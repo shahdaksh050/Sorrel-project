@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from src.core.domains import domain_confidence, resolve_column
+from src.core.findings import Finding
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -262,6 +263,153 @@ class FinancialAnalysisTool(BaseTool):
             "price_column": price_column,
             **metrics,
         }
+
+    def findings(  # type: ignore[override]
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        results: list[Finding] = []
+
+        def _series_findings(metrics: dict[str, Any], label: str, prefix: str) -> list[Finding]:
+            found: list[Finding] = []
+            total_return = metrics.get("total_return_pct")
+            if total_return is not None:
+                found.append(
+                    Finding(
+                        finding_id=f"{prefix}_return",
+                        kind="trend",
+                        headline=(
+                            f"{label} returned {total_return:+.2f}% over "
+                            f"{metrics.get('period_years', 0):.2f} years "
+                            f"({metrics.get('sampling_frequency', 'unknown')} data)"
+                        ),
+                        detail=(
+                            f"From {metrics.get('start_date')} ({metrics.get('start_price')}) "
+                            f"to {metrics.get('end_date')} ({metrics.get('end_price')})."
+                        ),
+                        evidence={
+                            "total_return_pct": total_return,
+                            "annualised_return_pct": metrics.get("annualised_return_pct"),
+                            "period_years": metrics.get("period_years"),
+                        },
+                        measure="total_return",
+                        effect=round(total_return / 100.0, 4),
+                        effect_kind="pct",
+                        confidence=0.7,
+                        surprise=0.3,
+                    )
+                )
+
+            max_dd = metrics.get("max_drawdown_pct")
+            if max_dd is not None and abs(max_dd) > 0.5:
+                found.append(
+                    Finding(
+                        finding_id=f"{prefix}_drawdown",
+                        kind="financial",
+                        headline=f"{label} suffered a maximum drawdown of {max_dd:.2f}%",
+                        detail=f"Measured from a peak price of {metrics.get('max_drawdown_peak_price')}.",
+                        evidence={
+                            "max_drawdown_pct": max_dd,
+                            "max_drawdown_peak_price": metrics.get("max_drawdown_peak_price"),
+                        },
+                        measure="max_drawdown",
+                        effect=round(max_dd / 100.0, 4),
+                        effect_kind="pct",
+                        confidence=0.65,
+                        surprise=0.4,
+                    )
+                )
+
+            autocorr_reading = metrics.get("autocorrelation_reading")
+            lag1 = metrics.get("return_autocorrelation_lag1")
+            if (
+                autocorr_reading
+                and autocorr_reading != "no meaningful serial dependence"
+                and lag1 is not None
+            ):
+                found.append(
+                    Finding(
+                        finding_id=f"{prefix}_autocorr",
+                        kind="trend",
+                        headline=(
+                            f"{label} returns show {autocorr_reading} "
+                            f"(lag-1 autocorrelation {lag1:+.2f})"
+                        ),
+                        evidence={"return_autocorrelation_lag1": lag1},
+                        measure="return_autocorrelation",
+                        effect=round(lag1, 4),
+                        effect_kind="r",
+                        confidence=0.5,
+                        surprise=0.5,
+                    )
+                )
+
+            vol_note = metrics.get("volatility_note")
+            if vol_note:
+                found.append(
+                    Finding(
+                        finding_id=f"{prefix}_vol_caveat",
+                        kind="method_fit",
+                        headline=f"{label}: volatility not annualised",
+                        detail=vol_note,
+                        evidence={"annualised_volatility_pct": metrics.get("annualised_volatility_pct")},
+                        confidence=0.9,
+                        surprise=0.0,
+                        caveats=[vol_note],
+                    )
+                )
+            return found
+
+        mode = output.get("mode")
+        if mode == "panel":
+            best = output.get("best_performer") or {}
+            worst = output.get("worst_performer") or {}
+            best_symbol = best.get("symbol")
+            worst_symbol = worst.get("symbol")
+            best_return = best.get("total_return_pct")
+            worst_return = worst.get("total_return_pct")
+            if best_return is not None and worst_return is not None and best_symbol != worst_symbol:
+                spread = best_return - worst_return
+                results.append(
+                    Finding(
+                        finding_id=f"{self.name}_panel_spread",
+                        kind="segment_lift",
+                        headline=(
+                            f"'{best_symbol}' returned {best_return:+.2f}% vs "
+                            f"'{worst_symbol}' at {worst_return:+.2f}% "
+                            f"({output.get('instrument_count')} instruments compared)"
+                        ),
+                        detail="Spread between the best- and worst-performing instruments in the panel.",
+                        evidence={
+                            "best_performer": best_symbol,
+                            "best_return_pct": best_return,
+                            "worst_performer": worst_symbol,
+                            "worst_return_pct": worst_return,
+                        },
+                        measure="total_return",
+                        dimension=output.get("symbol_column"),
+                        level=best_symbol,
+                        effect=round(spread / 100.0, 4),
+                        effect_kind="pct",
+                        confidence=0.7,
+                        surprise=0.4,
+                    )
+                )
+            if best:
+                results.extend(
+                    _series_findings(best, f"Best performer '{best_symbol}'", f"{self.name}_best")
+                )
+            if worst and worst_symbol != best_symbol:
+                results.extend(
+                    _series_findings(worst, f"Worst performer '{worst_symbol}'", f"{self.name}_worst")
+                )
+        else:
+            price_col = output.get("price_column", "series")
+            results.extend(_series_findings(output, f"'{price_col}'", self.name))
+
+        return results
 
     def get_schema(self) -> dict[str, Any]:
         return {

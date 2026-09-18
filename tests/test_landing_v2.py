@@ -99,6 +99,11 @@ def test_v2_seo_and_jsonld_schemas() -> None:
 
 def test_v2_warm_ledger_tokens() -> None:
     """Validates adherence to DESIGN.md Warm Ledger specifications."""
+    # Q1 — assert against ui.landing's LEDGER_TOKENS_DAY/NIGHT (mirrors
+    # DESIGN.md) instead of re-typed hex literals; see test_landing.py's
+    # sibling test for the same fix and rationale.
+    from ui.landing import LEDGER_TOKENS_DAY, LEDGER_TOKENS_NIGHT
+
     content = INDEX_HTML.read_text(encoding="utf-8")
 
     # Typography
@@ -108,15 +113,15 @@ def test_v2_warm_ledger_tokens() -> None:
     assert "--sans: 'Mukta'" in content
 
     # Night Tokens
-    assert "--stock: #130f0b" in content
-    assert "--pen: #f0a24a" in content
-    assert "--ink: #f6eedf" in content
+    assert f"--stock: {LEDGER_TOKENS_NIGHT['stock']}" in content
+    assert f"--pen: {LEDGER_TOKENS_NIGHT['pen']}" in content
+    assert f"--ink: {LEDGER_TOKENS_NIGHT['ink']}" in content
 
     # Day Tokens
     assert "html.theme-day" in content
-    assert "--stock: #f7eedd" in content
-    assert "--pen: #a34f20" in content
-    assert "--ink: #3a2b1e" in content
+    assert f"--stock: {LEDGER_TOKENS_DAY['stock']}" in content
+    assert f"--pen: {LEDGER_TOKENS_DAY['pen']}" in content
+    assert f"--ink: {LEDGER_TOKENS_DAY['ink']}" in content
 
 
 def test_v2_3d_engine_invariants() -> None:

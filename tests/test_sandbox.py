@@ -30,14 +30,35 @@ class TestStaticCheck:
         assert error_type == "static_check"
         assert "RESULT" in hint
 
-    def test_result_assignment_nested_in_if_not_recognized(self) -> None:
-        # Only a module-level assignment counts — matches the spec's "at
-        # the top level" requirement; the worker's own runtime check
-        # (Task 2) is what catches an unreachable nested assignment.
-        code = "if False:\n    RESULT = 1\n"
+    def test_result_assignment_nested_in_if_is_recognized(self) -> None:
+        # Round 8 (IMPROVEMENTS.md decision 6): a reusable, parameterized
+        # generated tool plausibly branches (`if grain == "month": RESULT =
+        # ... else: ...`), so the static check now walks the whole tree
+        # (ast.walk) instead of only tree.body — a RESULT assignment
+        # anywhere in the source passes the static check. This is a static
+        # pre-check only; an assignment that's syntactically present but
+        # never actually *executed* (e.g. inside `if False:`) is still
+        # caught at runtime — see test_sandbox_worker.py's
+        # test_result_never_assigned_at_runtime, which is what that case
+        # exercises now instead of this test.
+        code = "if True:\n    RESULT = 1\n"
+        assert sandbox._static_check(code) is None
+
+    def test_result_assignment_via_annassign_recognized(self) -> None:
+        # Round 8: an annotated assignment (`RESULT: dict = {...}`) is also
+        # accepted, not just a plain ast.Assign.
+        code = "RESULT: int = 1\n"
+        assert sandbox._static_check(code) is None
+
+    def test_missing_result_anywhere_still_caught(self) -> None:
+        # The relaxation (ast.walk instead of tree.body) must not become
+        # "accept anything" — code with no RESULT assignment at all, in any
+        # branch, is still rejected.
+        code = "if True:\n    x = 1\nelse:\n    x = 2\n"
         result = sandbox._static_check(code)
         assert result is not None
         assert result[0] == "static_check"
+        assert "RESULT" in result[1]
 
     def test_disallowed_import_caught(self) -> None:
         code = "import os\nRESULT = 1\n"
@@ -64,6 +85,33 @@ class TestStaticCheck:
         error_type, hint = result
         assert error_type == "static_check"
         assert "open" in hint
+
+
+class TestValidateExtraGlobals:
+    """Round 8 — parameters reach generated-tool code as data, never as
+    templated source (IMPROVEMENTS.md decision 2)."""
+
+    def test_none_is_valid(self) -> None:
+        assert sandbox._validate_extra_globals(None) is None
+
+    def test_empty_dict_is_valid(self) -> None:
+        assert sandbox._validate_extra_globals({}) is None
+
+    def test_json_primitive_values_are_valid(self) -> None:
+        assert sandbox._validate_extra_globals(
+            {"a": 1, "b": "x", "c": 1.5, "d": True, "e": None, "f": [1, 2], "g": {"k": "v"}}
+        ) is None
+
+    def test_non_json_value_rejected(self) -> None:
+        result = sandbox._validate_extra_globals({"bad": open})
+        assert result is not None
+        assert result[0] == "static_check"
+
+    def test_reserved_name_collision_rejected(self) -> None:
+        for reserved in ("df", "SCHEMA", "RESULT", "FINDING", "__builtins__"):
+            result = sandbox._validate_extra_globals({reserved: 1})
+            assert result is not None, f"{reserved} should be rejected"
+            assert result[0] == "static_check"
 
 
 class TestRunSandboxed:
@@ -132,3 +180,61 @@ class TestRunSandboxed:
         result = sandbox.run_sandboxed("RESULT = 1\n", str(dataset))
         assert result.status == "error"
         assert result.error_type == "runtime"
+
+    def test_extra_globals_reach_the_code_as_values(self, tmp_path: Path) -> None:
+        dataset = single_column(tmp_path)
+        result = sandbox.run_sandboxed(
+            "RESULT = extra_val * 2\n", str(dataset), extra_globals={"extra_val": 21}
+        )
+        assert result.status == "ok"
+        assert result.result == 42
+
+    def test_extra_globals_never_templated_into_source(self, tmp_path: Path) -> None:
+        # A value containing Python-looking text must stay inert data, never
+        # get executed — this is the core guarantee of decision 2.
+        dataset = single_column(tmp_path)
+        result = sandbox.run_sandboxed(
+            "RESULT = payload\n",
+            str(dataset),
+            extra_globals={"payload": "RESULT = 999\nimport os"},
+        )
+        assert result.status == "ok"
+        assert result.result == "RESULT = 999\nimport os"
+
+    def test_invalid_extra_globals_short_circuits_before_subprocess(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dataset = single_column(tmp_path)
+
+        def _fail_if_called(*args: object, **kwargs: object) -> None:
+            raise AssertionError("subprocess.Popen should not be called")
+
+        monkeypatch.setattr(sandbox.subprocess, "Popen", _fail_if_called)
+        result = sandbox.run_sandboxed(
+            "RESULT = 1\n", str(dataset), extra_globals={"df": [1, 2, 3]}
+        )
+        assert result.status == "error"
+        assert result.error_type == "static_check"
+
+    def test_finding_round_trips_when_present(self, tmp_path: Path) -> None:
+        dataset = single_column(tmp_path)
+        result = sandbox.run_sandboxed(
+            "RESULT = 1\nFINDING = {'headline': 'test'}\n", str(dataset)
+        )
+        assert result.status == "ok"
+        assert result.finding == {"headline": "test"}
+
+    def test_finding_is_none_when_absent(self, tmp_path: Path) -> None:
+        dataset = single_column(tmp_path)
+        result = sandbox.run_sandboxed("RESULT = 1\n", str(dataset))
+        assert result.status == "ok"
+        assert result.finding is None
+
+    def test_result_assigned_only_inside_branch_now_executes(self, tmp_path: Path) -> None:
+        # Round 8 relaxation, end to end: a genuinely reachable branch
+        # assignment is no longer rejected by the static pre-check.
+        dataset = single_column(tmp_path)
+        code = "x = 1\nif x:\n    RESULT = 'a'\nelse:\n    RESULT = 'b'\n"
+        result = sandbox.run_sandboxed(code, str(dataset))
+        assert result.status == "ok"
+        assert result.result == "a"

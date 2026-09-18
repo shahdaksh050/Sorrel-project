@@ -79,6 +79,10 @@
   <style>
     /* ==========================================================================
        DESIGN SYSTEM TOKENS — WARM LEDGER IDENTITY (DESIGN.md)
+       Keep in sync with DESIGN.md's "Tokens — ink" table and with
+       ui/landing.py's LEDGER_TOKENS_DAY / LEDGER_TOKENS_NIGHT (this file is a
+       static asset served by the Streamlit component and cannot import that
+       Python constant directly — hand-check hex values against it).
        ========================================================================== */
     :root {
       /* Night Palette — ink values mirror the console's night tokens in app.py (_inject_theme_css) */
@@ -86,7 +90,7 @@
       --sheet: #2f251a;
       --sheet-alt: #3a2e1f;
       --ink: #f3e9d8;
-      --graphite: #d0c2a8;
+      --graphite: #b8a688;
       --pen: #f0a24a;
       --pen-hover: #ffb86b;
       --pen-glow: rgba(240, 162, 74, 0.40);
@@ -2061,6 +2065,8 @@
 
     // 3D inks share the page tokens (stock, pen, accent, positive, risk, graphite; `sheet` here is
     // the page's --sheet-alt, the faint "paper" token colour) so the scene never drifts from the CSS.
+    // Keep in sync with the :root/.theme-day custom properties above (and DESIGN.md / ui/landing.py's
+    // LEDGER_TOKENS) — this object is hand-duplicated, not generated from the CSS.
     const PALETTES = {
       night: {
         stock: '#241c14',
@@ -2068,7 +2074,7 @@
         accent: '#d99a4e',
         positive: '#7fb77e',
         risk: '#e2685a',
-        graphite: '#d0c2a8',
+        graphite: '#b8a688',
         sheet: '#3a2e1f',
         grid: '#4a3c28',
         fogDensity: 0.016,

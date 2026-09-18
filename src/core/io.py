@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import gzip
 import io
 import os
 import tempfile
+import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,7 +32,15 @@ import pandas as pd
 #: Extensions read_any knows how to ingest. The single source of truth —
 #: src.core.security.ALLOWED_EXTENSIONS and the Streamlit uploader's type
 #: list both derive from this instead of maintaining their own copies.
-SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".csv", ".tsv", ".xlsx", ".xls"})
+#: ".gz"/".zip" are only meaningful paired with .csv/.tsv (e.g. "sales.csv.gz")
+#: — see _detect_format — but have to be listed bare here too, since the
+#: security/uploader layers gate on Path.suffix, which never sees the
+#: compound form.
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
+    ".csv", ".tsv", ".xlsx", ".xls",
+    ".json", ".jsonl", ".parquet",
+    ".gz", ".zip",
+})
 
 #: Delimiters considered when sniffing a .csv file's separator.
 _CSV_DELIMITER_CANDIDATES = ",;\t|"
@@ -38,7 +48,26 @@ _CSV_DELIMITER_CANDIDATES = ",;\t|"
 #: Bytes read from the front of a text file to sniff its delimiter/headers.
 _SNIFF_SAMPLE_BYTES = 64 * 1024
 
-_FORMAT_BY_SUFFIX = {".csv": "csv", ".tsv": "tsv", ".xlsx": "xlsx", ".xls": "xls"}
+#: Depth at which nested JSON fields stop being flattened into dotted column
+#: names (address.city -> ...) and are left as dict/list cell values instead.
+#: Uncapped flattening on adversarial or deeply-nested input is an easy way
+#: to explode a handful of records into thousands of columns.
+JSON_FLATTEN_MAX_DEPTH = 3
+
+#: Hard ceiling on rows loaded into memory for analysis. One constant, one
+#: application point (_cap_rows) — see get_max_rows(). The plan is to make
+#: this scale (chunked/streaming readers) later; until then, raising the
+#: limit is a config change (DSA_MAX_ROWS), not a hunt through call sites.
+MAX_ROWS_DEFAULT = 1_000_000
+
+_FORMAT_BY_SUFFIX = {
+    ".csv": "csv", ".tsv": "tsv", ".xlsx": "xlsx", ".xls": "xls",
+    ".json": "json", ".jsonl": "jsonl", ".parquet": "parquet",
+}
+
+#: Compression sniffed off a compound extension (e.g. "sales.csv.gz"). Only
+#: ever paired with .csv/.tsv today — see _detect_format.
+_COMPRESSION_BY_SUFFIX = {".gz": "gzip", ".zip": "zip"}
 
 #: Parsed frames, keyed on (resolved path, mtime_ns, size). Bounded because
 #: the values are whole DataFrames — a 1M-row file is ~50MB resident.
@@ -46,6 +75,19 @@ _READ_CACHE_MAX_ENTRIES = 4
 _READ_CACHE: OrderedDict[tuple[str, int, int], tuple[pd.DataFrame, ReadReport]] = (
     OrderedDict()
 )
+
+
+def get_max_rows() -> int:
+    """
+    Active row cap for read_any: the DSA_MAX_ROWS env var if set (and
+    parseable), else MAX_ROWS_DEFAULT. A function rather than a bare
+    constant so ops can raise the ceiling on a bigger box with zero code
+    changes.
+    """
+    try:
+        return max(1, int(os.getenv("DSA_MAX_ROWS", str(MAX_ROWS_DEFAULT))))
+    except ValueError:
+        return MAX_ROWS_DEFAULT
 
 
 @dataclass
@@ -59,6 +101,11 @@ class ReadReport:
     delimiter: str | None
     delimiter_sniffed: bool        # False when it came from the extension
     duplicate_headers: list[str] = field(default_factory=list)
+    flattened: bool = False            # True when nested JSON was flattened via json_normalize
+    flattened_columns: int | None = None  # resulting column count, when flattened
+    sampled: bool = False              # True when the frame exceeded get_max_rows()
+    sampled_from: int | None = None    # original row count, when sampled
+    sampled_to: int | None = None      # rows kept after sampling (== get_max_rows() at read time)
     notes: list[str] = field(default_factory=list)
 
 
@@ -133,12 +180,42 @@ def _find_duplicate_headers(text_sample: str, delimiter: str) -> list[str]:
     return dupes
 
 
-def _read_delimited(path: Path, format_: str) -> tuple[pd.DataFrame, ReadReport]:
+def _decompress(raw: bytes, compression: str, filename: str) -> bytes:
+    """Unwrap gzip/zip so the rest of _read_delimited never knows the
+    input was compressed — same encoding/delimiter detection either way."""
+    if compression == "gzip":
+        try:
+            return gzip.decompress(raw)
+        except OSError as exc:
+            raise DatasetReadError(f"'{filename}' could not be gunzipped: {exc}") from exc
+    if compression == "zip":
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                members = [n for n in zf.namelist() if not n.endswith("/")]
+                if not members:
+                    raise DatasetReadError(f"'{filename}' zip archive contains no files.")
+                return zf.read(members[0])
+        except zipfile.BadZipFile as exc:
+            raise DatasetReadError(f"'{filename}' is not a valid zip archive: {exc}") from exc
+    return raw
+
+
+def _read_delimited(
+    path: Path, format_: str, compression: str | None = None
+) -> tuple[pd.DataFrame, ReadReport]:
     raw = path.read_bytes()
     if not raw:
         raise DatasetReadError(f"'{path.name}' is empty — no data to read.")
 
-    encoding, encoding_confident, notes = _detect_encoding(raw)
+    notes: list[str] = []
+    if compression is not None:
+        raw = _decompress(raw, compression, path.name)
+        if not raw:
+            raise DatasetReadError(f"'{path.name}' decompressed to no data.")
+        notes.append(f"Decompressed from {compression} before parsing.")
+
+    encoding, encoding_confident, encoding_notes = _detect_encoding(raw)
+    notes.extend(encoding_notes)
     try:
         text = raw.decode(encoding)
     except UnicodeDecodeError as exc:
@@ -196,18 +273,143 @@ def _read_excel(path: Path, format_: str) -> tuple[pd.DataFrame, ReadReport]:
     return df, report
 
 
-def _read_uncached(file_path: str) -> tuple[pd.DataFrame, ReadReport]:
-    path = Path(file_path)
+def _is_nested(value: object) -> bool:
+    return isinstance(value, (dict, list))
+
+
+def _read_json(path: Path, format_: str) -> tuple[pd.DataFrame, ReadReport]:
+    notes: list[str] = []
+    try:
+        df = pd.read_json(path, lines=(format_ == "jsonl"))
+    except (ValueError, OSError) as exc:
+        raise DatasetReadError(f"'{path.name}' could not be parsed as {format_}: {exc}") from exc
+    if df.empty:
+        raise DatasetReadError(f"'{path.name}' contains no records.")
+
+    nested_cols = [c for c in df.columns if df[c].map(_is_nested).any()]
+    flattened = False
+    flattened_columns: int | None = None
+    if nested_cols:
+        cols_before = len(df.columns)
+        # Depth-capped: a record nested deeper than JSON_FLATTEN_MAX_DEPTH
+        # keeps its remaining structure as a dict/list cell value rather
+        # than exploding into unbounded dotted columns.
+        df = pd.json_normalize(
+            df.to_dict(orient="records"), max_level=JSON_FLATTEN_MAX_DEPTH, sep="."
+        )
+        flattened = True
+        flattened_columns = len(df.columns)
+        notes.append(
+            f"Nested field(s) {nested_cols} were flattened into dotted column names "
+            f"(e.g. 'address.city'), capped at depth {JSON_FLATTEN_MAX_DEPTH}; "
+            f"{cols_before} -> {flattened_columns} columns."
+        )
+
+    report = ReadReport(
+        path=str(path),
+        format=format_,
+        encoding="utf-8",
+        encoding_confident=True,
+        delimiter=None,
+        delimiter_sniffed=False,
+        flattened=flattened,
+        flattened_columns=flattened_columns,
+        notes=notes,
+    )
+    return df, report
+
+
+def _read_parquet(path: Path) -> tuple[pd.DataFrame, ReadReport]:
+    try:
+        df = pd.read_parquet(path, engine="pyarrow")
+    except Exception as exc:
+        raise DatasetReadError(f"'{path.name}' could not be read as parquet: {exc}") from exc
+    report = ReadReport(
+        path=str(path),
+        format="parquet",
+        encoding="n/a",
+        encoding_confident=True,
+        delimiter=None,
+        delimiter_sniffed=False,
+    )
+    return df, report
+
+
+def _detect_format(path: Path) -> tuple[str | None, str | None]:
+    """
+    Resolve a path to (format, compression).
+
+    format is one of the _FORMAT_BY_SUFFIX values, or None when neither the
+    plain nor the compound extension (e.g. "sales.csv.gz") is recognised.
+    compression is "gzip"/"zip" for a compressed .csv/.tsv, else None —
+    that is the only combination supported today.
+    """
     suffix = path.suffix.lower()
     format_ = _FORMAT_BY_SUFFIX.get(suffix)
+    if format_ is not None:
+        return format_, None
+    if suffix in _COMPRESSION_BY_SUFFIX and len(path.suffixes) >= 2:
+        inner_format = _FORMAT_BY_SUFFIX.get(path.suffixes[-2].lower())
+        if inner_format in ("csv", "tsv"):
+            return inner_format, _COMPRESSION_BY_SUFFIX[suffix]
+    return None, None
+
+
+def _cap_rows(df: pd.DataFrame, report: ReadReport) -> pd.DataFrame:
+    """
+    The one place get_max_rows() is consulted. Every _read_uncached path
+    (delimited, excel, json, parquet) funnels through here before its
+    result is cached or handed back — so raising the cap later is a config
+    change (DSA_MAX_ROWS), not a hunt through call sites.
+
+    Sampling, never truncation: a plain head(n) systematically keeps
+    whatever a time-ordered or pre-sorted export puts first, which is
+    exactly the silent bias this module exists to avoid. Every reader here
+    already materialises the full frame before this runs, so a uniform
+    `.sample()` without replacement *is* the distribution Algorithm-R
+    reservoir sampling converges to — no separate streaming pass needed
+    until the readers themselves become streaming.
+    """
+    cap = get_max_rows()
+    total = len(df)
+    if total <= cap:
+        return df
+    sampled = df.sample(n=cap, random_state=0).sort_index()
+    report.sampled = True
+    report.sampled_from = total
+    report.sampled_to = cap
+    report.notes.append(
+        f"Dataset has {total:,} rows, over the {cap:,}-row analysis cap. "
+        f"A random sample of {cap:,} rows (not the first {cap:,}) was used "
+        "instead — set DSA_MAX_ROWS to raise the cap."
+    )
+    return sampled
+
+
+def _read_uncached(file_path: str) -> tuple[pd.DataFrame, ReadReport]:
+    path = Path(file_path)
+    format_, compression = _detect_format(path)
     if format_ is None:
-        allowed = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+        attempted = (
+            "".join(path.suffixes[-2:])
+            if len(path.suffixes) >= 2 and path.suffix.lower() in _COMPRESSION_BY_SUFFIX
+            else (path.suffix or "(none)")
+        )
+        allowed = ", ".join(sorted(SUPPORTED_EXTENSIONS - set(_COMPRESSION_BY_SUFFIX)))
         raise DatasetReadError(
-            f"Unsupported file extension '{path.suffix or '(none)'}'. Supported: {allowed}."
+            f"Unsupported file extension '{attempted}'. Supported: {allowed} "
+            "(.csv/.tsv may also be gzip- or zip-compressed, e.g. 'sales.csv.gz')."
         )
     if format_ in ("csv", "tsv"):
-        return _read_delimited(path, format_)
-    return _read_excel(path, format_)
+        df, report = _read_delimited(path, format_, compression=compression)
+    elif format_ in ("json", "jsonl"):
+        df, report = _read_json(path, format_)
+    elif format_ == "parquet":
+        df, report = _read_parquet(path)
+    else:
+        df, report = _read_excel(path, format_)
+    df = _cap_rows(df, report)
+    return df, report
 
 
 def _cache_key(file_path: str) -> tuple[str, int, int] | None:
@@ -296,7 +498,13 @@ def read_any_bytes(raw: bytes, filename: str) -> tuple[pd.DataFrame, ReadReport]
     behind it was correct. Spilling to a temp file is what lets the one
     detection chain serve both.
     """
-    suffix = Path(filename).suffix.lower()
+    name = Path(filename)
+    suffix = name.suffix.lower()
+    if suffix in _COMPRESSION_BY_SUFFIX and len(name.suffixes) >= 2:
+        # Keep the compound extension (e.g. ".csv.gz") on the temp file too —
+        # _detect_format needs both parts, and Path.suffix alone only ever
+        # sees the last one.
+        suffix = "".join(name.suffixes[-2:]).lower()
     handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     try:
         handle.write(raw)

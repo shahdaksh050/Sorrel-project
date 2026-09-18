@@ -1,0 +1,189 @@
+# ============================================================
+# Agentic Data Analysis System — Resolved lockfile
+# ============================================================
+# Generated via: .venv/Scripts/python.exe -m pip freeze
+# Date: 2026-09-17
+#
+# This is an ENVIRONMENT SNAPSHOT, not a dependency-graph resolution scoped
+# to requirements.txt/pyproject.toml — pip freeze lists everything importable
+# in .venv, which is a superset of this project's declared dependencies. In
+# particular this .venv currently also has arize-phoenix and its transitive
+# tree installed (fastapi, mcp, opentelemetry-*, boto3, google-genai,
+# pydantic-ai-slim, Authlib, ldap3, joserfc, ...) even though P3.3 removed
+# arize-phoenix from requirements.txt/pyproject.toml as an unused dependency
+# — those packages are not required by src/, app.py, main.py, or scripts/.
+#
+# Treat this file as "known-good versions observed working together on this
+# machine", useful for reproducing an exact environment or diagnosing a
+# regression — not as the minimal install set (that's requirements.txt /
+# pyproject.toml [project.dependencies]). For a lockfile scoped strictly to
+# the declared dependency graph, run `uv pip compile pyproject.toml -o
+# requirements.lock` (or `pip-compile`) in a clean venv that has only this
+# project's dependencies installed.
+# ============================================================
+
+aioitertools==0.13.0
+aiosqlite==0.22.1
+alembic==1.18.4
+altair==6.1.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anthropic==0.102.0
+anyio==4.13.0
+arize-phoenix==15.9.0
+arize-phoenix-client==2.7.0
+arize-phoenix-evals==3.1.0
+arize-phoenix-otel==0.16.1
+ast_serialize==0.4.0
+attrs==26.1.0
+Authlib==1.7.2
+blinker==1.9.0
+boto3==1.43.8
+botocore==1.43.8
+cachetools==7.1.1
+certifi==2026.4.22
+cffi==2.0.0
+charset-normalizer==3.4.7
+click==8.3.3
+colorama==0.4.6
+contourpy==1.3.3
+cross-web==0.6.0
+cryptography==48.0.0
+cycler==0.12.1
+distro==1.9.0
+dnspython==2.8.0
+docstring_parser==0.18.0
+email-validator==2.3.0
+et_xmlfile==2.0.0
+fastapi==0.136.1
+fonttools==4.63.0
+genai-prices==0.0.60
+gitdb==4.0.12
+GitPython==3.1.50
+google-auth==2.52.0
+google-genai==2.3.0
+googleapis-common-protos==1.75.0
+graphql-core==3.2.8
+greenlet==3.5.0
+griffelib==2.0.2
+grpc-interceptor==0.15.4
+grpcio==1.80.0
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.7.1
+httpx==0.28.1
+httpx-sse==0.4.3
+idna==3.15
+importlib_metadata==8.7.1
+iniconfig==2.3.0
+itsdangerous==2.2.0
+Jinja2==3.1.6
+jiter==0.14.0
+jmespath==1.1.0
+joblib==1.5.3
+joserfc==1.6.5
+jsonpath-ng==1.8.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+kiwisolver==1.5.0
+ldap3==2.9.1
+librt==0.11.0
+logfire-api==4.33.0
+Mako==1.3.12
+Markdown==3.10.2
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+matplotlib==3.10.9
+mcp==1.27.1
+mdurl==0.1.2
+mypy==2.1.0
+mypy_extensions==1.1.0
+narwhals==2.21.0
+numpy==2.4.4
+openai==2.36.0
+openinference-instrumentation==0.1.51
+openinference-instrumentation-openai==0.1.48
+openinference-semantic-conventions==0.1.29
+openpyxl==3.1.5
+opentelemetry-api==1.41.1
+opentelemetry-exporter-otlp==1.41.1
+opentelemetry-exporter-otlp-proto-common==1.41.1
+opentelemetry-exporter-otlp-proto-grpc==1.41.1
+opentelemetry-exporter-otlp-proto-http==1.41.1
+opentelemetry-instrumentation==0.62b1
+opentelemetry-proto==1.41.1
+opentelemetry-sdk==1.41.1
+opentelemetry-semantic-conventions==0.62b1
+orjson==3.11.9
+packaging==26.2
+pandas==3.0.3
+pathspec==1.1.1
+patsy==1.0.2
+pillow==12.2.0
+plotly==6.7.0
+pluggy==1.6.0
+polars==1.40.1
+polars-runtime-32==1.40.1
+prometheus_client==0.25.0
+protobuf==6.33.6
+psutil==7.2.2
+pyarrow==24.0.0
+pyasn1==0.6.3
+pyasn1_modules==0.4.2
+pycparser==3.0
+pydantic==2.13.4
+pydantic-ai-slim==1.96.1
+pydantic-graph==1.96.1
+pydantic-settings==2.14.1
+pydantic_core==2.46.4
+pydeck==0.9.2
+pyflakes==3.4.0
+Pygments==2.20.0
+PyJWT==2.12.1
+pyparsing==3.3.2
+pystache==0.6.8
+pytest==9.0.3
+pytest-asyncio==1.3.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+python-multipart==0.0.28
+pywin32==311
+PyYAML==6.0.3
+referencing==0.37.0
+regex==2026.5.9
+reportlab==4.5.1
+requests==2.34.2
+rich==15.0.0
+rpds-py==0.30.0
+ruff==0.15.13
+s3transfer==0.17.0
+scikit-learn==1.8.0
+scipy==1.17.1
+seaborn==0.13.2
+six==1.17.0
+smmap==5.0.3
+sniffio==1.3.1
+SQLAlchemy==2.0.49
+sqlean.py==3.49.1
+sse-starlette==3.4.4
+starlette==1.0.0
+statsmodels==0.14.6
+strawberry-graphql==0.314.3
+streamlit==1.57.0
+tenacity==9.1.4
+threadpoolctl==3.6.0
+tiktoken==0.13.0
+toml==0.10.2
+tqdm==4.67.3
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzdata==2026.2
+urllib3==2.7.0
+uvicorn==0.47.0
+watchdog==6.0.0
+watchfiles==1.2.0
+websockets==16.0
+wrapt==2.1.2
+xgboost==3.2.0
+xlrd==2.0.2
+zipp==3.23.1

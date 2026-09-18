@@ -59,8 +59,10 @@ src/
 | :--- | :--- | :--- |
 | `controller.py` | `memory`, `prompt_manager`, `rlm/engine`, `ToolRegistry` | Direct tool imports, raw LLM SDK calls |
 | `engine.py` | LLM callable (injected), `REPLEnvironment` | `memory`, `tools`, `controller` |
-| `tools/*` | `base.py`, stdlib, data libs (pandas, sklearn…) | `memory`, `engine`, `controller` |
-| `memory.py` | stdlib, `rich` | Any tool or engine import |
+| `tools/*` | `base.py`, `memory` **types only** (`MemorySystem`, `ToolResult`, `DatasetMetadata` as type hints / return values — never engine or controller behaviour), `findings` (`Finding`), `profiler` (`DatasetProfile`), stdlib, data libs (pandas, sklearn…) | `engine`, `controller`, importing `memory`/`profiler` for their *behaviour* (e.g. calling `MemorySystem.save()` from a tool) |
+| `memory.py` | stdlib, `rich`, `findings` (`Finding`, `rank_findings`) | Any tool or engine import |
+
+*(P2.2, IMPROVEMENTS.md — 2026-09-18: this table used to forbid `tools/*` from importing `memory` at all, which `src/tools/base.py` already violated for `MemorySystem`/`ToolResult` before this note existed — the tool layer's return type genuinely is `memory.ToolResult`, and `BaseTool.prepare_params()` genuinely needs a live `MemorySystem` to read context from. Rather than extract those into a separate `contracts.py` module (a large, ~20-file-touching change with no functional benefit, deferred — see `HANDOVER.md`), this row was corrected to say what the architecture actually does: tools may depend on `memory`'s **types** and read from a `MemorySystem` instance handed to them, but must never drive `engine`/`controller` behaviour or reach into another tool's state directly. `tests/test_architecture.py` checks this mechanically so the rule can't silently drift from the code again.)*
 
 ---
 

@@ -10,6 +10,53 @@ readme = "README.md"
 requires-python = ">=3.11"
 
 # ==============================================================
+# RUNTIME DEPENDENCIES
+# ==============================================================
+# Loose lower bounds mirror requirements.txt (kept as the loose/development
+# file per IMPROVEMENTS.md P3.4); upper bounds cap at the next major version
+# as a compatibility guardrail. pandas is deliberately allowed into 3.x —
+# src/tools/ml_pipeline.py:91 and src/tools/statistical_analysis.py:300
+# already use `is_numeric_dtype` instead of `dtype == object` specifically
+# to work under pandas 3's `str` dtype, so the code does not need capping
+# below 3. 0.x-versioned packages (polars, statsmodels, seaborn, anthropic)
+# are capped at their next major too, though a 0.x minor bump can also be
+# breaking — pin tighter in requirements.lock if that bites.
+dependencies = [
+    "pandas>=2.2.0,<4",
+    "numpy>=1.26.0,<3",
+    "polars>=0.20.0,<1",
+    "openpyxl>=3.1.0,<4",
+    "xlrd>=2.0.1,<3",
+    "charset-normalizer>=3.4.0,<4",
+    "pyarrow>=14,<25",
+    "psutil>=5.9.0,<6",
+    "scipy>=1.12.0,<2",
+    "statsmodels>=0.14.0,<1",
+    "scikit-learn>=1.4.0,<2",
+    "xgboost>=2.0.0,<3",
+    "matplotlib>=3.8.0,<4",
+    "seaborn>=0.13.0,<1",
+    "plotly>=5.20.0,<6",
+    "reportlab>=4.1.0,<5",
+    "markdown>=3.6,<4",
+    "openai>=1.30.0,<2",
+    "anthropic>=0.25.0,<1",
+    "streamlit>=1.49.0,<2",
+    "rich>=13.7.0,<14",
+    "python-dotenv>=1.0.0,<2",
+    "pydantic>=2.6.0,<3",
+    "pydantic-settings>=2.2.0,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.1.0,<9",
+    "pytest-asyncio>=0.23.0,<1",
+    "ruff>=0.4.0,<1",
+    "mypy>=1.10.0,<2",
+]
+
+# ==============================================================
 # RUFF — Linting Configuration
 # ==============================================================
 [tool.ruff]

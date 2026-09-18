@@ -110,7 +110,7 @@ const P = RAW_STATE.palette || {};
 
 const PALETTES = {
   night: {
-    stock: (isNight && P.stock) || '#130f0b',
+    stock: (isNight && P.stock) || '#241c14',
     sheet: (isNight && P.sheet) || '#1c1610',
     pen: (isNight && P.pen) || '#f0a24a',
     accent: (isNight && P.accent) || '#4fc3f7',

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from src.core.memory import MemorySystem, ToolResult
 
 if TYPE_CHECKING:
+    from src.core.findings import Finding
     from src.core.memory import DatasetMetadata
     from src.core.profiler import DatasetProfile
 
@@ -121,12 +122,45 @@ class BaseTool(ABC):
                 params["file_path"] = cleaned
         if self.output_subdir and not params.get("output_dir"):
             params["output_dir"] = str(Path(output_root) / self.output_subdir)
+        elif self.output_subdir and params.get("output_dir"):
+            # P2.3 — output_dir can arrive from the LLM planner's own JSON
+            # plan, not just this injection. Every write location, planner-
+            # chosen or not, must still resolve under the run's output root;
+            # resolve_output_path refuses any escape (absolute path outside
+            # the root, `..` traversal). A planner value that fails the
+            # check is replaced with the safe default rather than rejected
+            # outright, so a bad plan degrades instead of failing the step.
+            from src.core.security import UploadValidationError, resolve_output_path
+            try:
+                params["output_dir"] = str(resolve_output_path(output_root, params["output_dir"]))
+            except UploadValidationError:
+                params["output_dir"] = str(Path(output_root) / self.output_subdir)
         for ctx_key, param_name in self.requires_context.items():
             if not params.get(param_name):
                 value = memory.get_context(ctx_key)
                 if value is not None:
                     params[param_name] = value
         return params
+
+    def findings(
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        """
+        Derive structured Finding objects (src.core.findings) from this
+        tool's own successful `output` dict — no tool rewrite required, this
+        is purely a projection of data the tool already computed.
+
+        Called once per successful step by the controller, which accumulates
+        the results on MemorySystem.findings (7.1 finding bus). The default
+        (no findings) suits tools that are pure data preparation (clean_data,
+        ingest_dataset) rather than analysis. Every analysis tool should
+        override this so its results reach the reports and dashboard through
+        the one shared projection instead of a per-surface hardcoded parser.
+        """
+        return []
 
     @abstractmethod
     def execute(self, **kwargs: Any) -> dict[str, Any]:

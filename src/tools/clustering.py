@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from src.core.findings import Finding
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.ml_pipeline import _read_df
 
@@ -208,6 +209,96 @@ class ClusterDataTool(BaseTool):
             "pca_explained_variance": [round(float(v), 4) for v in pca.explained_variance_ratio_],
             "model_path": str(model_path),
         }
+
+    def findings(  # type: ignore[override]
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        results: list[Finding] = []
+
+        n_clusters = output.get("n_clusters")
+        silhouette = output.get("silhouette_score")
+        quality = output.get("separation_quality")
+        if n_clusters and n_clusters >= 2 and silhouette is not None:
+            results.append(
+                Finding(
+                    finding_id=f"{self.name}_segments",
+                    kind="cluster",
+                    headline=(
+                        f"Data splits into {n_clusters} segments with {quality} "
+                        f"separation (silhouette={silhouette:.3f})"
+                    ),
+                    detail=(
+                        f"KMeans over {len(output.get('features_used', []))} feature(s); "
+                        "k selected by silhouette score."
+                    ),
+                    evidence={
+                        "n_clusters": n_clusters,
+                        "silhouette_score": silhouette,
+                        "cluster_sizes": output.get("cluster_sizes"),
+                    },
+                    measure="silhouette_score",
+                    effect=round(silhouette, 4),
+                    effect_kind="r",
+                    confidence=0.6 if quality != "weak" else 0.35,
+                    surprise=0.3,
+                    layer="exec" if quality != "weak" else "analyst",
+                )
+            )
+
+        profiles = output.get("cluster_profiles") or {}
+        sizes = output.get("cluster_sizes") or {}
+        if len(profiles) >= 2 and sizes:
+            largest_name = max(sizes, key=lambda k: sizes[k])
+            largest_profile = profiles.get(largest_name) or {}
+            feature_names = list(largest_profile.keys())
+            if feature_names:
+                overall_mean = {
+                    f: sum(p.get(f, 0.0) for p in profiles.values()) / len(profiles)
+                    for f in feature_names
+                }
+
+                def _rel_dev(feat: str) -> float:
+                    om = float(overall_mean[feat])
+                    v = float(largest_profile[feat])
+                    denom = abs(om) if abs(om) > 1e-9 else 1.0
+                    return abs(v - om) / denom
+
+                defining_feature = max(feature_names, key=_rel_dev)
+                deviation = _rel_dev(defining_feature)
+                if deviation > 0.15:
+                    total_rows = sum(sizes.values())
+                    share = sizes[largest_name] / total_rows if total_rows else 0.0
+                    results.append(
+                        Finding(
+                            finding_id=f"{self.name}_{largest_name}_profile",
+                            kind="cluster",
+                            headline=(
+                                f"Largest segment ({largest_name}, {sizes[largest_name]:,} rows, "
+                                f"{share * 100:.1f}% of data) stands out on '{defining_feature}' "
+                                f"(mean {largest_profile[defining_feature]:.3g} vs "
+                                f"{overall_mean[defining_feature]:.3g} across segments)"
+                            ),
+                            evidence={
+                                "cluster": largest_name,
+                                "size": sizes[largest_name],
+                                "defining_feature": defining_feature,
+                                "cluster_mean": largest_profile[defining_feature],
+                                "overall_mean": overall_mean[defining_feature],
+                            },
+                            measure=defining_feature,
+                            dimension="cluster",
+                            level=largest_name,
+                            effect=round(min(deviation, 2.0), 4),
+                            effect_kind="pct",
+                            confidence=0.55,
+                            surprise=0.4,
+                        )
+                    )
+
+        return results
 
     def get_schema(self) -> dict[str, Any]:
         return {

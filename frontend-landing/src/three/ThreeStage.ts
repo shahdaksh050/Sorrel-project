@@ -42,7 +42,7 @@ export const MOTION_TOKENS: ThreeMotionTokens = {
 
 export const LEDGER_PALETTES: Record<ThemeMode, ThemePalette> = {
   night: {
-    stock: '#130f0b',
+    stock: '#241c14',
     sheet: '#1c1610',
     sheetAlt: '#282017',
     ink: '#f6eedf',

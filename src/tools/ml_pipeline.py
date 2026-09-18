@@ -25,6 +25,8 @@ from sklearn.base import BaseEstimator, OneToOneFeatureMixin, TransformerMixin
 from src.core.io import DatasetReadError, read_any
 from src.tools.base import BaseTool, ToolExecutionError
 
+from src.core.findings import Finding
+
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata, MemorySystem
     from src.core.profiler import DatasetProfile
@@ -49,8 +51,50 @@ OVERFIT_THRESHOLD = 0.10
 OVERFIT_PENALTY_WEIGHT = 1.0
 
 
-#: Absolute skewness at which a non-negative numeric feature gets log1p.
+#: Absolute skewness at which a numeric feature gets a skew treatment
+#: (log1p for a positive/right skew, Yeo-Johnson for a negative/left skew).
 SKEW_TREATMENT_THRESHOLD = 2.0
+
+#: Local mirror of profiler.py's ordinal-detection name hints (IMPROVEMENTS.md
+#: 7.10) — duplicated rather than importing a private profiler helper, since
+#: the fitted Pipeline step here only ever sees a bare numeric frame, never
+#: the DatasetProfile that classified it.
+_ORDINAL_NAME_HINTS = (
+    "rating", "score", "grade", "level", "tier", "stars", "priority",
+    "satisfaction", "nps", "rank", "severity", "star",
+)
+_ORDINAL_CARD_MIN = 3
+_ORDINAL_CARD_MAX = 10
+
+
+def _is_flag_or_ordinal(name: str, clean: pd.Series[Any]) -> bool:
+    """
+    Cheap local replica of `profiler.py`'s semantic-role test for a numeric
+    column being a flag (0/1) or an ordinal scale (a 1-5 rating) rather than
+    a true continuous measure.
+
+    A flag or ordinal must never be log1p'd or power-transformed: log1p
+    implies a magnitude/skew reading that doesn't apply to a code, and a 0/1
+    flag skewed toward one value isn't "heavy-tailed" — it's just imbalanced,
+    which class weighting already handles. This was the P0.1/6.4 bug: a
+    negatively-skewed 0/1 flag was still getting log1p'd because the old
+    check only skipped `min < 0`, not "this isn't a continuous quantity".
+    """
+    if len(clean) == 0:
+        return False
+    try:
+        is_integer_valued = bool((clean % 1 == 0).all())
+    except TypeError:
+        return False
+    if not is_integer_valued:
+        return False
+    nunique = int(clean.nunique())
+    if nunique == 2:
+        return True  # flag
+    name_l = name.lower()
+    if _ORDINAL_CARD_MIN <= nunique <= _ORDINAL_CARD_MAX and any(h in name_l for h in _ORDINAL_NAME_HINTS):
+        return True  # ordinal
+    return False
 
 #: Minority-class fraction below which class weighting is applied.
 IMBALANCE_THRESHOLD = 0.10
@@ -125,11 +169,22 @@ def _prepare_features(
 
 class _SkewLog1pTransformer(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):  # type: ignore[misc]
     """
-    log1p-transforms whichever numeric columns look severely skewed — but
-    the skew is decided once, at `fit`, from whatever frame `fit` is called
-    on. Used inside a Pipeline fit only on the training fold (IMPROVEMENTS.md
-    P0.1), so the decision — and the values it's based on — never see the
-    test fold.
+    Fixes each severely-skewed numeric column with whichever transform
+    actually applies to its skew direction — but the decision is made once,
+    at `fit`, from whatever frame `fit` is called on. Used inside a Pipeline
+    fit only on the training fold (IMPROVEMENTS.md P0.1), so the decision —
+    and the values it's based on — never see the test fold.
+
+    log1p only compresses a long *right* tail (positive skew) on non-negative
+    data; it was previously gated on `abs(skew)` and `min < 0` alone, which
+    both log1p'd negatively-skewed columns (silently wrong — log1p on a left
+    tail does nothing useful) and left a 0/1 flag skewed toward one class
+    treated as "heavy-tailed" numeric data (IMPROVEMENTS.md 7.10/6.4). Now:
+      - flag/ordinal columns (see `_is_flag_or_ordinal`) are never touched.
+      - positive skew on non-negative data -> log1p.
+      - negative skew, or positive skew the column's negative values make
+        log1p inapplicable to -> `PowerTransformer(method="yeo-johnson")`,
+        which handles both tail directions and negative values.
 
     Must inherit BaseEstimator/TransformerMixin/OneToOneFeatureMixin rather
     than duck-typing fit/transform: sklearn 1.8's Pipeline requires
@@ -137,20 +192,40 @@ class _SkewLog1pTransformer(OneToOneFeatureMixin, TransformerMixin, BaseEstimato
     """
 
     def fit(self, X: pd.DataFrame, y: Any = None) -> _SkewLog1pTransformer:
+        from sklearn.preprocessing import PowerTransformer
+
         X = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
         self.n_features_in_ = X.shape[1]
         self.feature_names_in_ = np.asarray(X.columns, dtype=object)
         skewed: list[str] = []
+        power_cols: list[str] = []
+        power_transformers: dict[str, Any] = {}
         skew_values: dict[str, float] = {}
         for col in X.columns:
             clean = X[col].dropna()
-            if len(clean) < 3 or float(clean.min()) < 0:
+            if len(clean) < 3 or _is_flag_or_ordinal(str(col), clean):
                 continue
             skew = float(clean.skew())
-            if abs(skew) >= SKEW_TREATMENT_THRESHOLD:
+            if abs(skew) < SKEW_TREATMENT_THRESHOLD:
+                continue
+            if skew > 0 and float(clean.min()) >= 0:
                 skewed.append(str(col))
                 skew_values[str(col)] = skew
+            else:
+                # Negative skew (log1p doesn't apply to a left tail), or
+                # positive skew on data that goes negative (log1p undefined) —
+                # Yeo-Johnson handles both.
+                pt = PowerTransformer(method="yeo-johnson")
+                try:
+                    pt.fit(clean.to_numpy().reshape(-1, 1))
+                except Exception:
+                    continue
+                power_cols.append(str(col))
+                power_transformers[str(col)] = pt
+                skew_values[str(col)] = skew
         self.skewed_cols_ = skewed
+        self.power_cols_ = power_cols
+        self.power_transformers_ = power_transformers
         self.skew_values_ = skew_values
         return self
 
@@ -161,15 +236,25 @@ class _SkewLog1pTransformer(OneToOneFeatureMixin, TransformerMixin, BaseEstimato
             # Clip: a test-fold negative in a column the training fold saw
             # as non-negative must not silently produce NaN.
             X[col] = np.log1p(X[col].clip(lower=0))
+        for col in self.power_cols_:
+            pt = self.power_transformers_[col]
+            X[col] = pt.transform(X[[col]].to_numpy()).ravel()
         return X
 
     def describe(self) -> list[str]:
         """Human-readable treatment strings for the report, one per column
-        log1p was applied to (decided at fit time)."""
-        return [
-            f"Applied log1p to '{col}' (skew={self.skew_values_[col]:.2f} — heavy tail compressed)."
+        a skew treatment was applied to (decided at fit time), naming which
+        rule fired."""
+        lines = [
+            f"Applied log1p to '{col}' (skew={self.skew_values_[col]:.2f} — heavy right tail compressed)."
             for col in self.skewed_cols_
         ]
+        lines.extend(
+            f"Applied Yeo-Johnson power transform to '{col}' (skew={self.skew_values_[col]:.2f} — "
+            f"negatively skewed or not log1p-eligible)."
+            for col in self.power_cols_
+        )
+        return lines
 
 
 #: Linear models get OneHotEncoder (no fake ordinality); tree/ensemble models
@@ -432,7 +517,20 @@ class TrainModelTool(BaseTool):
         "Returns per-model metrics, CV scores, and the best model name."
     )
     output_subdir = "models"
-    requires_context: ClassVar[dict[str, str]] = {"target_column": "target_column"}
+    requires_context: ClassVar[dict[str, str]] = {
+        "target_column": "target_column",
+        # IMPROVEMENTS.md 7.16 — the Streamlit sidebar's "Max tree depth" /
+        # "Test split %" / "CV folds" sliders write these context keys
+        # before analyze() runs (see app.py's "Analysis Settings" section).
+        # Same fallback-fill semantics as target_column: only applied when
+        # the planner (LLM or deterministic) left the parameter empty, so an
+        # explicit plan value still wins — in practice the planner never
+        # sets these itself, so the UI's choice is what actually trains.
+        "ui_max_depth": "max_depth",
+        "ui_test_size": "test_size",
+        "ui_n_cv_folds": "n_cv_folds",
+        "ui_tune_hyperparameters": "tune_hyperparameters",
+    }
 
     CLASSIFICATION_MODELS: ClassVar[list[str]] = ["random_forest", "xgboost", "logistic_regression"]
     REGRESSION_MODELS: ClassVar[list[str]] = ["random_forest", "xgboost", "linear_regression", "ridge"]
@@ -468,6 +566,95 @@ class TrainModelTool(BaseTool):
                 params.setdefault("group_column", panel_cols[0])
         return params
 
+    def findings(
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        """
+        Project the training run's own headline result — best model + score,
+        overfit warnings, leakage warnings — onto the finding bus
+        (IMPROVEMENTS.md 7.2 item 4 / item 4). `driver_narrative`/top_drivers
+        are EvaluateModelTool's output, not this tool's, so per-driver
+        findings are emitted there; this covers what train_model itself
+        actually determined.
+        """
+        found: list[Finding] = []
+        models_trained = output.get("models_trained") or {}
+        best_model = output.get("best_model")
+        best = models_trained.get(best_model) or {}
+        task_type = output.get("task_type")
+        target_column = metadata.target_column if metadata else None
+        cv_mean = best.get("cv_mean")
+        cv_std = best.get("cv_std")
+
+        if best_model and best_model != "none" and isinstance(cv_mean, (int, float)):
+            scoring_label = "F1 (weighted)" if task_type == "classification" else "R2"
+            found.append(
+                Finding(
+                    finding_id=f"{self.name}_best_model",
+                    kind="model_performance",
+                    headline=(
+                        f"{best_model} best predicts {target_column or 'the target'} "
+                        f"— cross-validated {scoring_label} = {cv_mean:.3f}"
+                        + (f" (+/- {cv_std:.3f})" if isinstance(cv_std, (int, float)) else "")
+                    ),
+                    detail=(
+                        f"Selected from {len(models_trained)} candidate model(s) trained on a "
+                        f"'{output.get('split_strategy', 'random')}' split "
+                        f"({output.get('train_samples')} train / {output.get('test_samples')} test rows)."
+                    ),
+                    evidence={
+                        "models_trained": {
+                            name: res.get("cv_mean") for name, res in models_trained.items()
+                        },
+                        "best_model": best_model,
+                    },
+                    source_tool=self.name,
+                    measure=target_column,
+                    effect=round(float(cv_mean), 4),
+                    effect_kind="share",
+                    confidence=0.7,
+                    layer="analyst",
+                )
+            )
+
+        for warning in output.get("overfit_warnings") or []:
+            model_name = warning.split(":", 1)[0].strip()
+            found.append(
+                Finding(
+                    finding_id=f"{self.name}_overfit_{model_name}",
+                    kind="method_fit",
+                    headline=f"{model_name} shows signs of overfitting (train-test gap warning)",
+                    detail=warning,
+                    evidence={"model": model_name},
+                    source_tool=self.name,
+                    measure=target_column,
+                    caveats=[warning],
+                    confidence=0.6,
+                    layer="analyst",
+                )
+            )
+
+        for i, warning in enumerate(output.get("leakage_warnings") or []):
+            found.append(
+                Finding(
+                    finding_id=f"{self.name}_leakage_{i}",
+                    kind="method_fit",
+                    headline="Possible target leakage detected",
+                    detail=warning,
+                    evidence={},
+                    source_tool=self.name,
+                    measure=target_column,
+                    caveats=[warning],
+                    confidence=0.6,
+                    layer="analyst",
+                )
+            )
+
+        return found
+
     def execute(  # type: ignore[override]
         self,
         file_path: str,
@@ -477,7 +664,7 @@ class TrainModelTool(BaseTool):
         test_size: float = 0.2,
         n_cv_folds: int = 5,
         max_depth: int = 6,
-        tune_hyperparameters: bool = True,
+        tune_hyperparameters: bool = False,
         output_dir: str = "output/models",
         split_strategy: str = "random",
         time_column: str | None = None,
@@ -965,7 +1152,11 @@ class TrainModelTool(BaseTool):
             "max_depth": {"type": "int", "description": "Max tree depth (RF, XGB). Default: 6.", "required": False},
             "tune_hyperparameters": {
                 "type": "bool",
-                "description": "Run a light randomized hyperparameter search (auto-skipped above 20k rows). Default: true.",
+                "description": (
+                    "Run a light randomized hyperparameter search (auto-skipped above 20k "
+                    "rows). Opt-in ('Thorough' mode) — Default: false, since tuning multiplies "
+                    "training time for a usually-small score gain ('Quick' mode)."
+                ),
                 "required": False,
             },
             "split_strategy": {
@@ -1041,6 +1232,88 @@ class EvaluateModelTool(BaseTool):
             params["time_column"] = memory.get_context("split_time_column")
             params["group_column"] = memory.get_context("split_group_column")
         return params
+
+    def findings(
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        """
+        Project `_explain_drivers`'s upgraded output — per-driver level
+        effects/directions, plus the overfit gap this tool itself measured —
+        onto the finding bus (IMPROVEMENTS.md 7.2 item 4).
+        """
+        found: list[Finding] = []
+        target_column = metadata.target_column if metadata else None
+        task_type = output.get("task_type")
+
+        for drv in output.get("top_drivers") or []:
+            feature = drv.get("feature")
+            importance = drv.get("importance")
+            level_effect = drv.get("level_effect")
+            headline = drv.get("headline") or f"'{feature}' is a top driver of {target_column or 'the outcome'}"
+            if level_effect:
+                level = level_effect.get("level")
+                lift = level_effect.get("lift")
+                effect = lift if lift is not None else level_effect.get("diff")
+                effect_kind = "lift" if lift is not None else "pct"
+                found.append(
+                    Finding(
+                        finding_id=f"{self.name}_driver_{feature}_{level}",
+                        kind="driver",
+                        headline=headline,
+                        detail=f"Permutation importance {importance}.",
+                        evidence={"level_effect": level_effect, "importance": importance},
+                        source_tool=self.name,
+                        measure=target_column,
+                        dimension=feature,
+                        level=str(level) if level is not None else None,
+                        effect=round(float(effect), 4) if effect is not None else None,
+                        effect_kind=effect_kind,
+                        confidence=0.6,
+                        surprise=0.4,
+                        layer="analyst",
+                    )
+                )
+            else:
+                corr = drv.get("correlation")
+                effect = corr if corr is not None else importance
+                found.append(
+                    Finding(
+                        finding_id=f"{self.name}_driver_{feature}",
+                        kind="driver",
+                        headline=headline,
+                        detail=f"Permutation importance {importance}.",
+                        evidence={"importance": importance, "correlation": corr},
+                        source_tool=self.name,
+                        measure=target_column,
+                        dimension=feature,
+                        effect=round(float(effect), 4) if effect is not None else None,
+                        effect_kind="r" if corr is not None else None,
+                        confidence=0.5,
+                        layer="analyst",
+                    )
+                )
+
+        gap = output.get("train_test_gap")
+        if isinstance(gap, (int, float)) and abs(gap) > OVERFIT_THRESHOLD:
+            found.append(
+                Finding(
+                    finding_id=f"{self.name}_overfit_gap",
+                    kind="method_fit",
+                    headline=f"Train-test gap of {gap:+.3f} suggests possible overfitting",
+                    detail=output.get("summary", ""),
+                    evidence={"train_test_gap": gap, "task_type": task_type},
+                    source_tool=self.name,
+                    measure=target_column,
+                    caveats=[f"train_test_gap={gap:+.4f} exceeds the {OVERFIT_THRESHOLD} threshold."],
+                    confidence=0.6,
+                    layer="analyst",
+                )
+            )
+
+        return found
 
     def execute(  # type: ignore[override]
         self,
@@ -1145,14 +1418,22 @@ class EvaluateModelTool(BaseTool):
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """
         Model-agnostic explainability: permutation importance on the held-out
-        split, with effect direction from feature-target correlation, rendered
-        as plain-language driver sentences for the report.
+        split ranks the top drivers; how each is then explained depends on
+        its shape (IMPROVEMENTS.md 7.2 item 4):
+
+          - numeric/measure driver: direction (increases/decreases) plus the
+            raw feature-target correlation, as before — just made explicit
+            in the returned dict instead of living only in the ranking.
+          - categorical/dimension driver: a "level effect" — the per-level
+            mean of the outcome (predicted probability of the positive class
+            for classification, the target itself for regression), compared
+            to the overall baseline, so a driver like `contract` is reported
+            as "month-to-month customers churn at 3.1x the base rate"
+            instead of "a categorical feature" with no direction named.
 
         X_test carries raw (post-P0.1) columns, including string categoricals
-        for a Pipeline-wrapped model — `.corr()` only makes sense on numeric
-        columns, so direction is omitted for categoricals rather than raising
-        inside the blanket except below (which would silently drop every
-        driver, not just the categorical one).
+        for a Pipeline-wrapped model, which is what makes the per-level
+        groupby possible here without re-deriving the encoding.
 
         Failure here must never fail evaluation — returns empty results instead.
         """
@@ -1170,6 +1451,22 @@ class EvaluateModelTool(BaseTool):
                 # Numeric binary target — name the positive class by its value
                 positive_label = f"{target_column}={sorted(pd.Series(y_test).unique())[-1]}"
 
+            # The "outcome" per-row used for level-effect / correlation
+            # comparisons: predicted probability of the positive class when
+            # available (classification), else the actual target — a
+            # constant, reused for every driver rather than recomputed.
+            outcome = pd.Series(y_test).astype(float)
+            is_rate = False
+            if task_type == "classification" and hasattr(model, "predict_proba"):
+                try:
+                    proba = model.predict_proba(X_test)
+                    if proba.shape[1] == 2:
+                        outcome = pd.Series(proba[:, 1], index=X_test.index)
+                        is_rate = True
+                except Exception:
+                    pass
+            baseline = float(outcome.mean())
+
             drivers: list[dict[str, Any]] = []
             narrative: list[str] = []
             for rank, idx in enumerate(order, 1):
@@ -1178,32 +1475,93 @@ class EvaluateModelTool(BaseTool):
                     continue
                 feature = str(X_test.columns[idx])
                 col = X_test.iloc[:, idx]
-                direction: str | None = None
+
                 if pd.api.types.is_numeric_dtype(col):
                     corr = float(col.corr(pd.Series(y_test).astype(float)))
                     direction = "increases" if corr >= 0 else "decreases"
-                drivers.append({
+                    entry: dict[str, Any] = {
+                        "feature": feature,
+                        "importance": round(importance, 4),
+                        "kind": "numeric",
+                        "direction": direction,
+                        "correlation": round(corr, 4),
+                        "level_effect": None,
+                    }
+                    if task_type == "classification":
+                        toward = f"'{positive_label}'" if positive_label else "the higher-encoded class"
+                        headline = (
+                            f"'{feature}' — higher values "
+                            f"{'push predictions toward ' + toward if direction == 'increases' else 'push predictions away from ' + toward}"
+                            f" (r={corr:.2f})"
+                        )
+                    else:
+                        headline = (
+                            f"'{feature}' — higher values {direction} "
+                            f"predicted '{target_column}' (r={corr:.2f})"
+                        )
+                    entry["headline"] = headline
+                    drivers.append(entry)
+                    narrative.append(
+                        f"#{rank} driver: {headline} (permutation importance {importance:.3f})."
+                    )
+                    continue
+
+                # Categorical/dimension driver — per-level mean of the
+                # outcome vs. the overall baseline, so the direction and
+                # magnitude are named instead of collapsing to "categorical".
+                level_frame = pd.DataFrame({"level": col.astype(str), "outcome": outcome})
+                level_means = level_frame.groupby("level", observed=True)["outcome"].mean()
+                if level_means.empty:
+                    continue
+                deviations = (level_means - baseline).abs()
+                best_level = str(deviations.idxmax())
+                level_value = float(level_means.loc[best_level])
+                diff = level_value - baseline
+                lift = (level_value / baseline) if abs(baseline) > 1e-9 else None
+                direction_word = "up" if diff >= 0 else "down"
+                level_effect = {
+                    "level": best_level,
+                    "level_value": round(level_value, 4),
+                    "baseline": round(baseline, 4),
+                    "diff": round(diff, 4),
+                    "lift": round(lift, 4) if lift is not None else None,
+                    "direction": direction_word,
+                }
+                entry = {
                     "feature": feature,
                     "importance": round(importance, 4),
-                    "direction": direction,
-                })
-                if direction is None:
-                    narrative.append(
-                        f"#{rank} driver: '{feature}' — a categorical feature "
-                        f"(permutation importance {importance:.3f})."
-                    )
-                elif task_type == "classification":
-                    toward = f"'{positive_label}'" if positive_label else "the higher-encoded class"
-                    narrative.append(
-                        f"#{rank} driver: '{feature}' — higher values "
-                        f"{'push predictions toward ' + toward if direction == 'increases' else 'push predictions away from ' + toward}"
-                        f" (permutation importance {importance:.3f})."
+                    "kind": "categorical",
+                    "direction": None,
+                    "level_effect": level_effect,
+                }
+
+                if is_rate:
+                    if lift is not None:
+                        headline = (
+                            f"'{feature}' = '{best_level}': predicted {target_column} rate is "
+                            f"{lift:.2f}x the baseline ({level_value:.1%} vs {baseline:.1%})"
+                        )
+                    else:
+                        headline = (
+                            f"'{feature}' = '{best_level}': predicted {target_column} rate is "
+                            f"{level_value:.1%}, {abs(diff) * 100:.1f} pts {direction_word} "
+                            f"vs baseline {baseline:.1%}"
+                        )
+                elif lift is not None:
+                    headline = (
+                        f"'{feature}' = '{best_level}': average {target_column} is {lift:.2f}x "
+                        f"the overall baseline ({level_value:.3g} vs {baseline:.3g})"
                     )
                 else:
-                    narrative.append(
-                        f"#{rank} driver: '{feature}' — higher values {direction} "
-                        f"predicted '{target_column}' (permutation importance {importance:.3f})."
+                    headline = (
+                        f"'{feature}' = '{best_level}': average {target_column} is "
+                        f"{level_value:.3g}, {diff:+.3g} vs baseline {baseline:.3g}"
                     )
+                entry["headline"] = headline
+                drivers.append(entry)
+                narrative.append(
+                    f"#{rank} driver: {headline} (permutation importance {importance:.3f})."
+                )
             return drivers, narrative
         except Exception:
             return [], []

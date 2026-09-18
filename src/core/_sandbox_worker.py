@@ -28,9 +28,14 @@ from src.core.sandbox import (
     ALLOWED_MODULES,
     ALLOWED_MODULES_TEXT,
     BLOCKED_BUILTIN_NAMES,
+    RESERVED_GLOBAL_NAMES,
     RESULT_VAR_NAME,
     STDOUT_CAP_CHARS,
 )
+
+#: Optional companion to RESULT — a top-level `FINDING = {...}` in the
+#: sandboxed code, JSON-converted the same way RESULT is. Never required.
+FINDING_VAR_NAME: str = "FINDING"
 
 #: `src.*` is importable here because run_sandboxed (src/core/sandbox.py)
 #: sets PYTHONPATH to the repo root on this subprocess's environment —
@@ -112,13 +117,24 @@ def _build_restricted_builtins() -> dict[str, Any]:
 
 
 def _build_restricted_globals(
-    df: pd.DataFrame, schema: dict[str, str]
+    df: pd.DataFrame,
+    schema: dict[str, str],
+    extra_globals: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "__builtins__": _build_restricted_builtins(),
+    restricted: dict[str, Any] = {
         "df": df,
         "SCHEMA": schema,
     }
+    if extra_globals:
+        # The parent process (run_sandboxed) already rejects any key
+        # colliding with RESERVED_GLOBAL_NAMES before this subprocess is
+        # even spawned; this skip is defense in depth, not the primary gate.
+        for key, value in extra_globals.items():
+            if key in RESERVED_GLOBAL_NAMES:
+                continue
+            restricted[key] = value
+    restricted["__builtins__"] = _build_restricted_builtins()
+    return restricted
 
 
 def _error_payload(
@@ -139,7 +155,9 @@ def _error_payload(
     }
 
 
-def _execute(code: str, dataset_ref: str) -> dict[str, Any]:
+def _execute(
+    code: str, dataset_ref: str, extra_globals: dict[str, Any] | None = None
+) -> dict[str, Any]:
     t0 = time.perf_counter()
 
     try:
@@ -150,7 +168,7 @@ def _execute(code: str, dataset_ref: str) -> dict[str, Any]:
         )
 
     schema = _build_schema(df)
-    restricted_globals = _build_restricted_globals(df, schema)
+    restricted_globals = _build_restricted_globals(df, schema, extra_globals)
     stdout_buf = io.StringIO()
 
     try:
@@ -204,9 +222,22 @@ def _execute(code: str, dataset_ref: str) -> dict[str, Any]:
             stdout_buf.getvalue(),
         )
 
+    # FINDING is an optional companion to RESULT — never required, and a
+    # missing or unconvertible FINDING is never an execution error, just an
+    # absent one.
+    finding_payload = None
+    if FINDING_VAR_NAME in restricted_globals:
+        try:
+            candidate = _convert_result(restricted_globals[FINDING_VAR_NAME])
+            json.dumps(candidate, default=_json_default)
+            finding_payload = candidate
+        except Exception:
+            finding_payload = None
+
     return {
         "status": "ok",
         "result": converted,
+        "finding": finding_payload,
         "stdout": _cap(stdout_buf.getvalue()),
         "error_type": None,
         "traceback": None,
@@ -218,7 +249,11 @@ def _execute(code: str, dataset_ref: str) -> dict[str, Any]:
 def main() -> None:
     input_path, result_path = sys.argv[1], sys.argv[2]
     payload_in = json.loads(Path(input_path).read_text(encoding="utf-8"))
-    result = _execute(payload_in["code"], payload_in["dataset_ref"])
+    result = _execute(
+        payload_in["code"],
+        payload_in["dataset_ref"],
+        payload_in.get("extra_globals"),
+    )
     Path(result_path).write_text(
         json.dumps(result, default=_json_default), encoding="utf-8"
     )

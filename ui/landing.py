@@ -9,6 +9,35 @@ from typing import Any
 
 import streamlit.components.v1 as components
 
+# Canonical "Ledger" design-system tokens (see DESIGN.md, "Tokens — ink").
+# This is the single Python source of truth for the two hexes this module needs
+# (the iframe/background colour shown while the static landing component loads).
+# The static HTML assets (ui/landing_component/index.html, frontend-landing/index.html,
+# and their non-Python siblings) cannot import this constant, so their inline
+# :root/.theme-day CSS custom properties are hand-kept in sync with these values
+# and with DESIGN.md — look for the "Keep in sync" comments above each :root block.
+# Ledger design-system tokens (DESIGN.md) — single source of truth. The
+# static landing HTML (ui/landing_component/index.html, frontend-landing/)
+# duplicates these as literal CSS hexes (no build step wires them together),
+# so tests assert against THIS dict rather than re-typing hex literals a
+# second time — the exact "give the palette a single source of truth and
+# have both the code and the tests import it" fix IMPROVEMENTS.md's Q1 asks
+# for. Keep in sync with DESIGN.md's ink token table if it ever changes.
+LEDGER_TOKENS_DAY: dict[str, str] = {
+    "stock": "#f7eedd",
+    "sheet": "#fffbf2",
+    "ink": "#3a2b1e",
+    "graphite": "#8a7660",
+    "pen": "#a34f20",
+}
+LEDGER_TOKENS_NIGHT: dict[str, str] = {
+    "stock": "#241c14",
+    "sheet": "#2f251a",
+    "ink": "#f3e9d8",
+    "graphite": "#b8a688",
+    "pen": "#f0a24a",
+}
+
 # Determine component directory: prefers the next-generation frontend-landing directory if present
 _LEGACY_DIR: str = os.path.join(os.path.dirname(__file__), "landing_component")
 _V2_DIR: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend-landing"))
@@ -36,7 +65,7 @@ def show_landing_page() -> bool:
     # Day is the console's default theme (app.py _DEFAULTS); the landing runs before those defaults
     theme = "night" if st.session_state.get("theme", "day") in ("night", "dark") else "day"
     # Matches the console's --stock token for each theme (app.py _inject_theme_css)
-    bg_color = "#f7eedd" if theme == "day" else "#241c14"
+    bg_color = LEDGER_TOKENS_DAY["stock"] if theme == "day" else LEDGER_TOKENS_NIGHT["stock"]
 
     # Hide Streamlit UI completely and force iframe to be fixed full-screen
     st.markdown(f"""

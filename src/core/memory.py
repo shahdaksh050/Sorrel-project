@@ -21,6 +21,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from src.core.findings import Finding, rank_findings
+
 console = Console()
 
 
@@ -126,7 +128,20 @@ class DatasetMetadata:
         if not col_names:
             return None, 0.0
 
-        lower_to_orig = {c.lower(): c for c in col_names}
+        # A datetime/date-typed column is never a supervised-learning target
+        # — there is no regressor/classifier task for "predict the
+        # timestamp". Without this exclusion, a date column with no other
+        # target-shaped column in the dataset falls through to the
+        # positional fallback below (or, worse, a coincidental name match
+        # like "target_date") and gets auto-selected to train on, which is
+        # never the right call regardless of confidence.
+        non_datetime_cols = [
+            c for c in col_names if "datetime" not in self.columns.get(c, "").lower()
+        ]
+        if not non_datetime_cols:
+            return None, 0.0
+
+        lower_to_orig = {c.lower(): c for c in non_datetime_cols}
         candidates: list[tuple[str, float]] = []
 
         for lower, original in lower_to_orig.items():
@@ -161,7 +176,7 @@ class DatasetMetadata:
             # but with no name hint it is weak evidence. Score non-binary
             # guesses below the autonomy threshold so the pipeline prefers
             # EDA + clustering over modelling an arbitrary column.
-            last_col = col_names[-1]
+            last_col = non_datetime_cols[-1]
             nunique = self.column_nunique.get(last_col, -1)
             if nunique == 2:
                 pos_score = 0.65   # binary last column is the usual label shape
@@ -251,6 +266,7 @@ class ToolResult:
     error_message: str | None = None
     execution_time_ms: float = 0.0
     timestamp: float = field(default_factory=time.time)
+    iteration: int = 0   # P1.6 — which reasoning cycle produced this result
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -303,6 +319,14 @@ class MemorySystem:
         self.session_id: str = str(int(time.time()))
         self.persist_path: str | None = persist_path
         self._ctx: dict[str, Any] = {}     # generic RLM sub-call context store
+        self.findings: list[Finding] = []  # the finding bus (7.1) — one list, every surface projects it
+        #: Round 8 — specs (as dicts, see src.core.tool_factory.GeneratedToolSpec)
+        #: for tools the LLM has defined during this run via define_analysis_tool.
+        #: Populated by the controller (never by a tool's own execute()) once a
+        #: proposed tool passes validation — see AGENTS.md's layer rule and
+        #: IMPROVEMENTS.md Round 8 decision 3. Read back each iteration so the
+        #: prompt can tell the LLM which tools it created earlier in this run.
+        self.generated_tools: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Stage 1 — Dataset metadata
@@ -391,12 +415,84 @@ class MemorySystem:
                 lines.append(f"[{r.tool_name}] ERROR → {r.error_message}")
         return "\n".join(lines)
 
+    def get_results_summary_digest(
+        self, current_iteration: int, max_chars_per_result: int = 1200
+    ) -> str:
+        """
+        P1.6 — the iteration prompt re-sent every accumulated result in full
+        on every cycle (up to 48 entries by iteration 8), which grows
+        linearly and re-bills tokens for results the LLM already reacted to.
+        This gives the current iteration's results in full (the LLM's job
+        this cycle is to react to what just happened) and a one-line digest
+        for everything earlier.
+        """
+        if not self.tool_results:
+            return "No tool results yet."
+        current = [r for r in self.tool_results if r.iteration == current_iteration]
+        earlier = [r for r in self.tool_results if r.iteration != current_iteration]
+
+        lines: list[str] = []
+        if earlier:
+            lines.append("Earlier iterations (digest — full detail omitted, already reacted to):")
+            for r in earlier:
+                lines.append(f"  [iter {r.iteration}] {r.tool_name} → {r.status}")
+        if current:
+            lines.append("This iteration's results (in full):")
+            for r in current:
+                if r.status == "success":
+                    slim = {k: v for k, v in r.output.items() if k not in {"raw_data", "dataframe"}}
+                    shrunk = _shrink_to_fit(slim, max_chars_per_result)
+                    lines.append(f"  [{r.tool_name}] SUCCESS → {json.dumps(shrunk, default=str)}")
+                elif r.status == "skipped":
+                    lines.append(f"  [{r.tool_name}] SKIPPED → {r.output.get('summary', '')}")
+                else:
+                    lines.append(f"  [{r.tool_name}] ERROR → {r.error_message}")
+        return "\n".join(lines)
+
     def get_last_result_for(self, tool_name: str) -> ToolResult | None:
         """Return the most recent result for a given tool name."""
         for r in reversed(self.tool_results):
             if r.tool_name == tool_name:
                 return r
         return None
+
+    # ------------------------------------------------------------------
+    # Finding bus (7.1) — every projection (deterministic synthesis, the
+    # Markdown/HTML reports, the dashboard panel selector) reads
+    # ranked_findings() instead of re-deriving its own narrative from raw
+    # tool output, so a tool that gains a findings() implementation reaches
+    # every surface at once.
+    # ------------------------------------------------------------------
+
+    def add_findings(self, findings: list[Finding]) -> None:
+        self.findings.extend(findings)
+
+    def ranked_findings(self, suppress_trivial: bool = True) -> list[Finding]:
+        return rank_findings(self.findings, suppress_trivial=suppress_trivial)
+
+    def findings_by_kind(self, *kinds: str) -> list[Finding]:
+        return [f for f in self.findings if f.kind in kinds]
+
+    # ------------------------------------------------------------------
+    # Generated tools (Round 8) — tools the LLM defined during this run via
+    # define_analysis_tool, registered by the controller after validation.
+    # ------------------------------------------------------------------
+
+    def add_generated_tool(self, spec: dict[str, Any]) -> None:
+        """Record a newly-registered (or modified) generated tool spec.
+
+        A modification (same `name` as an existing entry) replaces that
+        entry rather than appending a duplicate, since only one live version
+        of a generated tool exists in the registry at a time — the spec's
+        own `history` list (see tool_factory.GeneratedToolSpec) is where
+        prior code versions are kept for audit.
+        """
+        name = spec.get("name")
+        self.generated_tools = [g for g in self.generated_tools if g.get("name") != name]
+        self.generated_tools.append(spec)
+
+    def list_generated_tools(self) -> list[dict[str, Any]]:
+        return list(self.generated_tools)
 
     # ------------------------------------------------------------------
     # Generic context store — RLM sub-call environments (Stage 6)
@@ -423,6 +519,8 @@ class MemorySystem:
             "iteration_count": self.iteration_count,
             "dataset_metadata": self.dataset_metadata.__dict__ if self.dataset_metadata else None,
             "tool_results": [r.to_dict() for r in self.tool_results],
+            "findings": [f.to_dict() for f in self.findings],
+            "generated_tools": self.generated_tools,
             "additional_context": {k: v for k, v in self._ctx.items() if isinstance(v, (str, int, float, bool, list, dict))},
         }
         Path(self.persist_path).write_text(json.dumps(state, indent=2, default=str))

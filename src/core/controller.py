@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -30,10 +31,12 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from src.core.agenda import Question, build_agenda, coverage_report
 from src.core.coercion import coerce_types
 from src.core.dashboard import build_dashboard, dashboard_to_json
 from src.core.degradations import collect_degradations
 from src.core.domains import infer_domains
+from src.core.findings import Finding
 from src.core.io import read_any
 from src.core.memory import AnalysisStep, DatasetMetadata, MemorySystem, ToolResult
 from src.core.profiler import DatasetProfile, profile_dataframe
@@ -68,26 +71,38 @@ _NUMBER_RE = re.compile(r"-?\d+\.\d+|-?\d+")
 _UNVERIFIABLE_SKIP_ABS_INT = 9
 
 
-def _canon_number(value: Any) -> str:
+def _canon_number(value: Any, precision: int = 4) -> str:
     """Normalise a number to a fixed-precision canonical string for
     set-membership comparison, so '0.8', '0.80' and 0.7999999999999999
     (float round-trip noise) all match."""
     try:
-        return f"{round(float(value), 4):g}"
+        return f"{round(float(value), precision):g}"
     except (TypeError, ValueError):
         return str(value)
 
 
+#: Finding headlines (7.1) round for readability (e.g. "r=0.81") while the
+#: tool output they're traced back to often carries more decimals
+#: ("correlation=0.8109") — the verified pool indexes several roundings of
+#: each source number so a claim's own (looser) precision still matches
+#: without weakening the check itself (a genuinely wrong number still fails
+#: at every precision).
+_CANON_PRECISIONS = (4, 3, 2, 1, 0)
+
+
 def _collect_numbers(obj: Any, into: set[str]) -> None:
     """Recursively flatten every numeric leaf/substring in a JSON-like
-    structure into canonical form."""
+    structure into canonical form, at several roundings (see
+    `_CANON_PRECISIONS`)."""
     if isinstance(obj, bool):
         return
     if isinstance(obj, (int, float)):
-        into.add(_canon_number(obj))
+        for p in _CANON_PRECISIONS:
+            into.add(_canon_number(obj, p))
     elif isinstance(obj, str):
         for match in _NUMBER_RE.finditer(obj):
-            into.add(_canon_number(match.group()))
+            for p in _CANON_PRECISIONS:
+                into.add(_canon_number(match.group(), p))
     elif isinstance(obj, dict):
         for v in obj.values():
             _collect_numbers(v, into)
@@ -136,6 +151,14 @@ class LLMClient:
         # long-lived and thread-safe, and re-pooling per call was costing
         # every invocation a fresh TCP+TLS handshake (~100-300ms).
         self._client: Any = None
+        # P3.1 — usage from the most recent _dispatch() call, if the
+        # provider branch captured one. `call()` attaches it to the parsed
+        # response under `_rlm_usage` so RLMEngine's `_extract_usage` (which
+        # already looks for that key) reports real token counts instead of
+        # the zeros its own docstring warns about. Not every branch sets
+        # this (the NVIDIA streaming path doesn't request usage in-stream —
+        # left as a smaller follow-up), so it stays best-effort by design.
+        self._last_usage: dict[str, Any] | None = None
 
     def ping(self) -> tuple[bool, str]:
         """
@@ -167,8 +190,12 @@ class LLMClient:
         Raises:
             ValueError: If the response cannot be parsed as JSON.
         """
+        self._last_usage = None
         raw = self._dispatch(system_prompt, user_prompt)
-        return self._parse_json(raw)
+        parsed = self._parse_json(raw)
+        if self._last_usage:
+            parsed["_rlm_usage"] = self._last_usage
+        return parsed
 
     def _dispatch(self, system_prompt: str, user_prompt: str) -> str:
         if self.provider == "anthropic":
@@ -311,6 +338,13 @@ class LLMClient:
         content = resp.choices[0].message.content
         if content is None:
             raise ValueError("LLM returned None content")
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            self._last_usage = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                "provider": self.provider,
+            }
         return str(content)
 
     def _call_anthropic(self, system_prompt: str, user_prompt: str) -> str:
@@ -323,12 +357,22 @@ class LLMClient:
         if self._client is None:
             self._client = anthropic.Anthropic(api_key=api_key, timeout=self.timeout, max_retries=2)
         client = self._client
+        # P1.6(b) — the tool-description/system block is byte-identical
+        # across all ~15 calls in a run; mark it for prompt caching so it's
+        # billed once instead of on every iteration.
         msg = client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
-            system=system_prompt,
+            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user_prompt}],
         )
+        usage = getattr(msg, "usage", None)
+        if usage is not None:
+            self._last_usage = {
+                "prompt_tokens": getattr(usage, "input_tokens", 0) or 0,
+                "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
+                "provider": "anthropic",
+            }
         for block in msg.content:
             if isinstance(block, TextBlock):
                 return block.text
@@ -490,20 +534,24 @@ class ToolRegistry:
         self._register_builtin_tools()
 
     def _register_builtin_tools(self) -> None:
+        from src.tools.change_analysis import ChangeAnalysisTool
         from src.tools.clustering import ClusterDataTool
         from src.tools.cohort_analysis import CohortAnalysisTool
+        from src.tools.concentration_analysis import ConcentrationAnalysisTool
         from src.tools.data_processing import (
             CleanDataTool,
             CorrelationAnalysisTool,
             DetectOutliersTool,
             IngestDatasetTool,
         )
+        from src.tools.define_analysis_tool import DefineAnalysisToolTool
         from src.tools.dimensionality import DimensionalityAnalysisTool
         from src.tools.dynamic_code import DynamicCodeExecutionTool
         from src.tools.financial_analysis import FinancialAnalysisTool
         from src.tools.geospatial import GeospatialAnalysisTool
         from src.tools.ml_pipeline import EvaluateModelTool, TrainModelTool
         from src.tools.report_generator import GenerateReportTool
+        from src.tools.segment_comparison import SegmentComparisonTool
         from src.tools.statistical_analysis import SelectStatisticalTestTool
         from src.tools.text_analysis import TextAnalysisTool
         from src.tools.time_series import TimeSeriesAnalysisTool
@@ -526,9 +574,21 @@ class ToolRegistry:
             DimensionalityAnalysisTool(),
             GeospatialAnalysisTool(),
             DynamicCodeExecutionTool(),
+            # Round 8 — LLM Sandbox mode: define_analysis_tool lets the agent
+            # register a new, named, reusable tool at runtime (registration
+            # itself happens in _maybe_register_generated_tool, called from
+            # _execute_steps after this tool's own pure validate/smoke-test
+            # step succeeds — see AGENTS.md's layer rule).
+            DefineAnalysisToolTool(),
             FinancialAnalysisTool(),
             CohortAnalysisTool(),
             WorkforceAnalysisTool(),
+            # 7.2 — insight library (segment comparison, concentration,
+            # period-over-period change): the "why"/"what happened"
+            # questions no prior tool answered directly.
+            SegmentComparisonTool(),
+            ConcentrationAnalysisTool(),
+            ChangeAnalysisTool(),
         ):
             self.register(tool)
 
@@ -649,13 +709,35 @@ class AgentController:
         self.tool_registry = ToolRegistry()
         self._rlm_engine: RLMEngine | None = None
         self._prompt_manager: PromptManager | None = None
-        self._output_dir: str = os.getenv("OUTPUT_DIR", "output")
+        # P2.4 — concurrent runs must not corrupt each other's models/reports.
+        # An explicit OUTPUT_DIR (the Streamlit app always sets one, into a
+        # fresh tempdir per run) is honoured as-is; with no override, default
+        # to a session-scoped subdirectory rather than a fixed "output" path,
+        # so two unattended CLI runs in flight never share a models/ or
+        # reports/ directory. A pointer file (not a symlink — no elevated
+        # rights needed on Windows) records the most recent run for humans
+        # poking at the output tree by hand.
+        if os.getenv("OUTPUT_DIR"):
+            self._output_dir: str = os.environ["OUTPUT_DIR"]
+        else:
+            self._output_dir = str(Path("output") / "runs" / self.memory.session_id)
+            try:
+                Path(self._output_dir).mkdir(parents=True, exist_ok=True)
+                Path("output").mkdir(parents=True, exist_ok=True)
+                Path("output", "latest.txt").write_text(self._output_dir, encoding="utf-8")
+            except OSError:
+                pass
         # Natural-language analysis objective supplied by the user (optional).
         self.objective: str = os.getenv("USER_OBJECTIVE", "").strip()
         if self.objective:
             self.memory.set_context("user_objective", self.objective)
         # Most recent dataset profile (set during load_dataset).
         self.last_profile: DatasetProfile | None = None
+        # The coerced dataframe from load_dataset's first profiling pass,
+        # held only long enough to re-profile once the target is known
+        # (7.4 needs profile-before-target; class-imbalance warnings need
+        # target-before-profile). Cleared at the end of load_dataset.
+        self._pending_df: pd.DataFrame | None = None
         # Charts from the most recent dashboard build (for the HTML report).
         self._last_charts: list[dict[str, Any]] = []
         self._rlm_decomposed: bool = False   # run decomposition at most once per session
@@ -673,6 +755,90 @@ class AgentController:
         self.on_step_callback: Any = None
         # Optional callback fired after each LLM iteration: (iteration, stage) -> None
         self.on_iteration_callback: Any = None
+
+    # ------------------------------------------------------------------
+    # 7.4 — Analysis-mode decision
+    # ------------------------------------------------------------------
+
+    #: Objective keywords that count as "the user actually asked for a
+    #: prediction" — without one of these, a name-matched numeric target at
+    #: transaction grain is treated as a descriptive subject (see below).
+    _PREDICTION_INTENT_KEYWORDS = (
+        "predict", "forecast", "model", "classif", "regress",
+        "estimate", "will churn", "likely to", "propensity",
+    )
+
+    def _decide_analysis_mode(self, col: str | None, confidence: float) -> dict[str, Any]:
+        """
+        Decide — and return a recorded rationale for — whether prediction is
+        even the right mode, before `load_dataset`'s confidence-banded logic
+        commits to training on `col`. `_AUTODETECT_HIGH` alone used to be
+        sufficient to start training a regressor on any name-matched numeric
+        column (`_NUMERIC_TARGET_NAMES` in memory.py); this adds one veto: a
+        measure at transaction grain in a domain-matched dataset is a
+        descriptive subject, not a modelling target, unless the objective
+        actually asks for prediction. Autonomy includes the autonomy to
+        decline to model (T2).
+        """
+        profile = self.last_profile
+        objective_l = self.objective.lower()
+        wants_prediction = any(kw in objective_l for kw in self._PREDICTION_INTENT_KEYWORDS)
+
+        # A candidate below the autonomy floor (_AUTODETECT_LOW) is not a
+        # real target — it's exactly the "very low confidence" band that
+        # load_dataset's own confidence-banded logic (below) leaves
+        # metadata.target_column unset for and defaults to EDA. Without this
+        # check, this function unconditionally recorded `mode: "model"` for
+        # ANY name-matched or positional-fallback column, however weak the
+        # signal — including a column the caller never actually models.
+        if col and confidence < _AUTODETECT_LOW:
+            return {
+                "mode": "describe",
+                "target": None,
+                "rationale": (
+                    f"Candidate target '{col}' reached only {confidence:.0%} confidence "
+                    f"(below the {_AUTODETECT_LOW:.0%} autonomy floor) — too weak a signal "
+                    "to commit to modelling; proceeding with descriptive EDA instead."
+                ),
+                "alternatives_rejected": [
+                    f"model on '{col}' (confidence {confidence:.0%}, below autonomy floor)"
+                ],
+            }
+
+        if col and profile and not wants_prediction:
+            col_profile = next((c for c in profile.columns if c.name == col), None)
+            is_transactional = bool(profile.domains) or (
+                profile.entity_col is not None and (profile.rows_per_entity or 0) > 1.5
+            )
+            if col_profile is not None and col_profile.semantic_role == "measure" and is_transactional:
+                return {
+                    "mode": "describe",
+                    "target": None,
+                    "rationale": (
+                        f"'{col}' is a descriptive measure at transaction grain "
+                        f"({'domain: ' + profile.domains[0].domain if profile.domains else 'repeat-row entity structure'}), "
+                        "and no prediction was requested — describing it (totals, "
+                        "concentration, trend) is a better answer than training a "
+                        "regressor on a name-matched column."
+                    ),
+                    "alternatives_rejected": [
+                        f"regression on '{col}' (name-matched only, confidence {confidence:.2f})"
+                    ],
+                }
+
+        if col:
+            return {
+                "mode": "model",
+                "target": col,
+                "rationale": f"Auto-detected target '{col}' (confidence {confidence:.0%}).",
+                "alternatives_rejected": [],
+            }
+        return {
+            "mode": "describe",
+            "target": None,
+            "rationale": "No plausible target column found — proceeding with descriptive EDA.",
+            "alternatives_rejected": [],
+        }
 
     # ------------------------------------------------------------------
     # Stage 1 — Dataset Ingestion
@@ -719,11 +885,88 @@ class AgentController:
         raw_meta = result.output["metadata"]
         metadata = DatasetMetadata(**raw_meta)
 
+        # ---- Data profiling runs before target auto-detection (7.4) — the
+        # analysis-mode decision below needs the semantic/domain picture
+        # (is this a transaction log? is the candidate column a measure?),
+        # not just a column name match. Failure here is non-fatal: the
+        # decision function below degrades to name-only reasoning when
+        # self.last_profile is still None. ----
+        try:
+            df, read_report = read_any(file_path)
+            df, coercions = coerce_types(df, delimiter=read_report.delimiter)
+            self._pending_df = df
+            profile = profile_dataframe(df, target_column=None)
+            try:
+                profile.domains = infer_domains(df, profile)
+            except Exception as exc:
+                profile.domains = []
+                console.print(f"  [yellow]⚠ Domain inference skipped: {exc}[/]")
+            self.last_profile = profile
+            self.memory.set_context("data_profile", profile.to_dict())
+            self.memory.set_context("data_profile_summary", profile.to_prompt_string())
+            self.memory.set_context(
+                "read_report",
+                {
+                    "path": read_report.path,
+                    "format": read_report.format,
+                    "encoding": read_report.encoding,
+                    "encoding_confident": read_report.encoding_confident,
+                    "delimiter": read_report.delimiter,
+                    "delimiter_sniffed": read_report.delimiter_sniffed,
+                    "duplicate_headers": read_report.duplicate_headers,
+                    "notes": read_report.notes,
+                },
+            )
+            self.memory.set_context("coercions", [c.to_dict() for c in coercions])
+            self.memory.set_context("profile_status", "ok")
+            self.memory.set_context(
+                "degradations",
+                collect_degradations(
+                    self.memory.get_context("read_report"),
+                    self.memory.get_context("coercions"),
+                    profile.to_dict(),
+                    "ok",
+                ),
+            )
+            console.print(
+                f"  [cyan]🔬 Profile: quality {profile.quality_score}/100, "
+                f"{len(profile.warnings)} warning(s).[/]"
+            )
+            if coercions:
+                console.print(
+                    f"  [cyan]🔧 Repaired {len(coercions)} column(s): "
+                    + ", ".join(f"{c.column} ({c.rule})" for c in coercions) + "[/]"
+                )
+        except Exception as exc:
+            profile_status = f"failed: {exc}"
+            self.memory.set_context("profile_status", profile_status)
+            self.memory.set_context(
+                "degradations", collect_degradations(None, None, None, profile_status)
+            )
+            console.print(
+                f"  [yellow]⚠ Data profiling failed (non-fatal): {exc}. "
+                "Running in degraded mode — dataset-nature tools (time-series, "
+                "text, geo...) are unavailable without a profile.[/]"
+            )
+
         # Auto-detect target column when user hasn't provided one
         if not metadata.target_column:
             col, confidence = metadata.detect_target_with_confidence()
+            decision = self._decide_analysis_mode(col, confidence)
+            self.memory.set_context("analysis_decision", decision)
 
-            if col and confidence >= _AUTODETECT_HIGH:
+            if decision["mode"] == "describe" and col is not None:
+                # 7.4 veto: a name-matched numeric column that would
+                # otherwise auto-model itself is, in this dataset's context,
+                # a descriptive subject — record why and skip modelling
+                # rather than training a near-tautological regressor.
+                console.print(
+                    f"  [cyan]📋 Analysis-mode decision: describe, not model — "
+                    f"{decision['rationale']}[/]"
+                )
+                metadata.task_type = "eda"
+
+            elif col and confidence >= _AUTODETECT_HIGH:
                 # High confidence — proceed autonomously
                 metadata.target_column = col
                 console.print(
@@ -791,71 +1034,38 @@ class AgentController:
         self.memory.set_context("target_column", metadata.target_column)
         self.memory.append_tool_result(result)
 
-        # ---- Data profiling (the data scientist's "first look") ----
-        # Failure here must never block the pipeline — it only enriches it,
-        # but a failure here silently loses every dataset-nature tool
-        # (candidate_tools(profile=None) vs candidate_tools(profile)), so it
-        # must be visible (memory "profile_status") even though it's non-fatal.
-        try:
-            df, read_report = read_any(file_path)
-            df, coercions = coerce_types(df, delimiter=read_report.delimiter)
-            profile = profile_dataframe(df, target_column=metadata.target_column)
-            # Semantic domain inference needs the dataframe as well as the
-            # structural profile, so it runs here rather than inside
-            # profile_dataframe. Never fatal: an unrecognised dataset simply
-            # has no domain and falls back to the generic tool set.
+        # Re-profile with the now-known target column so class-imbalance
+        # warnings (which need a target to check) are included — the first
+        # pass above ran before the target was decided, deliberately, since
+        # the analysis-mode decision needed the profile first. Cheap next to
+        # the read/coerce already done; non-fatal, and only runs when the
+        # first pass actually succeeded.
+        if self._pending_df is not None and self.last_profile is not None:
             try:
-                profile.domains = infer_domains(df, profile)
-            except Exception as exc:
-                profile.domains = []
-                console.print(f"  [yellow]⚠ Domain inference skipped: {exc}[/]")
-            self.last_profile = profile
-            self.memory.set_context("data_profile", profile.to_dict())
-            self.memory.set_context("data_profile_summary", profile.to_prompt_string())
-            self.memory.set_context(
-                "read_report",
-                {
-                    "path": read_report.path,
-                    "format": read_report.format,
-                    "encoding": read_report.encoding,
-                    "encoding_confident": read_report.encoding_confident,
-                    "delimiter": read_report.delimiter,
-                    "delimiter_sniffed": read_report.delimiter_sniffed,
-                    "duplicate_headers": read_report.duplicate_headers,
-                    "notes": read_report.notes,
-                },
+                reprofiled = profile_dataframe(self._pending_df, target_column=metadata.target_column)
+                reprofiled.domains = self.last_profile.domains
+                reprofiled.grain = self.last_profile.grain
+                reprofiled.entity_col = self.last_profile.entity_col
+                reprofiled.rows_per_entity = self.last_profile.rows_per_entity
+                self.last_profile = reprofiled
+                self.memory.set_context("data_profile", reprofiled.to_dict())
+                self.memory.set_context("data_profile_summary", reprofiled.to_prompt_string())
+            except Exception:
+                pass  # keep the pre-target profile rather than lose it
+        self._pending_df = None
+
+        # 7.5 — question agenda: what a human analyst would ask of this
+        # data, generated once profiling and the analysis-mode decision are
+        # both settled. Stored in context so the report's methodology
+        # section can show real coverage ("N questions, M answered") rather
+        # than only ever listing which tools ran.
+        try:
+            agenda = build_agenda(
+                self.last_profile, self.memory.get_context("analysis_decision"), self.objective
             )
-            self.memory.set_context("coercions", [c.to_dict() for c in coercions])
-            self.memory.set_context("profile_status", "ok")
-            self.memory.set_context(
-                "degradations",
-                collect_degradations(
-                    self.memory.get_context("read_report"),
-                    self.memory.get_context("coercions"),
-                    profile.to_dict(),
-                    "ok",
-                ),
-            )
-            console.print(
-                f"  [cyan]🔬 Profile: quality {profile.quality_score}/100, "
-                f"{len(profile.warnings)} warning(s).[/]"
-            )
-            if coercions:
-                console.print(
-                    f"  [cyan]🔧 Repaired {len(coercions)} column(s): "
-                    + ", ".join(f"{c.column} ({c.rule})" for c in coercions) + "[/]"
-                )
+            self.memory.set_context("question_agenda", [q.to_dict() for q in agenda])
         except Exception as exc:
-            profile_status = f"failed: {exc}"
-            self.memory.set_context("profile_status", profile_status)
-            self.memory.set_context(
-                "degradations", collect_degradations(None, None, None, profile_status)
-            )
-            console.print(
-                f"  [yellow]⚠ Data profiling failed (non-fatal): {exc}. "
-                "Running in degraded mode — dataset-nature tools (time-series, "
-                "text, geo...) are unavailable without a profile.[/]"
-            )
+            console.print(f"  [yellow]⚠ Question agenda build skipped (non-fatal): {exc}[/]")
 
         return metadata
 
@@ -1012,6 +1222,21 @@ class AgentController:
                     self.memory.set_context("llm_error", f"{type(exc).__name__}: {exc}")
                     final_result = self._deterministic_final()
 
+        # Every path through this loop must leave `findings` on the result —
+        # the LLM-complete and max-iteration branches return the raw LLM
+        # response dict, which doesn't carry the bus. Backfilling here means
+        # the reports/dashboard can always read final_result["findings"]
+        # regardless of which branch produced the final answer.
+        if "findings" not in final_result:
+            final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
+        try:
+            agenda = self.memory.get_context("question_agenda") or []
+            final_result["coverage"] = coverage_report(
+                [Question(**q) for q in agenda], final_result["findings"]
+            )
+        except Exception:
+            pass
+
         # ---- Verbatim-metric validation: enforce "cite only verbatim
         # metrics" as a mechanism, not just a prompt instruction ----
         unverified = self._flag_unverified_claims(final_result)
@@ -1103,6 +1328,12 @@ class AgentController:
         "ingest_dataset", "clean_data", "generate_report",
         "train_model", "evaluate_model", "cluster_data",
         "execute_dynamic_code",
+        # R3.1: its PNGs reach no consumer (grep for .png/chart_path/image_path
+        # across app.py, html_report.py, report_generator.py returns nothing) —
+        # excluded from the deterministic sweep rather than wired up, so the
+        # no-LLM path doesn't spend time writing files nobody reads. Left
+        # available to the LLM planner, which can still call it deliberately.
+        "generate_visualizations",
     })
 
     #: applies_to score a tool must reach to earn a slot in the deterministic
@@ -1271,6 +1502,7 @@ class AgentController:
                 target_column=meta.target_column,
                 task_type=meta.task_type,
                 tool_results=[r.to_dict() for r in self.memory.tool_results],
+                findings=[f.to_dict() for f in self.memory.ranked_findings()],
             )
             out_path = Path(self._output_dir) / "reports" / "dashboard.json"
             out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1308,6 +1540,8 @@ class AgentController:
                 unverified_claims=self.memory.get_context("unverified_claims"),
                 profile_status=self.memory.get_context("profile_status"),
                 degradations=self.memory.get_context("degradations"),
+                findings=[f.to_dict() for f in self.memory.ranked_findings()],
+                analysis_decision=self.memory.get_context("analysis_decision"),
             )
             out_path = Path(self._output_dir) / "reports" / "report.html"
             out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1318,8 +1552,17 @@ class AgentController:
             console.print(f"  [yellow]⚠ HTML report generation failed (non-fatal): {exc}[/]")
 
     def _deterministic_final(self) -> dict[str, Any]:
-        """Synthesise a final report dict from accumulated tool results, no LLM needed."""
-        insights: list[str] = []
+        """
+        Synthesise a final report dict, projected from the finding bus (7.1)
+        rather than re-deriving a narrative from raw tool output per tool.
+        `best_model`/`key_metrics` stay derived directly from train_model's
+        output since they're model-internal facts, not audience-facing
+        findings; every analytical claim ("X differs by Y", "Z is trending")
+        comes from `MemorySystem.ranked_findings()`, which is the same list
+        every other surface (both reports, the dashboard) reads — a tool
+        that gains a findings() implementation reaches all of them at once
+        instead of needing a hardcoded case in each narrator.
+        """
         recommendations: list[str] = []
         key_metrics: dict[str, Any] = {}
         best_model = self.memory.get_context("best_model_name")
@@ -1334,51 +1577,15 @@ class AgentController:
                 key_metrics["cv_mean"] = metrics.get("cv_mean")
                 key_metrics["cv_std"] = metrics.get("cv_std")
                 key_metrics["train_test_gap"] = metrics.get("train_test_gap")
-                insights.append(
-                    f"Best model '{best}' reached cross-validated score "
-                    f"{metrics.get('cv_mean')} ± {metrics.get('cv_std')} "
-                    f"with train-test gap {metrics.get('train_test_gap')}."
-                )
             warnings = train.output.get("overfit_warnings", [])
-            insights.extend(f"Overfitting warning: {w}" for w in warnings)
             if warnings:
                 recommendations.append(
                     "Reduce model complexity (lower max_depth) or add regularisation "
                     "to close the train-test gap."
                 )
 
-        corr = self.memory.get_last_result_for("correlation_analysis")
-        if corr and corr.status == "success":
-            top = corr.output.get("top_correlations", [])
-            if top:
-                pair = top[0]
-                insights.append(
-                    f"Strongest feature correlation: {pair.get('col_a')} ↔ "
-                    f"{pair.get('col_b')} (r={pair.get('correlation')})."
-                )
-
-        outliers = self.memory.get_last_result_for("detect_outliers")
-        if outliers and outliers.status == "success":
-            insights.append(
-                f"Outlier scan ({outliers.output.get('method')}): "
-                f"{outliers.output.get('total_outliers')} rows flagged "
-                f"({outliers.output.get('outlier_percentage')}% of data)."
-            )
-
-        stat = self.memory.get_last_result_for("select_statistical_test")
-        if stat and stat.status == "success":
-            insights.append(str(stat.output.get("summary", "")))
-
-        cluster = self.memory.get_last_result_for("cluster_data")
-        if cluster and cluster.status == "success":
-            sizes = cluster.output.get("cluster_sizes", {})
-            insights.append(
-                f"Segmentation: {cluster.output.get('n_clusters')} natural clusters "
-                f"(silhouette={cluster.output.get('silhouette_score')}, "
-                f"{cluster.output.get('separation_quality')} separation); "
-                f"sizes: {sizes}."
-            )
-
+        ranked = self.memory.ranked_findings()
+        insights = [f.headline for f in ranked[:12]]
         if not insights:
             insights.append("Analysis produced no tool results to synthesise.")
         # Chosen deterministic mode and a mid-run LLM failure produce the same
@@ -1429,6 +1636,7 @@ class AgentController:
             "recommendations": recommendations,
             "best_model": best_model,
             "key_metrics": key_metrics,
+            "findings": [f.to_dict() for f in ranked],
         }
 
     # ------------------------------------------------------------------
@@ -1526,8 +1734,38 @@ class AgentController:
                 result = tool.run(**params)
                 if result.status == "success":
                     self._step_cache[cache_key] = result
+            result.iteration = self.memory.iteration_count
             self.memory.append_tool_result(result)
             self.memory.mark_step_complete(step.step_number, result)
+
+            # Finding bus (7.1) — project this tool's own output into the
+            # shared Finding list right after it succeeds, so every surface
+            # (deterministic synthesis, both reports, the dashboard) reads
+            # one ranked list instead of each re-deriving its own narrative
+            # from raw tool JSON. A tool with no findings() override (data
+            # prep tools) contributes nothing here, which is correct.
+            if result.status == "success":
+                try:
+                    new_findings: list[Finding] = tool.findings(result.output, self.last_profile, self.memory.dataset_metadata)
+                except Exception as exc:
+                    new_findings = []
+                    console.print(f"  [yellow]⚠ findings() failed for {step.tool_name} (non-fatal): {exc}[/]")
+                if new_findings:
+                    for i, finding in enumerate(new_findings):
+                        if not finding.finding_id:
+                            finding.finding_id = f"{step.tool_name}_{step.step_number}_{i}"
+                        if not finding.source_tool:
+                            finding.source_tool = step.tool_name
+                    self.memory.add_findings(new_findings)
+
+            # Round 8 — dynamic tool creation. define_analysis_tool's own
+            # execute() is pure (per AGENTS.md's layer rule, it never touches
+            # the registry or memory) — it only validates and smoke-tests a
+            # proposed tool and reports output["status"] == "ready"/"error".
+            # Registration is the controller's job, same precedent as
+            # "clean_data succeeds -> controller sets cleaned_file_path".
+            if step.tool_name == "define_analysis_tool" and result.status == "success":
+                self._maybe_register_generated_tool(result)
 
             # Item 6 (report restructure): the planner is required to give a
             # rationale for every step (prompt_manager.py), but it was only
@@ -1601,6 +1839,80 @@ class AgentController:
             if self.on_step_callback:
                 summary = result.output.get("summary", "")[:80] if result.status == "success" else result.error_message
                 self.on_step_callback(step.tool_name, result.status, f"{idx}/{total_steps} done — {summary}")
+
+    def _maybe_register_generated_tool(self, result: ToolResult) -> None:
+        """
+        Round 8 — validate and, if it passes, register+persist a tool the
+        LLM proposed via define_analysis_tool.
+
+        define_analysis_tool.execute() only validates/smoke-tests (it must
+        never mutate the registry or memory itself, per AGENTS.md's layer
+        rule); this is where that proposal actually becomes a callable tool.
+        A validation failure rewrites `result` in place to status="error" so
+        the LLM sees exactly what to fix on its next iteration, the same way
+        any other tool failure is surfaced.
+        """
+        if result.output.get("status") != "ready":
+            return
+        spec_dict = result.output.get("spec") or {}
+        name = spec_dict.get("name")
+        description = spec_dict.get("description", "")
+        params_schema = spec_dict.get("params_schema", {}) or {}
+        code = spec_dict.get("code", "")
+        if not name:
+            result.status = "error"
+            result.error_message = "define_analysis_tool returned status='ready' with no tool name."
+            return
+
+        from src.core.tool_factory import (
+            GeneratedToolSpec,
+            compute_dataset_fingerprint,
+            register_and_persist,
+            validate_spec,
+        )
+
+        existing_generated = {g["name"]: g for g in self.memory.list_generated_tools() if g.get("name")}
+        errors = validate_spec(
+            name=name,
+            description=description,
+            params_schema=params_schema,
+            code=code,
+            existing_tool_names=[n for n in self.tool_registry.names() if n not in existing_generated],
+            existing_generated=existing_generated,
+        )
+        if errors:
+            result.status = "error"
+            result.error_message = (
+                f"'{name}' was not registered: " + "; ".join(errors)
+            )
+            console.print(f"  [yellow]⚠ Generated tool '{name}' rejected: {result.error_message}[/]")
+            return
+
+        prior = existing_generated.get(name)
+        version = (prior.get("version", 0) + 1) if prior else 1
+        # GeneratedTool inherits uses_cleaned_file=True (the default), so it
+        # always runs against the cleaned dataset once one exists — fingerprint
+        # that same path, or a later opt-in reload (load_persisted_tools)
+        # would never match.
+        runtime_path = (
+            self.memory.get_context("cleaned_file_path")
+            or (self.memory.dataset_metadata.file_path if self.memory.dataset_metadata else "")
+        )
+        fingerprint = compute_dataset_fingerprint(runtime_path) if runtime_path else ""
+        spec = GeneratedToolSpec(
+            name=name,
+            description=description,
+            params_schema=params_schema,
+            code=code,
+            version=version,
+            created_at=datetime.now(UTC).isoformat(),
+            dataset_fingerprint=fingerprint,
+        )
+        register_and_persist(spec, self.tool_registry, self.memory, self._output_dir)
+        console.print(
+            f"  [bold green]✓ Registered generated tool[/] '{name}' "
+            f"(v{version}, callable starting next iteration)."
+        )
 
     # ------------------------------------------------------------------
     # Stage 6 — RLM decomposition
@@ -1761,6 +2073,8 @@ class AgentController:
             unverified_claims=self.memory.get_context("unverified_claims"),
             profile_status=self.memory.get_context("profile_status"),
             degradations=self.memory.get_context("degradations"),
+            findings=[f.to_dict() for f in self.memory.ranked_findings()],
+            analysis_decision=self.memory.get_context("analysis_decision"),
         )
 
         self.memory.append_tool_result(result)

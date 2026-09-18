@@ -27,17 +27,22 @@ def test_landing_typography_tokens() -> None:
 
 
 def test_landing_day_and_night_themes() -> None:
+    # Q1 — assert against ui.landing's LEDGER_TOKENS_DAY/NIGHT (which mirror
+    # DESIGN.md) rather than re-typed hex literals, so this test and the
+    # rendered page can't silently diverge again.
+    from ui.landing import LEDGER_TOKENS_DAY, LEDGER_TOKENS_NIGHT
+
     content = INDEX_HTML.read_text(encoding="utf-8")
     # Night theme tokens
-    assert "--stock: #130f0b" in content
-    assert "--pen: #f0a24a" in content
-    assert "--ink: #f6eedf" in content
+    assert f"--stock: {LEDGER_TOKENS_NIGHT['stock']}" in content
+    assert f"--pen: {LEDGER_TOKENS_NIGHT['pen']}" in content
+    assert f"--ink: {LEDGER_TOKENS_NIGHT['ink']}" in content
 
     # Day theme tokens
     assert "html.theme-day" in content
-    assert "--stock: #f7eedd" in content
-    assert "--pen: #a34f20" in content
-    assert "--ink: #3a2b1e" in content
+    assert f"--stock: {LEDGER_TOKENS_DAY['stock']}" in content
+    assert f"--pen: {LEDGER_TOKENS_DAY['pen']}" in content
+    assert f"--ink: {LEDGER_TOKENS_DAY['ink']}" in content
 
     # Theme toggle button
     assert "btn-theme-toggle" in content

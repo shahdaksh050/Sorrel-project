@@ -24,8 +24,10 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from src.core.findings import Finding
 from src.core.io import DatasetReadError, read_any
-from src.core.profiler import is_identifier_like
+from src.core.multiple_testing import apply_benjamini_hochberg
+from src.core.profiler import is_identifier_like, profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
 
 if TYPE_CHECKING:
@@ -54,6 +56,32 @@ _RNG_SEED = 42
 #: Expected contingency-table cell count below which chi-square is
 #: considered unreliable (the standard rule of thumb).
 _MIN_EXPECTED_CELL_COUNT = 5
+
+#: A grouping column with more distinct levels than this is treated as
+#: identifier-like for hypothesis-testing purposes: too many groups to
+#: interpret and, for the family-mode path (7.6), too expensive to test
+#: against every measure. Reused both for an explicit group_column (the
+#: original n_groups check) and to filter family-mode dimension candidates,
+#: so both paths agree on what counts as "too many groups".
+MAX_DIMENSION_CARDINALITY = 20
+
+#: Maps each effect-size metric this tool computes to the practical-
+#: significance threshold used for it elsewhere in this file (PRACTICAL_
+#: THRESHOLD_*). Family mode (7.6) needs to judge "negligible effect" per
+#: pairing from just the effect_kind string carried in family_results,
+#: since each pairing can use a different test/effect metric.
+_EFFECT_KIND_THRESHOLDS: dict[str, float] = {
+    "cohens_d": PRACTICAL_THRESHOLD_D,
+    "hedges_g": PRACTICAL_THRESHOLD_D,
+    "rank_biserial": PRACTICAL_THRESHOLD_R,
+    "cramers_v": PRACTICAL_THRESHOLD_V,
+    "eta_squared": PRACTICAL_THRESHOLD_ETA2,
+    "epsilon_squared": PRACTICAL_THRESHOLD_ETA2,
+}
+
+#: Findings below this p_adjusted are candidates for the finding bus (7.6
+#: item 4) — matches the tool's own default alpha.
+_FINDING_P_THRESHOLD = 0.05
 
 
 def _read_df(file_path: str) -> pd.DataFrame:
@@ -219,24 +247,37 @@ class SelectStatisticalTestTool(BaseTool):
     def default_params(
         self, profile: DatasetProfile | None, metadata: DatasetMetadata | None
     ) -> dict[str, Any]:
-        """Pick a numeric measure and a small categorical grouping itself.
+        """Pick a measure column for the deterministic (no-LLM) planner.
+        Deliberately leaves `group_column` unset (7.6).
 
-        A hypothesis test needs both, and the deterministic planner has no
-        way to choose them. The group must have at least two levels and few
-        enough of them to be a grouping rather than an identifier."""
+        Only `feature_column` is filled here, and it prefers a column typed
+        `semantic_role == "measure"` over an arbitrary positional numeric
+        pick — this is the literal fix for the "tests quantity when the real
+        question was amount" bug (7.6 item 3).
+
+        `group_column` is intentionally left empty rather than guessing a
+        small categorical column, for an ordering reason: BaseTool.
+        prepare_params only fills a param via `requires_context` when the
+        planner left it empty, so pre-filling group_column here would win
+        the race against the target_column -> group_column injection every
+        time, regardless of which one is the better choice. Leaving it
+        empty lets that injection apply when a real target exists, and
+        otherwise `execute()` falls into family mode — testing this measure
+        against every eligible dimension and ranking by effect size instead
+        of committing to one arbitrary pairing before the tool ever runs."""
         if profile is None:
             return {}
-        numeric = [
-            c.name for c in profile.columns
-            if c.kind == "numeric" and c.nunique > 1
-        ]
-        groups = [
-            c.name for c in profile.columns
-            if c.kind in ("categorical", "boolean") and 2 <= c.nunique <= 10
-        ]
-        if not numeric or not groups:
+        measures = [c.name for c in profile.measures() if c.nunique > 1]
+        if not measures:
+            # No column typed as a measure yet (e.g. an older profile) —
+            # fall back to the previous plain-numeric heuristic.
+            measures = [
+                c.name for c in profile.columns
+                if c.kind == "numeric" and c.nunique > 1
+            ]
+        if not measures:
             return {}
-        return {"feature_column": numeric[0], "group_column": groups[0]}
+        return {"feature_column": measures[0]}
 
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
         if metadata and metadata.target_column and metadata.task_type == "classification":
@@ -249,17 +290,35 @@ class SelectStatisticalTestTool(BaseTool):
     def execute(  # type: ignore[override]
         self,
         file_path: str,
-        feature_column: str,
-        group_column: str,
+        feature_column: str | None = None,
+        group_column: str | None = None,
         alpha: float = 0.05,
+        test_family: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
         df = _read_df(file_path)
 
-        if feature_column not in df.columns:
+        # Needed to pick a typed measure/dimension rather than an arbitrary
+        # positional column (7.6 item 3), and to enumerate family-mode
+        # candidates (item 1). execute() never receives the controller's
+        # DatasetProfile directly, so it is recomputed here; a failure here
+        # (unexpected data shape) must not break the explicit-pair path
+        # below, hence the broad except.
+        try:
+            profile = profile_dataframe(df)
+        except Exception:
+            profile = None
+
+        group_supplied = bool(group_column)
+
+        if feature_column is None:
+            feature_column = self._pick_measure_column(df, profile)
+            if feature_column is None:
+                raise ToolExecutionError(
+                    "No numeric measure column found to test. Pass feature_column explicitly."
+                )
+        elif feature_column not in df.columns:
             raise ToolExecutionError(f"Feature column '{feature_column}' not found.")
-        if group_column not in df.columns:
-            raise ToolExecutionError(f"Group column '{group_column}' not found.")
 
         # Reject ID-like columns. The old heuristic here (monotonic + >95%
         # unique) rejected any sorted continuous measurement — a genuine
@@ -274,6 +333,169 @@ class SelectStatisticalTestTool(BaseTool):
                 f"Column '{feature_column}' appears to be a row ID or index. "
                 "Pass a meaningful feature instead."
             )
+
+        # Family mode (7.6): test_family=True forces it explicitly; leaving
+        # group_column empty (the deterministic planner's default_params no
+        # longer guesses one — see default_params) infers it. An explicit
+        # feature_column/group_column pair supplied together keeps testing
+        # exactly that pair, unchanged, for backward compatibility.
+        family_mode = test_family or not group_supplied
+        if not family_mode:
+            if group_column not in df.columns:
+                raise ToolExecutionError(f"Group column '{group_column}' not found.")
+            result, _n = self._run_single_test(df, feature_column, group_column, alpha)
+            return result
+
+        return self._execute_family(
+            df, profile, feature_column, group_column if group_supplied else None, alpha
+        )
+
+    def _pick_measure_column(self, df: pd.DataFrame, profile: DatasetProfile | None) -> str | None:
+        """Prefer a column typed `semantic_role == 'measure'` over an
+        arbitrary positional numeric pick (7.6 item 3 — the literal fix for
+        testing `quantity` when the real question was `amount`)."""
+        if profile is not None:
+            for c in profile.measures():
+                if c.name in df.columns and df[c.name].dropna().nunique() > 1:
+                    return c.name
+        for col in df.columns:
+            series = df[col]
+            if not pd.api.types.is_numeric_dtype(series):
+                continue
+            clean = series.dropna()
+            if clean.nunique() <= 1:
+                continue
+            if is_identifier_like(col, clean, len(clean)):
+                continue
+            return col
+        return None
+
+    def _eligible_dimensions(
+        self,
+        df: pd.DataFrame,
+        profile: DatasetProfile | None,
+        feature_column: str,
+        explicit_group_column: str | None,
+    ) -> list[str]:
+        """Every admissible grouping column for family mode: typed
+        `semantic_role in ("dimension", "flag")`, with a level count between
+        2 and MAX_DIMENSION_CARDINALITY (7.6 item 1). An explicitly-supplied
+        group_column (present only when test_family=True overrides an
+        explicit pair) is always included — that's the caller's decision to
+        honor (7.6 item 3)."""
+        candidates: list[str] = []
+        if profile is not None:
+            for c in profile.dimensions():
+                if c.name == feature_column or c.name not in df.columns:
+                    continue
+                if 2 <= c.nunique <= MAX_DIMENSION_CARDINALITY:
+                    candidates.append(c.name)
+        else:
+            # Defensive fallback if profiling itself failed above — mirrors
+            # the categorical/boolean heuristic this tool used before 7.6.
+            for col in df.columns:
+                if col == feature_column:
+                    continue
+                series = df[col]
+                nunique = int(series.nunique(dropna=True))
+                if not (2 <= nunique <= MAX_DIMENSION_CARDINALITY):
+                    continue
+                if pd.api.types.is_numeric_dtype(series) and nunique > 2:
+                    continue  # looks like a continuous/count measure, not a category
+                candidates.append(col)
+        if (
+            explicit_group_column
+            and explicit_group_column in df.columns
+            and explicit_group_column not in candidates
+        ):
+            candidates.append(explicit_group_column)
+        return candidates
+
+    def _execute_family(
+        self,
+        df: pd.DataFrame,
+        profile: DatasetProfile | None,
+        feature_column: str,
+        explicit_group_column: str | None,
+        alpha: float,
+    ) -> dict[str, Any]:
+        """Test `feature_column` against every eligible dimension column,
+        rank by effect size, and BH-correct p-values within the family
+        (7.6 items 1-2)."""
+        candidate_dims = self._eligible_dimensions(df, profile, feature_column, explicit_group_column)
+        if not candidate_dims:
+            raise ToolExecutionError(
+                f"No eligible dimension columns (semantic_role in 'dimension'/'flag', "
+                f"2-{MAX_DIMENSION_CARDINALITY} levels) found to test '{feature_column}' against."
+            )
+
+        raw_results: dict[str, dict[str, Any]] = {}
+        totals: dict[str, int] = {}
+        for dim in candidate_dims:
+            try:
+                r, n = self._run_single_test(df, feature_column, dim, alpha)
+            except ToolExecutionError:
+                continue
+            raw_results[dim] = r
+            totals[dim] = n
+
+        if not raw_results:
+            raise ToolExecutionError(
+                f"None of the {len(candidate_dims)} candidate dimension(s) produced a valid "
+                f"test against '{feature_column}'."
+            )
+
+        # Built from the (feature_column, dim) the loop above already knows
+        # rather than reading r["feature_column"]/r["group_column"] back —
+        # the categorical-feature branch (_chi_square) doesn't put those
+        # keys in its result dict, matching this tool's pre-7.6 output
+        # shape for that path.
+        pvalue_tests = [
+            {
+                "feature_column": feature_column,
+                "group_column": dim,
+                "test_name": r["test_name"],
+                "effect_size": r["effect_size"],
+                "effect_kind": r["effect_size_metric"],
+                "p_value": r["p_value"],
+                "n": totals[dim],
+            }
+            for dim, r in raw_results.items()
+        ]
+        corrected = apply_benjamini_hochberg(pvalue_tests, alpha=alpha)
+        # Rank by effect size (magnitude), not p-value — a family of tests
+        # can include several significant-but-negligible pairings once BH
+        # correction is applied to enough of them; effect size is what
+        # actually answers "which pairing matters" (7.6 item 2).
+        ranked = sorted(corrected, key=lambda e: (-abs(e["effect_size"]), e["p_adjusted"]))
+
+        top_group = ranked[0]["group_column"]
+        result = dict(raw_results[top_group])
+        result["feature_column"] = feature_column
+        result["group_column"] = top_group
+        result["p_adjusted"] = ranked[0]["p_adjusted"]
+        result["significant_after_correction"] = ranked[0]["significant_after_correction"]
+        result["family_results"] = ranked
+        result["family_size"] = len(ranked)
+        result["test_family"] = True
+        result["summary"] = (
+            f"Tested '{feature_column}' against {len(ranked)} dimension(s); strongest pairing — "
+            f"{result['summary']}"
+        )
+        return result
+
+    def _run_single_test(
+        self, df: pd.DataFrame, feature_column: str, group_column: str, alpha: float
+    ) -> tuple[dict[str, Any], int]:
+        """Run the one auto-selected test for this (feature, group) pair.
+
+        Returns (result, total_n). `result` is exactly the dict this tool
+        has always returned for a single explicit pairing — unchanged shape
+        for backward compatibility. `total_n` is extra bookkeeping consumed
+        only by family mode (7.6) and never exposed to a single-pair caller.
+        """
+        if group_column not in df.columns:
+            raise ToolExecutionError(f"Group column '{group_column}' not found.")
 
         df_clean = df[[feature_column, group_column]].dropna()
         # For continuous group columns, bin into quartiles automatically
@@ -290,10 +512,10 @@ class SelectStatisticalTestTool(BaseTool):
 
         if n_groups < 2:
             raise ToolExecutionError("At least 2 groups are required for hypothesis testing.")
-        if n_groups > 20:
+        if n_groups > MAX_DIMENSION_CARDINALITY:
             raise ToolExecutionError(
                 f"Too many groups ({n_groups}) for hypothesis testing. "
-                "Pass a categorical group_column with ≤20 unique values."
+                f"Pass a categorical group_column with ≤{MAX_DIMENSION_CARDINALITY} unique values."
             )
 
         # Categorical feature → Chi-Square / Fisher's exact
@@ -379,11 +601,11 @@ class SelectStatisticalTestTool(BaseTool):
             result["mean_diff_ci_95"] = [round(mean_diff_ci[0], 6), round(mean_diff_ci[1], 6)]
         if sample_size_note:
             result["sample_size_note"] = sample_size_note
-        return result
+        return result, sum(group_sizes)
 
     def _chi_square(
         self, df: pd.DataFrame, feature_col: str, group_col: str, alpha: float
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], int]:
         contingency = pd.crosstab(df[feature_col], df[group_col])
         chi2_stat, chi2_p, dof, expected = stats.chi2_contingency(contingency)
         n = int(contingency.to_numpy().sum())
@@ -433,24 +655,133 @@ class SelectStatisticalTestTool(BaseTool):
             result["expected_frequency_warning"] = expected_frequency_warning
         if sample_size_note:
             result["sample_size_note"] = sample_size_note
-        return result
+        return result, n
 
     def get_schema(self) -> dict[str, Any]:
         return {
             "file_path": {"type": "string", "description": "Path to dataset.", "required": True},
             "feature_column": {
                 "type": "string",
-                "description": "The continuous or categorical feature to test.",
-                "required": True,
+                "description": (
+                    "The continuous or categorical measure to test. If omitted, the "
+                    "best available measure column (semantic_role == 'measure') is "
+                    "picked automatically."
+                ),
+                "required": False,
             },
             "group_column": {
                 "type": "string",
-                "description": "The column defining comparison groups.",
-                "required": True,
+                "description": (
+                    "The column defining comparison groups. If omitted, or if "
+                    "test_family=True, feature_column is tested against every "
+                    "eligible dimension/flag column instead of just this one, "
+                    "ranked by effect size in output['family_results']."
+                ),
+                "required": False,
             },
             "alpha": {
                 "type": "float",
                 "description": "Significance level. Default: 0.05.",
                 "required": False,
             },
+            "test_family": {
+                "type": "boolean",
+                "description": (
+                    "Force family mode — test feature_column against every eligible "
+                    "dimension column and rank by effect size — even when "
+                    "group_column is also supplied. Default: False."
+                ),
+                "required": False,
+            },
         }
+
+    def findings(
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        """Derive Finding objects (7.6 item 4) from either the single
+        pairing this tool ran, or every surviving pairing in family_results.
+
+        A pairing only becomes a Finding when it clears both bars this file
+        already uses to distinguish a real result from a large-n artifact:
+        p_adjusted < 0.05 (BH-corrected within the family when in family
+        mode; this tool's own p_value otherwise — no run-wide correction is
+        available at this layer) AND a non-negligible effect size, per the
+        same PRACTICAL_THRESHOLD_* this tool already reports as
+        practical_significance/"negligible effect" in its interpretation
+        text. A statistically-significant-but-negligible-effect pairing
+        (the large-n trap) is deliberately skipped.
+        """
+        if not output:
+            return []
+
+        family = output.get("family_results")
+        if family:
+            candidates = [
+                {
+                    "feature_column": p.get("feature_column"),
+                    "group_column": p.get("group_column"),
+                    "test_name": p.get("test_name"),
+                    "effect_size": p.get("effect_size"),
+                    "effect_kind": p.get("effect_kind"),
+                    "p_value": p.get("p_value"),
+                    "p_adjusted": p.get("p_adjusted"),
+                    "n": p.get("n"),
+                }
+                for p in family
+            ]
+        else:
+            candidates = [{
+                "feature_column": output.get("feature_column"),
+                "group_column": output.get("group_column"),
+                "test_name": output.get("test_name"),
+                "effect_size": output.get("effect_size"),
+                "effect_kind": output.get("effect_size_metric"),
+                "p_value": output.get("p_value"),
+                # No run-wide BH correction is visible at this layer for a
+                # single explicit pairing — that happens once, run-wide, in
+                # src.core.multiple_testing off the accumulated p-values.
+                # Falling back to the raw p_value keeps this tool's own
+                # significance bar consistent with `significant` above.
+                "p_adjusted": output.get("p_value"),
+                "n": None,
+            }]
+
+        results: list[Finding] = []
+        for c in candidates:
+            p_adj, effect, effect_kind = c["p_adjusted"], c["effect_size"], c["effect_kind"]
+            if p_adj is None or effect is None or effect_kind is None:
+                continue
+            if p_adj >= _FINDING_P_THRESHOLD:
+                continue
+            threshold = _EFFECT_KIND_THRESHOLDS.get(effect_kind, PRACTICAL_THRESHOLD_D)
+            if abs(effect) < threshold:
+                continue  # negligible effect — the large-n trap, not a finding
+            measure, dimension = c["feature_column"], c["group_column"]
+            headline = (
+                f"'{measure}' differs meaningfully across '{dimension}' "
+                f"({c['test_name']}, {effect_kind}={effect:.3f}, p_adj={p_adj:.4f})."
+            )
+            results.append(Finding(
+                finding_id=f"{self.name}:{measure}:{dimension}",
+                kind="test",
+                headline=headline,
+                detail=output.get("interpretation", ""),
+                evidence={
+                    "test_name": c["test_name"],
+                    "p_value": c["p_value"],
+                    "p_adjusted": p_adj,
+                    "n": c["n"],
+                },
+                source_tool=self.name,
+                measure=measure,
+                dimension=dimension,
+                effect=effect,
+                effect_kind=effect_kind,
+                p_value=c["p_value"],
+                p_adjusted=p_adj,
+                confidence=0.7,
+            ))
+        return results

@@ -4,6 +4,18 @@ Time-Series Analysis Tool — Execution Layer.
 Stage 3: Trend, stationarity, and autocorrelation diagnostics for datasets
 with a genuine time axis (gated on DatasetProfile.is_time_series).
 
+7.7 (grain-aware time series): trend/ADF/seasonality diagnostics are only
+statistically meaningful over *one value per calendar period* — not over
+raw transaction rows in file order, where multiple rows can share a
+timestamp or sit minutes apart. Every row here is therefore resampled to a
+natural grain (day/week/month, chosen from the observed date span) and
+aggregated with the measure-appropriate reducer (sum for additive
+money/count measures, mean for rates) before any diagnostic runs. The
+chosen grain and aggregation are reported in the output so the choice is
+auditable rather than buried, and a calendar-aware seasonality read
+(month-of-year, and day-of-week when the grain is fine enough) supplements
+the lag-autocorrelation check, which only ever sees the row-order structure.
+
 Kept to statistics that generalise across irregular/coarse-grained data
 rather than a full seasonal decomposition, which needs a reliable
 inferred frequency that real-world timestamps rarely provide cleanly.
@@ -15,6 +27,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
+from src.core.findings import Finding
+from src.core.profiler import profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -23,7 +37,15 @@ if TYPE_CHECKING:
     from src.core.profiler import DatasetProfile
 
 #: Candidate seasonal lags checked via autocorrelation (weekly/monthly/yearly-ish).
-_SEASONAL_LAGS = (7, 12, 30, 365)
+#: Lag sets are grain-relative (a lag is "N periods", not "N days") — a lag
+#: of 12 means a year on monthly data and a quarter on weekly data, so the
+#: candidates checked must change with the chosen grain or the numbers stop
+#: meaning anything once the series is resampled instead of raw daily rows.
+_SEASONAL_LAGS_BY_GRAIN = {
+    "daily": (7, 30, 365),
+    "weekly": (4, 13, 52),
+    "monthly": (3, 6, 12),
+}
 
 #: |autocorrelation| at or above this is reported as a seasonal signal.
 _SEASONALITY_THRESHOLD = 0.3
@@ -35,6 +57,37 @@ _ADF_ALPHA = 0.05
 #: Below this the line explains almost none of the variation, so calling the
 #: series "increasing" reports the sign of noise as a finding.
 _TREND_MIN_R_SQUARED = 0.05
+
+# ---------------------------------------------------------------------------
+# 7.7 — grain selection. Chosen from the observed date span: a multi-year
+# range is summarised monthly, a multi-month range weekly, anything shorter
+# daily. If the coarse grain picked from the span doesn't leave enough
+# periods to diagnose (e.g. a "monthly" series with 3 points), step down to
+# the next finer candidate — that is the row-density half of the heuristic.
+# ---------------------------------------------------------------------------
+_GRAIN_MONTHLY_SPAN_DAYS = 545   # ~1.5 years+ of history -> monthly buckets
+_GRAIN_WEEKLY_SPAN_DAYS = 90     # a few months of history -> weekly buckets
+_MIN_PERIODS_FOR_GRAIN = 6
+
+_GRAIN_FREQ = {"daily": "D", "weekly": "W", "monthly": "MS"}
+_GRAIN_LABEL = {"daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}
+
+#: A calendar month running at/above this fraction away from the yearly
+#: average is reported as a seasonal Finding (T5 triviality suppression
+#: keeps unremarkable months out of the finding list).
+_MONTH_LIFT_THRESHOLD = 0.15
+
+#: Periods needed to cover roughly two full annual cycles at each grain —
+#: below this, a month-of-year factor and an underlying linear trend are
+#: confounded (a later calendar month is also later in time), so a month
+#: finding computed from less history than this carries a caveat rather
+#: than being reported as a clean repeating seasonal effect.
+_PERIODS_FOR_TWO_YEARS = {"daily": 730, "weekly": 104, "monthly": 24}
+
+_MONTH_NAMES = {
+    1: "January", 2: "February", 3: "March", 4: "April", 5: "May", 6: "June",
+    7: "July", 8: "August", 9: "September", 10: "October", 11: "November", 12: "December",
+}
 
 
 def _autodetect_datetime_column(df: pd.DataFrame) -> str | None:
@@ -55,9 +108,125 @@ def _autodetect_datetime_column(df: pd.DataFrame) -> str | None:
     return None
 
 
-def _autodetect_value_column(df: pd.DataFrame, date_column: str) -> str | None:
+def _fallback_numeric_column(df: pd.DataFrame, date_column: str) -> str | None:
+    """Last-resort pick when no profiled measure is available at all: first
+    remaining numeric column. Kept as a floor so the tool never fails purely
+    because profiling didn't recognise anything as a measure."""
     numeric = [c for c in df.select_dtypes(include="number").columns if c != date_column]
     return str(numeric[0]) if numeric else None
+
+
+def _choose_value_column_and_aggregation(
+    df: pd.DataFrame, date_column: str, requested: str | None
+) -> tuple[str | None, str, "DatasetProfile | None"]:
+    """
+    Resolve (value_column, aggregation, profile).
+
+    An explicitly requested column always wins on *which* column — only the
+    automatic pick is profile-driven. Either way, `aggregation` defaults to
+    "sum" (additive money/count measures) unless the resolved column reads
+    as a rate/percentage (`unit_hint == "percent"`), in which case "mean" is
+    correct. When multiple measures are candidates, one with
+    `unit_hint == "currency"` is preferred over an arbitrary numeric pick —
+    a revenue question is the most common one — otherwise the profile's
+    highest-variance measure is used.
+    """
+    try:
+        profile = profile_dataframe(df)
+    except Exception:
+        profile = None
+
+    if requested and requested in df.columns:
+        col_profile = next(
+            (c for c in (profile.columns if profile else []) if c.name == requested), None
+        )
+        aggregation = "mean" if col_profile and col_profile.unit_hint == "percent" else "sum"
+        return requested, aggregation, profile
+
+    if profile is not None:
+        measures = [c for c in profile.measures() if c.name != date_column and c.name in df.columns]
+        if measures:
+            currency = [c for c in measures if c.unit_hint == "currency"]
+            pool = currency if currency else measures
+            best = max(pool, key=lambda c: (c.stats.get("std") or 0.0) ** 2)
+            aggregation = "mean" if best.unit_hint == "percent" else "sum"
+            return best.name, aggregation, profile
+
+    return _fallback_numeric_column(df, date_column), "sum", profile
+
+
+def _choose_grain_candidates(dates: pd.Series) -> list[str]:
+    """Coarsest-appropriate-first candidate list, from the observed span."""
+    ordered = dates.dropna().sort_values()
+    span_days = float((ordered.iloc[-1] - ordered.iloc[0]).days) if len(ordered) > 1 else 0.0
+    if span_days >= _GRAIN_MONTHLY_SPAN_DAYS:
+        return ["monthly", "weekly", "daily"]
+    if span_days >= _GRAIN_WEEKLY_SPAN_DAYS:
+        return ["weekly", "daily"]
+    return ["daily"]
+
+
+def _resample(working: pd.DataFrame, grain: str, aggregation: str) -> pd.DataFrame:
+    """One row per observed calendar period: sum (additive measures) or mean
+    (rates). Periods with no underlying rows are dropped rather than
+    fabricated as zero — the tool aggregates observed data, it doesn't
+    assume unobserved periods were genuinely zero."""
+    indexed = working.set_index("_date")["_value"]
+    resampled = indexed.resample(_GRAIN_FREQ[grain])
+    agg = resampled.sum(min_count=1) if aggregation == "sum" else resampled.mean()
+    agg = agg.dropna()
+    return pd.DataFrame({"_period": agg.index, "_value": agg.to_numpy(dtype=float)})
+
+
+def _resample_series(
+    working: pd.DataFrame, aggregation: str, candidates: list[str]
+) -> tuple[pd.DataFrame | None, str]:
+    """Try grains coarsest-first; step down to the next finer grain if the
+    resampled series is too thin to diagnose. Always falls back to the
+    finest candidate's result if none clear the minimum-periods bar."""
+    for candidate in candidates:
+        resampled = _resample(working, candidate, aggregation)
+        if len(resampled) >= _MIN_PERIODS_FOR_GRAIN or candidate == candidates[-1]:
+            return resampled, candidate
+    return None, candidates[-1]
+
+
+def _month_of_year_factors(
+    period_dates: pd.Series, values: np.ndarray
+) -> tuple[dict[str, float], dict[str, int]]:
+    """Each calendar month's average vs. the overall mean, as a signed
+    fraction (0.4 = 40% above baseline). Computed on the resampled series so
+    a monthly grain compares each month's own point, and a weekly/daily
+    grain compares the months' averaged points."""
+    if len(values) < 4:
+        return {}, {}
+    s = pd.Series(values, index=pd.DatetimeIndex(period_dates))
+    overall_mean = float(s.mean())
+    if overall_mean == 0:
+        return {}, {}
+    grouped = s.groupby(s.index.month)
+    factors: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for month_num, group in grouped:
+        name = _MONTH_NAMES[int(month_num)]
+        factors[name] = round((float(group.mean()) - overall_mean) / abs(overall_mean), 4)
+        counts[name] = int(group.size)
+    return factors, counts
+
+
+def _day_of_week_factors(working: pd.DataFrame, aggregation: str) -> dict[str, float]:
+    """Weekday effect from a *daily* aggregation of the raw rows, independent
+    of the macro grain — weekday patterns only exist at day resolution, so a
+    weekly-grain analysis still checks them against the underlying days."""
+    daily = _resample(working, "daily", aggregation)
+    if len(daily) < 7:
+        return {}
+    s = pd.Series(daily["_value"].to_numpy(dtype=float), index=pd.DatetimeIndex(daily["_period"]))
+    overall_mean = float(s.mean())
+    if overall_mean == 0:
+        return {}
+    by_dow = s.groupby(s.index.day_name()).mean()
+    return {str(k): round((float(v) - overall_mean) / abs(overall_mean), 4) for k, v in by_dow.items()}
 
 
 class TimeSeriesAnalysisTool(BaseTool):
@@ -65,10 +234,12 @@ class TimeSeriesAnalysisTool(BaseTool):
 
     name = "time_series_analysis"
     description = (
-        "Analyse a time-indexed numeric column: trend direction/slope, stationarity "
-        "(Augmented Dickey-Fuller test), lag-1 autocorrelation, and seasonal signal at "
-        "weekly/monthly/yearly-ish lags. Use when the data profile shows a datetime column "
-        "(is_time_series). Auto-detects date_column and value_column when omitted."
+        "Resample a time-indexed numeric column to its natural grain (day/week/month) "
+        "and analyse: trend direction/slope, stationarity (Augmented Dickey-Fuller test), "
+        "lag autocorrelation, and calendar-aware seasonality (month-of-year, and "
+        "day-of-week when the grain is fine enough). Use when the data profile shows a "
+        "datetime column (is_time_series). Auto-detects date_column and value_column "
+        "(preferring a revenue/currency measure) when omitted."
     )
 
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
@@ -79,6 +250,8 @@ class TimeSeriesAnalysisTool(BaseTool):
         file_path: str,
         date_column: str | None = None,
         value_column: str | None = None,
+        target_column: str | None = None,
+        aggregation: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         df = _read_df(file_path)
@@ -90,15 +263,20 @@ class TimeSeriesAnalysisTool(BaseTool):
                 "No usable datetime column found. Pass date_column explicitly."
             )
 
-        if value_column is None:
-            value_column = _autodetect_value_column(df, date_column)
+        requested_value_column = value_column or target_column
+        value_column, inferred_aggregation, _profile = _choose_value_column_and_aggregation(
+            df, date_column, requested_value_column
+        )
         if value_column is None or value_column not in df.columns:
             raise ToolExecutionError(
                 "No numeric value_column found to analyse. Pass value_column explicitly."
             )
+        if aggregation not in ("sum", "mean"):
+            aggregation = inferred_aggregation
 
         dates = pd.to_datetime(df[date_column], errors="coerce", format="mixed")
-        working = pd.DataFrame({"_date": dates, "_value": df[value_column]}).dropna()
+        raw_values = pd.to_numeric(df[value_column], errors="coerce")
+        working = pd.DataFrame({"_date": dates, "_value": raw_values}).dropna()
         working = working.sort_values("_date")
 
         if len(working) < 10:
@@ -107,10 +285,21 @@ class TimeSeriesAnalysisTool(BaseTool):
                 f"values — need at least 10 for time-series diagnostics."
             )
 
-        values = working["_value"].to_numpy(dtype=float)
+        # ---- Resample to a natural grain before diagnosing anything (7.7) ----
+        grain_candidates = _choose_grain_candidates(working["_date"])
+        resampled, grain = _resample_series(working, aggregation, grain_candidates)
+        if resampled is None or len(resampled) < 3:
+            n = 0 if resampled is None else len(resampled)
+            raise ToolExecutionError(
+                f"Only {n} usable periods after resampling to {grain} — need at least 3 "
+                f"for time-series diagnostics."
+            )
+
+        values = resampled["_value"].to_numpy(dtype=float)
+        period_dates = pd.to_datetime(resampled["_period"])
         t = np.arange(len(values), dtype=float)
 
-        # ---- Trend: linear fit against row order (works for irregular spacing) ----
+        # ---- Trend: linear fit over the resampled series (one point per period) ----
         slope, intercept = np.polyfit(t, values, 1)
         fitted = slope * t + intercept
         ss_res = float(np.sum((values - fitted) ** 2))
@@ -139,12 +328,12 @@ class TimeSeriesAnalysisTool(BaseTool):
             adf_p_value = None
             is_stationary = bool(abs(slope) < 1e-9)
 
-        # ---- Autocorrelation ----
+        # ---- Autocorrelation (over the resampled series, not raw rows) ----
         series = pd.Series(values)
         lag1_autocorr = round(float(series.autocorr(lag=1)), 4) if len(series) > 1 else 0.0
 
         seasonality: dict[str, float] = {}
-        for lag in _SEASONAL_LAGS:
+        for lag in _SEASONAL_LAGS_BY_GRAIN[grain]:
             if len(series) > lag * 2:
                 corr = series.autocorr(lag=lag)
                 if corr is not None and not np.isnan(corr):
@@ -153,14 +342,34 @@ class TimeSeriesAnalysisTool(BaseTool):
             lag for lag, corr in seasonality.items() if abs(corr) >= _SEASONALITY_THRESHOLD
         ]
 
+        # ---- Calendar-aware seasonality (7.7) ----
+        month_factors, month_counts = _month_of_year_factors(period_dates, values)
+        day_of_week_factors: dict[str, float] = {}
+        if grain in ("daily", "weekly"):
+            day_of_week_factors = _day_of_week_factors(working, aggregation)
+        notable_months = {
+            name: lift for name, lift in month_factors.items() if abs(lift) >= _MONTH_LIFT_THRESHOLD
+        }
+
+        agg_word = "total" if aggregation == "sum" else "average"
+        series_label = f"{_GRAIN_LABEL[grain]} {agg_word} {value_column}"
+
+        seasonal_note = ""
+        if notable_months:
+            parts = [
+                f"{name} {lift * 100:+.0f}%" for name, lift in
+                sorted(notable_months.items(), key=lambda kv: -abs(kv[1]))
+            ]
+            seasonal_note = f" Calendar seasonality: {', '.join(parts)} vs. the yearly average."
+
         return {
             "summary": (
-                (
-                    f"No clear trend (R²={r_squared} — a fitted line explains "
-                    f"almost none of the variation) over {len(working)} points. "
+                f"{series_label} ({grain}, {len(resampled)} periods): "
+                + (
+                    f"no clear trend (R²={r_squared} — a fitted line explains "
+                    f"almost none of the variation). "
                     if direction == "no clear trend"
-                    else f"Trend is {direction} (slope={slope:.4g}, R²={r_squared}) over "
-                         f"{len(working)} points. "
+                    else f"trend is {direction} (slope={slope:.4g}, R²={r_squared}). "
                 )
                 + (
                     f"Series is {'stationary' if is_stationary else 'non-stationary'} "
@@ -169,14 +378,21 @@ class TimeSeriesAnalysisTool(BaseTool):
                     else f"Series is {'likely stationary' if is_stationary else 'likely non-stationary'} (ADF unavailable)."
                 )
                 + (
-                    f" Seasonal signal at lag(s) {', '.join(seasonal_lags_detected)}."
+                    f" Seasonal autocorrelation at lag(s) {', '.join(seasonal_lags_detected)} "
+                    f"({grain} periods)."
                     if seasonal_lags_detected
-                    else " No strong seasonal signal at checked lags."
+                    else ""
                 )
+                + seasonal_note
             ),
             "date_column": date_column,
             "value_column": value_column,
+            "aggregation": aggregation,
+            "grain": grain,
+            "series_label": series_label,
+            "chart_title": series_label,
             "rows_used": len(working),
+            "periods_used": len(resampled),
             "trend_direction": direction,
             "trend_slope": round(float(slope), 6),
             "trend_r_squared": r_squared,
@@ -185,19 +401,154 @@ class TimeSeriesAnalysisTool(BaseTool):
             "autocorrelation_lag1": lag1_autocorr,
             "seasonality_by_lag": seasonality,
             "seasonal_lags_detected": seasonal_lags_detected,
+            "month_of_year_factors": month_factors,
+            "month_of_year_counts": month_counts,
+            "notable_months": notable_months,
+            "day_of_week_factors": day_of_week_factors,
         }
+
+    def findings(
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        results: list[Finding] = []
+        value_column = output.get("value_column")
+        grain = output.get("grain")
+        r_squared = output.get("trend_r_squared")
+        direction = output.get("trend_direction")
+        slope = output.get("trend_slope")
+
+        if (
+            r_squared is not None
+            and r_squared >= _TREND_MIN_R_SQUARED
+            and direction not in (None, "no clear trend", "flat")
+        ):
+            signed_effect = round(min(1.0, r_squared), 4) * (1 if (slope or 0) >= 0 else -1)
+            results.append(Finding(
+                finding_id="",
+                kind="trend",
+                headline=(
+                    f"{value_column} is {direction} across {output.get('periods_used')} "
+                    f"{grain} periods (slope={slope}, R²={r_squared})."
+                ),
+                detail=(
+                    f"Linear trend fit on the {grain}-resampled series: slope={slope} "
+                    f"per period, R²={r_squared}. "
+                    + (
+                        f"ADF p-value={output.get('adf_p_value')} "
+                        f"({'stationary' if output.get('is_stationary') else 'non-stationary'})."
+                        if output.get("adf_p_value") is not None else ""
+                    )
+                ),
+                evidence={
+                    "value_column": value_column,
+                    "grain": grain,
+                    "aggregation": output.get("aggregation"),
+                    "trend_slope": slope,
+                    "trend_r_squared": r_squared,
+                    "periods_used": output.get("periods_used"),
+                },
+                source_tool=self.name,
+                measure=value_column,
+                effect=signed_effect,
+                effect_kind="eta_sq",
+                confidence=round(min(1.0, 0.4 + r_squared), 3),
+                chart_hint={"kind": "line", "data": {"series_label": output.get("series_label")}},
+                layer="analyst",
+            ))
+
+        # A real linear trend confounds a month-of-year read when there isn't
+        # enough history to separate "later in the calendar" from "later in
+        # time" — flag it on every month finding rather than silently
+        # reporting a trend artifact as a repeating season.
+        has_real_trend = (
+            r_squared is not None
+            and r_squared >= _TREND_MIN_R_SQUARED
+            and direction not in (None, "no clear trend", "flat")
+        )
+        periods_used = output.get("periods_used") or 0
+        two_year_floor = _PERIODS_FOR_TWO_YEARS.get(str(grain), 24)
+        trend_confounded = has_real_trend and periods_used < two_year_floor
+
+        notable_months = output.get("notable_months") or {}
+        month_counts = output.get("month_of_year_counts") or {}
+        for month_name, lift in notable_months.items():
+            direction_word = "above" if lift > 0 else "below"
+            single_observation = month_counts.get(month_name, 1) <= 1
+            caveats: list[str] = []
+            if single_observation:
+                caveats.append(
+                    f"Only one {grain} period observed for {month_name} — this is a "
+                    "single data point, not an average across repeated years."
+                )
+            if trend_confounded:
+                caveats.append(
+                    "A statistically real trend is present and less than two years of "
+                    "history are available, so this month's lift may partly reflect the "
+                    "trend rather than a repeating seasonal effect."
+                )
+            results.append(Finding(
+                finding_id="",
+                kind="change",
+                headline=(
+                    f"{month_name} {value_column} runs {abs(lift) * 100:.0f}% "
+                    f"{direction_word} the yearly average"
+                ),
+                detail=(
+                    f"Calendar-month factor computed on the {grain}-resampled series "
+                    f"({month_counts.get(month_name, '?')} period(s) in {month_name}): "
+                    f"{lift * 100:+.1f}% vs. the overall mean."
+                ),
+                evidence={
+                    "value_column": value_column,
+                    "grain": grain,
+                    "month": month_name,
+                    "lift": lift,
+                    "periods_in_month": month_counts.get(month_name),
+                },
+                source_tool=self.name,
+                measure=value_column,
+                dimension="month",
+                level=month_name,
+                effect=lift,
+                effect_kind="lift",
+                confidence=0.6 if single_observation else 0.75,
+                caveats=caveats,
+                chart_hint={"kind": "bar", "data": {"category": "month_of_year"}},
+                layer="analyst",
+            ))
+        return results
 
     def get_schema(self) -> dict[str, Any]:
         return {
             "file_path": {"type": "string", "description": "Path to the (cleaned) dataset.", "required": True},
             "date_column": {
                 "type": "string",
-                "description": "Datetime column to sort/index by. Auto-detected if omitted.",
+                "description": "Datetime column to resample by. Auto-detected if omitted.",
                 "required": False,
             },
             "value_column": {
                 "type": "string",
-                "description": "Numeric column to analyse over time. Auto-detected if omitted.",
+                "description": (
+                    "Numeric column to analyse over time. Auto-detected if omitted, "
+                    "preferring a currency/revenue measure over an arbitrary numeric column."
+                ),
+                "required": False,
+            },
+            "target_column": {
+                "type": "string",
+                "description": "Alias for value_column, accepted for compatibility with generic callers.",
+                "required": False,
+            },
+            "aggregation": {
+                "type": "string",
+                "description": (
+                    "How to aggregate the value per period: 'sum' (default for additive "
+                    "money/count measures) or 'mean' (for rates/percentages). Auto-chosen "
+                    "from the column's unit hint if omitted."
+                ),
                 "required": False,
             },
         }

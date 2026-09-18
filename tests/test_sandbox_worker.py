@@ -108,3 +108,46 @@ class TestExecute:
         payload = worker._execute("RESULT = 1\n", str(tmp_path / "does_not_exist.csv"))
         assert payload["status"] == "error"
         assert payload["error_type"] == "runtime"
+
+    def test_extra_globals_available_as_plain_variables(self, tmp_path: Path) -> None:
+        dataset = single_column(tmp_path)
+        payload = worker._execute(
+            "RESULT = threshold + 1\n", str(dataset), extra_globals={"threshold": 41}
+        )
+        assert payload["status"] == "ok"
+        assert payload["result"] == 42
+
+    def test_extra_globals_cannot_shadow_reserved_names(self, tmp_path: Path) -> None:
+        # Defense in depth: sandbox.py's parent-side check should already
+        # reject this before spawning a subprocess, but the worker filters
+        # colliding keys independently rather than trusting the caller.
+        dataset = single_column(tmp_path)
+        payload = worker._execute(
+            "RESULT = df.shape[0]\n", str(dataset), extra_globals={"df": "not a dataframe"}
+        )
+        assert payload["status"] == "ok"
+        assert payload["result"] == 50  # real df, not the injected string
+
+    def test_finding_included_when_present(self, tmp_path: Path) -> None:
+        dataset = single_column(tmp_path)
+        payload = worker._execute(
+            "RESULT = 1\nFINDING = {'headline': 'h', 'evidence': {'n': 1}}\n", str(dataset)
+        )
+        assert payload["status"] == "ok"
+        assert payload["finding"] == {"headline": "h", "evidence": {"n": 1}}
+
+    def test_finding_absent_is_none_not_an_error(self, tmp_path: Path) -> None:
+        dataset = single_column(tmp_path)
+        payload = worker._execute("RESULT = 1\n", str(dataset))
+        assert payload["status"] == "ok"
+        assert payload.get("finding") is None
+
+    def test_unconvertible_finding_does_not_fail_the_call(self, tmp_path: Path) -> None:
+        # A malformed/non-serializable FINDING must degrade to None, never
+        # turn a successful RESULT into an error.
+        dataset = single_column(tmp_path)
+        code = "class Thing:\n    pass\nRESULT = 1\nFINDING = Thing()\n"
+        payload = worker._execute(code, str(dataset))
+        assert payload["status"] == "ok"
+        assert payload["result"] == 1
+        assert payload.get("finding") is None

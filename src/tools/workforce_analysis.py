@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from src.core.domains import domain_confidence, resolve_column
+from src.core.findings import Finding
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -68,6 +69,53 @@ def _describe_pay(series: pd.Series) -> dict[str, float]:
         if float(clean.quantile(0.10)) > 0
         else 0.0,
     }
+
+
+def _pay_gap_between(
+    work: pd.DataFrame, salary_column: str, grouping_column: str
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Unadjusted median-pay comparison across the levels of
+    `grouping_column` (department, gender, or any other categorical split).
+
+    Returns `(pay_by_level, gap)`: `pay_by_level` is every level's
+    count/median/mean pay, sorted by median descending; `gap` compares the
+    highest- and lowest-paid levels with enough headcount to be a real
+    comparison (`_MIN_GROUP_FOR_COMPARISON`), or is `None` when fewer than
+    two levels qualify.
+    """
+    levels: list[dict[str, Any]] = []
+    for name, group in work.groupby(grouping_column)[salary_column]:
+        if group.notna().sum() == 0:
+            continue
+        levels.append(
+            {
+                "group": str(name),
+                "count": int(group.notna().sum()),
+                "median_pay": round(float(group.median()), 2),
+                "mean_pay": round(float(group.mean()), 2),
+            }
+        )
+    levels.sort(key=lambda g: g["median_pay"], reverse=True)
+
+    comparable = [g for g in levels if g["count"] >= _MIN_GROUP_FOR_COMPARISON]
+    gap: dict[str, Any] | None = None
+    if len(comparable) >= 2:
+        high, low = comparable[0], comparable[-1]
+        if high["median_pay"] > 0:
+            gap_frac = (high["median_pay"] - low["median_pay"]) / high["median_pay"]
+            gap = {
+                "higher_group": high["group"],
+                "lower_group": low["group"],
+                "gap_pct": round(gap_frac * 100, 2),
+                "higher_median": high["median_pay"],
+                "lower_median": low["median_pay"],
+                "note": (
+                    "Unadjusted: not controlled for role, level or tenure. "
+                    f"Groups smaller than {_MIN_GROUP_FOR_COMPARISON} were "
+                    "excluded from this comparison."
+                ),
+            }
+    return levels, gap
 
 
 def _resolve_status(series: pd.Series) -> pd.Series | None:
@@ -248,40 +296,28 @@ class WorkforceAnalysisTool(BaseTool):
                         "headcount": worst["headcount"],
                     }
 
-        # ---- Unadjusted pay comparison between groups ----
+            # Unadjusted pay gap between the highest- and lowest-paid
+            # departments — department is itself a "group" worth comparing
+            # pay across, same mechanism as the gender/sex comparison below.
+            # `by_department` above already has median pay per department
+            # but never compared them against each other; without this, a
+            # dataset with no gender/sex column (most HR rosters don't have
+            # one) never got ANY pay-gap finding at all, even when the
+            # department breakdown made one obvious.
+            # Not `_` — execute()'s own `**_: Any` kwargs catch-all already
+            # binds that name as dict[str, Any] in this scope; reusing it
+            # here for a throwaway list would conflict under mypy.
+            _dept_pay_by_level, dept_gap = _pay_gap_between(work, salary_column, department_column)
+            if dept_gap:
+                result["department_pay_gap"] = dept_gap
+
+        # ---- Unadjusted pay comparison between groups (gender/sex) ----
         if group_column and group_column in work.columns:
             result["group_column"] = group_column
-            groups: list[dict[str, Any]] = []
-            for name, group in work.groupby(group_column)[salary_column]:
-                if group.notna().sum() == 0:
-                    continue
-                groups.append(
-                    {
-                        "group": str(name),
-                        "count": int(group.notna().sum()),
-                        "median_pay": round(float(group.median()), 2),
-                        "mean_pay": round(float(group.mean()), 2),
-                    }
-                )
-            groups.sort(key=lambda g: g["median_pay"], reverse=True)
-            result["pay_by_group"] = groups
-            comparable = [g for g in groups if g["count"] >= _MIN_GROUP_FOR_COMPARISON]
-            if len(comparable) >= 2:
-                high, low = comparable[0], comparable[-1]
-                if high["median_pay"] > 0:
-                    gap = (high["median_pay"] - low["median_pay"]) / high["median_pay"]
-                    result["unadjusted_median_pay_gap"] = {
-                        "higher_group": high["group"],
-                        "lower_group": low["group"],
-                        "gap_pct": round(gap * 100, 2),
-                        "higher_median": high["median_pay"],
-                        "lower_median": low["median_pay"],
-                        "note": (
-                            "Unadjusted: not controlled for role, level or tenure. "
-                            f"Groups smaller than {_MIN_GROUP_FOR_COMPARISON} were "
-                            "excluded from this comparison."
-                        ),
-                    }
+            pay_by_group, group_gap = _pay_gap_between(work, salary_column, group_column)
+            result["pay_by_group"] = pay_by_group
+            if group_gap:
+                result["unadjusted_median_pay_gap"] = group_gap
 
         pay = result["pay_distribution"]
         parts = [f"{headcount:,} employee records; median pay {pay['median']:,.2f}"]
@@ -289,6 +325,12 @@ class WorkforceAnalysisTool(BaseTool):
             parts.append(f"{result['attrition_rate_pct']:.1f}% departed")
         if "tenure_years" in result:
             parts.append(f"median tenure {result['tenure_years']['median']:.1f} years")
+        if "department_pay_gap" in result:
+            gap = result["department_pay_gap"]
+            parts.append(
+                f"unadjusted median pay gap {gap['gap_pct']:.1f}% between departments "
+                f"({gap['higher_group']} vs {gap['lower_group']})"
+            )
         if "unadjusted_median_pay_gap" in result:
             gap = result["unadjusted_median_pay_gap"]
             parts.append(
@@ -297,6 +339,138 @@ class WorkforceAnalysisTool(BaseTool):
             )
         result["summary"] = "; ".join(parts) + "."
         return result
+
+    def _pay_gap_finding(self, gap: dict[str, Any], dimension: str) -> Finding | None:
+        """Build a `segment_lift`/`median_pay` Finding from a
+        `_pay_gap_between()` result, or `None` below the triviality floor."""
+        gap_pct = gap.get("gap_pct", 0.0)
+        if gap_pct <= 2.0:
+            return None
+        note = gap.get("note", "")
+        return Finding(
+            finding_id=f"{self.name}_pay_gap_{dimension}",
+            kind="segment_lift",
+            headline=(
+                f"Unadjusted median pay gap of {gap_pct:.1f}% between "
+                f"{gap.get('higher_group')} and {gap.get('lower_group')}"
+            ),
+            detail=note,
+            evidence=dict(gap),
+            measure="median_pay",
+            dimension=dimension,
+            level=f"{gap.get('higher_group')} vs {gap.get('lower_group')}",
+            effect=round(gap_pct / 100.0, 4),
+            effect_kind="pct",
+            confidence=0.55,
+            surprise=0.5,
+            caveats=[note] if note else [],
+        )
+
+    def findings(
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        results: list[Finding] = []
+
+        summary = output.get("summary")
+        if summary:
+            results.append(
+                Finding(
+                    finding_id=f"{self.name}_summary",
+                    kind="workforce",
+                    headline=summary.rstrip("."),
+                    evidence={
+                        "headcount": output.get("headcount"),
+                        "pay_distribution": output.get("pay_distribution"),
+                    },
+                    measure="headcount",
+                    confidence=0.7,
+                    surprise=0.2,
+                    objective_fit=0.25,
+                    layer="exec",
+                )
+            )
+
+        # Department and gender/sex pay gaps are independent findings — a
+        # dataset can have either, both, or neither, so each is built from
+        # its own `output` field via the same helper rather than assuming
+        # only the gender-style `group_column` gap exists.
+        dept_gap = output.get("department_pay_gap")
+        if dept_gap is not None:
+            finding = self._pay_gap_finding(
+                dept_gap, dimension=output.get("department_column") or "department"
+            )
+            if finding is not None:
+                results.append(finding)
+
+        group_gap = output.get("unadjusted_median_pay_gap")
+        if group_gap is not None:
+            finding = self._pay_gap_finding(
+                group_gap, dimension=output.get("group_column") or "group"
+            )
+            if finding is not None:
+                results.append(finding)
+
+        highest_attrition = output.get("highest_attrition_department")
+        overall_attrition = output.get("attrition_rate_pct")
+        if highest_attrition:
+            dept_rate = highest_attrition.get("attrition_rate_pct", 0.0)
+            lift = dept_rate - overall_attrition if overall_attrition is not None else dept_rate
+            if lift > 3.0:
+                results.append(
+                    Finding(
+                        finding_id=f"{self.name}_attrition_{highest_attrition.get('department')}",
+                        kind="segment_lift",
+                        headline=(
+                            f"'{highest_attrition.get('department')}' has the highest attrition "
+                            f"at {dept_rate:.1f}%"
+                            + (
+                                f" vs {overall_attrition:.1f}% overall"
+                                if overall_attrition is not None
+                                else ""
+                            )
+                        ),
+                        evidence={
+                            **highest_attrition,
+                            "overall_attrition_rate_pct": overall_attrition,
+                        },
+                        measure="attrition_rate",
+                        dimension="department",
+                        level=str(highest_attrition.get("department")),
+                        effect=round(lift / 100.0, 4),
+                        effect_kind="pct",
+                        confidence=0.6,
+                        surprise=0.5,
+                    )
+                )
+
+        tenure = output.get("tenure_years")
+        under1 = output.get("share_under_1_year_pct")
+        if tenure and under1 is not None and under1 > 15.0:
+            results.append(
+                Finding(
+                    finding_id=f"{self.name}_tenure",
+                    kind="workforce",
+                    headline=(
+                        f"{under1:.1f}% of employees have under 1 year of tenure "
+                        f"(median tenure {tenure.get('median')} years)"
+                    ),
+                    evidence={
+                        "tenure_years": tenure,
+                        "share_under_1_year_pct": under1,
+                        "share_over_5_years_pct": output.get("share_over_5_years_pct"),
+                    },
+                    measure="tenure",
+                    effect=round(under1 / 100.0, 4),
+                    effect_kind="pct",
+                    confidence=0.6,
+                    surprise=0.3,
+                )
+            )
+
+        return results
 
     def get_schema(self) -> dict[str, Any]:
         return {

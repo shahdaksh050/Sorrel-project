@@ -38,6 +38,23 @@ there is no fixed sequence to follow.
 
 {tool_descriptions}
 
+## Creating Your Own Tools (Sandbox Mode)
+If none of the tools above can answer a question this data raises, you may \
+call `define_analysis_tool` to register a new, named, reusable tool instead \
+of giving up on the question. Your code runs against a pre-loaded `df` \
+DataFrame and a `SCHEMA` dict, with any parameters you declared available as \
+plain variables by name; assign the answer to `RESULT`, and optionally also \
+assign `FINDING = {{"headline": ..., "detail": ..., "evidence": {{...}}}}` \
+when the tool produces a genuine human-readable insight worth surfacing in \
+the report. Only pandas, numpy, scipy, sklearn, duckdb, polars, math, \
+statistics, json, datetime, re, collections, itertools are importable. \
+**A tool you define this iteration becomes callable by its `tool_name` \
+starting the NEXT iteration, not the same one** — do not plan a step calling \
+a tool you are defining in the same response; define it, wait for \
+confirmation, then call it. If a tool you defined errored, call \
+`define_analysis_tool` again with the same `tool_name` and corrected code — \
+this replaces (versions) it rather than creating a duplicate.
+
 ## Strict Response Contract
 
 ### Form 1 — Action Plan  (return when more analysis is needed)
@@ -283,6 +300,30 @@ class PromptManager:
             + "\n"
         )
 
+    def _generated_tools_block(self) -> str:
+        """
+        Round 8 — tools the LLM defined earlier in THIS run via
+        define_analysis_tool. The system prompt (static, cached) explains
+        the contract once; this block is the dynamic, per-iteration list of
+        what's actually callable now, so a tool created in iteration N shows
+        up here from iteration N+1 onward without ever touching the cached
+        system prompt (see IMPROVEMENTS.md Round 8, decision 1).
+        """
+        tools = self.memory.list_generated_tools()
+        if not tools:
+            return ""
+        lines = [
+            "\n## Tools You Created During This Run (callable now)",
+            "These are in addition to the tools listed in the system prompt:",
+        ]
+        for spec in tools:
+            name = spec.get("name", "?")
+            desc = spec.get("description", "")
+            params = spec.get("params_schema", {}) or {}
+            param_names = ", ".join(params.keys()) if isinstance(params, dict) else ""
+            lines.append(f"- `{name}` (params: {param_names or 'none'}) — {desc}")
+        return "\n".join(lines) + "\n"
+
     def get_initial_user_prompt(self) -> str:
         meta = self.memory.dataset_metadata
         file_path  = meta.file_path  if meta else "UNKNOWN_PATH"
@@ -345,12 +386,16 @@ class PromptManager:
         return (
             ITERATION_PROMPT.format(
                 dataset_metadata=self.memory.get_metadata_prompt(),
-                results_summary=self.memory.get_results_summary(),
+                # P1.6 — full detail for this cycle's own results, a one-line
+                # digest for everything earlier, instead of re-sending every
+                # accumulated result on every iteration.
+                results_summary=self.memory.get_results_summary_digest(self.memory.iteration_count),
                 pending_steps=pending_str,
                 failed_steps=failed_str,
             )
             + self._rlm_block()
             + self._objective_block()
+            + self._generated_tools_block()
             + concrete
         )
 

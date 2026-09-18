@@ -45,7 +45,7 @@ CINEMATIC_PALETTES: dict[str, dict[str, str]] = {
         "card_border": "rgba(163, 79, 32, 0.22)",
     },
     "night": {
-        "stock": "#130f0b",
+        "stock": "#241c14",
         "sheet": "#1c1610",
         "sheet_alt": "#282017",
         "ink": "#f6eedf",

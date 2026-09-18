@@ -18,6 +18,7 @@ import json
 import time
 from typing import Any
 
+from src.core.chart_theme import vega_config
 from src.core.multiple_testing import apply_benjamini_hochberg
 
 # "Ledger" (DESIGN.md): warm paper, friendly ink, one terracotta pen.
@@ -113,30 +114,6 @@ _VEGA_CDN = (
     '<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>'
 )
 
-_VEGA_PLOT_CONFIG: dict[str, Any] = {
-    "background": "#fffbf2",
-    "font": "Mukta, 'Segoe UI', sans-serif",
-    "axis": {"labelColor": "#8a7660",
-             "titleColor": "#8a7660",
-             "gridColor": "#e4d4bc",
-             "gridDash": [2, 3],
-             "domainColor": "#3a2b1e",
-             "tickColor": "#3a2b1e",
-             "labelFont": "Mukta, sans-serif",
-             "labelFontSize": 11,
-             "titleFont": "Baloo 2, sans-serif",
-             "titleFontWeight": 600},
-    "legend": {"labelColor": "#3a2b1e",
-               "titleColor": "#8a7660",
-               "labelFont": "Mukta, sans-serif",
-               "titleFont": "Baloo 2, sans-serif",
-               "symbolType": "square"},
-    "view": {"stroke": "transparent"},
-    "range": {"category": ["#a34f20", "#a33526", "#c08a2e",
-                           "#5b8c5a", "#8a7660", "#b5714a"]},
-}
-
-
 def _esc(value: Any) -> str:
     return html.escape(str(value))
 
@@ -156,6 +133,74 @@ def _find_tool_output(tool_results: list[dict[str, Any]], name: str) -> dict[str
     return {}
 
 
+# ---------------------------------------------------------------------------
+# 7.9 — the layered report's finding-driven sections. `findings` is the
+# shared bus (src.core.findings): the caller (AgentController) already ranks
+# it by importance descending, but every selector here re-sorts defensively
+# rather than trusting call-site order.
+#
+# `method_fit`/`coverage_gap` findings are caveats, not discoveries — they
+# are the one exception `is_trivial()` never suppresses (so they always
+# reach *some* surface) but they must never occupy a headline/evidence slot.
+# ---------------------------------------------------------------------------
+
+_CAVEAT_FINDING_KINDS = ("method_fit", "coverage_gap")
+_MAX_HEADLINE_FINDINGS = 5
+_MAX_EVIDENCE_FINDINGS = 15
+
+
+def _headline_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = [f for f in findings if f.get("kind") not in _CAVEAT_FINDING_KINDS]
+    preferred = [f for f in candidates if f.get("layer") in ("exec", "analyst")]
+    pool = preferred if preferred else candidates
+    pool = sorted(pool, key=lambda f: f.get("importance") or 0.0, reverse=True)
+    return pool[:_MAX_HEADLINE_FINDINGS]
+
+
+def _evidence_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pool = [
+        f for f in findings
+        if f.get("layer") == "analyst" and f.get("kind") not in _CAVEAT_FINDING_KINDS
+    ]
+    pool = sorted(pool, key=lambda f: f.get("importance") or 0.0, reverse=True)
+    return pool[:_MAX_EVIDENCE_FINDINGS]
+
+
+def _caveat_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [f for f in findings if f.get("kind") in _CAVEAT_FINDING_KINDS]
+
+
+def _finding_evidence_html(finding: dict[str, Any]) -> str:
+    """One evidence card: headline, analyst-facing detail, and the raw
+    evidence numbers (effect/p-value/confidence) traceable to a tool result."""
+    bits: list[str] = [f"<strong>{_esc(finding.get('headline', ''))}</strong>"]
+    detail = finding.get("detail")
+    if detail:
+        bits.append(f"<br>{_esc(detail)}")
+    numeric_bits: list[str] = []
+    effect = finding.get("effect")
+    if effect is not None:
+        kind = finding.get("effect_kind") or ""
+        numeric_bits.append(f"effect {_esc(round(float(effect), 4))}" + (f" ({_esc(kind)})" if kind else ""))
+    p_value = finding.get("p_value")
+    if p_value is not None:
+        numeric_bits.append(f"p={_esc(round(float(p_value), 4))}")
+    p_adj = finding.get("p_adjusted")
+    if p_adj is not None:
+        numeric_bits.append(f"p(adj)={_esc(round(float(p_adj), 4))}")
+    evidence = finding.get("evidence") or {}
+    if isinstance(evidence, dict):
+        for k, v in evidence.items():
+            if isinstance(v, (int, float, str)) and not isinstance(v, bool):
+                numeric_bits.append(f"{_esc(k)}={_esc(v)}")
+    if numeric_bits:
+        bits.append(f"<br><span style='color:var(--graphite);font-size:.85rem;'>{' · '.join(numeric_bits)}</span>")
+    source = finding.get("source_tool")
+    if source:
+        bits.append(f"<br><span style='color:var(--graphite);font-size:.78rem;'>source: {_esc(source)}</span>")
+    return "".join(bits)
+
+
 def build_html_report(
     dataset_name: str,
     llm_insights: dict[str, Any],
@@ -170,6 +215,8 @@ def build_html_report(
     unverified_claims: list[str] | None = None,
     profile_status: str | None = None,
     degradations: list[str] | None = None,
+    findings: list[dict[str, Any]] | None = None,
+    analysis_decision: dict[str, Any] | None = None,
 ) -> str:
     """
     Assemble the full self-contained HTML report.
@@ -188,6 +235,14 @@ def build_html_report(
             Benjamini-Hochberg correction (item 4).
         unverified_claims: Numeric literals P0.7 couldn't trace to a tool result.
         profile_status: "ok" or "failed: <reason>" (item 7).
+        findings: Finding.to_dict() dicts (7.9 layered report) — the shared
+            "what did we discover" bus every projection reads from. When
+            empty/None (an old caller, or a run that produced none), the
+            report still renders fully from tool_results/llm_insights as
+            before; findings only ever *add* sections on top of that.
+        analysis_decision: {"mode", "rationale", "alternatives_rejected", ...}
+            — T2 "why we did or didn't model X" transparency, surfaced under
+            "Why these analyses" when present.
     """
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     sections: list[str] = []
@@ -226,6 +281,19 @@ def build_html_report(
             f"<h2>The short version</h2><div class='card exec'>{_esc(reasoning)}</div>"
         )
 
+    # ---- 7.9 headline layer — top findings from the shared finding bus.
+    # Purely additive: when `findings` is empty/None this renders nothing
+    # and the report falls back to the sections above/below exactly as
+    # before (the required graceful-degradation path). ----
+    findings = findings or []
+    top_findings = _headline_findings(findings)
+    if top_findings:
+        headline_cards = "\n".join(
+            f'<div class="card {"exec" if i == 0 else "insight"}">{_esc(f.get("headline", ""))}</div>'
+            for i, f in enumerate(top_findings)
+        )
+        sections.append("<h2>Top findings</h2>" + headline_cards)
+
     # ---- insights & recommendations ----
     insights = llm_insights.get("insights") or []
     if insights:
@@ -260,22 +328,45 @@ def build_html_report(
             + rows + "</table>"
         )
 
+    # ---- 7.9 evidence layer — the analyst-facing detail behind the
+    # headlines: every finding's detail/evidence dict, effect sizes and
+    # p-values. Additive; no-op when `findings` is empty. ----
+    evidence = _evidence_findings(findings)
+    if evidence:
+        sections.append(
+            "<h2>Evidence</h2>"
+            + "\n".join(f'<div class="card insight">{_finding_evidence_html(f)}</div>' for f in evidence)
+        )
+
     # ---- interactive dashboard ----
     if charts:
+        # Finding-tagged panels (priority > 0, set by src.core.dashboard) lead;
+        # ties keep the dashboard-builder's own ordering (stable sort).
+        charts = sorted(charts, key=lambda c: c.get("priority") or 0.0, reverse=True)
         chart_divs = "".join(
             f'<div class="chart"><h3>{_esc(c.get("title", ""))}</h3>'
-            f'<p>{_esc(c.get("description", ""))}</p>'
+            + (f'<p><strong>{_esc(c["caption"])}</strong></p>' if c.get("caption") else "")
+            + f'<p>{_esc(c.get("description", ""))}</p>'
             f'<div class="vega-holder" id="chart_{i}"></div></div>'
             for i, c in enumerate(charts)
         )
-        specs = [dict(c.get("spec", {}), config=_VEGA_PLOT_CONFIG, width="container")
-                 for c in charts]
+        # Colors are injected here, at render time, from the shared theme
+        # module — never stored in the spec itself — so this same HTML file
+        # renders correctly whichever way the viewer's OS/browser theme is
+        # set (7.17 / Q1: one chart theme module, no baked-in colors).
+        specs = [dict(c.get("spec", {}), width="container") for c in charts]
         specs_json = json.dumps(specs, default=str).replace("</", "<\\/")
+        day_cfg_json = json.dumps(vega_config(dark=False), default=str).replace("</", "<\\/")
+        night_cfg_json = json.dumps(vega_config(dark=True), default=str).replace("</", "<\\/")
         sections.append(
             "<h2>The charts</h2>"
             + chart_divs
             + f"<script>const SPECS = {specs_json};"
-            + "SPECS.forEach((s, i) => vegaEmbed('#chart_' + i, s, {actions: false}));"
+            + f"const VEGA_CFG_DAY = {day_cfg_json};"
+            + f"const VEGA_CFG_NIGHT = {night_cfg_json};"
+            + "const _dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);"
+            + "const _cfg = _dark ? VEGA_CFG_NIGHT : VEGA_CFG_DAY;"
+            + "SPECS.forEach((s, i) => vegaEmbed('#chart_' + i, Object.assign({}, s, {config: _cfg}), {actions: false}));"
             + "</script>"
         )
 
@@ -292,7 +383,10 @@ def build_html_report(
             "<th>Summary</th></tr>" + rows + "</table>"
         )
 
-    # ---- methodology (item 6) — why each step ran, from the planner ----
+    # ---- methodology (item 6) — why each step ran, from the planner, plus
+    # (7.9) the T2 "why we did or didn't model X" transparency when the
+    # controller recorded an analysis_decision. ----
+    methodology_html = ""
     if plan_rationales:
         rows = "".join(
             f"<tr><td>{_esc(r.get('step_number', '—'))}</td>"
@@ -300,10 +394,25 @@ def build_html_report(
             f"<td>{_esc(r.get('rationale', ''))}</td></tr>"
             for r in plan_rationales
         )
-        sections.append(
-            "<h2>Why these analyses</h2><table><tr><th>Step</th><th>Tool</th>"
-            "<th>Rationale</th></tr>" + rows + "</table>"
+        methodology_html += (
+            "<table><tr><th>Step</th><th>Tool</th><th>Rationale</th></tr>" + rows + "</table>"
         )
+    if analysis_decision:
+        mode = analysis_decision.get("mode")
+        rationale = analysis_decision.get("rationale")
+        rejected = analysis_decision.get("alternatives_rejected") or []
+        decision_bits = []
+        if mode:
+            decision_bits.append(f"<strong>Approach taken: {_esc(mode)}.</strong>")
+        if rationale:
+            decision_bits.append(_esc(rationale))
+        if decision_bits:
+            card = "<br>".join(decision_bits)
+            if rejected:
+                card += "<br>Alternatives considered and not taken: " + "; ".join(_esc(r) for r in rejected) + "."
+            methodology_html += f'<div class="card treat">{card}</div>'
+    if methodology_html:
+        sections.append("<h2>Why these analyses</h2>" + methodology_html)
 
     # ---- limitations & caveats (item 4 / 5 / 7 / 10 / P0.7) ----
     if degradations is None:
@@ -315,6 +424,10 @@ def build_html_report(
     limitation_cards: list[str] = list(degradations)
     if unverified_claims:
         limitation_cards.extend(str(c) for c in unverified_claims)
+    # 7.9 — method-fit / coverage-gap findings are caveats, not headline
+    # insights (src.core.findings.is_trivial never suppresses them for
+    # exactly this reason); this is where they belong.
+    limitation_cards.extend(f.get("headline", "") for f in _caveat_findings(findings))
 
     bh = apply_benjamini_hochberg(statistical_test_pvalues or [])
     if limitation_cards or bh:

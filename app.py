@@ -409,6 +409,59 @@ iframe:hover {{
     font-size: 14.5px; line-height: 1.58; color: var(--ink); max-width: 68ch;
 }}
 
+/* ── Finding cards (Answers tab, IMPROVEMENTS.md 7.15) ── */
+.finding-card {{
+    background: var(--sheet); border: 1px solid var(--rule);
+    border-left: 4px solid var(--pen); border-radius: var(--radius);
+    box-shadow: var(--lift-sm); padding: 1rem 1.3rem; margin: 0 0 .9rem;
+}}
+.finding-headline {{
+    font-family: var(--heading); font-size: 17px; font-weight: 700;
+    color: var(--ink); line-height: 1.4;
+}}
+
+/* ── Trust strip (Answers tab) ── */
+.trust-strip {{ display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }}
+.trust-cell {{
+    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
+    box-shadow: var(--lift-sm); padding: .9rem 1.2rem; flex: 1; min-width: 160px;
+}}
+.trust-cell .k {{ font-size: 12px; color: var(--graphite); font-weight: 600;
+                  text-transform: uppercase; letter-spacing: .5px; }}
+.trust-cell .v {{ font-family: var(--heading); font-size: 24px; font-weight: 800;
+                  color: var(--ink); margin-top: .3rem; }}
+
+/* ── KPI strip (technical-detail expander) — classes replace what used to be
+   ~35 lines of inline style= per tile (IMPROVEMENTS.md 7.22) ── */
+.kpi-row {{ display: flex; gap: 1.5rem; margin-bottom: 1.2rem; flex-wrap: wrap; }}
+.kpi-gauge-card {{
+    background: var(--sheet); padding: 1.5rem; border-radius: var(--radius); box-shadow: var(--lift-sm);
+    flex: 1; min-width: 250px; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; position: relative; overflow: hidden;
+}}
+.kpi-gauge-label {{ font-size: 14px; color: var(--graphite); font-weight: 700;
+                    margin-bottom: 1.5rem; text-transform: uppercase; letter-spacing: 1px; }}
+.kpi-ring-wrap {{ position: relative; width: 140px; height: 140px;
+                  display: flex; align-items: center; justify-content: center; }}
+.kpi-ring-value {{ display: flex; flex-direction: column; align-items: center;
+                   margin-top: 6px; z-index: 10; }}
+.kpi-ring-num {{ font-family: var(--heading); font-size: 38px; font-weight: 800;
+                 color: var(--ink); line-height: 1; }}
+.kpi-ring-sub {{ font-size: 11px; font-weight: 700; color: var(--graphite);
+                 text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }}
+.kpi-tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+              gap: 1rem; flex: 2; min-width: 300px; }}
+.kpi-tile {{ background: var(--sheet); padding: 1.5rem; border-radius: var(--radius);
+             box-shadow: var(--lift-sm); display: flex; flex-direction: column; justify-content: center; }}
+.kpi-tile.flagged {{ border: 1px solid var(--risk); }}
+.kpi-tile .k {{ font-size: 12px; color: var(--graphite); font-weight: 600;
+               text-transform: uppercase; letter-spacing: .5px; }}
+.kpi-tile .v {{ font-family: var(--heading); font-size: 24px; font-weight: 700;
+               color: var(--ink); margin-top: 0.5rem; }}
+.kpi-tile .v.big {{ font-size: 32px; font-weight: 800; margin-top: 0.2rem; }}
+.kpi-tile .v.risk {{ color: var(--risk); }}
+.kpi-tile .s {{ font-size: 12px; color: var(--graphite); margin-top: 4px; }}
+
 /* ── Team grid & cards ── */
 .agent-grid {{
     display: grid;
@@ -735,32 +788,17 @@ PEN_BLUE = "#a34f20"
 PEN_RED = "#a33526"
 
 def _get_vega_config() -> dict[str, Any]:
-    return {
-        "font": "Mukta, 'Segoe UI', sans-serif",
-        "axis": {
-            "gridDash": [2, 3],
-            "labelFont": "Mukta, sans-serif",
-            "labelFontSize": 11,
-            "titleFont": "Baloo 2, sans-serif",
-            "titleFontWeight": 600,
-        },
-        "legend": {
-            "labelFont": "Mukta, sans-serif",
-            "titleFont": "Baloo 2, sans-serif",
-            "symbolType": "square",
-        },
-        "view": {"stroke": "transparent"},
-        "range": {
-            "category": [
-                PEN_BLUE,
-                PEN_RED,
-                "#c08a2e",
-                "#5b8c5a",
-                "#8a7660",
-                "#b5714a",
-            ]
-        },
-    }
+    """Ledger palette for Vega-Lite charts.
+
+    Delegates to `src.core.chart_theme.vega_config` — the single source of
+    truth for the palette (DESIGN.md's "Tokens — ink" table) — instead of
+    hand-maintaining a second copy of the same hex codes (IMPROVEMENTS.md
+    7.17). `dark` follows the same day/night session-state flag the rest of
+    the app themes off of.
+    """
+    from src.core.chart_theme import vega_config as _vega_config_impl
+    _dark = st.session_state.get("theme", "day") in ("night", "dark")
+    return _vega_config_impl(dark=_dark)
 
 VEGA_PLOT_CONFIG = _get_vega_config()
 
@@ -1039,6 +1077,92 @@ def _render_defect_stamp(gap_val: float | None) -> str:
             </div>
         </div>
         """
+
+
+def _find_chart_by_id(dash: list[dict[str, Any]] | None, chart_id: str) -> dict[str, Any] | None:
+    """Look up a dashboard panel by its chart_id — lets a surface reuse a
+    panel the backend already built instead of re-deriving the same chart
+    (IMPROVEMENTS.md 7.17)."""
+    for ch in (dash or []):
+        if ch.get("chart_id") == chart_id:
+            return ch
+    return None
+
+
+def _render_dashboard_chart(ch: dict[str, Any], vega_cfg: dict[str, Any]) -> None:
+    """Render one dashboard panel (title, chart, caption/description) — the
+    one place a ChartSpec dict becomes Streamlit markup, shared by the
+    Charts tab and the Answers tab's technical-detail section so neither
+    hand-rolls its own copy (IMPROVEMENTS.md 7.17).
+
+    Prefers the finding's own `caption` (its headline sentence) over the
+    chart's generic `description` when both are present — the caption is
+    the "narrated dashboard" payoff of the finding-chart binding (7.18).
+    """
+    with st.container(border=True):
+        st.markdown(
+            f"<div style='font-family: var(--heading); font-size: 1.1rem; font-weight: 700; "
+            f"color: var(--ink); margin-bottom: 0.5rem;'>{html.escape(str(ch.get('title', '')))}</div>",
+            unsafe_allow_html=True,
+        )
+        _spec = dict(ch.get("spec", {}))
+        _spec.setdefault("background", "transparent")
+        _spec.setdefault("config", vega_cfg)
+        st.vega_lite_chart(_spec, width='stretch')
+        _caption = ch.get("caption")
+        if _caption:
+            st.caption(str(_caption))
+        elif ch.get("description"):
+            st.markdown(
+                f"<div style='font-size: 0.9rem; color: var(--graphite); margin-top: 0.5rem; "
+                f"line-height: 1.4;'>{html.escape(str(ch['description']))}</div>",
+                unsafe_allow_html=True,
+            )
+
+
+def _render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str]) -> str:
+    """One full-width sentence card for a top-ranked Finding (IMPROVEMENTS.md
+    7.15) — the headline carries the real number, an optional detail/caveat
+    line sits underneath, and a light text cross-reference points at the
+    chart that visualizes it, if any (7.18) — no anchor-scroll mechanism,
+    just an honest pointer to the Charts tab.
+    """
+    headline = html.escape(str(finding.get("headline", "")))
+    detail = finding.get("detail")
+    caveats = finding.get("caveats") or []
+    sub_text = str(detail) if detail else (str(caveats[0]) if caveats else "")
+    sub_html = (
+        f'<div style="font-size:13px;color:var(--graphite);margin-top:4px;">{html.escape(sub_text)}</div>'
+        if sub_text else ""
+    )
+    xref = ""
+    if finding.get("finding_id") and finding["finding_id"] in chart_finding_ids:
+        xref = '<div style="font-size:12px;color:var(--pen);margin-top:6px;font-weight:600;">→ see chart in the Charts tab</div>'
+    return (
+        '<div class="finding-card">'
+        f'<div class="finding-headline">{headline}</div>'
+        f'{sub_html}{xref}'
+        '</div>'
+    )
+
+
+def _search_findings(query: str, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Cheap, deterministic keyword search over the finding bus for the
+    'Ask a follow-up question' box (IMPROVEMENTS.md 7.20, scoped down — no
+    new tool calls, no LLM call, purely matching fields already on hand)."""
+    terms = [t for t in query.lower().split() if t]
+    if not terms:
+        return []
+    scored: list[tuple[int, float, dict[str, Any]]] = []
+    for f in findings:
+        haystack = " ".join(
+            str(f.get(k) or "") for k in ("headline", "measure", "dimension", "detail")
+        ).lower()
+        hits = sum(1 for t in terms if t in haystack)
+        if hits:
+            scored.append((hits, float(f.get("importance") or 0.0), f))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [f for _, _, f in scored[:3]]
 
 
 def _render_agent_grid(
@@ -1764,17 +1888,37 @@ with st.sidebar:
         st.caption("🔌 Deterministic planning, ML still on.")
     elif not use_ml:
         st.caption("⚡ AI narrative on, no models fitted.")
+    tune_hyperparameters = False
+    max_depth = 6
+    test_pct = 20
+    n_cv = 5
+    if use_ml:
+        # IMPROVEMENTS.md 7.16 — genuinely wired, not just informational.
+        # `TrainModelTool.requires_context` (ml_pipeline.py) reads these back
+        # from memory context and fills them into the actual train_model
+        # call whenever the planner leaves them empty (the same fallback-fill
+        # mechanism target_column already used) — so moving these sliders
+        # really does change what gets trained, not just what's displayed.
+        thorough = st.toggle(
+            "Thorough tuning (slower)",
+            value=False,
+            help=(
+                "Off (default): models train with their default hyperparameters — fast.\n"
+                "On: searches hyperparameters per model before picking the best "
+                "one — meaningfully slower (measured: ~20s extra at 20k rows) "
+                "but can improve accuracy."
+            ),
+        )
+        tune_hyperparameters = thorough
+        with st.expander("Advanced model settings"):
+            max_depth = st.slider("Max tree depth (Random Forest / XGBoost)", 2, 15, 6)
+            test_pct = st.slider("Test split %", 10, 40, 20, step=5)
+            n_cv = st.slider("CV folds (k)", 3, 10, 5)
 
     # ── Analysis Settings ─────────────────────────────────────────────────────
     st.markdown('<div class="side-head">Analysis Settings</div>', unsafe_allow_html=True)
     max_iter   = st.slider("Max iterations", 3, 25, 10)
     enable_rlm = st.toggle("Enable recursive decomposition (Stage 6)", value=True)
-
-    st.markdown('<div class="side-head">Anti-Overfitting</div>', unsafe_allow_html=True)
-    max_depth = st.slider("Max tree depth", 2, 15, 6,
-                          help="Lower = less overfitting for tree-based models")
-    test_pct  = st.slider("Test split %", 10, 40, 20, step=5)
-    n_cv      = st.slider("CV folds (k)", 3, 10, 5)
 
     st.divider()
 
@@ -1984,6 +2128,14 @@ if run_clicked:
             use_llm=use_llm,
             use_ml=use_ml,
         )
+        if use_ml:
+            # IMPROVEMENTS.md 7.16 — TrainModelTool.requires_context reads
+            # these back and fills them into the real train_model call
+            # whenever the planner leaves them empty.
+            agent.memory.set_context("ui_max_depth", max_depth)
+            agent.memory.set_context("ui_test_size", test_pct / 100.0)
+            agent.memory.set_context("ui_n_cv_folds", n_cv)
+            agent.memory.set_context("ui_tune_hyperparameters", tune_hyperparameters)
         meta = agent.load_dataset(
             dpath,
             target_hint=target_col.strip() or None,
@@ -2078,8 +2230,14 @@ if run_clicked:
                 _set_stage(_n, "error", "failed")
                 break
         _spinner_ph.empty()
-        st.error("The run stopped on an error. The traceback is below.")
-        st.code(err, language="python")
+        st.error(
+            "Something went wrong during the run and it couldn't finish. "
+            "This usually means a step in the analysis hit an unexpected "
+            "problem with this specific file — see the technical details "
+            "below if you want to know exactly what happened."
+        )
+        with st.expander("Technical details"):
+            st.code(err, language="python")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2133,12 +2291,18 @@ if st.session_state.get("analysis_done"):
     profile: dict[str, Any] | None = st.session_state.get("profile")
 
 
-    (tab_brief, tab_team, tab_dash, tab_lab, tab_cinema, tab_vault) = st.tabs([
-        "Summary",
-        "Your Helpers",
+    # IMPROVEMENTS.md 7.21 (user-confirmed): 4 top-level tabs, findings-led.
+    # "Your Helpers" (the agent grid / handoff stream) folds into Details as
+    # a "Run Trace" subsection rather than competing for top-level attention
+    # with the findings that answer the user's actual question; the live
+    # "3D Cinematic Journey" tab is dropped as a top-level tab since its
+    # content already exists as a standalone HTML export in Downloads
+    # (`tab_vault`, below) — keeping both was two ways to reach the same
+    # experience.
+    (tab_brief, tab_dash, tab_lab, tab_vault) = st.tabs([
+        "Answers",
         "Charts",
-        "Full Details",
-        "3D Cinematic Journey",
+        "Details",
         "Downloads",
     ])
 
@@ -2210,57 +2374,30 @@ if st.session_state.get("analysis_done"):
             if _dominant and _dominant.get("summary"):
                 st.info(f"**What we found:** {_dominant['summary']}")
 
-        # Hero KPI Strip & Radial Gauge
-        _radial_color = "var(--positive)" if _q >= 80 else ("var(--accent)" if _q >= 60 else "var(--risk)")
-        _radial_deg = (_q / 100) * 180  # Semicircle
-        
-        st.markdown(
-            f"""<div style="display: flex; gap: 1.5rem; margin-bottom: 2rem; flex-wrap: wrap;">
-<!-- Radial Gauge -->
-<div style="background: var(--sheet); padding: 1.5rem; border-radius: var(--radius); box-shadow: var(--lift-sm); flex: 1; min-width: 250px; display: flex; flex-direction: column; align-items: center; justify-content: center; position: relative; overflow: hidden;">
-<div style="font-size: 14px; color: var(--graphite); font-weight: 700; margin-bottom: 1.5rem; text-transform: uppercase; letter-spacing: 1px;">Data Quality</div>
-<div style="position: relative; width: 140px; height: 140px; display: flex; align-items: center; justify-content: center;">
-<svg width="140" height="140" viewBox="0 0 140 140" style="position: absolute; top: 0; left: 0; transform: rotate(-90deg); overflow: visible; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.1));">
-<circle cx="70" cy="70" r="56" fill="none" stroke="var(--rule-faint)" stroke-width="12" />
-<circle cx="70" cy="70" r="56" fill="none" stroke="{_radial_color}" stroke-width="12" stroke-linecap="round" stroke-dasharray="351.86" stroke-dashoffset="{351.86 - (351.86 * _q / 100)}" class="anime-gauge" data-q="{_q}" />
-</svg>
-<div style="display: flex; flex-direction: column; align-items: center; margin-top: 6px; z-index: 10;">
-<div style="font-family: var(--heading); font-size: 38px; font-weight: 800; color: var(--ink); line-height: 1;" class="count-up" data-value="{_q}" data-suffix="">{_q}</div>
-<div style="font-size: 11px; font-weight: 700; color: var(--graphite); text-transform: uppercase; letter-spacing: 1px; margin-top: 2px;">Score</div>
-</div>
-</div>
-</div>
-<!-- KPI Strip -->
-<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; flex: 2; min-width: 300px;">
-<div style="background: var(--sheet); padding: 1.5rem; border-radius: var(--radius); box-shadow: var(--lift-sm); display: flex; flex-direction: column; justify-content: center;">
-<div style="font-size: 12px; color: var(--graphite); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Best Model</div>
-<div style="font-family: var(--heading); font-size: 24px; font-weight: 700; color: var(--ink); margin-top: 0.5rem;">{best_model}</div>
-<div style="font-size: 12px; color: var(--graphite); margin-top: 4px;">Task: {task_type}</div>
-</div>
-<div style="background: var(--sheet); padding: 1.5rem; border-radius: var(--radius); box-shadow: var(--lift-sm); display: flex; flex-direction: column; justify-content: center;">
-<div style="font-size: 12px; color: var(--graphite); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">CV Score</div>
-<div style="font-family: var(--heading); font-size: 32px; font-weight: 800; color: var(--ink); margin-top: 0.2rem;" class="count-up" data-value="{best_cv}" data-suffix="%">{best_cv}%</div>
-</div>
-<div style="background: var(--sheet); padding: 1.5rem; border-radius: var(--radius); box-shadow: var(--lift-sm); display: flex; flex-direction: column; justify-content: center; border: { '1px solid var(--risk)' if gap_val is not None and _gap_is_risky(gap_val) else 'none' };">
-<div style="font-size: 12px; color: var(--graphite); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Train-Test Gap</div>
-<div style="font-family: var(--heading); font-size: 32px; font-weight: 800; color: { 'var(--risk)' if gap_val is not None and _gap_is_risky(gap_val) else 'var(--ink)' }; margin-top: 0.2rem;" class="count-up" data-value="{best_gap_str}" data-suffix="%">{best_gap_str}%</div>
-</div>
-</div>
-</div>""",
-            unsafe_allow_html=True
-        )
+        # ── What we found: the top-ranked Findings, as full-width sentence
+        # cards (IMPROVEMENTS.md 7.15) — this is the "invert the Answers tab"
+        # fix. Model-internal numbers (best model / CV / gap) move below,
+        # behind the technical-detail expander, since they're not answers to
+        # the user's question even when a model was trained.
+        _all_findings: list[dict[str, Any]] = report.get("findings") or []
+        _dash_finding_ids = {c.get("finding_id") for c in (dash or []) if c.get("finding_id")}
+        _card_findings = [
+            f for f in _all_findings
+            if f.get("layer") in ("exec", "analyst") and f.get("kind") not in ("method_fit", "coverage_gap")
+        ][:5]
 
-        # Generalization Defect / Certification Stamp
-        if gap_val is not None:
-            st.markdown(_render_defect_stamp(gap_val), unsafe_allow_html=True)
-
-        for _w in (train_out.get("overfit_warnings", []) if train_out else []):
-            st.markdown(f'<div class="wc"><span class="mk">Risk</span>{_w}</div>', unsafe_allow_html=True)
-
-        # Key Discoveries & Actions
-        col_ins, col_rec = st.columns(2)
-        with col_ins:
-            st.markdown("#### Key Discoveries")
+        st.markdown("#### What we found")
+        if _card_findings:
+            for _f in _card_findings:
+                st.markdown(_render_finding_card(_f, _dash_finding_ids), unsafe_allow_html=True)
+        elif _all_findings:
+            # Findings exist but every one of them is a caveat/appendix-only
+            # item for this run — say so rather than showing nothing.
+            st.caption("No headline-worthy findings cleared the bar for this run — "
+                       "see the Details tab for the full finding list.")
+        else:
+            # Old cached result (pre-finding-bus) or a totally empty run:
+            # fall back to the plain insights list rather than a blank tab.
             _ins_list = report.get("insights", [])
             if _ins_list:
                 for _i, _ins in enumerate(_ins_list, start=1):
@@ -2268,115 +2405,129 @@ if st.session_state.get("analysis_done"):
             else:
                 st.caption("No explicit statistical discoveries recorded.")
 
-        with col_rec:
-            st.markdown("#### Recommended Actions")
-            _rec_list = report.get("recommendations", [])
-            if _rec_list:
-                for _rec in _rec_list:
-                    st.markdown(f'<div class="rc"><span class="mk">Do</span>{html.escape(str(_rec))}</div>', unsafe_allow_html=True)
+        st.markdown("#### What to do")
+        _rec_list = report.get("recommendations", [])
+        if _rec_list:
+            for _rec in _rec_list:
+                st.markdown(f'<div class="rc"><span class="mk">Do</span>{html.escape(str(_rec))}</div>', unsafe_allow_html=True)
+        else:
+            st.caption("No operational recommendations generated.")
+
+        # ── Trust strip: quality, coverage, caveats — the honest summary of
+        # how much to trust this run, including what it declined to answer
+        # (the payoff of the 7.5 question agenda: use it, don't let it go
+        # unused) ───────────────────────────────────────────────────────────
+        st.markdown("#### At a glance")
+        _row_count = (
+            (meta.row_count if meta else None)
+            or (prof.get("row_count") if prof else None)
+            or (len(preview_df) if preview_df is not None else None)
+        )
+        _caveat_count = sum(1 for f in _all_findings if f.get("kind") in ("method_fit", "coverage_gap"))
+        _coverage = report.get("coverage") or {}
+        _unanswered = _coverage.get("unanswered") or []
+
+        _trust_cells = [
+            ("Data quality", f"{_q}/100"),
+            ("Rows analyzed", f"{_row_count:,}" if isinstance(_row_count, int) else "—"),
+            ("Caveats flagged", str(_caveat_count)),
+        ]
+        st.markdown(
+            '<div class="trust-strip">' + "".join(
+                f'<div class="trust-cell"><div class="k">{html.escape(k)}</div>'
+                f'<div class="v">{html.escape(v)}</div></div>'
+                for k, v in _trust_cells
+            ) + '</div>',
+            unsafe_allow_html=True,
+        )
+        if _unanswered:
+            st.caption(f"⚠ {len(_unanswered)} question(s) considered, not answered.")
+            with st.expander("What wasn't answered, and why"):
+                for _u in _unanswered:
+                    st.markdown(f"- {html.escape(str(_u.get('text', '')))}")
+
+        # ── Ask a follow-up question (IMPROVEMENTS.md 7.20, scoped down):
+        # a plain keyword search over the finding bus — no new tool calls,
+        # no LLM call. ───────────────────────────────────────────────────
+        st.markdown("#### Ask a follow-up question")
+        _ask_q = st.text_input(
+            "Ask a follow-up question",
+            placeholder="e.g. does tenure affect churn?",
+            label_visibility="collapsed",
+            key="ask_data_q",
+        )
+        if _ask_q.strip():
+            _matches = _search_findings(_ask_q, _all_findings)
+            if _matches:
+                for _m in _matches:
+                    st.success(f"Based on what was found: {_m.get('headline', '')}")
             else:
-                st.caption("No operational recommendations generated.")
+                st.info("Nothing in this analysis directly answers that — try rephrasing, "
+                        "or check the Details tab for full coverage.")
 
-        # Quick Model Scoring Comparison Chart
-        if train_out:
-            _mt_map2 = train_out.get("models_trained", {})
-            if _mt_map2:
-                st.markdown("#### How each model scored (Train vs Test vs CV)")
-                _task = train_out.get("task_type", "classification")
-                _pk   = "accuracy" if _task == "classification" else "r2"
-                _rows_v = []
-                for _name, _m in _mt_map2.items():
-                    _rows_v += [
-                        {"model": _name, "metric": "Train",
-                         "score": round(_m.get("train_metrics", {}).get(_pk, 0) * 100, 2)},
-                        {"model": _name, "metric": "Test",
-                         "score": round(_m.get("test_metrics", {}).get(_pk, 0) * 100, 2)},
-                        {"model": _name, "metric": "CV mean",
-                         "score": round(_m.get("cv_mean", 0) * 100, 2)},
-                    ]
-                st.vega_lite_chart(
-                    pd.DataFrame(_rows_v),
-                    {
-                        "mark": {"type": "bar"},
-                        "height": 280,
-                        "background": "transparent",
-                        "config": vega_cfg,
-                        "encoding": {
-                            "x": {"field": "model", "type": "nominal", "axis": {"labelAngle": 0, "title": None}},
-                            "xOffset": {"field": "metric"},
-                            "y": {"field": "score", "type": "quantitative", "title": f"{_pk} %", "scale": {"domain": [0, 110]}},
-                            "color": {
-                                "field": "metric",
-                                "scale": {
-                                    "domain": ["Train", "Test", "CV mean"],
-                                },
-                                "legend": {"orient": "top", "title": None},
-                            },
-                            "tooltip": [{"field": "model"}, {"field": "metric"}, {"field": "score", "title": f"{_pk} %"}],
-                        },
-                    },
-                    width='stretch',
-                )
+        # ── Technical detail: model-internal numbers, kept but demoted ─────
+        with st.expander("Show technical detail"):
+            _radial_color = "var(--positive)" if _q >= 80 else ("var(--accent)" if _q >= 60 else "var(--risk)")
+            _gap_flag = gap_val is not None and _gap_is_risky(gap_val)
+            st.markdown(
+                f"""<div class="kpi-row">
+<div class="kpi-gauge-card">
+<div class="kpi-gauge-label">Data Quality</div>
+<div class="kpi-ring-wrap">
+<svg width="140" height="140" viewBox="0 0 140 140" style="position: absolute; top: 0; left: 0; transform: rotate(-90deg); overflow: visible; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.1));">
+<circle cx="70" cy="70" r="56" fill="none" stroke="var(--rule-faint)" stroke-width="12" />
+<circle cx="70" cy="70" r="56" fill="none" stroke="{_radial_color}" stroke-width="12" stroke-linecap="round" stroke-dasharray="351.86" stroke-dashoffset="{351.86 - (351.86 * _q / 100)}" class="anime-gauge" data-q="{_q}" />
+</svg>
+<div class="kpi-ring-value">
+<div class="kpi-ring-num count-up" data-value="{_q}" data-suffix="">{_q}</div>
+<div class="kpi-ring-sub">Score</div>
+</div>
+</div>
+</div>
+<div class="kpi-tiles">
+<div class="kpi-tile">
+<div class="k">Best Model</div>
+<div class="v">{html.escape(best_model)}</div>
+<div class="s">Task: {html.escape(str(task_type))}</div>
+</div>
+<div class="kpi-tile">
+<div class="k">CV Score</div>
+<div class="v big count-up" data-value="{best_cv}" data-suffix="%">{best_cv}%</div>
+</div>
+<div class="kpi-tile{' flagged' if _gap_flag else ''}">
+<div class="k">Train-Test Gap</div>
+<div class="v big{' risk' if _gap_flag else ''} count-up" data-value="{best_gap_str}" data-suffix="%">{best_gap_str}%</div>
+</div>
+</div>
+</div>""",
+                unsafe_allow_html=True,
+            )
 
-        if corr_out:
-            _top = corr_out.get("top_correlations", [])[:8]
-            if _top:
-                st.markdown("#### Strongest feature correlations")
-                _corr_df = pd.DataFrame(
-                    [{"pair": f"{r['col_a']} ↔ {r['col_b']}", "correlation": r["correlation"]} for r in _top]
-                )
-                st.vega_lite_chart(
-                    _corr_df,
-                    {
-                        "mark": {"type": "bar"},
-                        "height": max(150, len(_top) * 28),
-                        "background": "transparent",
-                        "config": vega_cfg,
-                        "encoding": {
-                            "y": {"field": "pair", "type": "nominal", "sort": "-x", "title": None},
-                            "x": {"field": "correlation", "type": "quantitative", "scale": {"domain": [-1.1, 1.1]}, "title": "Correlation coefficient"},
-                            "color": {
-                                "condition": {"test": "datum.correlation >= 0", "value": PEN_BLUE},
-                                "value": PLOT_INK,
-                            },
-                            "tooltip": [{"field": "pair"}, {"field": "correlation"}],
-                        },
-                    },
-                    width='stretch',
-                )
+            # Generalization Defect / Certification Stamp
+            if gap_val is not None:
+                st.markdown(_render_defect_stamp(gap_val), unsafe_allow_html=True)
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # TIER 2: MULTI-AGENT TEAMWORK CONSOLE
-    # ═════════════════════════════════════════════════════════════════════════
-    with tab_team:
-        st.markdown(
-            '<div class="datum">'
-            '<div class="cell"><div class="k">How it works</div><div class="v">Reasoning, then doing, kept separate</div></div>'
-            '<div class="cell"><div class="k">Team</div><div class="v">8 helpers, each with one job</div></div>'
-            '<div class="cell"><div class="k">Status</div><div class="v">All ready</div></div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+            for _w in (train_out.get("overfit_warnings", []) if train_out else []):
+                st.markdown(f'<div class="wc"><span class="mk">Risk</span>{html.escape(str(_w))}</div>', unsafe_allow_html=True)
 
-        st.markdown("#### Meet Your Helpers")
-        st.caption("Each helper does one job, and hands off to the next. Click a card to peek inside.")
-        st.markdown(_render_agent_grid(st.session_state["stage_log"], tool_results, report), unsafe_allow_html=True)
+            # Model comparison & correlation charts — rendered from the
+            # dashboard artifact the backend already built, by chart_id,
+            # instead of app.py re-deriving the same chart (IMPROVEMENTS.md
+            # 7.17). Falls back to a caption rather than crashing when the
+            # panel isn't present (e.g. an old cached dashboard.json).
+            _mc_chart = _find_chart_by_id(dash, "model_comparison")
+            if _mc_chart:
+                st.markdown("##### How each model scored (Train vs Test vs CV)")
+                _render_dashboard_chart(_mc_chart, vega_cfg)
+            elif train_out:
+                st.caption("Model comparison chart not available for this run.")
 
-        st.markdown("#### What Was Said, Step by Step")
-        st.caption("A record of what each helper passed to the next, and when.")
-        st.markdown(
-            _render_handoff_stream(st.session_state.get("progress_lines", []), tool_results),
-            unsafe_allow_html=True,
-        )
-
-        # RLM Sub-task Decomposition Trace
-        sub_results = report.get("rlm_sub_results")
-        if sub_results:
-            st.markdown("#### How the Tricky Parts Were Split Up")
-            st.caption("Big questions got broken into smaller ones so nothing got lost.")
-            for _s_idx, _sub in enumerate(sub_results, 1):
-                with st.expander(f"Part {_s_idx:02d}: {_sub.get('task_name', 'Smaller Question')}", expanded=True):
-                    st.json(_sub)
+            _tc_chart = _find_chart_by_id(dash, "top_correlations")
+            if _tc_chart:
+                st.markdown("##### Strongest feature correlations")
+                _render_dashboard_chart(_tc_chart, vega_cfg)
+            elif corr_out:
+                st.caption("Correlation chart not available for this run.")
 
     # ═════════════════════════════════════════════════════════════════════════
     # TIER 3: DYNAMIC DASHBOARD
@@ -2384,32 +2535,47 @@ if st.session_state.get("analysis_done"):
     with tab_dash:
         dashboard: list[dict[str, Any]] | None = st.session_state.get("dashboard")
         if dashboard:
-            st.caption("Built automatically to fit your data.")
-            _full_width_ids = {"model_comparison", "top_correlations", "scatter_top_pair", "time_series"}
+            st.caption("Built automatically to fit your data — the most important panels lead.")
+
+            # Layout is data-driven, not a hardcoded chart_id set (7.18): a
+            # panel explicitly on the exec layer, or among the top 3 by the
+            # backend's own `priority` ranking, gets full width; everything
+            # else goes in the 2-column grid. `dashboard` already arrives
+            # sorted by priority descending (build_dashboard()'s contract),
+            # so the first 3 entries *are* the top 3 — no re-sort here.
+            _top_priority_ids = {c.get("chart_id") for c in dashboard[:3]}
             _grid_charts: list[dict[str, Any]] = []
 
-            def _render_chart(_ch: dict[str, Any]) -> None:
-                with st.container(border=True):
-                    st.markdown(f"<div style='font-family: var(--heading); font-size: 1.1rem; font-weight: 700; color: var(--ink); margin-bottom: 0.5rem;'>{_ch.get('title', '')}</div>", unsafe_allow_html=True)
-                    _spec = dict(_ch.get("spec", {}))
-                    _spec.setdefault("background", "transparent")
-                    _spec.setdefault("config", vega_cfg)
-                    st.vega_lite_chart(_spec, width='stretch')
-                    if _ch.get("description"):
-                        st.markdown(f"<div style='font-size: 0.9rem; color: var(--graphite); margin-top: 0.5rem; line-height: 1.4;'>{_ch['description']}</div>", unsafe_allow_html=True)
-
             for _ch in dashboard:
-                if _ch.get("chart_id") in _full_width_ids:
-                    _render_chart(_ch)
+                _is_full_width = (
+                    _ch.get("layer") == "exec"
+                    or _ch.get("chart_id") in _top_priority_ids
+                )
+                if _is_full_width:
+                    _render_dashboard_chart(_ch, vega_cfg)
                 else:
                     _grid_charts.append(_ch)
             if _grid_charts:
                 _dcols = st.columns(2)
                 for _i, _ch in enumerate(_grid_charts):
                     with _dcols[_i % 2]:
-                        _render_chart(_ch)
+                        _render_dashboard_chart(_ch, vega_cfg)
         else:
-            st.info("No dashboard was generated for this run.")
+            # Say *why* when the coverage record can tell us — an "everything
+            # was declined" run reads very differently from "nothing ran yet"
+            # (IMPROVEMENTS.md 7.22).
+            _dash_coverage = report.get("coverage") or {}
+            if _dash_coverage.get("total", 0) > 0 and _dash_coverage.get("answered", 0) == 0:
+                st.info(
+                    "No chart-worthy findings were produced for this run — every "
+                    "question on the agenda was either declined or came back without "
+                    "a chartable pattern. See the Details tab for the full coverage breakdown."
+                )
+            else:
+                st.info(
+                    "No dashboard was generated for this run. The run may still be "
+                    "processing, or the analysis produced no chartable results."
+                )
 
     # ═════════════════════════════════════════════════════════════════════════
     # TIER 4: STATISTICAL & ML LAB
@@ -2545,18 +2711,29 @@ if st.session_state.get("analysis_done"):
             st.caption("Segmentation, trends, text, and geography — run when your data called for them.")
             _render_other_findings(tool_results)
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # TIER 5: 3D CINEMATIC JOURNEY — FULLPAGE.JS + THREE.JS + ANIME.JS
-    # ═════════════════════════════════════════════════════════════════════════
-    with tab_cinema:
-        st.markdown("### 🎬 3D Cinematic Journey")
-        st.caption(
-            "Hardware-accelerated 6-section presentation choreographed with fullPage.js, Three.js & Anime.js. "
-            "Scroll or swipe across the 6 autonomous stages."
-        )
-        from ui.cinematic_3d import render_cinematic
-        _cur_cinema_theme = st.session_state.get("theme", "night")
-        render_cinematic(st.session_state, height=860, theme=_cur_cinema_theme)
+        # IMPROVEMENTS.md 7.21 — "Your Helpers" folded in here as the run
+        # trace: still available for anyone curious how the run actually
+        # went, but no longer competing with the findings for top-level
+        # attention. Kept inside an expander (collapsed by default) since
+        # it's supplementary to the numbered case log above, not part of it.
+        with st.expander("8. Run Trace — how the agents worked through this", expanded=False):
+            st.caption("Each helper does one job, and hands off to the next.")
+            st.markdown(_render_agent_grid(st.session_state["stage_log"], tool_results, report), unsafe_allow_html=True)
+
+            st.markdown("##### What Was Said, Step by Step")
+            st.caption("A record of what each helper passed to the next, and when.")
+            st.markdown(
+                _render_handoff_stream(st.session_state.get("progress_lines", []), tool_results),
+                unsafe_allow_html=True,
+            )
+
+            sub_results = report.get("rlm_sub_results")
+            if sub_results:
+                st.markdown("##### How the Tricky Parts Were Split Up")
+                st.caption("Big questions got broken into smaller ones so nothing got lost.")
+                for _s_idx, _sub in enumerate(sub_results, 1):
+                    with st.expander(f"Part {_s_idx:02d}: {_sub.get('task_name', 'Smaller Question')}", expanded=False):
+                        st.json(_sub)
 
     # ═════════════════════════════════════════════════════════════════════════
     # TIER 6: ARTIFACT VAULT & EXPORTS

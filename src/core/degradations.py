@@ -43,6 +43,21 @@ def collect_degradations(
                 log.append(note)
 
     for c in coercions or []:
+        if c.get("rule") == "date_ambiguous":
+            # 6.3 — the generic line below reads as a clean repair, but this
+            # rule fires precisely when dd/mm vs mm/dd could NOT be
+            # determined from the data (no day in the column exceeds 12) —
+            # the parser picked one silently. That is the worst failure
+            # mode this pipeline can produce (a confidently wrong date axis
+            # on every chart), so it gets its own explicit warning instead
+            # of blending into the "repaired" phrasing every other rule uses.
+            log.append(
+                f"Column '{c.get('column')}' — date convention could NOT be determined "
+                f"(no day value exceeds 12): {c.get('n_converted')} values parsed using an "
+                "assumed day/month order that may be wrong. Verify manually before trusting "
+                "any date-based chart or trend for this column."
+            )
+            continue
         log.append(
             f"Column '{c.get('column')}' repaired from string to {c.get('to_kind')} "
             f"({c.get('rule')} rule): {c.get('n_converted')} converted, {c.get('n_failed')} left unparsed."

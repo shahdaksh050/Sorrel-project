@@ -67,6 +67,127 @@ _PANEL_GROUP_MAX_CARD = 50
 _LAT_NAME_HINTS = ("lat", "latitude")
 _LON_NAME_HINTS = ("lon", "lng", "longitude")
 
+# ---------------------------------------------------------------------------
+# T1 — semantic role layer (Round 7, item 7.3).
+#
+# `kind` (numeric/categorical/datetime/...) is structural — it says how the
+# column is stored. `semantic_role` is what the column *is for*: whether a
+# 0/1 int is a flag or a measure decides whether log1p or IQR should ever
+# touch it, whether a categorical is a dimension worth grouping by, and
+# whether a numeric column should be summed (a measure) or never aggregated
+# at all (an ordinal or identifier). Almost every Round 7 defect traced back
+# to this distinction not existing.
+# ---------------------------------------------------------------------------
+
+SEMANTIC_MEASURE = "measure"
+SEMANTIC_DIMENSION = "dimension"
+SEMANTIC_FLAG = "flag"
+SEMANTIC_ORDINAL = "ordinal"
+SEMANTIC_IDENTIFIER = "identifier"
+SEMANTIC_TIME = "time"
+SEMANTIC_TEXT = "text"
+SEMANTIC_CONSTANT = "constant"
+
+#: A numeric column with cardinality in this (inclusive) range, made up of
+#: consecutive small integers, reads as an ordinal scale (rating 1-5, a
+#: 1-10 NPS score) rather than a continuous measure — it should never be
+#: summed or fed to log1p/IQR, and a segment comparison against it should
+#: treat each level as a group, not a number to average blindly.
+_ORDINAL_CARD_MIN = 3
+_ORDINAL_CARD_MAX = 10
+#: Column-name fragments that reinforce an ordinal read on a small-cardinality
+#: integer column (distinguishes "star_rating" from "num_children", which is
+#: the same shape but is a genuine count/measure).
+_ORDINAL_NAME_HINTS = (
+    "rating", "score", "grade", "level", "tier", "stars", "priority",
+    "satisfaction", "nps", "rank", "severity", "star",
+)
+
+#: Column-name fragments that hint a measure is money.
+_CURRENCY_NAME_HINTS = (
+    "price", "amount", "revenue", "cost", "salary", "income", "sales",
+    "profit", "margin", "spend", "fee", "charge", "payment", "balance",
+    "value", "wage", "expense", "discount", "fare", "budget", "arpu",
+)
+#: Column-name fragments that hint a measure is a percentage/rate already
+#: expressed on a 0-100 or 0-1 scale.
+_PERCENT_NAME_HINTS = ("pct", "percent", "rate", "ratio", "share", "margin_pct")
+#: Column-name fragments that hint a measure is a plain count.
+_COUNT_NAME_HINTS = ("count", "qty", "quantity", "units", "orders", "visits", "clicks", "views")
+
+#: Column-name fragments that hint a column identifies an "entity" whose
+#: repeat-row structure defines the dataset's grain (one row per order line,
+#: many rows per customer). Mirrors the entity roles src.core.domains looks
+#: for, kept independent to avoid a profiler -> domains import cycle
+#: (domains.py imports DatasetProfile from this module).
+_ENTITY_NAME_HINTS = ("customer", "client", "user", "account", "patient", "member", "employee", "subscriber")
+
+#: Rows-per-unique-value above which a candidate entity column is treated as
+#: this dataset's grain-defining entity (i.e. genuinely repeats, not just
+#: incidentally non-unique).
+_ENTITY_REPEAT_THRESHOLD = 1.5
+
+
+def _rows_per_value(df: pd.DataFrame, column: str) -> float:
+    """Mean rows per distinct value of `column`. 1.0 = one row per value."""
+    nunique = int(df[column].nunique(dropna=True))
+    return len(df) / nunique if nunique else 0.0
+
+
+def _infer_semantic_role(
+    name: str, series: pd.Series, kind: str, nunique: int, flags: list[str]
+) -> str:
+    """Assign a semantic role given the structural `kind` already decided by
+    `_profile_column`. Only numeric/categorical/boolean columns need real
+    reasoning here — the rest map onto a role one-to-one."""
+    if kind == "constant":
+        return SEMANTIC_CONSTANT
+    if kind == "identifier":
+        return SEMANTIC_IDENTIFIER
+    if kind == "datetime":
+        return SEMANTIC_TIME
+    if kind == "text":
+        return SEMANTIC_TEXT
+    if kind == "boolean":
+        return SEMANTIC_FLAG
+    if kind == "categorical":
+        return SEMANTIC_DIMENSION
+    if kind == "numeric":
+        is_integer_valued = False
+        try:
+            clean = series.dropna()
+            is_integer_valued = bool(len(clean)) and bool((clean % 1 == 0).all())
+        except TypeError:
+            is_integer_valued = False
+        if is_integer_valued and nunique == 2:
+            return SEMANTIC_FLAG
+        name_l = name.lower()
+        if (
+            is_integer_valued
+            and _ORDINAL_CARD_MIN <= nunique <= _ORDINAL_CARD_MAX
+            and any(h in name_l for h in _ORDINAL_NAME_HINTS)
+        ):
+            return SEMANTIC_ORDINAL
+        return SEMANTIC_MEASURE
+    return SEMANTIC_DIMENSION
+
+
+def _infer_unit_hint(name: str, semantic_role: str) -> str | None:
+    """Cheap name-based unit inference for measures — a fuller version would
+    thread src.core.coercion's currency/percent detection through, but that
+    detection happens at read time and is discarded before profiling runs
+    today; this heuristic gets the common cases without that plumbing."""
+    if semantic_role != SEMANTIC_MEASURE:
+        return None
+    name_l = name.lower()
+    if any(h in name_l for h in _PERCENT_NAME_HINTS):
+        return "percent"
+    if any(h in name_l for h in _CURRENCY_NAME_HINTS):
+        return "currency"
+    if any(h in name_l for h in _COUNT_NAME_HINTS):
+        return "count"
+    return None
+
 
 @dataclass
 class ColumnProfile:
@@ -82,6 +203,10 @@ class ColumnProfile:
     top_values: dict[str, int] = field(default_factory=dict)   # categorical columns
     flags: list[str] = field(default_factory=list)
 
+    # ---- T1 semantic layer (7.3) ----
+    semantic_role: str = SEMANTIC_DIMENSION   # measure | dimension | flag | ordinal | identifier | time | text | constant
+    unit_hint: str | None = None              # currency | percent | count | None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -93,7 +218,18 @@ class ColumnProfile:
             "stats": self.stats,
             "top_values": self.top_values,
             "flags": self.flags,
+            "semantic_role": self.semantic_role,
+            "unit_hint": self.unit_hint,
         }
+
+    def is_measure(self) -> bool:
+        return self.semantic_role == SEMANTIC_MEASURE
+
+    def is_flag(self) -> bool:
+        return self.semantic_role == SEMANTIC_FLAG
+
+    def is_dimension(self) -> bool:
+        return self.semantic_role in (SEMANTIC_DIMENSION, SEMANTIC_FLAG)
 
 
 @dataclass
@@ -132,6 +268,15 @@ class DatasetProfile:
     # domain tool out (the failure mode U0.5 documented for time-series). ----
     domains: list[DomainMatch] = field(default_factory=list)
 
+    # ---- T1 semantic layer (7.3) — what one row *is*. `grain` is the
+    # column set that makes a row unique; `entity_col`/`rows_per_entity`
+    # describe repeat-row structure (e.g. 10 order rows per customer) even
+    # when no single column is a clean key. Populated by profile_dataframe;
+    # defaulted so every DatasetProfile carries the attributes. ----
+    grain: list[str] = field(default_factory=list)
+    entity_col: str | None = None
+    rows_per_entity: float | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "row_count": self.row_count,
@@ -151,10 +296,22 @@ class DatasetProfile:
             "is_sufficient": self.is_sufficient,
             "sufficiency_reason": self.sufficiency_reason,
             "domains": [d.to_dict() for d in self.domains],
+            "grain": self.grain,
+            "entity_col": self.entity_col,
+            "rows_per_entity": self.rows_per_entity,
         }
 
     def columns_of_kind(self, *kinds: str) -> list[ColumnProfile]:
         return [c for c in self.columns if c.kind in kinds]
+
+    def columns_of_role(self, *roles: str) -> list[ColumnProfile]:
+        return [c for c in self.columns if c.semantic_role in roles]
+
+    def measures(self) -> list[ColumnProfile]:
+        return self.columns_of_role(SEMANTIC_MEASURE)
+
+    def dimensions(self) -> list[ColumnProfile]:
+        return self.columns_of_role(SEMANTIC_DIMENSION, SEMANTIC_FLAG)
 
     def has_geo(self) -> bool:
         return bool(self.geo_lat_col and self.geo_lon_col)
@@ -196,8 +353,19 @@ class DatasetProfile:
             nature.append("high-dimensional (many numeric features — watch multicollinearity)")
         if self.panel_group_cols:
             nature.append(f"grouped/panel structure via: {', '.join(_sp(c) for c in self.panel_group_cols[:3])}")
+        if self.entity_col and self.rows_per_entity:
+            nature.append(
+                f"repeat-row grain via '{_sp(self.entity_col)}' "
+                f"({self.rows_per_entity:.1f} rows/entity)"
+            )
         if nature:
             lines.append("Data nature: " + "; ".join(nature) + ".")
+        measures = [_sp(c.name) for c in self.measures()]
+        flags = [_sp(c.name) for c in self.columns if c.semantic_role == SEMANTIC_FLAG]
+        if measures:
+            lines.append(f"Measures (summable quantities): {', '.join(measures[:8])}.")
+        if flags:
+            lines.append(f"Binary flags (not measures — never sum/log-transform): {', '.join(flags[:8])}.")
         for match in self.domains:
             roles = ", ".join(f"{r}={_sp(c)}" for r, c in sorted(match.roles.items()))
             lines.append(
@@ -328,6 +496,9 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
     if missing_pct > HIGH_MISSING_FRACTION * 100:
         flags.append("high_missing")
 
+    semantic_role = _infer_semantic_role(name, series, kind, nunique, flags)
+    unit_hint = _infer_unit_hint(name, semantic_role)
+
     return ColumnProfile(
         name=name,
         dtype=str(series.dtype),
@@ -338,6 +509,8 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
         stats=stats,
         top_values=top_values,
         flags=flags,
+        semantic_role=semantic_role,
+        unit_hint=unit_hint,
     )
 
 
@@ -453,6 +626,32 @@ def profile_dataframe(df: pd.DataFrame, target_column: str | None = None) -> Dat
             ):
                 panel_group_cols.append(col.name)
 
+    # ---- Grain / entity structure (T1) — one row *is* what? An identifier
+    # column that is 100% unique is a clean row key; failing that, a
+    # dimension whose name hints at an entity (customer, order, patient...)
+    # and whose rows-per-value ratio is well above 1 describes a repeat-row
+    # grain (e.g. "10 rows per customer") even with no single-column key. ----
+    grain: list[str] = []
+    entity_col: str | None = None
+    rows_per_entity: float | None = None
+    id_key = next((c.name for c in columns if c.kind == "identifier" and c.nunique == row_count and row_count > 0), None)
+    if id_key:
+        grain = [id_key]
+    entity_candidates = [
+        c for c in columns
+        if c.semantic_role in (SEMANTIC_IDENTIFIER, SEMANTIC_DIMENSION)
+        and any(h in c.name.lower() for h in _ENTITY_NAME_HINTS)
+        and 0 < c.nunique < row_count
+    ]
+    if entity_candidates:
+        best = max(entity_candidates, key=lambda c: _rows_per_value(df, c.name))
+        ratio = _rows_per_value(df, best.name)
+        if ratio >= _ENTITY_REPEAT_THRESHOLD:
+            entity_col = best.name
+            rows_per_entity = round(ratio, 2)
+            if not grain:
+                grain = [best.name] + (datetime_cols[:1] if datetime_cols else [])
+
     return DatasetProfile(
         row_count=row_count,
         column_count=len(df.columns),
@@ -470,4 +669,7 @@ def profile_dataframe(df: pd.DataFrame, target_column: str | None = None) -> Dat
         panel_group_cols=panel_group_cols,
         is_sufficient=is_sufficient,
         sufficiency_reason=sufficiency_reason,
+        grain=grain,
+        entity_col=entity_col,
+        rows_per_entity=rows_per_entity,
     )

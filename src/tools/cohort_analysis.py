@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from src.core.domains import domain_confidence, resolve_column
+from src.core.findings import Finding
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -314,6 +315,130 @@ class CohortAnalysisTool(BaseTool):
             )
         result["summary"] = "; ".join(parts) + "."
         return result
+
+    def findings(  # type: ignore[override]
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        results: list[Finding] = []
+
+        summary = output.get("summary")
+        if summary:
+            results.append(
+                Finding(
+                    finding_id=f"{self.name}_summary",
+                    kind="cohort",
+                    headline=summary.rstrip("."),
+                    detail=(
+                        f"{output.get('transaction_count', 0):,} transactions, "
+                        f"{output.get('customer_count', 0):,} customers, total revenue "
+                        f"{output.get('total_revenue', 0):,.2f} over "
+                        f"{output.get('date_range', {}).get('start')} to "
+                        f"{output.get('date_range', {}).get('end')}."
+                    ),
+                    evidence={
+                        "transaction_count": output.get("transaction_count"),
+                        "total_revenue": output.get("total_revenue"),
+                        "customer_count": output.get("customer_count"),
+                    },
+                    measure="revenue",
+                    confidence=0.75,
+                    surprise=0.3,
+                    objective_fit=0.3,
+                    layer="exec",
+                )
+            )
+
+        top10_share = output.get("revenue_share_of_top_10pct_customers")
+        if top10_share is not None and top10_share > 15.0:
+            excess = (top10_share - 10.0) / 100.0
+            results.append(
+                Finding(
+                    finding_id=f"{self.name}_top10_concentration",
+                    kind="concentration",
+                    headline=f"Top 10% of customers drive {top10_share:.1f}% of total revenue",
+                    detail=(
+                        "Revenue concentration measured by ranking customers by total "
+                        "spend and summing the top decile's share of total revenue."
+                    ),
+                    evidence={
+                        "revenue_share_of_top_10pct_customers": top10_share,
+                        "revenue_share_of_top_20pct_customers": output.get(
+                            "revenue_share_of_top_20pct_customers"
+                        ),
+                        "customer_count": output.get("customer_count"),
+                    },
+                    measure="revenue_share",
+                    dimension="customer",
+                    effect=round(excess, 4),
+                    effect_kind="share",
+                    confidence=0.7,
+                    surprise=0.5,
+                    objective_fit=0.3,
+                )
+            )
+
+        repeat_rate = output.get("repeat_purchase_rate_pct")
+        if repeat_rate is not None:
+            results.append(
+                Finding(
+                    finding_id=f"{self.name}_repeat_rate",
+                    kind="cohort",
+                    headline=f"{repeat_rate:.1f}% of customers are repeat buyers",
+                    detail=(
+                        f"{output.get('repeat_customer_count', 0):,} of "
+                        f"{output.get('customer_count', 0):,} customers placed more than "
+                        "one order."
+                    ),
+                    evidence={
+                        "repeat_customer_count": output.get("repeat_customer_count"),
+                        "customer_count": output.get("customer_count"),
+                    },
+                    measure="repeat_purchase_rate",
+                    dimension="customer",
+                    effect=round(repeat_rate / 100.0, 4),
+                    effect_kind="pct",
+                    confidence=0.7,
+                    surprise=0.3,
+                )
+            )
+
+        rfm_segments = output.get("rfm_segments")
+        if rfm_segments:
+            top_segment = rfm_segments[0]
+            cust_share = top_segment.get("customer_share_pct") or 0.0
+            rev_share = top_segment.get("revenue_share_pct") or 0.0
+            if cust_share > 0:
+                lift = rev_share / cust_share
+                if lift > 1.15:
+                    results.append(
+                        Finding(
+                            finding_id=f"{self.name}_rfm_{top_segment.get('segment', 'top')}",
+                            kind="segment_lift",
+                            headline=(
+                                f"'{top_segment.get('segment')}' customers are "
+                                f"{cust_share:.1f}% of the base but drive "
+                                f"{rev_share:.1f}% of revenue"
+                            ),
+                            detail=(
+                                f"Mean recency {top_segment.get('mean_recency_days')} days, "
+                                f"mean frequency {top_segment.get('mean_frequency')} orders."
+                            ),
+                            evidence=dict(top_segment),
+                            measure="revenue_share",
+                            dimension="rfm_segment",
+                            level=str(top_segment.get("segment")),
+                            effect=round(lift - 1.0, 4),
+                            effect_kind="lift",
+                            confidence=0.65,
+                            surprise=0.45,
+                            objective_fit=0.2,
+                        )
+                    )
+
+        return results
 
     def get_schema(self) -> dict[str, Any]:
         return {

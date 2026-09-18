@@ -17,12 +17,44 @@ import numpy as np
 import pandas as pd
 
 from src.core.coercion import coerce_types
+from src.core.findings import Finding
 from src.core.io import DatasetReadError, invalidate_read_cache, read_any
-from src.core.memory import DatasetMetadata
+from src.core.memory import DatasetMetadata, MemorySystem
+from src.core.security import UploadValidationError, escape_csv_formulas, resolve_output_path
 from src.tools.base import BaseTool, ToolExecutionError
 
 if TYPE_CHECKING:
     from src.core.profiler import DatasetProfile
+
+#: Semantic roles that must never be run through outlier detection — a flag
+#: (0/1) has no distribution to speak of, an ordinal is a small closed scale
+#: where "outlier" is meaningless, and an identifier is a key, not a measure.
+_OUTLIER_EXCLUDED_ROLES = frozenset({"flag", "ordinal", "identifier"})
+
+#: Outlier rate above which the method is judged unsuitable for a column's
+#: distribution rather than having found genuine anomalies (7.10 / 6.4).
+_METHOD_UNSUITABLE_PCT = 20.0
+
+#: Modified z-score (MAD-based) threshold conventionally used as the robust
+#: analogue of a 3-sigma rule (Iglewicz & Hoaglin).
+_MAD_MODIFIED_Z_THRESHOLD = 3.5
+
+#: |r| floor for CorrelationAnalysisTool.findings() — below this, a
+#: correlation is noise-level on most real datasets and not worth promoting.
+_CORR_FINDING_THRESHOLD = 0.3
+
+#: Cap on how many top correlation pairs become Findings per run.
+_CORR_TOP_N = 3
+
+
+def _resolve_write_path(out_dir: Path, filename: str) -> Path:
+    """Join filename under out_dir via resolve_output_path (P2.3) so a
+    crafted filename (e.g. from an uploaded file's stem) can't escape the
+    intended output directory."""
+    try:
+        return resolve_output_path(out_dir, filename)
+    except UploadValidationError as exc:
+        raise ToolExecutionError(str(exc)) from exc
 
 
 def _read_raw_df(file_path: str) -> pd.DataFrame:
@@ -143,12 +175,20 @@ class IngestDatasetTool(BaseTool):
         task_type = DatasetMetadata(**metadata_dict).infer_task_type()
         metadata_dict["task_type"] = task_type
 
+        # Cosmetic-but-visible fix (Round 7 audit): `infer_task_type()` with
+        # no target correctly returns "clustering" as the *unsupervised
+        # fallback*, but that reads as a settled, wrong answer in the log
+        # when the run goes on to auto-detect a target and train a
+        # classifier — target auto-detection runs later, in the controller,
+        # not here. Say so honestly instead of stating a task nobody chose.
+        task_type_display = task_type if target_column else "TBD (target not yet selected)"
+
         return {
             "summary": (
                 f"Ingested: {len(df):,} rows × {len(df.columns)} cols | "
                 f"{len(numerical_cols)} numerical, {len(categorical_cols)} categorical | "
                 f"{sum(missing_values.values()):,} missing cells | "
-                f"task={task_type or 'TBD'}"
+                f"task={task_type_display}"
             ),
             "metadata": metadata_dict,
             "column_list": df.columns.tolist(),
@@ -241,7 +281,11 @@ class CleanDataTool(BaseTool):
         missing_after = int(df.isnull().sum().sum())
         out_dir = Path(output_dir) if output_dir else path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{path.stem}_cleaned.csv"  # always CSV
+        # Read back by every downstream tool (uses_cleaned_file redirection) —
+        # NOT a final user-facing export, so no escape_csv_formulas here: a
+        # quoted-string repair would break exact-value matching for any
+        # tool that re-reads this file expecting the original values.
+        out_path = _resolve_write_path(out_dir, f"{path.stem}_cleaned.csv")  # always CSV
         df.to_csv(out_path, index=False)
         # This path may already be in the read cache from an earlier
         # step (a re-planned or retried run rewrites the same name).
@@ -277,6 +321,67 @@ class CleanDataTool(BaseTool):
         }
 
 
+def _iqr_bounds(values: pd.Series) -> tuple[float, float]:
+    q1, q3 = values.quantile(0.25), values.quantile(0.75)
+    iqr = q3 - q1
+    return float(q1 - 1.5 * iqr), float(q3 + 1.5 * iqr)
+
+
+def _column_outlier_mask(
+    series: pd.Series, method: str, threshold: float, is_skewed: bool
+) -> tuple[pd.Series, str]:
+    """
+    Flag outliers in one numeric column, choosing a distribution-aware
+    method (7.10 / 6.4).
+
+    Raw IQR/z-score on a right-skewed measure (revenue, tenure, claim
+    amounts...) treats the column's natural long tail as anomalous, flagging
+    20-40% of rows on real data — a method-fit failure, not a finding. When
+    the column is flagged `severe_skew` by the profiler, this uses IQR on
+    log-transformed values (only valid when every value is positive) or
+    falls back to a MAD-based robust threshold (Iglewicz & Hoaglin's
+    modified z-score), which is far less sensitive to a long tail than a
+    raw standard deviation or raw quartile spread.
+
+    Returns (boolean mask aligned to `series.index`, method actually used).
+    """
+    clean = series.dropna()
+    empty_mask = pd.Series(False, index=series.index)
+    if clean.empty:
+        return empty_mask, method
+
+    if is_skewed and method in ("iqr", "zscore"):
+        if (clean > 0).all():
+            log_vals = np.log(clean)
+            lower, upper = _iqr_bounds(log_vals)
+            flagged = (log_vals < lower) | (log_vals > upper)
+            used = "iqr_log"
+        else:
+            median = float(clean.median())
+            mad = float((clean - median).abs().median())
+            if mad == 0:
+                flagged = pd.Series(False, index=clean.index)
+            else:
+                modified_z = 0.6745 * (clean - median) / mad
+                flagged = modified_z.abs() > _MAD_MODIFIED_Z_THRESHOLD
+            used = "mad"
+    elif method == "iqr":
+        lower, upper = _iqr_bounds(clean)
+        flagged = (clean < lower) | (clean > upper)
+        used = "iqr"
+    elif method == "zscore":
+        from scipy import stats
+        z = pd.Series(np.abs(stats.zscore(clean)), index=clean.index)
+        flagged = z > threshold
+        used = "zscore"
+    else:
+        raise ValueError(f"Unsupported per-column method '{method}'")
+
+    mask = empty_mask.copy()
+    mask.loc[flagged.index[flagged]] = True
+    return mask, used
+
+
 # ============================================================
 # Tool 3: Outlier Detection — Stage 3
 # ============================================================
@@ -286,6 +391,14 @@ class DetectOutliersTool(BaseTool):
     Detect outliers in numerical columns using configurable methods.
 
     Methods: IQR (default), Z-score, Isolation Forest.
+
+    7.10 (subsumes 6.4) — method-fit guards: flags, ordinals, and
+    identifiers are never checked (a 0/1 flag or a small closed scale has no
+    "outlier" concept), and a column the profiler flagged `severe_skew` gets
+    a distribution-aware method (log-IQR or MAD) instead of raw IQR/z-score,
+    which otherwise mistakes a heavy right tail for anomalies. Columns whose
+    flag rate still exceeds 20% are reported as method-unsuitable rather
+    than as a finding.
     """
 
     name = "detect_outliers"
@@ -301,6 +414,28 @@ class DetectOutliersTool(BaseTool):
             return 1.0
         return 1.0 if profile.columns_of_kind("numeric") else 0.0
 
+    def prepare_params(
+        self, params: dict[str, Any], memory: MemorySystem, output_root: str
+    ) -> dict[str, Any]:
+        """
+        Thread the profiler's semantic roles into execute() (7.10).
+
+        execute() has no direct access to the DatasetProfile object — every
+        other tool in this codebase that needs profile facts at execute time
+        (e.g. train_model's split_strategy in ml_pipeline.py) pulls them from
+        `memory.get_context("data_profile")` (the dict form set by the
+        controller after profiling) inside prepare_params and injects them
+        as extra params, rather than changing execute()'s call contract.
+        Same pattern here: role-by-column and the severe-skew set are
+        injected as internal `_`-prefixed params.
+        """
+        params = super().prepare_params(params, memory, output_root)
+        profile = memory.get_context("data_profile") or {}
+        cols = profile.get("columns") or []
+        params["_semantic_roles"] = {c.get("name"): c.get("semantic_role") for c in cols}
+        params["_skewed_cols"] = {c.get("name") for c in cols if "severe_skew" in (c.get("flags") or [])}
+        return params
+
     def execute(  # type: ignore[override]
         self,
         file_path: str,
@@ -308,6 +443,8 @@ class DetectOutliersTool(BaseTool):
         threshold: float = 3.0,
         columns: list[str] | None = None,
         output_dir: str | None = None,
+        _semantic_roles: dict[str, str] | None = None,
+        _skewed_cols: set[str] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         path = Path(file_path)
@@ -318,72 +455,162 @@ class DetectOutliersTool(BaseTool):
             valid = [c for c in columns if c in num_df.columns]
             num_df = num_df[valid]
 
+        role_by_col = _semantic_roles or {}
+        skewed_cols = _skewed_cols or set()
+        excluded = {
+            c: role_by_col[c]
+            for c in num_df.columns
+            if role_by_col.get(c) in _OUTLIER_EXCLUDED_ROLES
+        }
+        if excluded:
+            num_df = num_df.drop(columns=list(excluded))
+
         if num_df.empty:
-            raise ToolExecutionError("No numerical columns found for outlier detection.")
+            raise ToolExecutionError(
+                "No numerical columns eligible for outlier detection "
+                "(remaining columns are flags, ordinals, or identifiers)."
+                if excluded
+                else "No numerical columns found for outlier detection."
+            )
 
-        report: dict[str, Any] = {"method": method}
+        row_count = len(df)
+        report: dict[str, Any] = {"method": method, "columns_excluded": excluded}
+        per_column_detail: dict[str, dict[str, Any]] = {}
+        per_column_outliers: dict[str, int] = {}
 
-        if method == "iqr":
-            q1 = num_df.quantile(0.25)
-            q3 = num_df.quantile(0.75)
-            iqr = q3 - q1
-            mask = ((num_df < (q1 - 1.5 * iqr)) | (num_df > (q3 + 1.5 * iqr))).any(axis=1)
-            per_col = {
-                col: int(
-                    ((num_df[col] < (q1[col] - 1.5 * iqr[col]))
-                     | (num_df[col] > (q3[col] + 1.5 * iqr[col]))).sum()
-                )
-                for col in num_df.columns
-            }
-            report.update({"total_outliers": int(mask.sum()), "per_column_outliers": per_col})
-
-        elif method == "zscore":
-            from scipy import stats
-            clean = num_df.dropna()
-            z = np.abs(stats.zscore(clean))
-            mask_idx = (z > threshold).any(axis=1)
-            report.update({
-                "total_outliers": int(mask_idx.sum()),
-                "threshold": threshold,
-                "columns_checked": num_df.columns.tolist(),
-            })
+        if method in ("iqr", "zscore"):
             mask = pd.Series(False, index=df.index)
-            mask.loc[clean.index[mask_idx]] = True
+            for col in num_df.columns:
+                col_mask, used = _column_outlier_mask(
+                    num_df[col], method, threshold, col in skewed_cols
+                )
+                mask = mask | col_mask
+                n_flagged = int(col_mask.sum())
+                pct_flagged = round(n_flagged / max(row_count, 1) * 100, 2)
+                per_column_outliers[col] = n_flagged
+                per_column_detail[col] = {
+                    "method_used": used,
+                    "n_flagged": n_flagged,
+                    "pct_flagged": pct_flagged,
+                    "method_unsuitable": pct_flagged > _METHOD_UNSUITABLE_PCT,
+                }
+            if method == "zscore":
+                report["threshold"] = threshold
+            report["total_outliers"] = int(mask.sum())
 
         elif method == "isolation_forest":
             from sklearn.ensemble import IsolationForest
             model = IsolationForest(contamination=0.05, random_state=42, n_jobs=-1)
             clean = num_df.dropna()
             preds = model.fit_predict(clean)
-            report.update({"total_outliers": int((preds == -1).sum()), "contamination": 0.05})
             mask = pd.Series(False, index=df.index)
             mask.loc[clean.index[preds == -1]] = True
+            total_iso = int((preds == -1).sum())
+            pct_iso = round(total_iso / max(row_count, 1) * 100, 2)
+            # Isolation Forest is multivariate — it flags rows, not columns —
+            # so there is no per-feature decomposition of the count. Every
+            # included column reports the same (global) figure, tagged so
+            # callers can tell it apart from a true per-column method.
+            for col in num_df.columns:
+                per_column_outliers[col] = total_iso
+                per_column_detail[col] = {
+                    "method_used": "isolation_forest",
+                    "n_flagged": total_iso,
+                    "pct_flagged": pct_iso,
+                    "method_unsuitable": pct_iso > _METHOD_UNSUITABLE_PCT,
+                }
+            report["total_outliers"] = total_iso
+            report["contamination"] = 0.05
 
         else:
             raise ToolExecutionError(f"Unknown method '{method}'. Use: iqr, zscore, isolation_forest")
 
         total = report.get("total_outliers", 0)
-        report["outlier_percentage"] = round(total / max(len(df), 1) * 100, 2)
+        report["outlier_percentage"] = round(total / max(row_count, 1) * 100, 2)
+        report["per_column_outliers"] = per_column_outliers
+        report["per_column_detail"] = per_column_detail
+        report["method_unsuitable_columns"] = [
+            c for c, d in per_column_detail.items() if d["method_unsuitable"]
+        ]
 
-        # Save flagged dataset
+        # Save flagged dataset. This is a final, user-facing artifact (opened
+        # in Excel/Sheets to inspect flagged rows) — never read back by the
+        # pipeline itself — so it is the one export in this file that gets
+        # escape_csv_formulas as well as the path-escape guard.
         df["_is_outlier"] = mask
         out_dir = Path(output_dir) if output_dir else path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{path.stem}_outliers_flagged.csv"  # always CSV
-        df.to_csv(out_path, index=False)
+        out_path = _resolve_write_path(out_dir, f"{path.stem}_outliers_flagged.csv")  # always CSV
+        escape_csv_formulas(df).to_csv(out_path, index=False)
         # This path may already be in the read cache from an earlier
         # step (a re-planned or retried run rewrites the same name).
         invalidate_read_cache(str(out_path))
+
+        unsuitable_note = (
+            f" {len(report['method_unsuitable_columns'])} column(s) flagged "
+            ">20% of rows — method unsuitable for their distribution, see "
+            "method_unsuitable_columns."
+            if report["method_unsuitable_columns"]
+            else ""
+        )
 
         return {
             "summary": (
                 f"Outlier detection ({method}): {total:,} outliers "
                 f"({report['outlier_percentage']}% of data). "
-                f"Flagged dataset saved to '{out_path}'."
+                f"Flagged dataset saved to '{out_path}'.{unsuitable_note}"
             ),
             "flagged_file_path": str(out_path),
             **report,
         }
+
+    def findings(
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        """
+        Only method-fit caveats are emitted here (7.10). A reasonable (<20%)
+        outlier rate on any one column is not insight-grade on its own — a
+        raw count of flagged rows has no meaning without a peer/segment
+        comparison, so T5 triviality suppression would drop it anyway.
+        Columns where the method itself was unsuitable for the distribution
+        are the one thing worth surfacing: as a caveat/limitation, not as an
+        anomaly finding, which is why `kind="method_fit"` is exempt from
+        that suppression (src.core.findings.is_trivial).
+        """
+        results: list[Finding] = []
+        for col, detail in (output.get("per_column_detail") or {}).items():
+            if not detail.get("method_unsuitable"):
+                continue
+            pct = detail.get("pct_flagged", 0)
+            results.append(Finding(
+                finding_id=f"{self.name}_unsuitable_{col}",
+                kind="method_fit",
+                headline=(
+                    f"Outlier detection unsuitable for '{col}' — "
+                    f"{pct}% flagged, distribution is naturally heavy-tailed"
+                ),
+                detail=(
+                    f"'{detail.get('method_used')}' flagged {detail.get('n_flagged')} "
+                    f"of {output.get('total_outliers', '?')} rows in '{col}' ({pct}%). "
+                    "At this rate the method is describing the column's natural "
+                    "long tail, not detecting genuine anomalies."
+                ),
+                evidence={"column": col, **detail},
+                source_tool=self.name,
+                measure=col,
+                effect=None,
+                confidence=0.6,
+                caveats=[
+                    f"Outlier counts for '{col}' should not be read as an anomaly "
+                    "finding — the underlying distribution is heavy-tailed, and "
+                    "the detection method used here isn't a good fit for it."
+                ],
+                layer="appendix",
+            ))
+        return results
 
     def get_schema(self) -> dict[str, Any]:
         return {
@@ -545,7 +772,64 @@ class CorrelationAnalysisTool(BaseTool):
             "target_encoded_binary": target_encoded,
             "features_analyzed": cols,
             "n_features": len(cols),
+            "n_samples": int(num_df.shape[0]),
         }
+
+    def findings(
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        """
+        Turn the strongest pairwise correlations into Findings.
+
+        Only pairs at or above `_CORR_FINDING_THRESHOLD` are considered —
+        below that, r is noise-level on most real datasets and not worth
+        promoting to the finding bus (T5 triviality suppression would also
+        catch it via TRIVIAL_EFFECT_FLOOR, but that floor is much lower than
+        what's actually interesting here). `confidence` scales with sample
+        size when it's available: a correlation computed on a few dozen rows
+        deserves less trust than the same r on thousands.
+        """
+        top_pairs = output.get("top_correlations") or []
+        if not top_pairs:
+            return []
+
+        n_samples = output.get("n_samples")
+        if isinstance(n_samples, int) and n_samples > 0:
+            confidence = 0.9 if n_samples >= 500 else 0.75 if n_samples >= 100 else 0.5
+        else:
+            confidence = 0.6
+
+        measure_names = {c.name for c in profile.measures()} if profile is not None else set()
+        method = output.get("method", "pearson")
+
+        results: list[Finding] = []
+        for i, pair in enumerate(top_pairs[:_CORR_TOP_N]):
+            r = pair.get("correlation")
+            col_a, col_b = pair.get("col_a"), pair.get("col_b")
+            if r is None or col_a is None or col_b is None or abs(r) < _CORR_FINDING_THRESHOLD:
+                continue
+            both_measures = col_a in measure_names and col_b in measure_names
+            results.append(Finding(
+                finding_id=f"{self.name}_{i}_{col_a}_{col_b}",
+                kind="correlation",
+                headline=f"{col_a} and {col_b} move together (r={r:.2f})",
+                detail=(
+                    f"{method.capitalize()} correlation between '{col_a}' and "
+                    f"'{col_b}' is r={r:.2f} (n={n_samples if n_samples else 'unknown'})."
+                ),
+                evidence={"col_a": col_a, "col_b": col_b, "correlation": r, "method": method},
+                source_tool=self.name,
+                measure=col_a,
+                dimension=None if both_measures else col_b,
+                effect=r,
+                effect_kind="r",
+                confidence=confidence,
+                layer="analyst",
+            ))
+        return results
 
     def get_schema(self) -> dict[str, Any]:
         return {

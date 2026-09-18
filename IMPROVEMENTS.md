@@ -1,637 +1,1194 @@
-# Backend Audit — Improvements (Round 2)
+# Backend Improvements — open backlog
 
-Deep audit of the backend: orchestration (`src/core/controller.py`,
-`src/rlm/engine.py`, `src/core/memory.py`, `src/core/prompt_manager.py`,
-`src/core/profiler.py`, `src/core/security.py`), execution
-(`src/tools/*.py`), presentation builders (`src/core/dashboard.py`,
-`src/core/html_report.py`), entry points (`main.py`, `scripts/*`), plus a
-scoped review of `app.py` where it constrains the backend API.
+**What this file is.** The open engineering backlog for the backend and the UI,
+plus the current improvement plan (**Round 8**, live). **Items that have
+already landed are not here in full** — Round 7 and its carried-forward
+predecessors are commented out in place (`<!-- ... -->`, so the reasoning
+stays readable in the raw file/git history without cluttering the live
+backlog) and given one line each in the [closed ledger](#closed-ledger) at
+the end. Everything visible in the body of this file is either Round 8 (live)
+or a still-open item carried forward from an earlier round.
 
-Findings are ranked by impact on the system's core promise: **correct,
-fast, autonomous analysis and interpretation that a user can trust.**
+**Gate state, measured 2026-09-18 (end of the testing pass).**
+`pytest tests/ -q` (equivalently, the project's own default `-m "not slow"`
+addopts) → **472 passed, 1 deselected, 0 failed.** Round 8 initially shipped
+with no test files (an explicit interim user directive, "no testing, I'll
+test later") — that directive was then reversed the same day ("do the tests,
+make sure everything works well together"), and this gate state reflects the
+follow-up pass: full pytest coverage written for every Round 8 module (138
+new tests, listed under Round 8's own status note below), plus a real,
+independent finding from actually *running* `tests/test_planted_effects.py`
+for the first time — it had been written in the Round 7 session but never
+executed. `ruff check .` and `mypy src/` are both clean on every file this
+session touched (Round 8's own files, `controller.py`, `memory.py`,
+`segment_comparison.py`, `workforce_analysis.py`); a small, pre-existing
+type-hygiene debt remains elsewhere (12 mypy errors across 9 files nobody
+touched this session — `statistical_analysis.py`, `report_generator.py`,
+`text_analysis.py`, `geospatial.py`, `financial_analysis.py`,
+`cohort_analysis.py`, `change_analysis.py`, `clustering.py`,
+`dimensionality.py` — and ~41 pre-existing ruff findings, mostly a
+consistent-but-nonstandard `UPPER_CASE` local-variable style in
+`tests/fixtures/planted_effects.py` and unrelated issues in `ui/animations.py`)
+not addressed here since fixing them was out of this pass's scope.
 
-Every claim below is anchored to `file:line` and, where it is a
-performance claim, to a measurement taken on this machine (method in
-[Appendix A](#appendix-a--measurement-method)).
+**2026-09-18.** Round 7 (7.1–7.22, the finding bus, semantic layer, insight
+library, method-fit guards, analysis-mode decision, dashboard story layer,
+layered reports, planted-effect harness, UI restructure) plus Q1, P2.2, P3.1,
+P3.3, P3.4, R3.1, 6.1, 6.3, 6.4, P1.2, P1.6, P2.3, P2.4, P2.7, U1.2, U1.5 all
+landed and are now commented out below — see `HANDOVER.md` §1–§2c for what was
+verified and how. **Same day, later:** Round 8 was opened — LLM Sandbox mode
+(dynamic tool creation/modification) and chart-format intelligence — per a
+fresh `/goal` directive. See the Round 8 section immediately below for the
+live plan; "Still open from Round 7" (just above "Carried-forward open items")
+lists what Round 7 deliberately left for later (7.12–7.14, parts of
+7.18–7.20/7.22) so none of it got lost in the comment-out pass.
+
+**Reading order.** Round 8 is the live plan. The carried-forward items below
+it keep their original numbering (`6.x`, `U1.x`, `P1.x`…) so older notes,
+commits and conversations still resolve.
 
 ---
 
-## Round 2 status — landed this pass
+---
 
-Items below are fixed in the working tree, each with an invariant test
-added alongside it (`tests/test_controller.py`, `tests/test_ml_enhancements.py`,
-`tests/test_pipeline_3d.py`). `ruff check .`, `mypy src/`, and `pytest tests/`
-are green (217 passed).
+# Round 8 — LLM Sandbox Mode: dynamic tool creation & modification, chart intelligence
 
-| # | Item | What changed |
+**Directive (2026-09-18, via `/goal`):** implement the LLM Sandbox mode completely
+— the agent must be able to *create new tools and modify existing ones at
+runtime* for better analysis/interpretation, plus make charts that a normal
+human (not just an analyst) can look at and understand. **No testing** (user's
+explicit instruction, overriding AGENTS.md's "one unit test per tool" rule for
+this round only — verification is by direct script invocation and reading the
+code, the same pattern HANDOVER.md's Round 7 session used for its background-
+agent output, not by writing pytest files). Executed via parallel Claude Code
+subagents, one per file-owning boundary, briefed against the fixed interface
+contracts below so they don't need to coordinate live. **Ask First flags below
+are noted for the record, not re-litigated** — the `/goal` directive is the
+pre-clearance, same posture Round 7's constraints took for its own scope.
+
+**What already exists (sub-project 1 of the "Universal Dynamic Analyst" plan,
+`docs/superpowers/specs/2026-09-11-isolated-compute-sandbox-design.md`):**
+`src/core/sandbox.py` + `src/core/_sandbox_worker.py` run one-shot LLM-authored
+Python in an isolated subprocess (import allowlist, restricted builtins, no
+network/file access, timeout + soft memory cap), and `src/tools/dynamic_code.py`
+wraps it as `execute_dynamic_code`, a `BaseTool` the planner can already select.
+That sub-project explicitly scoped out 2 (self-correction retry loop), 3
+(question→code translation) and 4 (formatting results into reports/charts) as
+separate work. **Round 8 supersedes all three**: instead of one-shot code, the
+agent can register a *named, described, re-callable tool* that persists for
+the rest of the run (and optionally across runs on the same dataset), and can
+*revise* one that errored — which is what turns sub-projects 2–4 from
+"someday" into "now," because a tool that failed once can be fixed and called
+again by name instead of being a dead end.
+
+**Why not just let `execute_dynamic_code` do this already:** it is
+intentionally single-shot and un-named — every call is independent, so there
+is nothing to reuse, nothing to schedule twice, and nothing a later iteration
+can refer back to. It stays exactly as-is; Round 8 is additive.
+
+## Design decisions (resolved via `/advisor` before writing this plan)
+
+1. **The system prompt stays static and cached.** `PromptManager.get_system_prompt()`
+   is built once per `analyze()` call and handed to `RLMEngine` at construction
+   (`controller.py:1066-1071`); `LLMClient._dispatch`'s Anthropic branch marks
+   it `cache_control: ephemeral` (P1.6(b)). A tool created in iteration 3 must
+   still be plainly *callable* in iteration 4 — the answer is **not** to rebuild
+   the system prompt (which would kill the cache and re-bill the prefix every
+   cycle), but to list newly-created tools in `get_iteration_user_prompt()`,
+   which is already per-iteration and uncached. The system prompt gains exactly
+   one new *static* paragraph: what `define_analysis_tool` is, the `df`/
+   `SCHEMA`/`RESULT`/`FINDING` contract, and the allowed-module list — all of
+   which is already true for every dataset, so it costs nothing to cache.
+2. **Parameters reach generated-tool code as data, never as templated source.**
+   `run_sandboxed` gains an `extra_globals: dict[str, Any] | None` parameter,
+   threaded through the existing `input.json` handoff into
+   `_sandbox_worker._build_restricted_globals`, JSON-validated before the
+   subprocess spawns. No string concatenation into the code body, ever — a
+   parameter value with a newline or a quote in it must stay a value.
+3. **Tool registration is controller's job, not the tool's own `execute()`.**
+   AGENTS.md's layer rule ("tools/* must never drive memory/engine/controller
+   behaviour") already implies this, and it has a precedent: `clean_data`
+   doesn't call `MemorySystem.set_context("cleaned_file_path", ...)` itself —
+   the controller does, after the step succeeds (see the "Always Do" row in
+   AGENTS.md). `DefineAnalysisToolTool.execute()` only *validates and smoke-
+   tests* a proposed tool (pure, no side effects on the registry); the
+   controller, which already owns `tool_registry` and `memory`, performs the
+   actual `register()` + persistence once the step reports success.
+4. **Collision and origin guards.** `ToolRegistry.register()` (`controller.py:589`)
+   currently overwrites silently — `self._registry[tool.name] = tool` with no
+   check. A generated tool named `clean_data` would replace the real cleaner
+   for the rest of the run. New rule: a name already held by a *built-in* tool
+   is always rejected; a name already held by a *previously generated* tool is
+   allowed to overwrite **only** when the new spec is itself LLM-generated
+   (i.e. this is treated as "modification," versioned, old code kept in
+   history) — this is the mechanism that makes self-correction possible.
+5. **Generated tools are invisible to the deterministic (`--no-llm`) planner.**
+   Same pattern `DynamicCodeExecutionTool` already uses: `requires_llm = True`.
+   `ToolRegistry.candidate_tools()` already excludes `requires_llm` tools when
+   `use_llm=False` (`controller.py:634-635`), so no change to the fallback
+   sweep is needed and the R3.1 regression (a tool re-added itself to the
+   deterministic plan through the generic `applies_to` sweep) cannot recur
+   here by construction.
+6. **The static pre-check's RESULT rule must relax, or self-correction burns
+   its budget on false failures.** `_static_check` (`sandbox.py:111-115`)
+   requires a **top-level** `ast.Assign` to `RESULT`. One-shot code from a
+   single prompt rarely branches; a reusable, parameterized tool body
+   plausibly does (`if grain == "month": RESULT = ... else: RESULT = ...`).
+   Fix: walk the whole tree for *any* assignment target named `RESULT`
+   (`ast.walk` instead of `tree.body`), accepting `AnnAssign` too. The runtime
+   check (`RESULT_VAR_NAME not in restricted_globals` in `_sandbox_worker.py`)
+   remains the authoritative gate either way, so this only removes a source of
+   spurious rejections, not the safety net.
+7. **`FINDING` numbers must also land in the tool's own `output` dict.**
+   `_flag_unverified_claims` (`controller.py`) checks narrative numbers
+   against tool outputs — HANDOVER §1 documents a false-positive here from
+   rounding mismatch, already fixed with multi-precision canonicalisation.
+   A generated tool's `FINDING` evidence numbers need to appear verbatim in
+   `output` too, or every AI-generated insight gets stamped "unverified" on
+   sight. `GeneratedTool.execute()` copies `finding.evidence` values into its
+   returned `output` dict for this reason — not a workaround, a requirement.
+8. **Persistence is keyed to the dataset, never auto-reloaded across
+   datasets.** A tool generated for file A references A's columns; loading it
+   automatically against file B is a guaranteed `KeyError`. Persist to
+   `<output_root>/generated_tools/<name>.json` per run (audit + reproducibility)
+   with the dataset fingerprint (`src/core/io.py`'s existing path+mtime+size
+   cache key) recorded in the spec; reloading across sessions is opt-in and
+   fingerprint-checked, not automatic.
+9. **A hard cap on generated tools per run** (`MAX_GENERATED_TOOLS = 6`)
+   bounds tool sprawl the same way `MAX_ITERATIONS` bounds reasoning cycles.
+
+## Interface contracts (fixed so agents can build against them without syncing)
+
+```python
+# src/core/sandbox.py — extended, not replaced
+def run_sandboxed(
+    code: str,
+    dataset_ref: str,
+    extra_globals: dict[str, Any] | None = None,   # NEW — JSON-primitive values only
+    timeout_s: float = 20.0,
+    memory_limit_mb: int = 512,
+) -> SandboxResult: ...
+
+@dataclass
+class SandboxResult:
+    status: Literal["ok", "error"]
+    result: Any | None
+    finding: dict[str, Any] | None   # NEW — from an optional top-level `FINDING = {...}`,
+                                      #        same JSON-conversion rules as RESULT, never required
+    stdout: str
+    error_type: str | None
+    traceback: str | None
+    hint: str | None
+    duration_ms: float
+```
+
+```python
+# src/core/tool_factory.py — NEW
+@dataclass
+class GeneratedToolSpec:
+    name: str                       # snake_case, validated, not a built-in tool name
+    description: str
+    params_schema: dict[str, Any]   # exact BaseTool.get_schema() shape
+    code: str
+    version: int
+    created_at: str                 # ISO timestamp
+    dataset_fingerprint: str        # reuse src.core.io's path+mtime+size cache key
+    source: str = "llm_generated"
+
+def validate_spec(
+    name: str, description: str, params_schema: dict[str, Any], code: str,
+    existing_tool_names: list[str], existing_generated: dict[str, GeneratedToolSpec],
+) -> list[str]:
+    """Returns a list of human-readable error strings; [] means valid.
+    Rejects: bad snake_case, collision with a *built-in* name, malformed
+    schema, code failing the relaxed static check. Allows overwrite of a name
+    already in `existing_generated` (that's a modification, bumps version)."""
+
+def register_and_persist(
+    spec: GeneratedToolSpec, tool_registry: Any, memory: Any, output_root: str,
+) -> None:
+    """Builds a GeneratedTool from spec, tool_registry.register()s it,
+    appends/updates it on memory's generated-tools list, writes
+    <output_root>/generated_tools/<name>.json (with prior versions under a
+    `history` key, not overwritten)."""
+
+def load_persisted_tools(output_root: str, dataset_fingerprint: str) -> list[GeneratedToolSpec]:
+    """Opt-in reload for a matching dataset fingerprint only — never auto-runs
+    across datasets."""
+```
+
+```python
+# src/tools/generated_tool.py — NEW
+class GeneratedTool(BaseTool):
+    requires_llm = True   # invisible to the --no-llm deterministic planner (decision 5)
+    def __init__(self, spec: GeneratedToolSpec) -> None: ...
+    def get_schema(self) -> dict[str, Any]: return self.spec.params_schema
+    def execute(self, file_path: str, **kwargs: Any) -> dict[str, Any]:
+        """extra_globals = kwargs (minus file_path), JSON-validated; delegates
+        to run_sandboxed(self.spec.code, file_path, extra_globals=...). Copies
+        sandbox_result.finding's evidence numbers into the returned output
+        dict (decision 7) before returning."""
+    def findings(self, output, profile, metadata) -> list[Finding]:
+        """Builds one Finding from output["finding_payload"] if present;
+        tags caveats=["AI-generated analysis tool"] for the trust surface
+        (T8); never raises — malformed payload means no finding, not a crash."""
+
+# src/tools/define_analysis_tool.py — NEW
+class DefineAnalysisToolTool(BaseTool):
+    requires_llm = True
+    name = "define_analysis_tool"
+    def execute(self, tool_name, description, params_schema, code,
+                example_params=None, file_path=None, **_) -> dict[str, Any]:
+        """PURE — no registry/memory mutation (decision 3). Relaxed-static-
+        checks `code`, optionally smoke-tests it once via run_sandboxed with
+        example_params against file_path, returns {"summary", "status":
+        "ready"|"error", "spec": {...}, "hint": ...}. Controller reads
+        output["status"]=="ready" to decide whether to call
+        tool_factory.register_and_persist()."""
+```
+
+## Work items
+
+| # | Item | Owner | Files | Flags |
+| :-- | :--- | :--- | :--- | :--- |
+| **8.1** | `extra_globals` threading + relaxed static check + optional `FINDING` | Agent A | `src/core/sandbox.py`, `src/core/_sandbox_worker.py` | additive, no existing behaviour changes for `execute_dynamic_code` |
+| **8.2** | Tool factory + `GeneratedTool` + meta-tool | Agent B | `src/core/tool_factory.py` (NEW), `src/tools/generated_tool.py` (NEW), `src/tools/define_analysis_tool.py` (NEW) | **Ask First** (new tool contract) — pre-cleared by `/goal` |
+| **8.3** | Controller/memory/prompt wiring: register meta-tool, post-step registration hook, `generated_tools` on `MemorySystem`, iteration-prompt block, one static system-prompt paragraph | **Main session** (highest blast radius — `controller.py` is the contention point per every prior round) | `src/core/controller.py`, `src/core/memory.py`, `src/core/prompt_manager.py` | **Ask First** (`MemorySystem` schema) — pre-cleared |
+| **8.4** | Chart intelligence: wire `unit_hint` → Vega `axis`/tooltip `format` + human axis titles, sort categorical bars by value, one-line plain-language captions on un-bound EDA filler panels | Agent C | `src/core/dashboard.py`, `src/core/chart_theme.py` | Load the `dataviz` skill first. **Do not** re-touch panel selection/suppression/cross-filtering/theme tokens/tab structure — 7.8/7.15/7.17/7.18 already landed those (HANDOVER §2c); re-auditing them is out of scope and wastes the round |
+
+### 8.4 detail — the actual gap, not a dashboard rewrite
+
+`unit_hint` (`profiler.py`'s semantic layer) is read today only for measure
+*selection* (`dashboard.py:307`) and sum-vs-mean aggregation choice
+(`dashboard.py:600`) — never for how a value is *displayed*. A revenue chart's
+axis shows `269.3`, not `$269`; a churn-rate chart shows `0.17`, not `17%`.
+That is the concrete "make it make sense to a normal human" gap, and it's
+narrow and mechanical:
+
+- `chart_theme.py` gains `axis_format(unit_hint: str | None) -> dict[str, str]`
+  returning e.g. `{"format": "$,.0f"}` for `"currency"`, `{"format": ".0%"}`
+  for `"percent"`, `{"format": ",d"}` for `"count"`, `{}` otherwise — theme-
+  adjacent, not per-chart hardcoded, matching how `vega_config()` is already
+  the one place colour lives.
+- Every `ChartSpec` builder in `dashboard.py` that knows a column's
+  `unit_hint` (histogram, time-series, category/bar, box plot) applies it to
+  the relevant `encoding.<channel>.axis` and tooltip format, and gives the
+  axis a human title (`"Amount ($)"` not `"amount"`) rather than leaving the
+  raw column name as the label.
+- Category/segment bar charts get `"sort": "-y"` (or `-x`) wherever order
+  doesn't already carry meaning (i.e. not already time-ordered), so the
+  tallest bar reads first instead of alphabetical column order.
+- EDA filler panels — the histograms/category-count charts with **no** bound
+  finding (everything with a finding already gets a caption from 7.18) —
+  get a one-line plain-language caption computed from data already on hand
+  (`_five_number_summary`, category counts): "Most values fall between X and
+  Y" / "Three categories cover N% of rows." Small, bounded, not a new
+  analysis.
+
+## Verification (no pytest, per directive)
+
+Each agent verifies its own slice by **direct invocation**, not by writing
+test files — the same pattern Round 7's session used to validate background-
+agent output (HANDOVER.md §1, §2c):
+- Agent A: a scratch script calling `run_sandboxed(code, ref, extra_globals={"k": "v"})`
+  directly and printing the result — confirms the value round-trips and the
+  relaxed static check still rejects a genuinely missing `RESULT`.
+- Agent B: a scratch script building a `GeneratedToolSpec` by hand, calling
+  `GeneratedTool(spec).run(file_path=..., **params)` directly against a real
+  fixture CSV — confirms `execute()`/`get_schema()`/`findings()` all round-trip
+  without the controller in the loop yet.
+- Main session (8.3): once A and B land, a full `main.py --no-llm` smoke run
+  first (must stay green — generated tools must not appear, per decision 5),
+  then a targeted script that constructs `AgentController`, calls
+  `tool_registry.register(GeneratedTool(spec))` directly (simulating what the
+  controller hook will do), and confirms the tool is callable by name and its
+  `findings()` output reaches `memory.ranked_findings()`.
+- Agent C: re-run the existing `out_test` smoke-run reports and visually
+  confirm (by reading the emitted `dashboard.json`/`report.html` chart specs)
+  that a currency measure's axis now carries a `$` format and a percent
+  measure carries `%` — no visual/browser check needed since the artifact is
+  plain JSON.
+
+## Sequencing
+
+```
+8.1 (Agent A) ─┐
+8.2 (Agent B) ─┼─→ 8.3 (main session, integrates all three) ─→ done
+8.4 (Agent C) ─┘        (chart work is independent of 8.1/8.2)
+```
+
+8.1 and 8.2 must both land before 8.3's controller hook can be wired
+end-to-end (the hook calls `tool_factory.register_and_persist`, which builds
+on `GeneratedTool`, which calls the extended `run_sandboxed`), but both agents
+can build against the interface contracts above without waiting on each
+other. 8.4 has no dependency on 8.1–8.3 and runs fully in parallel.
+
+## Status: landed 2026-09-18, verified end-to-end
+
+All four items (8.1–8.4) landed via three parallel subagents plus the main
+session's own controller/memory/prompt wiring, exactly against the interface
+contracts above — no deviations reported by any agent except two the agents
+caught and fixed themselves before handback: a non-deterministic `finding_id`
+(was using Python's randomized `hash()`, replaced with a deterministic slug —
+`BaseTool`'s documented determinism contract requires this) and
+`validate_spec` not originally rejecting a declared parameter named `df`/
+`SCHEMA`/`RESULT`/`FINDING` (would have collided with the sandbox's reserved
+globals on every call — now rejected at definition time).
+
+**Verified together, end-to-end, by direct invocation** (a throwaway script,
+deleted after use — no pytest, per directive): `define_analysis_tool` called
+directly on the churn dataset defined a real tool (`high_charge_share`,
+sharing customers above mean `monthly_charges`, with a `FINDING` payload);
+`_maybe_register_generated_tool` registered it into the live `ToolRegistry`
+and persisted its spec to `<run>/generated_tools/high_charge_share.json`;
+the tool was then called by name, returned `status="ok"`, and its
+`findings()` produced a `Finding` (`"58% of customers pay above the 50
+average"`) that reached `memory.ranked_findings()` — the full loop the
+finding bus (Round 7) was built to support. Also verified: the generated
+tool and the meta-tool are both **absent** from `candidate_tools(use_llm=False)`
+(decision 5 holds), and a collision attempt naming a generated tool
+`clean_data` was rejected with the real `CleanDataTool` left untouched
+(decision 4 holds). The full `main.py --no-llm` pipeline was re-run twice
+during this work (once after the controller/memory/prompt wiring, once after
+all three agents' changes were combined) and stayed green both times — no
+regression to the existing deterministic path.
+
+**Not verified this round:** an actual LLM-driven run exercising
+`define_analysis_tool` from a real model's own plan (everything above called
+the tool directly, bypassing the planner); opening the Streamlit app to see a
+generated-tool finding/chart rendered in the UI; the `load_persisted_tools`
+cross-session reload path (built and unit-verified by Agent B in isolation,
+not exercised from a second `analyze()` run in this session). None of these
+block calling Round 8 done — they're the honest list of what a live/UI pass
+would still confirm.
+
+### Follow-up testing pass (2026-09-18, same day)
+
+The "no testing" directive above was reversed later the same day ("do the
+tests, make sure everything works well together"). What that pass added,
+beyond the manual verification already described:
+
+- **138 new pytest tests**, real (no mocking of the code under test):
+  `tests/test_sandbox.py`/`tests/test_sandbox_worker.py` (extended —
+  `extra_globals`/`FINDING`/the relaxed static check), `tests/test_tool_factory.py`,
+  `tests/test_generated_tool.py`, `tests/test_define_analysis_tool.py`
+  (all new), `tests/test_round8_tool_creation.py` (new — the full
+  define→register→call→finding-bus→collision-guard loop, formalizing the
+  manual script above as a repeatable test), `tests/test_chart_theme.py` and
+  `tests/test_dashboard_chart_formatting.py` (new — 8.4's unit-format work,
+  exercised through real `build_dashboard()` calls, not just the theme
+  functions in isolation).
+- **Two pre-existing stale tests fixed** (predating Round 8, surfaced by
+  actually running the suite): `tests/test_sandbox.py`'s
+  `test_result_assignment_nested_in_if_not_recognized` asserted the exact
+  behavior decision 6 deliberately relaxed — rewritten to assert the new
+  contract instead of reverting it; `tests/test_data_shapes.py`'s
+  `test_json_records_rejects_with_clear_error` asserted JSON support didn't
+  exist, which stopped being true when U1.2 landed in Round 7 — rewritten to
+  assert successful parsing.
+- **`tests/test_planted_effects.py` was run for the first time** (written in
+  the Round 7 session per its own harness design, per HANDOVER.md never
+  actually executed before now) and found **5 real, pre-existing failures**
+  — none caused by Round 8, all latent since Round 7. Diagnosed and fixed,
+  one finding bus/pipeline bug each except where noted:
+  - **Concentration finding missing on a transactional fixture** — the
+    fixture's own construction was too uniform (13.73% top-decile share,
+    below both `cohort_analysis`/`concentration_analysis`'s shared 15%
+    triviality floor) to produce a real concentration signal; fixed the
+    *fixture* (added a genuine top-decile-spends-3x plant), not the tools.
+  - **`segment_comparison` never tested a classification target against any
+    dimension at all** — its measure-selection helper only included binary
+    flags (like `churn`) as a last resort when no continuous measure
+    existed, and `default_params()` separately pinned the sweep to a
+    currency-flavoured column instead of the dataset's actual target. Real
+    pipeline bug, fixed in `src/tools/segment_comparison.py`.
+  - **Drawdown fixture's background noise organically exceeded its own
+    planted drawdown** — `financial_analysis.py`'s max-drawdown calculation
+    was verified correct; the fixture's unrelated random walk produced a
+    larger, unplanted decline elsewhere in the series. Fixed the fixture
+    (capped incidental drawdowns below the planted one).
+  - **No pay-gap finding possible without a gender/sex column** — the only
+    "unadjusted pay gap" comparison implemented was gender/sex-specific,
+    even though the tool already computed per-department medians right next
+    to it. Real coverage gap, fixed in `src/tools/workforce_analysis.py`
+    (generalized to a reusable `_pay_gap_between()` helper, called for both
+    department and gender/sex independently).
+  - **A datetime column got auto-selected as an ML target at 20%
+    confidence** — two related real bugs: `DatasetMetadata.detect_target_with_confidence()`
+    (`src/core/memory.py`) never excluded datetime-typed columns from
+    candidacy, and `_decide_analysis_mode()` (`src/core/controller.py`)
+    recorded `mode: "model"` for any non-None candidate regardless of
+    confidence, disconnected from the confidence bands its own caller
+    actually acts on. Both fixed — a real "decline to model" bug independent
+    of the specific fixture.
+- **Two mypy regressions caught in review, not by the diagnostic agent's own
+  run** (it doesn't run mypy): a variable named `_` in
+  `workforce_analysis.py` shadowed `execute()`'s own `**_: Any` kwargs
+  catch-all parameter (renamed); a stale `# type: ignore[override]` on
+  `findings()` was carried over unnecessarily during the same edit (removed).
+  Full suite re-confirmed green (472 passed) after both fixes.
+- **Final state**: `pytest tests/ -q` → 472 passed, 1 deselected, 0 failed.
+  `ruff`/`mypy` clean on every file this pass touched. Two more `main.py
+  --no-llm` smoke runs, both clean.
+
+---
+
+<!--
+
+Closed 2026-09-18 — see HANDOVER.md §1-§2c for the validated implementation
+and the Closed Ledger at the end of this file for one-line pointers per item.
+Kept here, commented out, for the historical reasoning behind each item.
+
+# Round 7 — Autonomy & Insight-Quality Audit
+
+**Question asked:** the goal is an app that is *fully autonomous on any field of
+data* and returns the *best dynamic report, dashboard, charts and real human
+insights* possible. What would that take, and where is the current backend
+against it?
+
+**Method.** Read the whole backend (`src/core/*`, `src/rlm/engine.py`,
+`src/tools/*`, `main.py`, the report/dashboard builders, and `app.py` where it
+constrains the backend API), then **ran the pipeline end-to-end twice** and
+judged the artifacts it produced, rather than reasoning from source alone:
+
+| Run | Dataset | Command | Time |
+| :-- | :--- | :--- | :--- |
+| A | `data/sample_customer_churn.csv` (1,500 × 21, classification) | `main.py --no-llm` | 60 s |
+| B | synthetic transactional CSV (4,000 × 8: `order_id`, `order_date`, `customer_id`, `region`, `product_category`, `quantity`, `amount`, `discount_pct`) | `main.py --no-llm` | 25 s |
+
+Run B was built with three **planted effects** so the output could be graded
+rather than admired: a +25% revenue premium in `region == "West"`, a ×1.4
+November/December seasonal lift, and 10 orders per customer (repeat-purchase
+structure). Artifacts inspected: `*_report.md`, `*_raw.json`,
+`dashboard.json`, `report.html`, `final_report.json`, console output.
+
+**Scope note.** Rounds 2–4 audited *correctness of the ML path*; Round 5
+audited *generality of the data path*; Round 6 was domain-layer residue. **None
+of them asked whether the output is any good.** That is this round. Where an
+item here is already logged elsewhere it is cross-referenced, not restated.
+
+**Constraints confirmed with the user before writing this:**
+
+1. **LLM-on is the primary mode**; deterministic is a fallback that must be
+   decent, not equal. *Caveat on this whole round: both runs were `--no-llm`,
+   so the plan below is graded against the deterministic path. Findings 7.1–7.7
+   and 7.10 are structural and hit both paths; 7.12 is where the LLM path's own
+   gaps are collected and is explicitly ungraded until a provider is run.*
+2. **Audience is "all types of people"** → the report must be *layered*, not
+   re-pitched: one executive surface, one analyst surface, one appendix.
+3. **Structural change is allowed**, including new core modules, new tools, a
+   changed `MemorySystem` schema, and changes to the agent loop. AGENTS.md's
+   "Ask First" gates are therefore pre-cleared for this round's items, but each
+   one below still carries its flag so the blast radius stays visible.
+4. **Dashboard stack: a recommendation was requested.** See
+   [Appendix A](#appendix-a--recommended-dashboard-configuration). Short
+   version: keep Vega-Lite as the spec language, change *what* is put in the
+   specs and how they are assembled.
+
+---
+
+## Phase 1 — Target state: what the goal actually requires
+
+Ten capabilities. Each is phrased as a property of the *output*, because that is
+what the goal is about; the code implication follows.
+
+**T1 — Semantic type & grain layer.** The system must know that a column is a
+*measure* (revenue, charges), a *dimension* (region, contract), a *flag* (0/1
+senior_citizen), an *ordinal* (rating 1–5), an *identifier*, or a *time axis* —
+and what one row *is* (one order? one customer? one customer-month?). Structural
+kind (`numeric`/`categorical`) is not enough: almost every defect in Phase 2
+traces back to a flag or a measure being treated as generic numeric.
+
+**T2 — An explicit analysis-mode decision.** Before planning, the system should
+decide and *record* whether this dataset calls for description, explanation,
+prediction, forecasting, segmentation, or comparison — and be willing to answer
+"this is a descriptive dataset; there is nothing here worth predicting."
+Autonomy includes the autonomy to decline to model.
+
+**T3 — A question agenda, not a tool list.** A human analyst starts from
+questions ("which segments churn most?", "is revenue growing?", "what
+concentrates?") and then picks methods. The agenda should be generated from the
+semantic layer + objective, ranked by expected value, and *then* mapped to tool
+calls — so coverage is judged in question space, where a user's "why" lives.
+
+**T4 — One finding bus.** Every analysis should emit structured `Finding`
+objects (claim, the numbers behind it, effect size, direction, confidence,
+surprise, audience-facing sentence, caveat, chart binding). Insights, the
+Markdown report, the HTML report, the dashboard and the UI should all be
+*projections of the same ranked finding list*. Any output surface that
+re-derives its own narrative from raw tool JSON will drift — and today three of
+them do, each differently.
+
+**T5 — An insight library that matches what humans call insight.** Concretely:
+segment-vs-baseline rate/mean comparison with lift; driver direction *at level
+granularity* ("month-to-month contracts churn 3.1× the base rate"), not
+"`contract` is a categorical feature"; concentration (Pareto); change over time
+on the correct grain; cohort behaviour; anomalies and regime breaks;
+missingness that correlates with the target; relationship strength with
+practical meaning. Plus the inverse — **triviality suppression**: a histogram of
+a 0/1 flag, a uniform category count, an outlier scan that flags 39% of rows are
+noise and must not be printed as findings.
+
+**T6 — Layered narrative.** Headline → so-what → evidence → method, generated
+by the LLM *from findings only* (the verbatim-number enforcement in
+`_flag_unverified_claims` already exists and is the right mechanism to build
+on). Non-technical readers get lift and money; analysts get effect sizes and
+diagnostics; the appendix carries methodology and caveats.
+
+**T7 — Dashboard as a story, not a gallery.** Panels chosen because a finding
+needs them, ordered by that finding's rank, each captioned with what it shows;
+cross-filtering within a section; low-value panels suppressed; aggregate-first
+data so specs stay small and unbiased.
+
+**T8 — Trust surfaces.** Effect size before p-value — Round 5 item 4 landed
+this properly (the stats tool leads with the effect, and the BH table reaches
+the reports' limitations section), so the remaining gap is *ranking*: findings
+are still ordered by tool execution order, not by effect size, so a negligible
+result can sit above a large one. Plus method-fit checks (don't run IQR on flags, don't log1p a negatively-skewed
+binary); sufficiency gates that actually gate rather than warn; a quality score
+that discriminates.
+
+**T9 — Time to first insight.** A profile + cheap findings within seconds, deep
+work streamed behind it. Run A spent 45 s of 60 s inside `train_model` with
+tuning on by default. For an interactive app that is a product problem, not
+just the perf item P1.2 files it as.
+
+**T10 — Measurable insight quality.** Planted-effect datasets plus an assertion
+harness: "on this file, the system must report the West premium, the Q4 lift and
+the repeat-purchase concentration." Without this, "best insights possible" is
+unfalsifiable and every later change is a matter of taste. Run B was a one-off
+version of exactly this, and the system failed all three plants.
+
+---
+
+## Phase 2 — What the runs actually produced
+
+### Run A — churn (classification, no domain match)
+
+| Observed in the artifacts | Why it matters |
+| :--- | :--- |
+| Key Insight #5 was `Mann-Whitney U` on **`feature_column='senior_citizen'`, `group_column='gender'`** — p=0.0846, "negligible effect" | Nobody asked whether a 0/1 senior-citizen flag differs by gender. A non-question became a headline finding, and then the **only row** in the Benjamini-Hochberg table in both reports. |
+| `treatments_applied`: **"Applied log1p to `phone_service` (skew=-2.94 — heavy tail compressed)"** | `phone_service` is a 0/1 flag, and log1p is wrong for *negative* skew in any case. Reported to the user as a considered decision. |
+| **39.47%** of rows flagged as outliers (IQR), printed as Key Insight #4 | At 39% the honest finding is "IQR does not fit this data" (flags + skewed charges). No per-column breakdown is emitted, so the number can't be interrogated. |
+| `evaluate_model` computed `driver_narrative`: **`contract` #1, `tenure_months` #2, `internet_service` #3** | The single most insight-like output of the run. It reaches `report.html` and nothing else — absent from `insights`, the Markdown Key Insights, `final_report.json` and the CLI summary. And `contract`'s entry reads "a categorical feature", with no direction and no level named. |
+| Quality score **100/100** with 11 missing cells, an ID column and the above | The score does not discriminate. |
+| Dashboard: 13 panels including `Distribution — senior_citizen` (a binary), `Category Counts — gender` (uniform by construction) | Panels are chosen by column kind and cardinality, not by whether they carry a finding. `contract` — the #1 driver — gets **no panel at all**. |
+| Ingest log line says `task=clustering` while the run trained a classifier | `IngestDatasetTool` runs before target auto-detection; the tool log contradicts the run. Cosmetic, but it is in the report. |
+
+### Run B — transactional (domain matched, planted effects)
+
+| Observed | Why it matters |
+| :--- | :--- |
+| Domain inference: `transactional`, **confidence 1.00**, roles fully resolved, evidence "10.0 rows per customer" | The domain layer works. This is the foundation the rest of the plan builds on. |
+| `cohort_analysis` summary: *"4,000 transactions totalling 704,945.38 …; 399 customers, 99.8% repeat; top 10% of customers drive 18.9% of revenue"* | The best human sentence the whole system produced — and it appears in **no** insight list, **no** chart, and not in the Markdown report's "Additional Analyses" (which covers `cluster_data`, `time_series_analysis`, `text_analysis`, `geospatial_analysis`, `dimensionality_analysis` only — cf. item 6.1, which logged the *chart* half of this gap). |
+| `time_series_analysis` ran over **4,000 raw transaction rows** in row order → *"No clear trend (R²=0.0006)… no strong seasonal signal"* | The planted ×1.4 Q4 lift was **missed**. A transaction log is not a series; it must be aggregated to a grain (daily/weekly/monthly **sum** of the measure) before trend/seasonality means anything. |
+| Trend chart: **"monthly mean `quantity`"** | Wrong measure (`quantity`, not `amount`) and wrong aggregate (mean, not sum) for a revenue question. Chosen by `_rank_numeric_features` variance ranking, which has no notion of a measure. |
+| `train_model` fitted a **regression on `amount`** (R² 0.81, `split=time_series`) | No one asked for a prediction. `amount` was auto-selected purely because the name heuristic lists it (`_NUMERIC_TARGET_NAMES` in `memory.py`, 0.85 ≥ the 0.75 autonomy threshold), then 4 models were trained to predict revenue from quantity and category — near-tautological, and it consumed most of the run. |
+| `select_statistical_test`: **`quantity` by `region`** → p=0.0574, negligible | The planted effect is `amount` by `region` (+25%). The tool tested the neighbouring column and reported "no effect", i.e. an actively misleading answer. |
+| Planted effects found: **0 of 3** (West premium, Q4 lift, revenue concentration — the last computed but never surfaced) | This is the headline result of the round. |
+| Dashboard: 8 panels, including `Relationship — quantity vs discount_pct` | No revenue-over-time, no revenue-by-region, no revenue-by-category panel. For a sales file, the three charts anyone would want are all absent. |
+
+---
+
+## Phase 3 — Gap analysis against the current codebase
+
+| Target | What exists today | Gap |
 | :-- | :--- | :--- |
-| §0 | Stale tests | `_parse_steps` calls bound to a controller instance; palette assertion re-pointed at the current Ledger tokens (`ink=#3a2b1e`, `pen=#a34f20`, `risk=#a33526`, plus `accent`/`grid`). |
-| P0.2 | CV leakage | `cross_val_score` now fits `X_train`/`y_train`, never the full `X`/`y`. |
-| P1.2(1) | Redundant CV after tuning | `_tune` returns `cv_mean`/`cv_std` from `search.best_score_`/`cv_results_`; the separate `cross_val_score` call is skipped when tuning ran. |
-| P0.8 | `max_iterations` env override | Explicit constructor argument now wins over `MAX_ITERATIONS`, mirroring `enable_rlm`. |
-| P2.3 | `clean_data`/`detect_outliers` write next to input | Both now declare `output_subdir = "data"`, routing writes under the run's output root by default. |
-| P1.7 | New HTTP client per LLM call | `LLMClient` builds the SDK client once (lazily) and reuses it. |
-| P0.9 / P1.4 | Re-executing already-succeeded steps | `AgentController._step_cache` keyed on `(tool_name, resolved params, input file mtime+size)` — an identical re-planned step is served from cache instead of re-run (closes the `train_model` overwrite race). |
-| P0.3 | Time-series/panel structure never reached the splitter | `TrainModelTool.prepare_params` reads `is_time_series`/`panel_group_cols` from `data_profile` and sets `split_strategy`; `execute` branches (via shared `_resolve_split_strategy`/`_split_train_test` helpers) to a chronological split + `TimeSeriesSplit`, or `GroupShuffleSplit`/`GroupKFold` on the entity column, which is also dropped from the feature matrix (it's a split key, not a feature). Reported in output as `split_strategy`/`time_column`/`group_column`, and **persisted to memory context so `EvaluateModelTool` recreates the identical partition** — the two tools now share one split implementation instead of `evaluate_model` silently reverting to a random split on the exact datasets this fix targets. |
-| P0.4 | Datetime columns dropped before modelling | `_prepare_features` now expands them into `year/month/day/dayofweek/hour/is_weekend/days_since_min` instead of dropping (ordered *after* P0.3's chronological sort, so the raw column still orders the split first). |
-| P0.7 | "Cite only verbatim metrics" unenforced | `AgentController._flag_unverified_claims` runs between the reasoning loop and Stage 7: any numeric literal in `insights`/`recommendations`/`key_metrics` not traceable to an actual tool result is annotated `[unverified: ...]` in place and logged to `memory.set_context("unverified_claims", ...)`. Verified the deterministic fallback path can't trip its own validator (it only ever echoes real tool numbers) with an explicit test. |
-
-**Caught in self-review before landing (worth recording — both were introduced
-by the P0.2/P1.2 and P0.3 fixes above, not pre-existing):**
-- `_tune`'s `cv_std` initially computed `std(mean_test_score)` — the spread
-  *between candidate configurations* — instead of `std_test_score[best_index_]`,
-  the fold-to-fold variability of the actually-selected model. Fixed to read
-  the latter, which is what the untuned path's `cross_val_score(...).std()`
-  has always meant.
-- `EvaluateModelTool` still called a bare `train_test_split` after P0.3 landed
-  in `TrainModelTool` — meaning evaluate's "held-out" rows on a time-series or
-  panel dataset would include rows the model *had* trained on, inflating
-  exactly the metric P0.3 was fixing. Extracted `_resolve_split_strategy`/
-  `_split_train_test` as shared helpers and wired `EvaluateModelTool` to use
-  the same persisted `split_strategy` train_model resolved.
-
-**Not done this pass — deliberately deferred, not silently dropped:**
-
-- **P0.1 / P0.5 / P0.6** (the `Pipeline`/`ColumnTransformer` refactor —
-  imputation/encoding/log-transform fit on train-only, self-contained
-  saved models, one-hot for linear models). This is the single largest
-  remaining correctness gap and the right next target, but it's a
-  multi-file refactor touching `CleanDataTool`, `_prepare_features`,
-  every model's save/load path, and `EvaluateModelTool`'s re-derivation
-  logic — too large to land safely in the same pass as everything above.
-  **Landed in Round 4, below** (attempted and reverted once mid-Round-2
-  session before that; see Round 4 for what actually shipped).
-- **P1.5** (parallelise RLM sub-tasks) — `src/rlm/engine.py` is
-  AGENTS.md "Ask First" territory.
-- **P2.1, P2.2, P2.4, P2.5, P2.6, P2.7** — structural cleanup, best done
-  once the above settle.
-- **P3.x, P4.1, P4.2** — observability, lockfile, coverage measurement,
-  tests for the four untested tools.
-- **P2.3's second half** — `resolve_output_path` is still not called from
-  any tool's write path; only the default-location half of the finding
-  (`output_subdir`) is fixed. An LLM-supplied `output_dir` can still point
-  outside the output root.
+| T1 semantic layer | `profiler.py:263-341` — kinds: numeric / categorical / datetime / boolean / identifier / constant / text; flags: `severe_skew`, `high_cardinality`, `high_missing`, `id_like`. `domains.py` adds semantic *roles* but only for 3 registered domains | No measure/dimension/flag/ordinal distinction, no units, no row-grain fact. 0/1 ints are plain `numeric`, which is the root of the log1p, IQR, histogram and test-pairing defects |
+| T2 analysis mode | `metadata.infer_task_type()` (`memory.py:184-205`) + confidence-gated target detection (`controller.py:722-785`) | Only ever chooses classification / regression / clustering / eda. No "describe, don't model" outcome; a name-matched numeric column becomes a regression target unconditionally |
+| T3 question agenda | `ToolRegistry.candidate_tools` scores tools via `applies_to` (`controller.py:557-598`); `_build_fallback_plan` sweeps them by score | Planning is in *tool* space. Nothing represents the question a tool is meant to answer, so parameter choice is arbitrary (`statistical_analysis.py:219-240` takes `numeric[0]`/`groups[0]` positionally) and coverage is never assessed against the objective |
+| T4 finding bus | `ToolResult.output` dicts + three independent narrators: `_deterministic_final` (`controller.py:1320-1432`), `report_generator._format_additional_analyses` (`report_generator.py:183-238`), `html_report.build_html_report` (`html_report.py:159+`) | Each surface hardcodes a different subset of tools. `_deterministic_final` knows 5 tools (train, correlation, outliers, stat-test, cluster); drivers, cohort, financial, workforce, time-series, geo, PCA never become insights. This is one bug repeated per surface, and it is why Run B's best sentence vanished |
+| T5 insight library | Real analysis exists in `statistical_analysis.py`, `cohort_analysis.py`, `financial_analysis.py`, `workforce_analysis.py`, `ml_pipeline._explain_drivers` | No segment-vs-baseline comparison anywhere (the core of "why"); driver direction stops at "a categorical feature"; no concentration/Pareto as a general tool; no triviality suppression — everything computed is printed |
+| T6 layered narrative | `PromptManager` Form 2 (`insights` / `recommendations` / `key_metrics`); `_flag_unverified_claims` (`controller.py:1690-1734`) enforces verbatim numbers | Flat lists, one register for all readers. The grounding mechanism is good and should become the *contract* for a narrative written from findings |
+| T7 dashboard story | `dashboard.py` — 11 builders, fixed candidate order (`dashboard.py:638-651`), `MAX_POINTS=1000` random row sample inlined per chart | Column-driven, not finding-driven; no suppression; no cross-filter; no captions tied to a finding; `cohort`/`financial`/`workforce` unpanelled (item 6.1); raw rows inlined per chart (P2.7) |
+| T8 trust | Effect sizes + CIs + sample-size notes in the stats tool; `_detect_target_leakage`; `_TREND_MIN_R_SQUARED`; `degradations.py`; BH correction at report time | No method-fit gate (IQR on flags — item 6.4; `_SkewLog1pTransformer.fit` at `ml_pipeline.py:139-156` uses `abs(skew)` and only skips `min < 0`, so a negatively-skewed 0/1 flag is log1p'd); `is_sufficient` warns but does not gate; quality score saturates at 100 |
+| T9 speed | `--no-ml`, `_step_cache`, read cache, `n_jobs=1` (measured, P1.3) | Tuning on by default = 45 s of a 60 s run (P1.2); `analyze()` is blocking with callbacks only (P2.5); no progressive "cheap findings first" stage |
+| T10 measurable quality | `tests/` (232 passing), `scripts/validate.py`, `scripts/dry_run.py`, `tests/test_data_shapes.py` | Tests assert *mechanism* ("a chart spec is JSON-serialisable"), never *insight recovery*. Nothing would have failed when Run B missed all three planted effects |
 
 ---
 
-## Round 3 — data-flow/tool-value audit, landed items
+## Phase 4 — Prioritised improvement plan
 
-Separate exercise from the correctness audit above: traced what each of
-the 14 registered tools produces against what actually reaches a user
-(Streamlit tabs in `app.py`, the Vega dashboard in `dashboard.py`, the
-HTML/Markdown reports). Two real findings, both fixed and covered by tests
-(`tests/test_dashboard.py::test_time_series_chart_uses_tool_columns_and_findings`):
-
-1. **`generate_visualizations`'s PNGs reached nobody.** Grepped `.png` /
-   `chart_path` / `image_path` across `app.py`, `html_report.py`,
-   `report_generator.py` — zero consumers; the interactive Vega dashboard
-   already covers the same ground better. Yet the deterministic no-target
-   fallback plan still called it every run
-   (`controller.py`, `_build_fallback_plan`). **Fixed:** removed that step;
-   the tool stays registered for the LLM planner to call deliberately.
-2. **Five tools' findings had no narrated UI surface.** `cluster_data`,
-   `time_series_analysis`, `text_analysis`, `geospatial_analysis`,
-   `dimensionality_analysis` results were reachable only via the raw
-   "Full Technical Log" JSON dump — no dedicated tab section, and only
-   `cluster_data` got a dashboard chart. **Fixed:**
-   - `app.py`: `_render_other_findings()` — a generic "Other Analyses"
-     card in the Full Details tab covering all five, so a future tool
-     without a bespoke renderer is never JSON-only again.
-   - `dashboard.py`: the time-series chart now reads
-     `time_series_analysis`'s actual `date_column`/`value_column` (instead
-     of independently re-guessing) and its description states the tool's
-     trend/stationarity/seasonality findings, not just the axis labels.
-
-Deferred from the same audit (lower value/effort, natural follow-ons once
-the above shapes existed) — not implemented, ranked below the two items
-above: a dedicated geospatial chart, a PCA scree-plot chart for
-`dimensionality_analysis`, promoting these findings into the Summary tab
-when they're a dataset's dominant story, and pointing
-`report_generator.py`'s Markdown log at the same richer formatting instead
-of a one-line-per-tool log.
-
----
-
-## Round 4 — Pipeline/ColumnTransformer refactor (P0.1, P0.5, P0.6), landed
-
-Closes the single largest deferred item from Round 2. `_prepare_features`
-now does only structural feature engineering (datetime expansion, ID-column
-dropping) — no statistic is fit there any more. Skew-decision and
-categorical encoding moved into a `Pipeline([("prep", ColumnTransformer),
-("model", estimator)])` built by `_build_preprocessor` and fit exclusively
-on `X_train`:
-
-- `_SkewLog1pTransformer` (`src/tools/ml_pipeline.py`) decides, at `fit`,
-  which numeric columns are skewed enough for log1p — from whichever frame
-  it's fit on, so wiring it into the Pipeline is what makes the decision
-  train-fold-only (closes P0.1). Clips at transform so a test-fold negative
-  in a column the training fold saw as non-negative doesn't produce NaN.
-- `_build_preprocessor(X, encoding)` — `OneHotEncoder(handle_unknown=
-  "ignore")` for `LINEAR_MODELS = {logistic_regression, linear_regression,
-  ridge}`, `OrdinalEncoder(handle_unknown="use_encoded_value",
-  unknown_value=-1)` for tree/ensemble and clustering models (closes P0.6).
-  `SimpleImputer` (median for numeric, most-frequent for categorical) runs
-  per branch — this is *new* behavior, not a port: `_prepare_features`
-  never imputed (`CleanDataTool` did that, upstream, on its own separate
-  full-dataset pass); a model trained on an uncleaned file now silently
-  imputes inside the pipeline instead of failing or carrying NaNs through.
-  Named per the P0.1/P0.5 fix IMPROVEMENTS.md already specified.
-- The whole `Pipeline` is pickled (closes P0.5 — a saved model is now
-  self-contained; scoring new data no longer depends on `EvaluateModelTool`
-  coincidentally re-deriving identical `LabelEncoder` state from the same
-  file).
-- `TrainModelTool._tune` tunes the whole `Pipeline` — grid keys are
-  prefixed `model__` for `RandomizedSearchCV` and the prefix is stripped
-  from the returned `best_params` before it reaches the report.
-- `TrainModelTool`'s clustering branch (`kmeans`/`dbscan`) gets its own
-  `_build_preprocessor(X_train, "ordinal")` wrap — it stopped getting free
-  imputation/encoding from `_prepare_features` once that moved out.
-- `visualization.py::_feature_importance` pulls the estimator via
-  `pipeline.named_steps["model"]` and post-encoding names via
-  `pipeline.named_steps["prep"].get_feature_names_out()` — `Pipeline`
-  doesn't delegate `feature_importances_`/`coef_`, and one-hot expands
-  column count past raw `X.columns` length.
-- `EvaluateModelTool._explain_drivers`'s direction-from-correlation
-  calculation now guards on `is_numeric_dtype` before calling `.corr()` —
-  `X_test` carries raw string categoricals post-refactor, and `.corr()` on
-  those raised inside the method's blanket `except Exception`, silently
-  dropping every driver rather than just the categorical one. Categoricals
-  now report importance without a direction. `permutation_importance` and
-  `model.predict()`/`.predict_proba()` needed no changes — they work on a
-  `Pipeline` via duck typing, confirmed for `_roc_curve`/`_confusion_matrix`
-  too (no automated test exercised those two chart types' success path;
-  verified manually against a trained Pipeline before landing this).
-
-Tests: `_SkewLog1pTransformer` covered in isolation
-(`TestSkewLog1pTransformer`); an invariant test builds a frame where a
-categorical level exists only in the test-split rows and asserts `predict`
-succeeds (`TestUnseenCategoryHandling`) — proves `handle_unknown="ignore"`/
-`use_encoded_value` is doing its job, the thing the old whole-dataset
-`LabelEncoder` was hiding; and — the actual regression guard, not just
-mechanism — `test_log1p_decision_uses_training_fold_only_not_full_frame`
-builds a column whose training-fold skew is below threshold but whose
-full-frame skew is above threshold (outliers concentrated in the test
-tail) and asserts no log1p line appears for it, which fails against the
-pre-refactor whole-frame decision. `ruff check .`, `mypy src/`,
-`pytest tests/` (232 passed), and `python scripts/validate.py` (68/68) all
-green.
-
----
-
-# Round 5 — Universal Data Handling Audit
-
-**Question asked:** can this backend ingest *any* dataset — any format, schema,
-size, or quality level — and produce the best analysis, dashboard and report
-available for it, without hardcoded assumptions?
-
-**Method.** Read every module in the data path (ingestion → profiling →
-cleaning → analysis → dashboard → report), then probed the running system with
-adversarial inputs rather than reasoning from the source alone. Every finding
-below cites either a `file:line` or a probe result. Probes are reproducible
-from the descriptions given; they were throwaway scripts, not committed.
-
-**Scope note.** Rounds 2–4 audited *correctness of the ML path*. This round
-audits *generality of the data path*. Overlap is deliberate only where a
-Round 2–4 fix created the surface being judged here.
-
-## Phase 1 — Findings
-
-### What already works (do not rewrite these)
-
-Worth stating plainly, because the temptation with a brief like "handle any
-data" is to rebuild what is already sound:
-
-- **`DatasetProfile` is a real semantic profiler**, not a `df.describe()`
-  wrapper (`src/core/profiler.py`). It classifies each column as numeric /
-  categorical / datetime / boolean / identifier / constant / text, and derives
-  dataset-*nature* facts — `is_time_series`, `text_cols`, `geo_lat_col` /
-  `geo_lon_col`, `is_high_dimensional`, `panel_group_cols`. Ordering of the
-  checks is already thought through (datetime before identifier so a daily
-  index isn't an ID; free-text before identifier so 100%-unique prose isn't
-  an ID).
-- **Analysis selection is already data-driven, not fixed.**
-  `BaseTool.applies_to(profile, metadata) -> float` scores each tool against
-  the profile and `ToolRegistry.candidate_tools` drops anything scoring 0.0
-  (`controller.py:495-513`). The planner is only *shown* tools that fit the
-  data's nature. This is the right architecture for the brief — it needs
-  extending, not replacing.
-- **Dashboard chart choice is already data-driven** (`dashboard.py:607-652`):
-  charts are selected from profile column-kinds plus which tools actually
-  produced output, not from a fixed list.
-- **The pluggable-tool requirement is already met.** `ToolRegistry.register()`
-  is generic; adding a tool needs no registry edit.
-
-The gap is therefore **not** "the system is hardcoded to one shape of data."
-It is that the *front door* (reading bytes into a DataFrame) is far narrower
-and more fragile than everything behind it, and that the *rigor and honesty*
-of what comes out the back door lags what the profiler already knows.
-
-### U0.1 — Delimiter is assumed to be a comma; non-comma files are silently corrupted
-
-`_read_df` dispatches on file extension and calls bare `pd.read_csv(path)`
-for both `.csv` **and `.tsv`** — with no `sep` argument
-(`data_processing.py:26-37`, and four identical copies, see U1.1).
-
-A tab-separated file is therefore parsed with a comma delimiter. Probed with a
-3-row × 3-column TSV:
-
-| Input | Parsed as | `IngestDatasetTool.run` | Profiler verdict |
-| :--- | :--- | :--- | :--- |
-| 3×3 `.tsv` | **3 rows × 1 column** | `success` | quality **90/100** |
-| 3×3 `;`-delimited `.csv` (EU Excel default) | **3 rows × 1 column** | `success` | quality **72/100** |
-
-This is the worst failure shape in the system: not a crash, but a confident
-success. Every column collapses into one, the profiler classifies that single
-mangled column as an identifier, and the run proceeds to produce an analysis
-and a report about a dataset that does not exist. Semicolon-delimited CSV is
-the *default export format of Excel in most of Europe*, so this is not an
-exotic input.
-
-No delimiter sniffing exists anywhere in the codebase.
-
-### U0.2 — Encoding is assumed UTF-8; any other encoding is a hard failure
-
-No `encoding=` argument is passed at any read site. A cp1252/latin-1 CSV —
-again, a routine Excel export — fails with `UnicodeDecodeError` at
-`tools/_read_df`, at `controller._read_dataframe`, and at the Streamlit
-preview path. `IngestDatasetTool` converts it to `error: Failed to read file`.
-No encoding detection or fallback chain is attempted.
-
-### U0.3 — The ID-guard rejects any *sorted* continuous feature, at any sample size
-
-`statistical_analysis.py:81-91` rejects a feature column when
-`uniqueness > 0.95 and is_monotonic`. Continuous measurements are naturally
-~100% unique, so the guard reduces to "is it sorted?".
-
-Probed with a legitimate continuous measurement, sorted (the natural layout of
-data exported grouped by key):
-
-| n | sorted | result |
-| :--- | :--- | :--- |
-| 6 | yes | **error** — "appears to be a row ID or index" |
-| 500 | yes | **error** — same |
-| 5000 | yes | **error** — same |
-| 5000 | no (identical data, shuffled) | **success** |
-
-Row order alone decides whether the system's *only* hypothesis-testing tool
-will run. This is not a small-sample artifact — it fires at every size tested.
-
-### U0.4 — Statistical significance is reported with no effect size, interval, or power
-
-`select_statistical_test` returns `statistic`, `p_value`, `significant`, and a
-prose `interpretation`. It returns no effect size, no confidence interval, and
-no sample-size or power caveat.
-
-Probed with two groups of 50,000 differing by 0.6 on SD 15 — **Cohen's
-d = 0.038**, a negligible difference no one should act on:
-
-> `Independent T-Test: stat=-5.9670, p=0.0000. Statistically significant
-> difference detected (p=0.0000 < α=0.05).`
-
-The report will tell a user there is a meaningful difference between two
-practically identical groups. Given this repo's own stated standard —
-"*a wrong number delivered confidently is worse than a slow one*" — this is a
-P0-class honesty defect, not a nice-to-have.
-
-Related rigor gaps in the same tool:
-- **Chi-square validity unchecked** — no expected-cell-frequency test; the
-  statistic is invalid when expected counts fall below ~5, and nothing says so.
-- **No effect size for any branch** — no Cohen's d, no Cramér's V, no η².
-- **Normality subsample is order-dependent** — `g[:5000]` takes the *first*
-  5000 values, not a random sample (`statistical_analysis.py:123`), so on
-  sorted data the Shapiro test sees a truncated tail and mis-answers.
-- **No multiple-comparison correction**, though the tool is designed to be
-  called repeatedly across feature/group pairs in one run.
-
-### U0.5 — Profiling failure is swallowed, and silently narrows the toolset
-
-`controller.py:694-705` wraps profiling in `try/except` and continues with
-`last_profile = None` on any failure — correct as a resilience choice, but the
-consequence is invisible. `controller._read_dataframe` (`controller.py:42-49`)
-recognises only `.csv/.xlsx/.xls` — **it does not know `.tsv`**, though the
-tools' `_read_df` does. A `.tsv` upload therefore ingests (badly, per U0.1)
-and then profiles not at all.
-
-With `profile=None`, `applies_to` falls back to per-tool defaults that differ
-by tool. Measured on a time-series fixture, `candidate_tools(profile, meta)`
-vs `candidate_tools(None, meta)`:
-
-- **Lost:** `time_series_analysis`
-- **Gained:** *(none)*
-
-So a profiling failure does not corrupt the plan — it *quietly removes exactly
-the dataset-nature tools that make the analysis fit the data*, leaving generic
-EDA, and says nothing to the user. The degradation is real but narrower than
-"the gating breaks"; the defect is that it is silent, not that it is chaotic.
-
-### U0.6 — The Markdown report has no data overview, methodology, or limitations
-
-`GenerateReportTool.execute` accepts `dataset_name`, `tool_results_json`,
-`llm_insights`, `output_dir` (`report_generator.py:130-137`). **The
-`DatasetProfile` is never passed to it.** Quality score, per-column warnings,
-missingness, class imbalance and every caveat the profiler computed reach the
-Streamlit UI and a single badge in the HTML report (`html_report.py:154`) —
-but never the Markdown report a user actually keeps.
-
-Against the seven-section report structure this brief asks for:
-
-| Required section | Present? |
-| :--- | :--- |
-| Executive summary | ✅ (LLM `reasoning`) |
-| Data overview / profile | ❌ **absent** |
-| Methodology — which analyses ran and *why* | ❌ absent — see below |
-| Key findings | ✅ |
-| Visualizations | ⚠️ dashboard only; PNGs reach no report (Round 3, item 1) |
-| Limitations / caveats | ❌ **absent** |
-| Recommendations | ✅ |
-
-The system computes the honesty material and then discards it at the last step.
-
-**The methodology gap is self-inflicted and cheap to close.** The planning
-prompt *demands* a rationale for every step — "Provide a `rationale` for EVERY
-step — this is a research-grade system" (`prompt_manager.py:85`), "rationale
-tied to the profile evidence" (`:131`) — and the LLM supplies one. It is
-parsed (`controller.py:889`), stored on `AnalysisStep.rationale`
-(`memory.py:273`), rendered **truncated to 60 characters in a terminal
-panel** (`controller.py:1210`), and then dropped. The exact "why this analysis
-for this dataset" narrative the brief asks for is already being generated and
-thrown away.
-
-### U0.7 — Numerics trapped in strings are never recovered
-
-No type coercion or repair pass exists. The profiler classifies whatever dtype
-pandas inferred. Probed on routine real-world columns:
-
-| Column | Values | Classified as | Consequence |
-| :--- | :--- | :--- | :--- |
-| `price_with_symbol` | `$123.45` | **identifier** | dropped from all numeric analysis |
-| `pct_as_string` | `45.3%` | **categorical**, `high_cardinality` | one-hot candidate; flagged as a data-quality problem |
-| `zipcode` | `04521` | identifier | reasonable, but never offered as a geo/categorical key |
-| `bool_yn` | `Y`/`N` | categorical | never becomes boolean |
-| `date_iso`, `date_us` | ISO and `MM/DD/YYYY` | datetime ✅ | (correct — date handling is already good) |
-
-Currency, percentages and thousands separators are among the most common
-real-world CSV contents. Today every such column is excluded from correlation,
-modelling, and outlier detection — silently, and while being counted against
-the dataset's quality score.
-
-### U1.1 — `_read_df` is duplicated five times
-
-Identical (or near-identical) reader implementations at
-`data_processing.py:26`, `ml_pipeline.py:32`, `statistical_analysis.py:29`,
-`visualization.py:24`, plus a *divergent* fifth at `controller.py:42` that
-supports fewer formats. Any ingestion fix — U0.1, U0.2, format coverage — must
-currently be made in five places and has already drifted in one. This is the
-single biggest structural obstacle to everything else in this round.
-
-### U1.2 — Format coverage is narrow, and inconsistent about its own limits
-
-Supported: `.csv`, `.tsv` (broken, U0.1), `.xlsx`, `.xls`. Unsupported: JSON,
-JSONL, Parquet, SQL, compressed CSV, nested/semi-structured data of any kind.
-
-The supported set is also *declared inconsistently* across three places:
-
-| Site | Accepts |
-| :--- | :--- |
-| `security.ALLOWED_EXTENSIONS:25` | `.csv`, `.xlsx`, `.xls` |
-| Streamlit uploader (`app.py:1413`) | `csv`, `xlsx`, `xls` |
-| tools' `_read_df` | `.csv`, **`.tsv`**, `.xlsx`, `.xls` |
-| `controller._read_dataframe:42` | `.csv`, `.xlsx`, `.xls` |
-
-`.tsv` is a phantom format: reachable by direct tool/CLI invocation, rejected
-by upload validation, unprofileable, and corrupt when it does load.
-
-### U1.3 — The quality score has no row-count floor
-
-`profile_dataframe` penalises `row_count < 100` by a flat 10 points. Probed:
-
-- **0 rows** (headers only) → quality **81/100**, `success`
-- **1 row** → quality **81/100**, `success`
-
-A dataset that cannot support any inference at all is scored "good". Nothing
-downstream gates on insufficient data; tools fail individually and
-idiosyncratically further down instead (U0.3's guard, Shapiro's n≥3, etc.).
-
-### U1.4 — Structural corruption is neither detected nor reported
-
-- **Mixed-type columns:** `1, 2, NOT_A_NUMBER, 4` → whole column becomes
-  object → classified `identifier` → excluded from analysis. The single
-  contaminating cell is never surfaced.
-- **Duplicate headers:** `a,a,b` → pandas silently mangles to `a`, `a.1`, `b`.
-  No warning.
-
-### U1.5 — Scale: adequate where measured, but unbounded and re-read per tool
-
-Measured on this machine (read + profile):
-
-| Rows | File | `pd.read_csv` | `profile_dataframe` | In-memory |
-| ---: | ---: | ---: | ---: | ---: |
-| 10,000 | 0.6 MB | 0.03 s | 0.01 s | 0.5 MB |
-| 200,000 | 11.6 MB | 0.15 s | 0.09 s | 9.9 MB |
-| 1,000,000 | 58.0 MB | 0.64 s | 0.57 s | 49.6 MB |
-
-Profiling is **not** a bottleneck at these sizes and needs no optimisation.
-Two architectural risks remain, both unmeasured beyond 1M rows and stated here
-as risks rather than defects:
-
-1. **No row cap, no chunking, no sampling policy.** Every read is a full load.
-   Memory is the binding constraint and nothing degrades gracefully when it
-   binds.
-2. **Every tool re-reads the file from disk independently.** A 9-tool run on a
-   1M-row file pays the ~0.64 s read nine times and holds nine transient
-   copies. `dashboard.py` has a `MAX_POINTS` cap for rendering, but nothing
-   equivalent governs analysis input.
-
-### U1.6 — No edge-case test corpus
-
-232 tests pass, but the suite is organised by *module*, not by *data shape*.
-There is no fixture for: empty file, headers-only, single row, single column,
-all-categorical, all-text, wrong delimiter, non-UTF-8 encoding, mixed-type
-column, duplicate headers, or high-missingness data. Every finding in this
-round was found by probing, because nothing in CI probes.
-
----
-
-## Phase 2 — Improvement Roadmap
-
-Ordered so each item is independently shippable and earlier items make later
-ones cheaper. Effort estimates are rough and assume the existing quality gates
-(`ruff`, `mypy src/`, `pytest tests/`, `scripts/validate.py`) must stay green.
-
-**Deviation from `superpowers:writing-plans`, stated deliberately:** that skill
-produces bite-sized TDD task bodies with literal code for each step. Writing
-that for all ten items would be thousands of lines of speculative code for
-items you may reorder or reject. This is written at roadmap altitude —
-numbered, ranked, with dependencies and breaking-change flags. I'll expand the
-**one item you approve first** into a full `writing-plans` task breakdown at
-that point.
-
-### Prioritised items
+Ranked by **"does this change what the user reads"**, not by effort.
 
 | # | Item | Impact | Effort | Depends on | Flags |
 | :-- | :--- | :--- | :--- | :--- | :--- |
-| **1** | Edge-case dataset corpus + fixtures | High | 0.5 d | — | |
-| **2** | Unified reader: one `read_any()` behind all five call sites | **Highest** | 1 d | 1 | **Ask First** |
-| **3** | Type coercion / repair pass | High | 1 d | 2 | |
-| **4** | Statistical rigor: effect sizes, CIs, power, validity checks | **Highest** | 1.5 d | 1 | |
-| **5** | ID-guard fix + data-sufficiency gate | High | 0.5 d | 1 | |
-| **6** | Report restructure: overview, methodology, limitations | High | 1 d | 3 | |
-| **7** | Profiling failure becomes loud + degraded-mode flag | Medium | 0.5 d | 2 | |
-| **8** | Format expansion: JSON / JSONL / Parquet / compressed | Medium | 1 d | 2 | **Ask First** |
-| **9** | Scale policy: row cap, sampling, read-once cache | Medium | 1.5 d | 2 | **Ask First** |
-| **10** | Observability: structured degradation log | Low-Med | 0.5 d | 7 | |
-
----
-
-**1. Edge-case dataset corpus** *(do this first — it is the regression harness
-every later item is validated against)*
-
-`tests/fixtures/` + a `conftest.py` factory producing: empty, headers-only,
-single-row, single-column, all-categorical, all-text, wrong-delimiter (TSV and
-`;`), cp1252-encoded, mixed-type column, duplicate headers, high-missingness,
-1M-row synthetic, time-series, panel, geo, and high-cardinality frames. Plus a
-`test_data_shapes.py` that asserts, for each, that the pipeline either
-succeeds *or* fails with a clear actionable error — never succeeds on corrupt
-input. Several will fail immediately: that is the point, and they become the
-acceptance criteria for items 2–5.
-
-**2. Unified reader** — *closes U0.1, U0.2, U1.1, U1.2*
-
-New `src/core/io.py` exposing `read_any(path) -> tuple[pd.DataFrame, ReadReport]`:
-extension dispatch → delimiter sniffing (`csv.Sniffer` on a byte sample, with
-explicit `sep` for `.tsv`) → encoding detection (UTF-8, then BOM check, then
-`charset_normalizer`, then cp1252 fallback) → header validation (duplicate
-names, unnamed columns). `ReadReport` carries what was detected and what was
-assumed, so the report can say so (feeds item 6). Replace all five call sites.
-Reconcile the three disagreeing extension allowlists into one constant.
-
-*Breaking-change risk:* every tool's read path changes at once. Mitigated by
-item 1 landing first. *Ask First:* AGENTS.md gates new shared modules in
-`src/core/` and this sits on the boundary between the execution and core
-layers — I'd confirm placement (`src/core/io.py` vs `src/tools/_io.py`) with
-you before writing it, since the layer rules forbid `tools/*` importing from
-`core/` except `memory`.
-
-**3. Type coercion / repair pass** — *closes U0.7, part of U1.4*
-
-A `coerce_types(df) -> tuple[pd.DataFrame, list[Coercion]]` step run once at
-ingestion, before profiling: strip currency symbols/thousands separators →
-numeric; `45.3%` → 0.453 numeric; `Y/N`, `yes/no`, `true/false` → boolean;
-detect mixed-type columns and report the contaminating values rather than
-letting the column degrade to object. Every coercion is *recorded and
-reported*, never silent — same discipline as `treatments_applied`. Profiler
-then classifies the repaired frame.
-
-**4. Statistical rigor** — *closes U0.4*
-
-For every branch of `select_statistical_test`: add effect size (Cohen's d /
-Cramér's V / η² / rank-biserial as the test dictates), bootstrap or analytic
-confidence interval on the effect, a sample-size/power note, and an explicit
-`practical_significance` verdict distinct from `significant` so the p<0.05 /
-d=0.04 case reports honestly. Add chi-square expected-frequency validity check.
-Make the Shapiro subsample random (seeded), not positional. Add
-Benjamini-Hochberg correction across tests within one run. Surface all of it
-in the report's limitations section (item 6).
-
-**5. ID-guard fix + data-sufficiency gate** — *closes U0.3, U1.3*
-
-Replace `uniqueness > 0.95 and is_monotonic` with a check that cannot be
-tripped by sort order: require integer dtype **and** near-perfect uniqueness
-**and** (name hint **or** consecutive-integer spacing) — reuse
-`profiler._is_identifier_like` rather than maintaining a second, worse copy.
-Separately, add a dataset-sufficiency gate in the profiler: below a row-count
-floor, cap the quality score and emit a blocking warning that the report must
-carry, so 0-row and 1-row datasets stop scoring 81/100.
-
-**6. Report restructure** — *closes U0.6*
-
-Pass the `DatasetProfile` and the `ReadReport` into `GenerateReportTool`
-(`prepare_params` already pulls from memory — `data_profile` is in context, so
-this is an injection change, not a signature fight). Add three sections: **Data
-Overview** (shape, column kinds, quality score, missingness, what was
-detected/assumed at read time, what was coerced), **Methodology** (each tool
-that ran, with the planner's own `rationale` for it — currently computed and
-discarded), **Limitations & Caveats** (profile warnings, sufficiency flags,
-effect-size caveats from item 4, anything the unverified-claims validator from
-P0.7 flagged). This is what makes the report explain *why* these analyses, for
-*this* dataset.
-
-**7. Loud profiling failure** — *closes U0.5*
-
-Keep profiling non-fatal, but record `profile_status` in memory context and
-surface "running in degraded mode — dataset-nature tools unavailable, because
-X" in the UI, the report's limitations section, and the log. Add `.tsv` (and
-whatever item 2 supports) to the controller's reader so the most common cause
-disappears.
-
-**8. Format expansion** — JSON/JSONL (with `json_normalize` flattening for
-nested records, depth-capped), Parquet, `.gz`/`.zip` CSV. Needs a decision
-from you on nested data: flatten, or reject with a clear message? **Ask First**
-— this expands the product's supported-input promise, which is a product
-decision, not a code one.
-
-**9. Scale policy** — a configurable row cap with *reported* reservoir
-sampling above it, and a read-once cache keyed on path+mtime so a 9-tool run
-reads once rather than nine times. **Ask First** — sampling changes results,
-so whether that is acceptable (and the default threshold) is your call.
-Note the measurements in U1.5: this is about robustness beyond 1M rows and
-wasted I/O, not a current performance problem.
-
-**10. Observability** — a structured `degradations` list in memory that every
-silent fallback appends to (encoding guessed, delimiter sniffed, profiling
-skipped, sampling applied, tool gated out), rendered in the report and the UI.
-Turns every "silent" in this document into "visible".
+| **7.1** | Finding bus: one `Finding` type, all surfaces project it | **Highest** | 2 d | — | **Ask First** (memory schema) |
+| **7.2** | Insight library: segment comparison, level-granular drivers, concentration | **Highest** | 2.5 d | 7.1 | new tools |
+| **7.3** | Semantic layer: measure / dimension / flag / ordinal + row grain | **Highest** | 1.5 d | — | touches profiler API |
+| **7.4** | Analysis-mode decision + "don't model that" target guard | High | 1 d | 7.3 | behaviour change |
+| **7.5** | Question agenda between profile and plan | High | 2 d | 7.3, 7.1 | controller loop |
+| **7.6** | Relevance-driven statistical testing (family, not one arbitrary pair) | High | 1 d | 7.3, 7.5 | |
+| **7.7** | Grain-aware time series (aggregate before diagnosing) | High | 1 d | 7.3 | |
+| **7.8** | Dashboard story layer + suppression + finding→panel binding | High | 2 d | 7.1, 7.2 | artifact schema |
+| **7.9** | Layered report (exec / analyst / appendix) | Medium-High | 1.5 d | 7.1, 7.6 | |
+| **7.10** | Method-fit guards: outliers, skew sign/cardinality, quality score | Medium-High | 1 d | 7.3 | subsumes 6.4 |
+| **7.11** | Planted-effect evaluation harness | **Highest** (as a gate) | 1.5 d | — | do first |
+| **7.12** | LLM path: grounded narration contract, ask-your-data, cost accounting | High | 2.5 d | 7.1 | ungraded so far |
+| **7.13** | Time-to-first-insight: tuning budget, progressive stages, streaming | Medium | 2 d | 7.5 | P1.2 / P2.5 |
+| **7.14** | Dashboard/report service contract + run history | Medium | 2 d | 7.8 | P2.4 / P2.5 |
+| **7.15** | Summary tab leads with findings, not model diagnostics | **Highest** | 1 d | 7.1 | UI |
+| **7.16** | Wire or delete the three dead ML sliders; expose the tuning cost | High | 0.5 d | — | UI, trust |
+| **7.17** | One chart source, one theme module (kill the duplicate charts) | High | 1 d | — | UI, precedes 7.8 |
+| **7.18** | Panel metadata drives layout; finding→chart links; cross-filter | Medium-High | 1.5 d | 7.8 | UI |
+| **7.19** | Stream findings during the run instead of stage chips | Medium-High | 1 d | 7.13 | UI |
+| **7.20** | Ask-your-data box, what-if form, run history | High | 2.5 d | 7.1, 7.12 | UI, new surfaces |
+| **7.21** | Tab restructure + owned empty/error states | Medium | 1 d | 7.15 | **your call** |
+| **7.22** | `app.py` decomposition, styles into the sheet, a11y pass | Medium | 2 d | 7.15–7.19 | UI |
 
 ### Sequencing
 
 ```
-1 (corpus) ──> 2 (reader) ──> 3 (coercion) ──> 6 (report)
-          └──> 4 (rigor) ────────────────────> 6
-          └──> 5 (guards) ───────────────────> 6
-                2 ──> 7 (loud failure) ──> 10 (observability)
-                2 ──> 8 (formats)
-                2 ──> 9 (scale)
+7.11 (harness, red)  →  7.3 (semantics)  →  7.1 (finding bus)  →  7.2 (insights)
+                                    ↘  7.4, 7.7, 7.10  ↗
+                                       7.5 (agenda) → 7.6
+                                       7.8 (dashboard) → 7.9 → 7.12 → 7.13 → 7.14
 ```
 
-Items 1–6 are the core of the brief and are worth doing in order. 7–10 are
-independent follow-ons.
-
-### If only one thing gets done
-
-**Item 2 (unified reader)**, with item 1 as its test harness. U0.1 is the only
-finding in this round where the system produces a confident, complete,
-plausible-looking analysis *of data that does not exist* — and it triggers on
-a file format Excel produces by default across most of Europe.
+**If only one thing gets done: 7.11 then 7.1 + 7.2 as one push.** The harness
+makes the goal falsifiable; the finding bus plus the insight library is the
+difference between "correlation r=0.44 on quantity↔amount" and "West-region
+orders run 25% above the rest, and Q4 lifts revenue 40%."
 
 ---
 
+### 7.11 — Planted-effect evaluation harness *(do this first; it fails today)*
+
+`tests/fixtures/` already has a factory (Round 5 item 1) for *shape* edge cases.
+Add a **semantic** corpus: generated files with known, documented effects, and
+tests that assert the effects are *recovered in the findings*, not that a tool
+ran.
+
+Corpus (5–7 files, each with a `plants` manifest): transactional with a region
+premium + Q4 seasonality + revenue concentration (Run B, kept); churn with a
+dominant categorical driver (`contract`) and a weak numeric one; a price series
+with a drawdown; an HR roster with a pay gap by department; a panel/grouped
+file; a pure-description file with **no** plantable target (asserting the system
+*declines* to model — the T2 behaviour); a text-column file.
+
+Assertion style, so it grades output rather than mechanism:
+
+```python
+findings = run_pipeline(path, use_llm=False).findings
+assert_finding(findings, kind="segment_lift", dimension="region",
+               level="West", measure="amount", min_rank=3)
+assert_no_finding(findings, kind="outlier_scan", min_pct=30)   # method-fit
+```
+
+Score per dataset: plants recovered / plants present, plus a **noise count**
+(findings that are trivially true). Print a table. That table is the metric the
+rest of this round optimises, and today it reads 0/3 on Run B.
+
+### 7.1 — Finding bus
+
+New `src/core/findings.py`:
+
+```python
+@dataclass
+class Finding:
+    finding_id: str
+    kind: str                  # segment_lift | driver | trend | concentration | ...
+    headline: str              # audience-facing, numbers embedded
+    detail: str                # analyst-facing
+    evidence: dict[str, Any]   # the exact numbers, traceable to a ToolResult
+    source_tool: str
+    measure: str | None; dimension: str | None; level: str | None
+    effect: float | None; effect_kind: str | None   # lift | cohens_d | r | eta_sq
+    p_value: float | None; p_adjusted: float | None
+    confidence: float          # evidence strength × sufficiency
+    surprise: float            # distance from the base rate / prior expectation
+    importance: float          # ranking key = f(effect, confidence, surprise, objective fit)
+    caveats: list[str]
+    chart_hint: dict[str, Any] | None   # what would show this
+```
+
+Tools keep returning their current `output` dicts (no tool rewrite), and gain an
+optional `findings() -> list[Finding]` derived from that output — so the
+migration is per-tool and incremental. `MemorySystem` grows a `findings` list
+(the **Ask First** schema change) with `add_findings` / `ranked_findings`.
+
+Then delete the three parallel narrators: `_deterministic_final`,
+`report_generator._format_additional_analyses` and `html_report`'s section
+picker all become projections of `ranked_findings()`. **This alone fixes Run A's
+orphaned drivers and Run B's orphaned cohort insight, and structurally prevents
+the next tool from being orphaned** — the failure mode Round 3 fixed once by
+hand with `_render_other_findings` and which recurred anyway for the three
+domain tools.
+
+Objective fit enters `importance` here, which is how "prioritise analyses that
+answer the objective" becomes a mechanism instead of a prompt sentence.
+
+### 7.2 — Insight library
+
+Three new tools plus one upgrade. These are the analyses that produce sentences
+a human would actually say:
+
+1. **`segment_comparison`** — for each dimension × measure (or target rate),
+   compute per-level mean/rate vs the overall baseline, with lift, CI, n, and a
+   significance test; emit `segment_lift` findings ranked by |lift| × n.
+   Recovers Run B's West premium and Run A's `contract` story: *"Month-to-month
+   customers churn at 42% vs a 27% baseline (1.6×, n=812)."* Guard against
+   testing every level of every dimension by capping cardinality and correcting
+   across the family (reuse `multiple_testing.apply_benjamini_hochberg`).
+2. **`concentration_analysis`** — Pareto/Gini over a measure by an entity
+   dimension. Generalises the one good line `cohort_analysis` already produces
+   (top-10% revenue share) to any file with a measure and an entity.
+3. **`change_analysis`** — period-over-period movement on the correct grain
+   (which period changed, by how much, which segment drove it). This is the
+   "what happened" question no current tool answers.
+4. **Upgrade `_explain_drivers`** (`ml_pipeline.py:1138-1210`) — for a
+   categorical driver, report *which level* pushes which way (per-level mean
+   prediction or target rate), so `contract` stops being "a categorical
+   feature". Pair permutation importance with the `segment_comparison` result
+   for the same column so the model-based and descriptive views agree.
+
+Plus **triviality suppression** as a shared predicate: no findings from flags
+with no variance, uniform categories, near-duplicate measures, or a scan that
+flags >20% of rows (that becomes a *method-fit* caveat instead — 7.10).
+
+### 7.3 — Semantic layer
+
+Extend `ColumnProfile` with `semantic_role` (`measure` | `dimension` | `flag` |
+`ordinal` | `identifier` | `time` | `text` | `constant`) and `unit_hint`
+(currency / percent / count — `coercion.py` already detects currency and percent
+at read time and throws that knowledge away after converting). Add
+`DatasetProfile.grain` (the column set that makes a row unique, and the
+`rows_per_entity` fact `domains._rows_per_unique` already computes for domain
+checks).
+
+Rules that matter most: an integer column with `nunique == 2` is a **flag**, not
+numeric; a small-cardinality integer with order is **ordinal**; a numeric column
+that is summable and not a flag/ordinal/ID is a **measure**. Then:
+
+- `dashboard._rank_numeric_features` ranks measures for measure questions
+  (fixes "monthly mean quantity" → "monthly total revenue").
+- `_histogram_charts` skips flags (fixes `Distribution — senior_citizen`).
+- `DetectOutliersTool` skips flags (part of the 39% number).
+- `_SkewLog1pTransformer` skips flags and negative skew (fixes the
+  `phone_service` log1p treatment).
+- `select_statistical_test` gets typed candidates instead of `numeric[0]`.
+
+This is one change with six downstream fixes, which is why it outranks its own
+size.
+
+### 7.4 — Analysis-mode decision + target guard
+
+Add `decide_analysis_mode(profile, objective) -> AnalysisDecision` (mode, target
+or None, rationale, alternatives rejected) and record it in memory and in the
+report's methodology. Rules: an auto-detected target needs *both* a name signal
+**and** a plausible modelling shape; a measure at transaction grain in a
+domain-matched transactional file is a **descriptive** subject, not a regression
+target unless the objective asks for prediction; `_AUTODETECT_HIGH` stops being
+sufficient on its own. Stating "no prediction target — this is a descriptive
+sales log, so here is what it describes" is a better answer than R²=0.81 on
+`amount`, and it also returns Run B's 25 s of model fitting to the user.
+
+### 7.5 — Question agenda
+
+New `src/core/agenda.py`: `build_agenda(profile, decision, domains, objective)
+-> list[Question]` where a `Question` carries text, kind, the columns it
+concerns, an expected-value score, and the tool call(s) that would answer it.
+The planner prompt then presents the **agenda** alongside the tool list, and the
+deterministic planner walks the agenda instead of sweeping `applies_to` scores —
+so parameters come from the question ("does `amount` differ by `region`?")
+rather than from positional defaults. Unanswered questions become a reported
+coverage gap, which is also the honest place for "I could not answer X."
+
+Keeps `applies_to` as the capability filter; adds intent above it.
+
+### 7.6 — Relevance-driven statistical testing
+
+`select_statistical_test` currently answers one arbitrary pairing per call.
+Change its contract to a **family**: given a measure (or target) and the
+candidate dimensions, test all admissible pairings, return them ranked by effect
+size with BH correction applied *inside* the family, and emit one finding per
+survivor. `requires_context`'s `target_column → group_column` injection is
+currently defeated by `default_params` filling `group_column` first
+(`base.py:124-128` only fills empty params) — the fix is for the agenda (7.5) to
+supply both, and for `default_params` to become "propose", not "decide".
+
+**Ordering constraint, or this regresses:** `default_params` exists to make
+tools *schedulable* on no-LLM runs (`base.py:81-97`), and
+`_build_fallback_plan` drops any tool whose required schema params are still
+unfilled (`controller.py:1185-1200`). So the agenda must populate parameters
+**before** that runnability check runs. Demote `default_params` without doing
+that and the deterministic planner stops scheduling `select_statistical_test`
+(and `generate_visualizations`) altogether — the exact failure
+`default_params` was added to fix.
+
+### 7.7 — Grain-aware time series
+
+Before diagnosing, resample to the natural grain: group by day/week/month and
+aggregate the **measure** appropriately (sum for additive money/count measures,
+mean for rates), then run trend/ADF/seasonality on that series. Report the grain
+in the output and in the chart title. Seasonality should use the calendar
+(month-of-year, day-of-week factors), not just autocorrelation lags over row
+order — which is what missed the Q4 lift in Run B. `financial_analysis` already
+does grain reasoning (`_infer_periods_per_year`); reuse it rather than
+re-deriving.
+
+### 7.8 — Dashboard story layer
+
+`build_dashboard` becomes `build_dashboard(findings, df, profile, …)`: each
+top-ranked finding requests its panel via `chart_hint`, EDA panels fill the
+remainder, and suppression drops panels with no story. Panels carry
+`finding_id`, `priority`, `layer` (exec / analyst / appendix) and a caption
+taken from the finding's `headline` — so a chart always says what it shows.
+Includes the 6.1 panels (cohort RFM + revenue-by-month, financial drawdown,
+workforce pay/tenure) as the first concrete customers of the new signature.
+Artifact schema and interaction config: [Appendix A](#appendix-a--recommended-dashboard-configuration).
+
+### 7.9 — Layered report
+
+Both reports gain a fixed skeleton driven by finding rank: **Headline** (3–5
+findings in plain language with money/lift) → **What to do** → **Evidence**
+(effect sizes, tests, model metrics) → **How it was analysed** (agenda,
+rationales, decision record from 7.4) → **Limits** (degradations, caveats, BH
+table, unverified claims). Same content, three depths; the executive layer never
+contains a p-value and the appendix never hides one.
+
+### 7.10 — Method-fit guards
+
+Distribution-aware outlier detection (item **6.4**, still open): choose IQR /
+z-score / modified z-score (MAD) / isolation forest by skew and kind, skip flags
+and IDs, emit per-column counts, and when >20% of rows flag, report it as
+"method unsuitable" rather than as a finding. `_SkewLog1pTransformer`: skip
+flags/ordinals, require positive skew, and prefer `yeo-johnson` where skew is
+negative. Quality score: make it discriminate (ID columns, unusable target,
+sufficiency, coercion damage should all move it off 100).
+
+### 7.12 — LLM path *(the part this round could not grade)*
+
+Both runs were deterministic, so the LLM path is unaudited output-wise. Once a
+provider is configured, three things belong here regardless: (a) the narrative
+prompt should take **findings, not raw tool JSON** (shorter context, grounded by
+construction, and `_flag_unverified_claims` becomes a near-no-op rather than a
+net); (b) an "ask your data" turn that answers a follow-up question from the
+finding bus plus one optional tool call (PLAN.md Tier 2 item 8 — highest demo
+value and now cheap, since findings are structured); (c) token/cost/latency
+accounting (**P3.1**) and a per-run budget, because iterating a 15-cycle loop
+against a paid provider without accounting is how a bill happens. Also worth a
+check on the iteration prompt re-sending the whole result set each cycle
+(**P1.6**) once findings replace raw JSON.
+
+### 7.13 — Time to first insight
+
+Tuning off by default with an explicit `tuning_budget_s` (**P1.2**); a
+`profile → cheap findings → deep analysis` staging so the UI can show real
+findings in ~2 s; `analyze()` gains a generator/event interface (**P2.4/P2.5**)
+so Streamlit and a future API consume the same stream instead of callbacks.
+
+### 7.14 — Service contract + history
+
+Freeze a versioned artifact bundle per run (`profile.json`, `findings.json`,
+`dashboard.json`, `report.html`, `report.md`) under a per-run output directory
+(**P2.4**), a thin FastAPI layer over the event stream, and a SQLite run history
+(PLAN.md Tier 2 item 10). This is what makes the backend UI-agnostic; it is last
+because everything above changes the artifact shape.
+
 ---
 
-# Round 6 — domain layer + capability toggles, residual backlog
+## Phase 5 — UI recommendations (`app.py`, 2,693 lines)
 
-Round 6 was not a planned audit round. It is the residue of the session that
-added the semantic domain layer (`src/core/domains.py` + three domain tools) and
-made LLM and ML independently switchable. That session ran the full pipeline
-end-to-end on a retail export and found **4 bugs and 2 flags**.
+Graded the same way as the backend: by what the interface *says* to the person
+reading it, against `DESIGN.md`'s own stated audience — "anyone with a
+spreadsheet and a question… a shopkeeper checking sales… they don't know what
+'generalisation' or 'train-test gap' means, and they shouldn't have to."
 
-**The four bugs are fixed and in `master`** (`1bcb739`):
+Current shape: a sidebar (upload, objective, provider/model, toggles, ML
+sliders, run button), a hero with a 7-stage pipeline drawing, then six result
+tabs — **Summary · Your Helpers · Charts · Full Details · 3D Cinematic Journey ·
+Downloads** (`app.py:2136-2143`).
 
-| Bug observed | Fix, and where it lives |
-| :--- | :--- |
-| dd/mm/yyyy dates silently destroyed — 63% of rows to `NaT`, day/month swapped on the survivors | `_detect_date_convention` in `src/core/coercion.py`, returning `date_iso` / `date_dayfirst` / `date_monthfirst` / `date_ambiguous`; the datetime branch runs *before* the numeric rules |
-| A tautological model reported as the best result (CV 0.9969, accuracy 1.0000) | `_detect_target_leakage` in `src/tools/ml_pipeline.py` — per-feature purity (`_LEAKAGE_PURITY = 0.99`) plus a near-perfect-score heuristic |
-| "Trend is increasing" asserted on pure noise (R² = 0.0008) | `_TREND_MIN_R_SQUARED = 0.05` in `src/tools/time_series.py` |
-| AOV reported as 563.20 against a true 76.03 — the order-id role matched `order_date`, so revenue aggregated per *day* | sequential role claiming with an `exclude` set and most-specific-first candidates, consolidated into `domains.resolve_column` |
+### 7.15 — The Summary tab opens with model diagnostics instead of answers
 
-**The two flags were deliberate non-fixes.** `cross_val_score` keeps `n_jobs=1`
-— measured **4× faster** than `n_jobs=-1` on 16 cores (0.52 s vs 2.06 s), see
-P1.3, which reached the same conclusion independently. The second flag is IQR
-over-flagging skewed data, carried below as item 6.4.
+The first screen after a run is a **Data Quality** radial gauge plus three
+tiles: **Best Model**, **CV Score**, **Train-Test Gap** (`app.py:2217-2251`).
+For the stated audience, two of those three are meaningless and the third is a
+model-internal number. The *answers* — `insights` / `recommendations` — sit
+below them under "Key Discoveries" (`app.py:2260-2278`).
 
-**Naming warning:** the session that produced these called them **P1–P4**, and
-the user refers to them that way. They are renumbered 6.1–6.4 here because
-`P1`–`P4` in this document are priority *tiers* (P1 = Speed, P4 = Test
-coverage). The session labels are noted on each item so both handles resolve.
+Worse on descriptive data: Run B had no legitimate prediction target, so the
+same three tiles render **`N/A`**, **`0%`**, **`0%`** (defaults at
+`app.py:2177-2189`), and a fourth of the first screen becomes a report on a
+model nobody wanted. The `if not train_out` branch does try to compensate with
+`st.info("**What we found:** …")` (`app.py:2201-2211`), but it prints *one*
+tool summary, chosen from a hardcoded five-tool list that excludes
+`cohort_analysis` — which is exactly why Run B's best sentence never appeared in
+the UI either.
+
+**Recommendation.** Invert the tab. Top: the three highest-`importance`
+findings from the bus (7.1) as full-width sentence cards, each with its number
+in the sentence. Then "What to do". Then a single **trust strip** (quality
+score, row count, caveat count, "1 result may not hold" in `--risk` when
+applicable). Model metrics move down into an analyst layer that a "Show
+technical detail" toggle expands in place — one surface, two depths, which is
+how "all types of people" gets served without writing two products.
+
+### 7.16 — Three sidebar controls do nothing
+
+`max_depth` (`app.py:1774`), `test_pct` (`:1776`) and `n_cv` (`:1777`) are
+assigned and never read again — no env var, no constructor argument, no tool
+parameter (`grep` for each: one hit at the slider, plus an unrelated
+`train_out.get('n_cv_folds', 5)` display at `:2506`). A user who sets "Test
+split % = 30" gets a 20% split and is told nothing. `enable_rlm`, by contrast,
+is wired properly (`:1904`, `:1983`) — so the pattern exists, these three just
+missed it.
+
+**Recommendation.** Wire them through `train_model`'s parameters (they are all
+real schema params) or delete them. A control that silently does nothing costs
+more trust than a missing feature, and it is a ~20-line fix either way. While
+there: the tuning cost from 7.13 belongs here as a visible choice — "Thorough
+(slower)" vs "Quick" — rather than a hidden `tune_hyperparameters: bool = True`
+default (`ml_pipeline.py:480`) that turned Run A into a 60-second wait.
+
+### 7.17 — Charts are built twice, themed twice, and drift
+
+`dashboard.py` builds the model-comparison and correlation panels; the Summary
+tab then builds *its own* versions of the same two charts inline
+(`app.py:2297-2319`, `:2328-2346`). Two implementations of one chart, and they
+already differ — the inline pair reference `PEN_BLUE`/`PLOT_INK`
+(`app.py:731-735`) while the dashboard builders carry hardcoded blueprint-era
+hexes (`#12467e`, `#8aa6c2` in `dashboard.py:441`, `:513`, `:594`) that belong
+to the "Drafting Table" identity `DESIGN.md` explicitly retired. The Vega
+config exists twice as well: `app._get_vega_config` (`:737-763`) and
+`html_report._VEGA_PLOT_CONFIG`.
+
+**Recommendation.** One `src/core/chart_theme.py` exporting the Ledger tokens
+and a `vega_config(theme)` function; `dashboard.py` emits **no** colours
+(theme injected at render, per Appendix A item 4); `app.py` renders panels from
+the artifact and builds no chart of its own. This is 7.8's prerequisite — a
+story dashboard cannot have a second, differently-themed copy of two of its
+panels living upstream of it.
+
+### 7.18 — Panels are static, and nothing connects a finding to its chart
+
+Panel width is decided by a hardcoded id whitelist — `_full_width_ids =
+{"model_comparison", "top_correlations", "scatter_top_pair", "time_series"}`
+(`app.py:2388`) — so every panel added later silently renders half-width. There
+is no cross-filtering, no drill-down, and no link from an insight card to the
+chart that evidences it.
+
+**Recommendation.** Take width/order/layer from the panel's own fields in the
+artifact (7.8), not from a set in the view. Add three interactions, in this
+order of value: (a) each finding card carries a "see the chart" anchor to its
+bound panel; (b) one composed spec per section so a click on a region/segment
+cross-filters its neighbours (Appendix A item 3); (c) a "rows behind this"
+expander on a finding, showing the actual rows its evidence cites — the single
+most trust-building thing an analysis UI can offer a sceptical reader.
+
+### 7.19 — The wait shows stages, not findings
+
+A run blocks for 1–3 minutes (`app.py:1928`) behind stage chips and a spinner
+whose copy escalates to "Still working…" (`:2012-2016`, `:2028-2032`). Nothing
+real appears until everything finishes, because results are written to
+`session_state` in one batch at the end (`:2051-2066`).
+
+**Recommendation.** Once `analyze()` yields events (7.13 / P2.5), stream
+findings into the Summary as they land — "Found: West-region orders run 25%
+above the rest" at second 3, not at second 60. Same total runtime, a completely
+different felt experience, and it makes the deep phases interruptible: a "good
+enough, stop here" button becomes possible because partial findings are already
+on screen.
+
+### 7.20 — The highest-value surfaces are still missing
+
+Three things the backend can now almost support, none of them present: an **Ask
+your data** box (a follow-up question answered from the finding bus plus at most
+one extra tool call — PLAN.md Tier 2 item 8, and cheap once 7.1 exists); a
+**what-if** form built from the feature schema against the saved pipeline (Tier
+2 item 9 — the Round 4 refactor made saved models self-contained precisely so
+this is possible); and **run history** (Tier 2 item 10) so a user can compare
+today's file with last month's.
+
+Also missing, and smaller: an "explain this" affordance on any number, which is
+the cheapest way to serve the non-technical half of the audience without
+diluting the analyst half.
+
+### 7.21 — Two of six tabs are showmanship; the empty states are unowned
+
+**Your Helpers** (agent grid + handoff stream) and **3D Cinematic Journey**
+(`ui/cinematic_3d.py`, 353 lines + 1,881 lines of JS) occupy a third of the top
+level. That is a legitimate choice for a demo or a thesis defence, and I am not
+calling it a defect — but it competes for the same attention as the findings,
+and it is where a large share of `app.py`'s size lives.
+
+**Recommendation** (a judgement call for you, not a fix): promote insight
+surfaces to the top level — **Answers · Charts · Details · Downloads** — fold
+the helper grid into Details as the run trace, and keep the cinematic export in
+Downloads where it already exists as a standalone HTML. Then spend the reclaimed
+tab on 7.20's "Ask your data".
+
+Either way, the empty and error states need owners: `st.info("No dashboard was
+generated for this run.")` (`:2412`) tells the user nothing about why, and the
+failure path prints a raw Python traceback (`:2081-2082`) to an audience
+`DESIGN.md` defines as non-technical. Each should say what happened, what it
+means, and what to do — and 7.5's coverage gaps give you the honest version of
+the first: "here is what I could not answer, and why."
+
+### 7.22 — Structure: one 2,693-line module, styled inline
+
+38 `unsafe_allow_html` blocks, most carrying hardcoded inline CSS — the
+Summary tab's KPI strip alone is ~35 lines of inline `style="…"` with literal
+`px` sizes and `var(--token)` references mixed together (`app.py:2217-2251`).
+`_inject_theme_css()` already exists (`:116`) as the right mechanism, so the
+inline styling is habit rather than necessity — and it means `DESIGN.md`'s
+tokens are authoritative in the stylesheet but optional everywhere else.
+
+**Recommendation.** Move every style into the injected sheet, leave only class
+names in the f-strings, then split the module: `ui/pages/<tab>.py` for layout,
+`ui/components/` for the cards/tiles/strips, `app.py` as wiring and session
+state only. Add the accessibility pass `DESIGN.md` promises for tokens but
+nothing enforces for components: keyboard focus and `aria` labels on the
+click-to-expand helper cards, a text label beside every `--risk` colour cue
+(colour is currently the only carrier in the defect stamp and the gap tile),
+and a check that the two-column grids stack rather than scroll on a narrow
+window.
+
+---
+
+## Appendix A — Recommended dashboard configuration
+
+**Keep Vega-Lite.** It is the right choice here and switching would cost more
+than it returns: specs are plain JSON (an LLM can write and a test can assert
+them), the same spec renders in Streamlit (`st.vega_lite_chart`), in the
+self-contained HTML report (`vega-embed`), and in any future JS frontend, and
+theming is a single injected `config` object. The problems in Phase 2 are not
+Vega-Lite's — they are *what we put in the specs*. Five changes:
+
+1. **Aggregate-first data, not sampled rows.** This is **P2.7**'s fix, still
+   open; it already specifies bin counts for histograms, five-number summaries
+   for box plots, and a lower scatter cap, with the resampled time series as
+   the model. Round 7 adds only two arguments to it: the sampling is
+   *statistically* wrong as well as heavy (a 1,000-row sample of
+   `dashboard.MAX_POINTS` hides exactly the tails an outlier or skew finding is
+   about), and the aggregates should be emitted as named datasets (next item)
+   rather than per-spec copies. Send pre-computed
+   bins, per-level aggregates and resampled series; keep raw rows only where the
+   mark needs them (scatter, boxplot), and then say so in the caption.
+2. **Named datasets, referenced once.** Emit
+   `{"datasets": {"revenue_by_month": [...], "by_region": [...]}, "panels": [...]}`
+   with panels using `"data": {"name": "revenue_by_month"}`. One copy per
+   dataset instead of one per chart, and two panels over the same rows can then
+   be cross-filtered.
+3. **Cross-filtering inside a section.** Compose a section as one spec with
+   `vconcat`/`hconcat` + a shared `params` selection (`"select": {"type":
+   "point", "fields": ["region"]}`) and `filter` transforms on the dependants,
+   plus `"bind": "scales"` for zoom on time axes. In Streamlit, prefer one
+   composed spec per section over N separate `st.vega_lite_chart` calls (which
+   cannot cross-filter); use `on_select="rerun"` only where a selection must
+   drive Python.
+4. **One theme module.** `html_report._VEGA_PLOT_CONFIG` and `app._get_vega_config`
+   are two copies of the same intent and will drift — move to
+   `src/core/chart_theme.py`, keyed to the Ledger tokens in `DESIGN.md`, and
+   inject at render time (never bake theme into a stored spec, so the same
+   artifact can render light/dark).
+5. **Escape hatches, deliberately narrow.** Real basemaps → pydeck/deck.gl or
+   Plotly (Vega-Lite has no tile layer; the current "geospatial" panel is a
+   lat/lon scatter); 3-D/cinematic → the existing Three.js surfaces;
+   >100k points → server-side aggregation or a data URL served by the API
+   (7.14) rather than inline values.
+
+With LLM-on as the primary mode, add one thing Vega-Lite cannot give you: a
+per-panel **caption written from the finding** (7.8), which is what turns a
+gallery into a narrated dashboard.
+
+## Appendix B — Reproducing the runs in this round
+
+```bash
+# Run A
+.venv/Scripts/python.exe main.py --dataset data/sample_customer_churn.csv \
+    --no-llm --output-dir out_a
+
+# Run B: generate the planted-effect transactional file first (see 7.11 —
+# this generator becomes tests/fixtures/), then
+.venv/Scripts/python.exe main.py --dataset tx.csv --no-llm --output-dir out_b
+```
+
+Graded artifacts: `out_*/reports/*_report.md`, `*_raw.json` (tool outputs,
+`driver_narrative`, `treatments_applied`), `dashboard.json` (panel titles),
+`final_report.json` (insights actually delivered). `PYTHONIOENCODING=utf-8` when
+running through Bash on Windows; the `?`/`�` in console chart titles is the
+cp1252 console, not a defect in the artifacts.
+
+-->
+
+## Still open from Round 7 (the commented block above has the full reasoning)
+
+| Item | What's still missing |
+| :-- | :--- |
+| **7.12** | LLM path: findings-grounded narration, ask-your-data, cost accounting — backlog itself calls this "ungraded" pending a live provider run |
+| **7.13** | Progressive `profile → cheap findings → deep analysis` staging + a visible tuning-budget toggle; blocked on P2.5 |
+| **7.14** | Versioned artifact bundle, FastAPI layer, run history — sequenced last by design |
+| **7.18** (partial) | Cross-filtering between charts in a section, and a "rows behind this" expander on a finding — the simpler "→ see chart" text link is done |
+| **7.19** | Streaming findings into the UI during a run instead of static stage chips — blocked on P2.5 |
+| **7.20** (partial) | What-if form and run history were scoped out; the "ask your data" keyword search over findings is done |
+| **7.22** (partial) | `ui/pages/`/`ui/components/` module split not attempted (by design, HANDOVER §3) — `app.py` is still one file |
+
+# Carried-forward open items
+
+Everything below was raised in an earlier round and is **still open**, verified
+against the current code while writing Round 7 (call-site claims by `grep -rn`
+across `src/`, `app.py`, `main.py`, `scripts/` and `tests/`).
+
+## Failing gates
+
+<!-- Closed 2026-09-18 — Q1 fixed, see HANDOVER.md §2 and Closed Ledger.
+
+### Q1 — Two tests assert a palette that no longer exists
+
+`pytest tests/ -q` → 338 passed, **2 failed** (228 s):
+
+- `tests/test_landing.py::test_landing_day_and_night_themes`
+- `tests/test_landing_v2.py::test_v2_warm_ledger_tokens`
+
+Both assert `"--stock: #130f0b" in content`. `DESIGN.md`'s Ledger tokens are
+`--stock` = `#f7eedd` (Day) / `#241c14` (Night); `#130f0b` belongs to neither,
+and the rendered landing page ships `class="theme-day"`. So the tests encode a
+palette that predates the current design system — the same staleness Round 2's
+§0 fixed for the plate tests, recurring in the landing suite.
+
+**Fix:** give the palette a single source of truth and have both the code and
+the tests import it, rather than re-asserting hexes. This is the third instance
+of the same root cause — Round 2's §0 fixed it for the plate tests, Round 7's
+7.17 fixes it for the two Vega configs and the blueprint-era hexes still in
+`dashboard.py` — so **do Q1 and 7.17 together**, or the palette gets
+de-duplicated twice and re-diverges a third time. Restoring a green suite also
+restores the baseline every other item in this file is validated against.
+
+-->
+
+## Regressed since it was fixed
+
+<!-- Closed 2026-09-18 — R3.1 fixed, see HANDOVER.md §2 (`generate_visualizations`
+excluded from the deterministic sweep) and Closed Ledger.
+
+### R3.1 — `generate_visualizations`' PNGs still reach nobody, and the fallback plan schedules it again
+
+Round 3 removed `generate_visualizations` from the deterministic plan because
+nothing consumed its PNGs. Both halves are back:
+
+- **No consumers.** `grep` for `.png` / `chart_path` / `image_path` across
+  `app.py`, `src/core/html_report.py` and `src/tools/report_generator.py`
+  returns nothing. The files are written and never read.
+- **It is scheduled again.** The Round 3 fix deleted a hardcoded step, but
+  `_build_fallback_plan`'s profile sweep (`src/core/controller.py:1156-1211`)
+  re-adds any tool scoring ≥ `_FALLBACK_MIN_SCORE`;
+  `GenerateVisualizationsTool` keeps `applies_to`'s 1.0 default and is absent
+  from `_FALLBACK_EXCLUDED_TOOLS`. Confirmed in Round 7's Run A: step 5,
+  *"profile-driven selection scored 'generate_visualizations' at 1.00"*.
+
+**Fix:** decide what the PNGs are *for* — a static export for the Markdown
+report and the Downloads tab (then wire them there and reference them from
+`report_generator`), or nothing (then add the tool to
+`_FALLBACK_EXCLUDED_TOOLS` and leave it for the LLM planner to call
+deliberately). Either is fine; the current state pays for them and shows nobody.
+The general lesson is Round 7's 7.1: a hardcoded per-tool fix in one surface
+does not survive a generic mechanism added later.
+
+-->
+
+## Round 6 residue
 
 ### Prioritised items
 
@@ -641,6 +1198,9 @@ coverage). The session labels are noted on each item so both handles resolve.
 | **6.2** | Tests for the domain layer, date coercion, leakage detector, toggles, read cache | High | 1 d | — | |
 | **6.3** | Surface `date_ambiguous` as an explicit warning | Medium | 1 h | — | cheapest |
 | **6.4** | Distribution-aware outlier detection | Medium | 0.5 d | — | **Ask First** |
+
+<!-- Closed 2026-09-18 — 6.1 fixed, see HANDOVER.md §2 (`dashboard.py` 6.1 row:
+cohort/financial/workforce panels added) and Closed Ledger.
 
 ### 6.1 — Three domain tools compute results that are never charted  *(session "P1")*
 
@@ -660,6 +1220,8 @@ cumulative-return line (financial), RFM segment bar + revenue-by-month line
 (cohort), tenure histogram + headcount-by-department bar (workforce). Cap rows
 at `MAX_POINTS` and mind P2.7 — dashboard specs inline raw rows, so each new
 panel adds to artifact size.
+
+-->
 
 ### 6.2 — The new code has no tests at all  *(session "P2")*
 
@@ -681,6 +1243,16 @@ mtime-granularity trap has no test holding it shut.
 (`time_series`, `text_analysis`, `geospatial`, `dimensionality`). 6.2 is
 new-code coverage; the two are separate debts with separate scopes.
 
+*Verified still open:* no test in `tests/` references `infer_domains`,
+`cohort_analysis`, `financial_analysis`, `workforce_analysis`,
+`geospatial_analysis`, `text_analysis` or `time_series_analysis` (the only
+matches are incidental mentions in `test_dashboard.py`, `test_data_shapes.py`
+and `test_ml_enhancements.py`). Build this inside Round 7's 7.11 harness rather
+than as a parallel suite.
+
+<!-- Closed 2026-09-18 — 6.3 fixed, see HANDOVER.md §2 (`degradations.py` 6.3
+row: explicit `date_ambiguous` warning) and Closed Ledger.
+
 ### 6.3 — `date_ambiguous` is computed, then rendered as if it were a success  *(session "P3")*
 
 `_detect_date_convention` returns `"date_ambiguous"` (`src/core/coercion.py:172`)
@@ -694,6 +1266,16 @@ Fix: a dedicated branch in the degradation log for datetime coercions carrying
 the ambiguous rule, naming the column and stating the convention could not be
 determined. Worst failure mode in this round (a confidently wrong date axis on
 every chart) against the smallest fix.
+
+*Verified still open:* `date_ambiguous` appears only where it is produced
+(`src/core/coercion.py:172`) — no reader in `degradations.py`, in either
+report, or in the UI.
+
+-->
+
+<!-- Closed 2026-09-18 — 6.4 fixed, see HANDOVER.md §2 (`data_processing.py`
+6.4 row: distribution-aware outlier detection, verified 0.67% vs 39.47%) and
+Closed Ledger.
 
 ### 6.4 — Outlier detection ignores the skew flag the profiler already sets  *(session "P4")*
 
@@ -712,310 +1294,88 @@ to a robust alternative (MAD-based, or asymmetric fences), and report which rule
 was used per column. **Ask First** — the default changes reported outlier counts
 on existing datasets.
 
-## Round 1 status — verified fixed
+*Scope note:* Round 7's 7.10 generalises this into a method-fit gate (skip
+flags and IDs, report per-column counts, declare the method unsuitable above a
+20% flag rate). Keep 6.4's skew-specific reasoning — it is the concrete half of
+that item.
 
-The previous `IMPROVEMENTS.md` (deleted in the working tree) listed ten
-items. Nine are confirmed landed in the current code, most with in-code
-comments citing the original item number:
+-->
 
-| # | Item | Verified at |
-| :-- | :--- | :--- |
-| 1 | Task-type inference unified | `src/tools/data_processing.py:117` delegates to `DatasetMetadata.infer_task_type()` |
-| 2 | `.iloc` → `.loc` on label indices | `src/tools/data_processing.py:320`, `:329` |
-| 3 | Field-wise shrink instead of blind slice | `src/core/memory.py:41-86` (`_shrink_to_fit`) |
-| 4 | Multi-class target correlation | `src/tools/data_processing.py:470-494` (eta-squared branch) |
-| 5 | Overfit-penalised best-model pick | `src/tools/ml_pipeline.py:532-550` (`_pick_best`) |
-| 6 | `test_size` forced to match training | `src/tools/ml_pipeline.py:618-621` |
-| 7 | Shapiro `n>=3` guard | `src/tools/statistical_analysis.py:121-126` |
-| 8 | String-sniffed path substitution replaced | `src/tools/base.py:69-105` (`prepare_params` + declarative `uses_cleaned_file`) |
-| 9 | Dead `dtype in (float,)` clause removed | `src/tools/statistical_analysis.py:95` |
+## Round 5 residue
 
-Item 10 was `app.py`-scoped and is out of this round's scope.
+<!-- Closed 2026-09-18 — U1.2 and U1.5 fixed, see HANDOVER.md §2 (`io.py` row:
+json/jsonl/parquet/gz/zip with depth-capped flatten; row cap + reservoir
+sampling, one choke point) and Closed Ledger.
 
-**Nothing below repeats those.** This round is a fresh pass.
+### U1.2 — Format coverage is narrow (roadmap item 8)
 
----
 
-## 0. Current state of the quality gates
+Supported: `.csv`, `.tsv`, `.xlsx`, `.xls`. Unsupported: JSON,
+JSONL, Parquet, SQL, compressed CSV, nested/semi-structured data of any kind.
 
-Measured on the working tree at audit time:
+The supported set is also *declared inconsistently* across three places:
 
-| Gate | Result |
+| Site | Accepts |
 | :--- | :--- |
-| `ruff check .` | ✅ clean |
-| `mypy src/` | ✅ clean, 23 files |
-| `pytest tests/` | ❌ **5 failed, 199 passed in 124.22s** |
-| `python scripts/validate.py` | ✅ 68/68, 2.59s |
+| `security.ALLOWED_EXTENSIONS:25` | `.csv`, `.xlsx`, `.xls` |
+| Streamlit uploader (`app.py:1413`) | `csv`, `xlsx`, `xls` |
+| tools' `_read_df` | `.csv`, **`.tsv`**, `.xlsx`, `.xls` |
+| `controller._read_dataframe:42` | `.csv`, `.xlsx`, `.xls` |
 
-The five failures are **stale tests, not product defects** — but they
-still break AGENTS.md success criterion #3, so they block any claim that
-the tree is green:
+`.tsv` is a phantom format: reachable by direct tool/CLI invocation, rejected
+by upload validation, unprofileable, and corrupt when it does load.
 
-- `tests/test_controller.py:78,86,95,105` — four `TestParseSteps` cases call
-  `AgentController._parse_steps({...})` unbound. `_parse_steps` became an
-  instance method when the hallucinated-tool-name guard started needing
-  `self.tool_registry` (`src/core/controller.py:784-834`). The test was
-  never updated.
-- `tests/test_pipeline_3d.py:135` — asserts `PALETTE["ink"] == "#171c1f"`;
-  the palette is now `#3a2b1e` after the Drafting Table → Ledger theme
-  change in `DESIGN.md`.
+*Verified still open:* `src/core/io.py:33` —
+`SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls"}`. `.tsv` is no
+longer a phantom format (the unified reader handles it end to end), but
+JSON/JSONL, Parquet and compressed CSV remain unsupported.
 
-**Fix:** bind the four `_parse_steps` calls to a controller instance (or
-a lightweight fake registry), and either re-point the palette assertion at
-`DESIGN.md` as the source of truth or update the literal. ~20 minutes,
-and it restores the ability to trust CI.
+**8. Format expansion** — JSON/JSONL (with `json_normalize` flattening for
+nested records, depth-capped), Parquet, `.gz`/`.zip` CSV. Needs a decision
+from you on nested data: flatten, or reject with a clear message? **Ask First**
+— this expands the product's supported-input promise, which is a product
+decision, not a code one.
 
----
+### U1.5 — Scale is unbounded, and the read cache only half-closes it (roadmap item 9)
 
-## P0 — Correctness and trustworthiness
 
-These are the findings that most directly undermine "analysis you can
-trust." A wrong number delivered confidently is worse than a slow one.
+Measured on this machine (read + profile):
 
-### P0.1 — Train/test leakage chain: imputation, encoding and transforms are all fit on the full dataset
+| Rows | File | `pd.read_csv` | `profile_dataframe` | In-memory |
+| ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 0.6 MB | 0.03 s | 0.01 s | 0.5 MB |
+| 200,000 | 11.6 MB | 0.15 s | 0.09 s | 9.9 MB |
+| 1,000,000 | 58.0 MB | 0.64 s | 0.57 s | 49.6 MB |
 
-The pipeline's split happens *after* every preprocessing decision has
-already seen the test rows.
+Profiling is **not** a bottleneck at these sizes and needs no optimisation.
+Two architectural risks remain, both unmeasured beyond 1M rows and stated here
+as risks rather than defects:
 
-1. `CleanDataTool` computes imputation statistics over the whole file and
-   writes a cleaned CSV: `subset.fillna(subset.median(numeric_only=True))`
-   at `src/tools/data_processing.py:195` (same for `mean` at `:193`,
-   `mode` at `:197-199`, `ffill` at `:209`).
-2. `_prepare_features` then applies `log1p` using a skew computed on all
-   rows (`src/tools/ml_pipeline.py:114-120`) and fits a fresh
-   `LabelEncoder` per categorical column on all rows
-   (`src/tools/ml_pipeline.py:124-125`).
-3. Only then does `train_test_split` run
-   (`src/tools/ml_pipeline.py:251-253`).
+1. **No row cap, no chunking, no sampling policy.** Every read is a full load.
+   Memory is the binding constraint and nothing degrades gracefully when it
+   binds.
+2. **Every tool re-reads the file from disk independently.** A 9-tool run on a
+   1M-row file pays the ~0.64 s read nine times and holds nine transient
+   copies. `dashboard.py` has a `MAX_POINTS` cap for rendering, but nothing
+   equivalent governs analysis input.
 
-Every "held-out" metric the system reports — `test_metrics`,
-`train_test_gap`, `evaluate_model`'s accuracy — is therefore computed on
-rows whose imputed values, log transform and category codes were derived
-with knowledge of those same rows. The bias is small for median
-imputation on large data and can be large for `mode`/`ffill` on small or
-high-missingness data. Either way, the *number the agent prints as its
-generalisation estimate is not a generalisation estimate.*
+*Partly closed:* `src/core/io.py` now caches reads on path+mtime+size
+(`_cache_key`, `read_any`), so the nine-reads-per-run waste is gone. **Still
+open:** there is no row cap and no reported sampling above it, so a file an
+order of magnitude past 1M rows has no defined behaviour.
 
-**Fix:** move preprocessing inside a `sklearn.pipeline.Pipeline` fitted
-only on the training fold — `ColumnTransformer(SimpleImputer +
-OrdinalEncoder/OneHotEncoder + FunctionTransformer(np.log1p))`. This also
-fixes P0.5 (the saved model becomes self-contained) and P0.6 (ordinal
-codes stop being fed to linear models) in the same change. `CleanDataTool`
-stays useful as an *EDA* step and as the thing that reports what was
-missing — it just stops being the thing that decides model inputs.
+**9. Scale policy** — a configurable row cap with *reported* reservoir
+sampling above it, and a read-once cache keyed on path+mtime so a 9-tool run
+reads once rather than nine times. **Ask First** — sampling changes results,
+so whether that is acceptable (and the default threshold) is your call.
+Note the measurements in U1.5: this is about robustness beyond 1M rows and
+wasted I/O, not a current performance problem.
 
-### P0.2 — Cross-validation runs on the full dataset, including the test split
-
-`src/tools/ml_pipeline.py:288`:
-
-```python
-cv_scores = cross_val_score(model, X, y, cv=cv, scoring=scoring, n_jobs=1)
-```
-
-`X, y` here is the *entire* dataset — `X_test` rows are inside those CV
-folds. `cv_mean` is then used as the primary ranking metric by
-`_pick_best` (`src/tools/ml_pipeline.py:532-550`), surfaced as the
-headline number in `_deterministic_final`
-(`src/core/controller.py:1012-1018`), and charted next to "Test" in the
-dashboard's model comparison (`src/core/dashboard.py:372-411`) — where
-the chart's own description tells the reader that a train-vs-test gap
-signals overfitting.
-
-Compounding it: when tuning is on, hyperparameters are selected by
-`RandomizedSearchCV` over `X_train` (`src/tools/ml_pipeline.py:279-282`,
-`:491-500`), and the resulting estimator is then CV-scored over data that
-includes the rows tuning did *not* see. The two numbers the pipeline
-places side by side are not measured on comparable partitions.
-
-**Fix:** `cross_val_score(model, X_train, y_train, ...)`. When tuning ran,
-don't even call it — `RandomizedSearchCV` already computed exactly this
-quantity with the same splitter and scorer; read `search.best_score_` and
-`np.std(search.cv_results_["mean_test_score"])`. That makes the fix
-*free* and removes 5 model fits per tuned model (see P1.2).
-
-### P0.3 — The profiler detects time-series and panel structure; the splitter never hears about it
-
-`profile_dataframe` computes `is_time_series`
-(`src/core/profiler.py:350`) and `panel_group_cols`
-(`src/core/profiler.py:371-378`). Grepping every consumer of those two
-fields shows they reach exactly two places: tool *gating*
-(`src/tools/time_series.py:70`) and *prompt text*
-(`src/core/profiler.py:153-162`). They never reach `TrainModelTool`.
-
-So on a dataset the profiler has just labelled time-series,
-`train_test_split(X, y, random_state=42, stratify=...)` at
-`src/tools/ml_pipeline.py:251` shuffles rows — the model trains on the
-future and is tested on the past, and `StratifiedKFold`
-(`:255-259`) does the same five more times. On panel data (repeated
-observations per customer/store/device), the same entity lands in both
-train and test, and the reported accuracy is substantially inflated.
-
-The detection already exists. Only the wiring is missing — and
-`prepare_params` already receives `memory`
-(`src/tools/base.py:69-71`), which already holds the serialised profile
-at `memory.get_context("data_profile")` (`src/core/controller.py:634`).
-
-**Fix:** have `TrainModelTool.prepare_params` read `data_profile` and pass
-a `split_strategy` through to `execute`:
-
-| Profile fact | Splitter | CV |
-| :--- | :--- | :--- |
-| `is_time_series` | chronological `train_test_split(shuffle=False)` on sorted time column | `TimeSeriesSplit` |
-| `panel_group_cols` non-empty | `GroupShuffleSplit` on the group key | `GroupKFold` |
-| neither | current behaviour | current behaviour |
-
-Report the chosen strategy in the tool output so it reaches the report and
-the LLM's synthesis. This is the single highest-value change in this
-document.
-
-### P0.4 — Datetime columns are discarded rather than engineered
-
-`src/tools/ml_pipeline.py:91-94`:
-
-```python
-if pd.api.types.is_datetime64_any_dtype(series):
-    features = features.drop(columns=[col])
-    treatments.append(f"Dropped datetime column '{col}' (not model-ready).")
-```
-
-On a dataset whose profile says `is_time_series: true`, *all* temporal
-signal is thrown away before modelling. The agent then tells the user, in
-the report's "treatments applied" list, that it did so — which is honest
-but not what a data scientist would do.
-
-**Fix:** replace the drop with expansion —
-`year, month, day, dayofweek, hour, is_weekend`, plus elapsed-days-since-min
-as a trend term. Roughly ten lines, and it turns the system's best-detected
-data nature from a liability into a feature set. Note the interaction: do
-this *after* P0.3, so the raw time column is still available to order the
-chronological split.
-
-### P0.5 — Saved models are not self-contained, so they cannot score new data
-
-`pickle.dump(model, f)` (`src/tools/ml_pipeline.py:305`, `:339`) saves the
-bare estimator. The `LabelEncoder`s fitted in `_prepare_features`
-(`src/tools/ml_pipeline.py:124-125`) and the target encoder from
-`_encode_target` (`:129-143`) are discarded.
-
-`EvaluateModelTool` gets away with it only by re-deriving identical
-encodings from the identical file
-(`src/tools/ml_pipeline.py:640-644`) — a coincidence, not a contract.
-Point the saved `.pkl` at any new data with a different category set, or
-even the same categories in a different order, and the codes silently
-differ. There is no `predict` path in the system today, which is precisely
-why this hasn't bitten yet; it will the moment scoring is added.
-
-`ClusterDataTool` shows the correct pattern already —
-`pickle.dump({"scaler": ..., "kmeans": ..., "features": ...})` at
-`src/tools/clustering.py:186`. Apply it uniformly, or better, fold the
-encoders into the `Pipeline` from P0.1.
-
-### P0.6 — `LabelEncoder` on nominal categoricals feeds fake ordinality to linear models
-
-`src/tools/ml_pipeline.py:124-125` label-encodes every remaining
-categorical column into `0..n-1`. Trees can recover from arbitrary
-integer codes; `LogisticRegression`, `Ridge` and `LinearRegression`
-(`src/tools/ml_pipeline.py:401-406`) cannot — they read
-`plan=basic(0) < plan=premium(1) < plan=enterprise(2)` as a real distance.
-Two of the four regression models and one of the three classification
-models are affected.
-
-`LabelEncoder` is also documented for *targets*, not features; its use
-here is why the column-order dependence in P0.5 exists at all.
-
-**Fix:** `OneHotEncoder(handle_unknown="ignore", max_categories=...)` for
-linear models inside the per-model pipeline, keeping ordinal codes for
-tree models. The profiler already flags `high_cardinality`
-(`src/core/profiler.py:265`) so the cases where one-hot would explode are
-already known.
-
-### P0.7 — "Cite only verbatim metrics" is a prompt rule with no enforcement
-
-`SYSTEM_PROMPT_CORE` states it as a hard rule
-(`src/core/prompt_manager.py:82-84`):
-
-> In Form 2, cite ONLY metric values that appear verbatim in the results
-> provided to you. If a number is not in the results, do not state it —
-> never estimate, extrapolate, or invent values.
-
-Nothing checks it. The LLM's `insights`, `recommendations` and
-`key_metrics` flow unvalidated from
-`RLMEngine.invoke` → `_generate_final_report`
-(`src/core/controller.py:1266-1302`) → `report.md`, `report.html` and the
-dashboard. For a system whose entire value proposition is *interpretation*,
-the one rule that keeps interpretation honest is enforced by hope.
-
-**Fix — the highest-leverage interpretation change in this document:** add
-a post-synthesis validator in the controller, between `analyze()`'s loop
-exit and `_generate_final_report`:
-
-1. Extract every numeric literal from the LLM's `insights` /
-   `recommendations` / `key_metrics`.
-2. Build the set of numbers that actually appear in
-   `[r.to_dict() for r in memory.tool_results]` (recursively, rounded to
-   the same precision).
-3. Any literal with no match is either stripped, or the sentence carrying
-   it is annotated `[unverified]` in the report and logged to
-   `memory.set_context("unverified_claims", ...)`.
-
-This converts the system's central promise from a prompt instruction into
-a mechanism, and it produces a *measurable* hallucination rate you can
-track across model/provider changes. It also makes the deterministic
-fallback (`_deterministic_final`, `src/core/controller.py:998-1078`) and
-the LLM path directly comparable for the first time.
-
-### P0.8 — `max_iterations` constructor argument is silently overridden by the environment
-
-`src/core/controller.py:482`:
-
-```python
-self.max_iterations = int(os.getenv("MAX_ITERATIONS", str(max_iterations or 15)))
-```
-
-The env var wins over the explicit argument. Its sibling three lines
-below gets the precedence right:
-
-```python
-self.enable_rlm = (
-    enable_rlm if enable_rlm is not None
-    else os.getenv("ENABLE_RLM_INFERENCE", "true").lower() == "true"
-)
-```
-
-Both current callers work around it by mutating the environment first
-(`app.py:1608`, `main.py:143`), which is why nobody has noticed. Any
-programmatic caller — an API wrapper, a test, a notebook — that passes
-`max_iterations=3` with a `.env` present silently gets 15, and with each
-iteration costing an LLM round trip plus a full tool pass, that is a 5×
-cost overrun with no error.
-
-**Fix:** mirror the `enable_rlm` pattern. Two lines.
-
-### P0.9 — A step that already succeeded is re-executed on every replanning cycle
-
-`_execute_steps` (`src/core/controller.py:1092-1195`) tracks
-`_tool_failure_counts` so a *failing* tool is skipped after
-`MAX_STEP_RETRIES`. There is no equivalent for *successes*. The LLM
-re-plans from scratch each iteration (`src/core/controller.py:727-733`),
-and any step it repeats — `clean_data` on the same file,
-`correlation_analysis` with the same parameters — runs again in full.
-
-Correctness impact, not just speed: `train_model` re-run with a different
-tuning draw can overwrite `output/models/random_forest.pkl`
-(`src/tools/ml_pipeline.py:303-305`) *after* `best_model_path` was already
-written to memory context (`src/core/controller.py:1174-1180`), so
-`evaluate_model` can report on a different fitted model than the one whose
-metrics reached the report. With `max_iterations` defaulting to 15, this
-is not a corner case.
-
-**Fix:** a content-addressed result cache in the controller, keyed on
-`(tool_name, sorted resolved params, input file mtime+size)`. On a hit,
-re-append the cached `ToolResult` and skip execution. This is the same
-mechanism as P1.4 and it is the cheapest large win in the document.
+-->
 
 ---
 
-## P1 — Speed
+# P1 — Speed
 
 ### Measured baseline
 
@@ -1044,24 +1404,20 @@ Per-model breakdown at 20,000 rows (the threshold below which tuning is
 
 Two results drive everything below.
 
-### P1.1 — Re-reading CSVs is *not* the bottleneck. Don't optimise it first.
-
-Five separate copies of `_read_df` exist
-(`src/core/controller.py:41`, `src/tools/data_processing.py:26`,
-`src/tools/ml_pipeline.py:31`, `src/tools/statistical_analysis.py:29`,
-`src/tools/visualization.py:24`) and the file is re-parsed by every tool.
-That is a real design problem — see P2.1 — but at 50k rows it costs
-**0.12 s × ~7 calls ≈ 0.8 s**, under 5% of a run. Fixing it first would be
-optimising the wrong thing. It matters at 10× the row count; it does not
-matter now.
+<!-- Closed 2026-09-18 (the "on by default" headline complaint) — see
+HANDOVER.md §2 (`ml_pipeline.py` row: "P1.2 (tuning off by default)") and
+Closed Ledger. The remaining sub-fixes here (successive halving, an adaptive/
+visible budget) are now tracked live under Round 8-preceding item **7.13**
+(still open, see "Still open from Round 7" above), not restated twice.
 
 ### P1.2 — Hyperparameter tuning is ~95% of model-training time, and it is on by default
 
 At 20k rows, tuning costs **21.3 s** against **0.46 s** of actual fitting —
 a 46× multiplier. `do_tune = tune_hyperparameters and len(X) <= 20_000`
 (`src/tools/ml_pipeline.py:227`) means the default path for any dataset a
-user is likely to upload interactively pays it, and P0.9 means a
-replanning cycle can pay it twice.
+user is likely to upload interactively pays it. (A replanning cycle no
+longer pays it twice — the `_step_cache` added in Round 2 serves an identical
+re-planned step from cache.)
 
 The arithmetic: `n_iter=min(8, n_combos)` × `n_splits=5` = up to **40 fits
 per model** in `_tune` (`src/tools/ml_pipeline.py:492-500`), *plus* 1
@@ -1070,12 +1426,12 @@ final fit, *plus* 5 more in the separate `cross_val_score` at `:288`.
 
 Three fixes, in order of value:
 
-1. **Delete the redundant CV entirely when tuning ran.** `search.best_score_`
-   is the cross-validated score of the selected configuration, computed by
-   the same splitter with the same scorer. Reading it instead of calling
-   `cross_val_score` at `:288` removes 5 fits per tuned model — **~11% of
-   training time, for free** — *and* fixes the leakage in P0.2. Do this one
-   first; it is strictly a win on both axes.
+1. ~~**Delete the redundant CV entirely when tuning ran.**~~ **Done in
+   Round 2** — `_tune` now returns `cv_mean`/`cv_std` from
+   `search.best_score_`/`cv_results_`, and the separate `cross_val_score` is
+   skipped when tuning ran. The fit arithmetic above therefore reads ~41 fits
+   per tuned model, not 46, and the two remaining fixes below are what is
+   left of this item.
 2. **Switch to successive halving.**
    `sklearn.model_selection.HalvingRandomSearchCV` evaluates many
    configurations on small data subsets and promotes only survivors,
@@ -1088,74 +1444,17 @@ Three fixes, in order of value:
    `tune_hyperparameters` in the UI. Right now the user pays 21 s for a
    search they cannot see or control.
 
-### P1.3 — `n_jobs=-1` on the CV loop is a pessimisation here — measured, not theorised
+*Still the default:* `tune_hyperparameters: bool = True`
+(`src/tools/ml_pipeline.py:480`). Measured again in Round 7 — Run A spent 45 s
+of its 60 s total inside `train_model`. Round 7's 7.13 and 7.16 carry the
+product half of this (a visible "Quick vs Thorough" choice, and a budget); this
+item stays for the defaults and the grid size.
 
-The obvious move on seeing three `n_jobs=1` sites
-(`src/tools/ml_pipeline.py:288`, `:498`, `:728`) is to flip them to `-1`.
-**Measured, that makes it slower on every model** — 2.2× for
-random_forest, 2.1× for xgboost, 13× for logistic_regression (table
-above).
+-->
 
-Two causes: joblib's `loky` backend spawns processes on Windows and must
-re-pickle the feature matrix per worker, and `RandomForestClassifier` /
-`XGBClassifier` are *already* constructed with `n_jobs=-1`
-(`src/tools/ml_pipeline.py:395`, `:399`), so outer parallelism oversubscribes
-the CPU against inner parallelism.
-
-**Recommendation:** leave the CV `n_jobs=1` sites alone. If nesting is
-ever wanted, it must come with inner `n_jobs=1` and a measurement on the
-target platform. The genuinely parallelisable work in this codebase is at
-a coarser grain — see P1.5. This item exists mainly so the next person
-doesn't "fix" it.
-
-### P1.4 — No caching anywhere in the backend
-
-A grep for `lru_cache`, `joblib.Memory`, `st.cache_data`, `st.cache_resource`
-across `src/`, `app.py` and `main.py` returns **zero hits**. Concretely:
-
-- `_generate_dashboard` (`src/core/controller.py:941-975`) re-reads the
-  dataframe at `:951` and calls `profile_dataframe` again at `:952`,
-  although `load_dataset` already profiled the same data at `:632` and
-  stored it at `:634`. It re-profiles because it wants the *cleaned* file
-  — a legitimate reason that a keyed cache handles and an unconditional
-  recompute does not.
-- Every tool re-parses the CSV (P1.1).
-- Every replanned step re-executes (P0.9).
-
-**Fix, one mechanism at the right layer:** a `ResultCache` in the
-controller keyed on `(tool_name, resolved params, input mtime+size)`,
-plus a small `DataFrameCache` keyed on `(path, mtime, size)` behind the
-single shared `_read_df` from P2.1. The orchestration-level cache subsumes
-the I/O-level one for repeated steps; the I/O one still helps within a
-single planning cycle where several distinct tools read the same file.
-
-### P1.5 — RLM sub-tasks are provably independent and are run strictly serially
-
-`decompose_and_invoke` (`src/rlm/engine.py:175-190`) loops one LLM call at
-a time. The comment at `:187` explains the sequencing — "Store the result
-too so later sub-tasks can reference it" — but grepping every reader of
-`repl_env` shows the only consumers outside the engine are
-`scripts/validate.py:409` and `tests/test_rlm_engine.py:70-71`, both
-assertions. The actual prompt builder,
-`controller._run_rlm_decomposition.build_prompt`
-(`src/core/controller.py:1240-1247`), reads only `task.task_id`,
-`task.description` and `json.dumps(task.context)`. **No sub-task has ever
-read another's result.** The data dependency the serial loop protects does
-not exist.
-
-A wide dataset partitions into groups of 8 numeric columns plus one
-categorical group (`src/core/controller.py:1222-1226`), so a 40-column
-dataset is 6 sub-tasks — 6 sequential LLM round trips, typically 2–5 s
-each, on the critical path.
-
-**Fix:** `concurrent.futures.ThreadPoolExecutor` over `sub_tasks` with a
-small bounded pool (4–6; these are I/O-bound HTTP calls, so threads are
-right and the GIL is irrelevant). Preserve deterministic ordering by
-writing results back into a dict keyed by `task_id` — which
-`decompose_and_invoke` already returns. Expected saving: `(n_groups − 1) ×
-round-trip`, commonly 10–25 s. If a future sub-task genuinely needs a
-predecessor's output, the dependency becomes explicit rather than
-accidental.
+<!-- Closed 2026-09-18 — P1.6 fixed, see HANDOVER.md §2 (`memory.py`:
+`get_results_summary_digest()`; `prompt_manager.py`: "P1.6(a): iteration
+prompt uses the digest") and Closed Ledger.
 
 ### P1.6 — The iteration prompt re-sends the entire accumulated result set every cycle
 
@@ -1177,18 +1476,7 @@ support it, mark the static system prompt for caching (Anthropic
 block from `get_system_prompt` (`src/core/prompt_manager.py:238-239`) is
 byte-identical across all 15 calls and is currently re-billed each time.
 
-### P1.7 — A new HTTP client is constructed on every LLM call
-
-`src/core/controller.py:184` calls `OpenAI(**client_kwargs)` inside
-`_call_openai_compat`, i.e. once per invocation; `_call_anthropic` does
-the same at `:272`. Each construction builds a fresh `httpx` client and a
-fresh connection pool, so every call pays TLS handshake and TCP setup
-— typically 100–300 ms against a cloud endpoint, × (iterations +
-sub-tasks + 1 ping), so commonly 2–6 s per run of pure avoidable latency.
-
-**Fix:** build the client once in `LLMClient.__init__` (or a cached
-property keyed on provider), and reuse it. The SDK clients are designed to
-be long-lived and are thread-safe — which P1.5 needs anyway.
+-->
 
 ### P1.8 — The test suite takes 124 s, which is why it stops being run
 
@@ -1205,30 +1493,11 @@ not to measure accuracy. Target: under 15 s for the default suite.
 
 ---
 
-## P2 — Architecture and extensibility
+# P2 — Architecture and extensibility
 
-### P2.1 — Five copies of `_read_df`, and the tool layer imports across itself to avoid a sixth
-
-`_read_df` is defined five times with near-identical bodies
-(`src/core/controller.py:41`, `src/tools/data_processing.py:26`,
-`src/tools/ml_pipeline.py:31`, `src/tools/statistical_analysis.py:29`,
-`src/tools/visualization.py:24`). The controller's copy silently differs —
-it omits the explicit `openpyxl`/`xlrd` engines and rejects `.tsv`, which
-the other four accept.
-
-The newer tools avoided a sixth copy by importing sideways between peers:
-`src/tools/time_series.py:19`, `src/tools/text_analysis.py:16`,
-`src/tools/geospatial.py:18` and `src/tools/dimensionality.py:19` all
-import `_read_df` from `data_processing`; `src/tools/clustering.py:25` imports it
-from `ml_pipeline`; `src/tools/dimensionality.py:18` imports
-`_select_cluster_features` from `clustering`. Six tools now depend on two
-sibling tools' private helpers. Deleting or renaming a leading-underscore
-function in `data_processing.py` breaks four unrelated tools.
-
-**Fix:** `src/tools/io.py` (or `src/core/dataio.py`) exporting one public
-`read_dataframe`, with the caching from P1.4 behind it. Every tool imports
-from there; nothing imports from a peer. Add `_select_cluster_features`
-to a `src/tools/features.py` for the same reason.
+<!-- Closed 2026-09-18 — P2.2 resolved via option (b), see HANDOVER.md §2b
+(AGENTS.md's Layer Rules table corrected + `tests/test_architecture.py` added
+as a drift-check) and Closed Ledger.
 
 ### P2.2 — AGENTS.md's layer rules are violated by the code they describe
 
@@ -1258,16 +1527,20 @@ Either way, add a CI check — `import-linter` with a contract file, or a
 ten-line `tests/test_architecture.py` walking the AST — so the rules can't
 drift again silently.
 
-### P2.3 — Two tools write derived data outside the output root, and the guard that would prevent it is dead code
+*Still open, and note the irony:* `src/tools/base.py` imports `MemorySystem`
+from `src/core/memory.py` (line 20) — exactly what AGENTS.md's layer table
+forbids for `tools/*`.
 
-`CleanDataTool` and `DetectOutliersTool` declare no `output_subdir`
-(only `clustering`, `ml_pipeline`, `report_generator` and `visualization`
-do — `src/tools/base.py:92-93` is the injection point). So both fall back
-to `out_dir = Path(output_dir) if output_dir else path.parent`
-(`src/tools/data_processing.py:215`, `:339`) and write
-`*_cleaned.csv` / `*_outliers_flagged.csv` **next to the input file** —
-i.e. into `data/`, or into the user-upload directory. `.gitignore:30-31`
-exists specifically to paper over this.
+-->
+
+<!-- Closed 2026-09-18 — P2.3 fixed, see HANDOVER.md §2 (`base.py` row: "P2.3
+output_dir validation via resolve_output_path() in prepare_params()") and
+Closed Ledger.
+
+### P2.3 (second half) — the output-root guard is still dead code
+
+The first half landed in Round 2: `clean_data` and `detect_outliers` now
+declare `output_subdir = "data"`. What remains:
 
 Meanwhile `src/core/security.py:197-212` defines `resolve_output_path`,
 whose entire purpose is "refuse any escape from the output root." Grepping
@@ -1285,6 +1558,14 @@ tool's file write through `resolve_output_path(output_root, ...)`. Apply
 `escape_csv_formulas` to user-facing CSV exports only — its own docstring
 correctly warns not to apply it to files the pipeline reads back.
 
+*Verified still open:* `resolve_output_path` is defined
+(`src/core/security.py:203`) and called from nowhere in `src/`.
+
+-->
+
+<!-- Closed 2026-09-18 — P2.4 fixed, see HANDOVER.md §2 ("P2.4: session-scoped
+output dir default + output/latest.txt") and Closed Ledger.
+
 ### P2.4 — Runs share one output directory, so concurrent runs corrupt each other
 
 Every run writes to fixed paths: `output/models/random_forest.pkl`
@@ -1299,6 +1580,8 @@ the other run.
 (`src/core/memory.py:303`). Make the controller's `_output_dir` default to
 `output/runs/{session_id}/` and symlink or copy `output/latest`. This is a
 prerequisite for anything multi-user, and it gives run history for free.
+
+-->
 
 ### P2.5 — `AgentController.analyze()` has no non-blocking or streaming interface
 
@@ -1328,28 +1611,13 @@ currently imports `rich.progress` and prints emoji directly
 (`src/core/controller.py:29-30`, `:675-679`), which is presentation logic in
 the orchestration layer.
 
-### P2.6 — `prepare_params` cannot recover a missing required parameter
+*Partly addressed:* `on_step_callback` / `on_iteration_callback` exist
+(`src/core/controller.py:672-675`) and `app.py` drives the stage chips from
+them. **Still open:** `analyze()` is a single blocking call, so nothing partial
+can be rendered — this is the dependency Round 7's 7.19 needs.
 
-`BaseTool.prepare_params` fills a parameter from memory context only when
-the planner left it empty (`src/tools/base.py:94-98`), and
-`uses_cleaned_file` redirects `file_path` only `if ... "file_path" in params`
-(`src/tools/base.py:88-90`). If the LLM omits `file_path` *entirely* on a
-later iteration — plausible, since the prompt tells it the controller
-substitutes paths automatically (`src/core/prompt_manager.py:299`) —
-the tool raises a `TypeError`, burns a retry, and the failure text the LLM
-sees back is a Python signature error rather than actionable guidance.
-
-Similarly `SelectStatisticalTestTool` maps
-`{"target_column": "group_column"}` (`src/tools/statistical_analysis.py:56`)
-but `feature_column` is required with no fallback
-(`:193-197`), so an omitted `feature_column` is a hard error where the profiler
-could nominate the highest-variance numeric column.
-
-**Fix:** make `requires_context` fill unconditionally-required params
-whether absent or empty, and have `BaseTool.run` catch `TypeError` on
-signature mismatch and convert it into a `ToolExecutionError` naming the
-missing parameter and its schema description — so the next planning cycle
-gets a usable correction.
+<!-- Closed 2026-09-18 — P2.7 fixed, see HANDOVER.md §2 (`dashboard.py` row:
+"P2.7 (aggregate-first, named datasets)") and Closed Ledger.
 
 ### P2.7 — Dashboard specs inline raw rows, so artifact size scales with chart count
 
@@ -1370,9 +1638,15 @@ needs points; cap it lower (250–400 is visually indistinguishable at
 typical opacity). Expect a 5–10× reduction in `report.html` size and a
 correspondingly faster first paint.
 
+-->
+
 ---
 
-## P3 — Observability, cost control, reproducibility
+# P3 — Observability, cost control, reproducibility
+
+<!-- Closed 2026-09-18 — P3.1 fixed, see HANDOVER.md §2b (real `response.usage`
+captured for Anthropic/OpenAI-compatible providers; `usage_summary()` reports
+real token counts/cost) and Closed Ledger.
 
 ### P3.1 — No token, cost, or latency accounting
 
@@ -1390,6 +1664,12 @@ report footer and the trace table. Add an optional `max_total_tokens`
 budget that ends the loop gracefully via `_deterministic_final` rather
 than by exhausting iterations.
 
+*Raised in priority by Round 7's constraints:* with LLM-on as the primary mode
+and a 15-iteration default loop, no token accounting is a financial risk, not
+just an observability gap. Round 7's 7.12 carries it.
+
+-->
+
 ### P3.2 — `print`-based diagnostics via Rich, no structured logging
 
 The orchestration layer writes user-facing prose with emoji directly to a
@@ -1404,6 +1684,10 @@ stub out `rich` entirely just to import the modules under test.
 presentation layer (`main.py`, `app.py`) via `RichHandler`. Write a
 `run.log` alongside each run's outputs (pairs naturally with P2.4).
 
+<!-- Closed 2026-09-18 — P3.3 fixed (removed, the unused-dependency option),
+see HANDOVER.md §2 (`rlm/engine.py` + deps row: "P3.3 (removed unused dep)")
+and Closed Ledger.
+
 ### P3.3 — `arize-phoenix` is a declared dependency with zero imports
 
 `requirements.txt:44` pins `arize-phoenix>=3.0.0` under "Observability."
@@ -1415,6 +1699,14 @@ every CI run pays for and nothing uses.
 **Fix:** either wire it up — it is a genuinely good fit for P3.1, since
 the RLM trace is already structured for it — or remove it. Do not leave it
 declared and unused.
+
+*Verified still open:* `arize-phoenix>=3.0.0` is in `requirements.txt`, and
+`grep` for `phoenix` across `src/`, `app.py` and `main.py` returns nothing.
+
+-->
+
+<!-- Closed 2026-09-18 — P3.4 fixed, see HANDOVER.md §2 (deps + lockfile,
+`requirements.lock` now in the repo) and Closed Ledger.
 
 ### P3.4 — No dependency lockfile, and `pyproject.toml` declares no dependencies at all
 
@@ -1440,7 +1732,15 @@ upstream drift surfaces as a PR rather than as a wrong number.
 
 ---
 
-## P4 — Test coverage
+*Verified still open (stale — see closure note above):* no lockfile or
+constraints file in the repo, and `pyproject.toml` still declares no
+`dependencies`.
+
+-->
+
+---
+
+# P4 — Test coverage
 
 ### P4.1 — Four tools ship with no tests at all
 
@@ -1462,6 +1762,11 @@ mode no one notices.
 synthetic frame, (b) `applies_to` returning 0.0 on unsuitable data and
 1.0 on suitable, (c) the auto-detection path with the column omitted.
 
+*Worse than logged:* it is **seven** untested tools now, not four —
+`time_series`, `text_analysis`, `geospatial`, `dimensionality`,
+`cohort_analysis`, `financial_analysis`, `workforce_analysis` (the last three
+postdate this item). Overlaps 6.2; do them together inside Round 7's 7.11.
+
 ### P4.2 — No coverage measurement
 
 Nothing in `pyproject.toml` or `ci.yml` measures coverage, so the gap in
@@ -1471,49 +1776,9 @@ P4.1 is invisible to CI and the next one will be too.
 `--cov-fail-under` floor set just below today's actual number so it
 ratchets up rather than blocking immediately.
 
-### P4.3 — No test asserts the anti-leakage or anti-overfitting invariants
-
-`tests/test_ml_enhancements.py` covers the tuning and imbalance features,
-but nothing asserts the properties the system's credibility rests on: that
-CV never sees test rows, that a time-series dataset gets a chronological
-split, that `_pick_best` prefers a lower-CV model when the higher one is
-badly overfit, that reported metrics appear verbatim in tool outputs.
-
-**Fix:** as each P0 item lands, add the invariant test with it. These are
-cheap property-style tests (construct a frame with a known leak signal,
-assert the metric does *not* detect it) and they are what keeps P0 fixed.
-
 ---
 
-## Suggested order of work
-
-Sequenced so each step is independently shippable and earlier steps make
-later ones easier.
-
-| Step | Items | Why here | Rough size |
-| :--- | :--- | :--- | :--- |
-| **1** | §0 stale tests | Can't verify anything else until the suite is green | 20 min |
-| **2** | P0.2 + P1.2(1) | Same one-line change fixes the leakage *and* removes 11% of training time | 1 h |
-| **3** | P0.8, P2.3, P1.7 | Small, isolated, high value-per-line | 2 h |
-| **4** | P0.9 + P1.4 | One cache mechanism; also closes the model-overwrite race | 4 h |
-| **5** | P0.3 + P0.4 | The flagship correctness fix; wiring already exists in memory context | 1 day |
-| **6** | P0.1 + P0.5 + P0.6 | The `Pipeline` refactor — one change, three findings | 2 days |
-| **7** | P0.7 | Verbatim-metric validator; makes the core promise measurable | 1 day |
-| **8** | P1.5, P1.6, P2.5 | Latency and API shape; P1.7 from step 3 is a prerequisite for P1.5 | 2 days |
-| **9** | P2.1, P2.2, P2.4 | Structural cleanup, best done once the above have settled | 2 days |
-| **10** | P3.x, P4.x | Observability, lockfile, coverage — the ratchet that keeps it all fixed | 2 days |
-
-If only one thing gets done: **step 5** (P0.3). It is the largest gap
-between what the system already knows about the data and what it does with
-it, and it is the difference between a plausible number and a correct one.
-
-If only one *hour* is available: **step 2**. A one-line change that is
-simultaneously a correctness fix and a speed win is rare enough to take
-immediately.
-
----
-
-## Appendix A — Measurement method
+# Appendix — Measurement method (carried-forward P1 items)
 
 All timings from this machine (Windows 11, Python 3.13 in `.venv`), warm
 OS file cache, single run each — treat them as order-of-magnitude, not
@@ -1542,7 +1807,56 @@ of the repository; the parameters above are sufficient to reproduce them.
 
 ---
 
-*Filename note: written to `IMPROVEMENTS.md` rather than a new
-`Improvement.md`. Git has that path staged as deleted, so restoring it
-records this as a modification with the previous audit's history intact,
-rather than a delete-plus-add of a near-identical name.*
+
+---
+
+# Closed ledger
+
+One line per item removed from this file. The full original text of each is in
+git history (`git log -p IMPROVEMENTS.md`).
+
+| Item | Closed by | What changed |
+| :--- | :--- | :--- |
+| P0.1 / P0.5 / P0.6 | Round 4 | `Pipeline([("prep", ColumnTransformer), ("model", …)])` fit on the training fold only; saved models self-contained; one-hot for linear models, ordinal for trees |
+| P0.2 | Round 2 | `cross_val_score` fits `X_train`/`y_train`, never the full frame |
+| P0.3 | Round 2 | Splitter reads `is_time_series` / `panel_group_cols`; chronological and `GroupShuffleSplit` splits, shared with `evaluate_model` |
+| P0.4 | Round 2 | Datetime columns expanded (year/month/day/dow/hour/is_weekend/days_since_min) instead of dropped |
+| P0.7 | Round 2 | `_flag_unverified_claims` annotates any numeric literal in the synthesis that no tool result supports |
+| P0.8 | Round 2 | An explicit `max_iterations` argument wins over the environment |
+| P0.9 / P1.4 | Round 2 | `_step_cache` keyed on tool + resolved params + input mtime/size |
+| P1.1 / P1.3 | Round 2 (decided, no action) | CSV reads are not the bottleneck; `n_jobs=1` kept — measured 4× faster than `n_jobs=-1` on 16 cores |
+| P1.2 (part) | Round 2 | Redundant `cross_val_score` after tuning dropped; `cv_mean`/`cv_std` read from the search results |
+| P1.5 | later session | `decompose_and_invoke` runs sub-tasks on a bounded `ThreadPoolExecutor` (`src/rlm/engine.py:197-201`) |
+| P1.7 | Round 2 | SDK client built once, lazily, and reused across calls |
+| P2.1 | Round 5 item 2 | All five `_read_df` copies are now thin wrappers over `src.core.io.read_any` |
+| P2.3 (first half) | Round 2 | `clean_data` / `detect_outliers` declare `output_subdir = "data"` |
+| P2.6 | Round 6 session | `BaseTool.default_params` lets a tool propose its own required parameters |
+| P4.3 | Round 2 | Invariant tests for the anti-leakage / anti-overfitting behaviour |
+| U0.1 / U0.2 / U1.1 | Round 5 item 2 | `src/core/io.py` — one reader with encoding detection, delimiter sniffing, duplicate-header detection and a `ReadReport` |
+| U0.3 / U1.3 | Round 5 item 5 | ID-guard fixed; `is_sufficient` / `sufficiency_reason` and a row-count floor on the quality score |
+| U0.4 | Round 5 item 4 | Effect sizes, confidence intervals, sample-size notes, practical-vs-statistical verdicts, Benjamini-Hochberg across a run |
+| U0.5 | Round 5 item 7 | `profile_status` in memory; degraded mode stated in both reports and the UI |
+| U0.6 | Round 5 item 6 | Markdown report gained a data overview, methodology (planner rationales) and limitations |
+| U0.7 / U1.4 | Round 5 item 3 | `src/core/coercion.py` — currency/percent/thousands/bool/date repair, reported per column |
+| U1.5 (part) | Round 5 item 9 | Read-once cache keyed on path+mtime+size |
+| U1.6 (part) | Round 5 item 1 | `tests/fixtures/` + `tests/test_data_shapes.py` exist. **The finding itself is still open:** the suite is still organised by module, not by data shape — see 6.2 / P4.1, which Round 7's 7.11 closes |
+| Round 5 item 10 | Round 5 | `src/core/degradations.py` — structured degradation log, rendered in both reports |
+| Round 6 bugs (4) | Round 6 (`1bcb739`) | dd/mm/yyyy convention detection; `_detect_target_leakage`; `_TREND_MIN_R_SQUARED`; sequential domain-role claiming |
+| Round 3 item 2 | Round 3 | `_render_other_findings` in `app.py`; the time-series chart reads the tool's own columns and findings |
+| Round 2 §0 | Round 2 | Stale tests re-pointed at the Ledger palette; `_parse_steps` calls bound to an instance |
+| Q1 | Round 7 session (2026-09-18) | `LEDGER_TOKENS_DAY/NIGHT` imported by the two landing tests instead of re-typed hex literals |
+| R3.1 | Round 7 session | `generate_visualizations` excluded from the deterministic fallback sweep |
+| 6.1 | Round 7 session | Cohort/financial/workforce chart panels added to `dashboard.py` |
+| 6.3 | Round 7 session | Explicit `date_ambiguous` warning in `degradations.py` |
+| 6.4 | Round 7 session | Distribution-aware outlier detection (skew/flag-aware); 39.47% → 0.67% on the churn fixture |
+| U1.2 | Round 7 session | `io.py` — JSON/JSONL/Parquet/`.gz`/`.zip`, depth-capped `json_normalize` flatten |
+| U1.5 | Round 7 session | `io.py` — configurable row cap + reported reservoir sampling, one choke point |
+| P1.2 (remainder) | Round 7 session | `tune_hyperparameters` default flipped off; successive-halving/adaptive-budget sub-fixes carried forward as 7.13 |
+| P1.6 | Round 7 session | `get_results_summary_digest()` — latest iteration in full, one-line digest for older ones; Anthropic system prompt marked `cache_control` |
+| P2.2 | Round 7 session | AGENTS.md's Layer Rules table corrected to match reality; `tests/test_architecture.py` added as an AST-based drift check |
+| P2.3 (second half) | Round 7 session | Every tool write routed through `resolve_output_path()` in `BaseTool.prepare_params()` |
+| P2.4 | Round 7 session | Session-scoped output directory default + `output/latest.txt` |
+| P2.7 | Round 7 session | Dashboard specs pre-aggregate (bins, five-number summaries, resampled series) instead of inlining raw rows |
+| P3.1 | Round 7 session | Real `response.usage` captured for Anthropic/OpenAI-compatible providers; `usage_summary()` reports real tokens/cost |
+| P3.3 | Round 7 session | Unused `arize-phoenix` dependency removed |
+| P3.4 | Round 7 session | `requirements.lock` generated; runtime deps given upper bounds |

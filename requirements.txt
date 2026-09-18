@@ -10,6 +10,7 @@ polars>=0.20.0
 openpyxl>=3.1.0      # Excel .xlsx read/write
 xlrd>=2.0.1          # Excel .xls (legacy) read
 charset-normalizer>=3.4.0   # src/core/io.py encoding detection (was transitive only)
+pyarrow>=14                 # src/core/io.py .parquet read (pandas' pyarrow engine)
 psutil>=5.9.0        # src/core/sandbox.py soft memory-limit polling (no Windows resource module)
 
 # --- Statistical Analysis ---
@@ -41,9 +42,6 @@ rich>=13.7.0
 python-dotenv>=1.0.0
 pydantic>=2.6.0
 pydantic-settings>=2.2.0
-
-# --- Observability ---
-arize-phoenix>=3.0.0
 
 # --- Dev & Quality Assurance ---
 pytest>=8.1.0

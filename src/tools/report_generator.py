@@ -95,25 +95,140 @@ def _format_data_overview(
     return lines
 
 
-def _format_methodology(plan_rationales: list[dict[str, Any]] | None) -> list[str]:
+def _format_methodology(
+    plan_rationales: list[dict[str, Any]] | None,
+    analysis_decision: dict[str, Any] | None = None,
+) -> list[str]:
     """The planner is required to justify every step (prompt_manager.py's
     SYSTEM_PROMPT_CORE), but that rationale used to be truncated to 60 chars
     in a console panel and then discarded — this is the narrative the brief
-    asks for, generated all along and just never surfaced."""
-    if not plan_rationales:
-        return []
-    lines = [
-        "## Methodology",
-        "",
-        "Why each analysis was chosen, in the planner's own words:",
-        "",
-        "| Step | Tool | Rationale |",
-        "|------|------|-----------|",
+    asks for, generated all along and just never surfaced.
+
+    `analysis_decision` (7.9) adds the T2 "why we did or didn't model X"
+    transparency when the controller recorded one — additive, so a caller
+    without one gets exactly the table this always produced."""
+    lines: list[str] = []
+    if plan_rationales:
+        lines += [
+            "## Methodology",
+            "",
+            "Why each analysis was chosen, in the planner's own words:",
+            "",
+            "| Step | Tool | Rationale |",
+            "|------|------|-----------|",
+        ]
+        for r in plan_rationales:
+            rationale = str(r.get("rationale", "")).replace("|", "\\|")
+            lines.append(f"| {r.get('step_number', '—')} | {r.get('tool_name', '—')} | {rationale} |")
+        lines.append("")
+    if analysis_decision:
+        mode = analysis_decision.get("mode")
+        rationale = analysis_decision.get("rationale")
+        rejected = analysis_decision.get("alternatives_rejected") or []
+        if mode or rationale:
+            if not lines:
+                lines += ["## Methodology", ""]
+            lines.append(f"**Approach taken**: {mode or '—'}.")
+            if rationale:
+                lines.append("")
+                lines.append(str(rationale))
+            if rejected:
+                lines.append("")
+                lines.append("Alternatives considered and not taken:")
+                for r in rejected:
+                    lines.append(f"- {r}")
+            lines.append("")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# 7.9 — the layered report's finding-driven sections, mirroring
+# src.core.html_report's selectors so the Markdown and HTML reports agree on
+# what "headline" / "evidence" / "caveat" mean. `findings` is the shared bus
+# (src.core.findings): the caller (AgentController) already ranks it by
+# importance descending, but every selector here re-sorts defensively rather
+# than trusting call-site order.
+# ---------------------------------------------------------------------------
+
+_CAVEAT_FINDING_KINDS = ("method_fit", "coverage_gap")
+_MAX_HEADLINE_FINDINGS = 5
+_MAX_EVIDENCE_FINDINGS = 15
+
+
+def _headline_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = [f for f in findings if f.get("kind") not in _CAVEAT_FINDING_KINDS]
+    preferred = [f for f in candidates if f.get("layer") in ("exec", "analyst")]
+    pool = preferred if preferred else candidates
+    pool = sorted(pool, key=lambda f: f.get("importance") or 0.0, reverse=True)
+    return pool[:_MAX_HEADLINE_FINDINGS]
+
+
+def _evidence_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    pool = [
+        f for f in findings
+        if f.get("layer") == "analyst" and f.get("kind") not in _CAVEAT_FINDING_KINDS
     ]
-    for r in plan_rationales:
-        rationale = str(r.get("rationale", "")).replace("|", "\\|")
-        lines.append(f"| {r.get('step_number', '—')} | {r.get('tool_name', '—')} | {rationale} |")
+    pool = sorted(pool, key=lambda f: f.get("importance") or 0.0, reverse=True)
+    return pool[:_MAX_EVIDENCE_FINDINGS]
+
+
+def _caveat_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [f for f in findings if f.get("kind") in _CAVEAT_FINDING_KINDS]
+
+
+def _format_top_findings(findings: list[dict[str, Any]] | None) -> list[str]:
+    """The headline layer: the top 3-5 findings' own words, in plain
+    language. Purely additive — an old caller passing no findings simply
+    gets no section here, and every other section renders as before."""
+    top = _headline_findings(findings or [])
+    if not top:
+        return []
+    lines = ["## Top Findings", ""]
+    for i, f in enumerate(top, 1):
+        lines.append(f"{i}. {f.get('headline', '')}")
     lines.append("")
+    return lines
+
+
+def _format_evidence(findings: list[dict[str, Any]] | None) -> list[str]:
+    """The analyst layer: every finding's detail/evidence dict, effect sizes
+    and p-values — the traceable numbers behind the headlines above. This is
+    exactly where a tool's own `findings()` (e.g. cohort_analysis's revenue-
+    concentration or RFM-lift findings) now reaches the report regardless of
+    whether it also has a bespoke subsection in `_format_additional_analyses`."""
+    evidence = _evidence_findings(findings or [])
+    if not evidence:
+        return []
+    lines = ["## Evidence", ""]
+    for f in evidence:
+        lines.append(f"### {f.get('headline', '')}")
+        lines.append("")
+        detail = f.get("detail")
+        if detail:
+            lines.append(str(detail))
+            lines.append("")
+        bits: list[str] = []
+        effect = f.get("effect")
+        if effect is not None:
+            kind = f.get("effect_kind") or ""
+            bits.append(f"effect {round(float(effect), 4)}" + (f" ({kind})" if kind else ""))
+        p_value = f.get("p_value")
+        if p_value is not None:
+            bits.append(f"p={round(float(p_value), 4)}")
+        p_adj = f.get("p_adjusted")
+        if p_adj is not None:
+            bits.append(f"p(adj)={round(float(p_adj), 4)}")
+        raw_evidence = f.get("evidence") or {}
+        if isinstance(raw_evidence, dict):
+            for k, v in raw_evidence.items():
+                if isinstance(v, (int, float, str)) and not isinstance(v, bool):
+                    bits.append(f"{k}={v}")
+        if bits:
+            lines.append("- " + " · ".join(str(b) for b in bits))
+        source = f.get("source_tool")
+        if source:
+            lines.append(f"- source: `{source}`")
+        lines.append("")
     return lines
 
 
@@ -123,26 +238,34 @@ def _format_limitations(
     unverified_claims: list[str] | None,
     profile_status: str | None,
     degradations: list[str] | None = None,
+    findings: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Everything a careful reader needs to know before trusting a number in
     this report: every recorded fallback/repair (item 10's degradations
     log, when the caller has it — the controller always does), the
-    multiple-comparisons correction (item 4), and anything the
-    verbatim-metric guard (P0.7) couldn't verify."""
+    multiple-comparisons correction (item 4), anything the verbatim-metric
+    guard (P0.7) couldn't verify, and (7.9) every `method_fit`/`coverage_gap`
+    finding — caveats, not headline insights, per
+    src.core.findings.is_trivial's own triviality rules."""
     if degradations is None:
         # Direct callers that don't accumulate a degradations log (tests,
         # scripts) still get the same information, derived on the spot.
         from src.core.degradations import collect_degradations
 
         degradations = collect_degradations(None, None, data_profile, profile_status)
+    caveat_findings = [
+        str(f.get("headline", "")) for f in _caveat_findings(findings or []) if f.get("headline")
+    ]
     bh = _apply_benjamini_hochberg(statistical_test_pvalues or [])
-    if not (degradations or bh or unverified_claims):
+    if not (degradations or bh or unverified_claims or caveat_findings):
         return []
 
     lines = ["## Limitations & Caveats", ""]
     for item in degradations:
         lines.append(f"- {item}")
-    if degradations:
+    for item in caveat_findings:
+        lines.append(f"- {item}")
+    if degradations or caveat_findings:
         lines.append("")
 
     if bh:
@@ -285,6 +408,8 @@ class GenerateReportTool(BaseTool):
         params.setdefault("unverified_claims", memory.get_context("unverified_claims"))
         params.setdefault("profile_status", memory.get_context("profile_status"))
         params.setdefault("degradations", memory.get_context("degradations"))
+        params.setdefault("findings", [f.to_dict() for f in memory.ranked_findings()])
+        params.setdefault("analysis_decision", memory.get_context("analysis_decision"))
         return params
 
     def execute(
@@ -301,6 +426,8 @@ class GenerateReportTool(BaseTool):
         unverified_claims: list[str] | None = None,
         profile_status: str | None = None,
         degradations: list[str] | None = None,
+        findings: list[dict[str, Any]] | None = None,
+        analysis_decision: dict[str, Any] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         if llm_insights is None:
@@ -343,6 +470,12 @@ class GenerateReportTool(BaseTool):
         # read time (item 2) and repaired before analysis (item 3).
         md_lines += _format_data_overview(data_profile, read_report, coercions)
 
+        # 7.9 layered skeleton, headline first: the top-ranked findings from
+        # the shared bus, in plain language with the numbers embedded. Falls
+        # back to the old insights list below when no findings were passed
+        # (an old caller, or a run that produced none), so nothing regresses.
+        md_lines += _format_top_findings(findings)
+
         # Executive summary from LLM
         reasoning = llm_insights.get("reasoning", "")
         if reasoning:
@@ -351,7 +484,7 @@ class GenerateReportTool(BaseTool):
         insights = llm_insights.get("insights") or []
         recs = llm_insights.get("recommendations") or []
 
-        if insights:
+        if insights and not findings:
             md_lines += ["## Key Insights", ""]
             for i, insight in enumerate(insights, 1):
                 md_lines.append(f"{i}. {insight}")
@@ -385,9 +518,18 @@ class GenerateReportTool(BaseTool):
         if additional:
             md_lines += ["## Additional Analyses", "", *additional]
 
+        # 7.9 — the analyst layer: every finding's effect size, p-value and
+        # traceable evidence dict. This is exactly where a tool's own
+        # findings() (cohort's revenue concentration, workforce's pay gap...)
+        # now reaches the report regardless of whether it also got a bespoke
+        # subsection above — the orphaning bug this round set out to fix.
+        md_lines += _format_evidence(findings)
+
         # Methodology — why each analysis was chosen, from the planner's own
-        # rationale (previously generated every run and then discarded).
-        md_lines += _format_methodology(plan_rationales)
+        # rationale (previously generated every run and then discarded), plus
+        # (7.9/7.4) the analysis-mode decision — the honest "we considered
+        # modelling X and declined, here's why" record.
+        md_lines += _format_methodology(plan_rationales, analysis_decision)
 
         # Tool execution log
         if tool_results:
@@ -403,7 +545,8 @@ class GenerateReportTool(BaseTool):
         # correction (item 4), degraded-profiling notice (item 7), and any
         # unverified metric claims (P0.7).
         md_lines += _format_limitations(
-            data_profile, statistical_test_pvalues, unverified_claims, profile_status, degradations
+            data_profile, statistical_test_pvalues, unverified_claims, profile_status,
+            degradations, findings=findings,
         )
 
         md_lines += [
@@ -435,6 +578,8 @@ class GenerateReportTool(BaseTool):
                     "unverified_claims": unverified_claims,
                     "profile_status": profile_status,
                     "degradations": degradations,
+                    "findings": findings,
+                    "analysis_decision": analysis_decision,
                 },
                 indent=2,
                 default=str,
@@ -470,6 +615,16 @@ class GenerateReportTool(BaseTool):
             "output_dir": {
                 "type": "string",
                 "description": "Output directory. Default: output/reports.",
+                "required": False,
+            },
+            "findings": {
+                "type": "list",
+                "description": "Ranked Finding dicts from the shared finding bus (7.1). Injected automatically from memory.",
+                "required": False,
+            },
+            "analysis_decision": {
+                "type": "dict",
+                "description": "The 7.4 analysis-mode decision record (mode/rationale/alternatives_rejected). Injected automatically from memory.",
                 "required": False,
             },
         }

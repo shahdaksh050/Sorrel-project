@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
+from src.core.findings import Finding
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -133,6 +134,54 @@ class GeospatialAnalysisTool(BaseTool):
             "grid_size": grid_size,
             "densest_cells": densest_cells,
         }
+
+    def findings(  # type: ignore[override]
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        densest_cells = output.get("densest_cells")
+        n_points = output.get("n_points")
+        grid_size = output.get("grid_size")
+        if not densest_cells or not n_points or not grid_size:
+            return []
+
+        top_cell = densest_cells[0]
+        count = top_cell.get("count", 0)
+        share = count / n_points if n_points else 0.0
+        expected_share = 1.0 / (grid_size ** 2)
+        # Suppress when the densest cell is no denser than a uniform scatter
+        # would produce by chance — no real geographic concentration (T5).
+        if share < expected_share * 2.0:
+            return []
+
+        return [
+            Finding(
+                finding_id=f"{self.name}_hotspot",
+                kind="geospatial",
+                headline=(
+                    f"A single grid cell holds {count:,} of {n_points:,} points "
+                    f"({share * 100:.1f}% of all coordinates)"
+                ),
+                detail=(
+                    f"Densest cell spans lat {top_cell.get('lat_range')}, "
+                    f"lon {top_cell.get('lon_range')}, on a {grid_size}x{grid_size} grid."
+                ),
+                evidence={
+                    "densest_cell": top_cell,
+                    "n_points": n_points,
+                    "grid_size": grid_size,
+                    "centroid": output.get("centroid"),
+                },
+                measure="point_density",
+                dimension="location",
+                effect=round(share - expected_share, 4),
+                effect_kind="share",
+                confidence=0.6,
+                surprise=0.5,
+            )
+        ]
 
     def get_schema(self) -> dict[str, Any]:
         return {

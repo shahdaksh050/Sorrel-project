@@ -95,13 +95,17 @@ class TestDelimiterAndEncoding:
             assert report.encoding == "cp1252"
 
 
-class TestUnsupportedFormatFailsLoud:
-    """JSON support is item 8 (out of scope) — but it must reject cleanly,
-    not silently misparse."""
+class TestJsonRecordsSupported:
+    """JSON support (item U1.2) landed in Round 7 — records-oriented JSON
+    parses cleanly into a DataFrame rather than being rejected. Was
+    `TestUnsupportedFormatFailsLoud`, asserting the pre-U1.2 behavior; kept
+    as a locked-in-format regression check instead of a rejection check."""
 
-    def test_json_records_rejects_with_clear_error(self, tmp_path: Path) -> None:
-        with pytest.raises(DatasetReadError, match="Unsupported"):
-            read_any(str(json_records(tmp_path)))
+    def test_json_records_parses_to_dataframe(self, tmp_path: Path) -> None:
+        df, report = read_any(str(json_records(tmp_path)))
+        assert list(df.columns) == ["a", "b"]
+        assert df.to_dict(orient="records") == [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
+        assert report.format == "json"
 
 
 class TestAlreadyCorrectFailLoud:

@@ -12,6 +12,7 @@ import re
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
+from src.core.findings import Finding
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -106,6 +107,60 @@ class TextAnalysisTool(BaseTool):
             "vocab_size": len(tokens),
             "top_tokens": top_tokens,
         }
+
+    def findings(  # type: ignore[override]
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        results: list[Finding] = []
+
+        top_tokens = output.get("top_tokens")
+        non_null = output.get("non_null_count")
+        text_column = output.get("text_column")
+        if top_tokens and non_null:
+            top_word, top_count = next(iter(top_tokens.items()))
+            occurrence_rate = top_count / non_null
+            if occurrence_rate > 0.05:
+                results.append(
+                    Finding(
+                        finding_id=f"{self.name}_top_token",
+                        kind="text",
+                        headline=(
+                            f"'{top_word}' is the most frequent term in '{text_column}' "
+                            f"({top_count:,} occurrences across {non_null:,} entries)"
+                        ),
+                        detail=(
+                            f"Vocabulary of {output.get('vocab_size', 0):,} distinct token(s); "
+                            f"top {len(top_tokens)} shown."
+                        ),
+                        evidence={"top_tokens": top_tokens, "non_null_count": non_null},
+                        measure="token_frequency",
+                        dimension=text_column,
+                        level=top_word,
+                        effect=round(min(occurrence_rate, 1.0), 4),
+                        effect_kind="pct",
+                        confidence=0.5,
+                        surprise=0.2,
+                    )
+                )
+
+        missing_pct = output.get("missing_pct")
+        if missing_pct is not None and missing_pct > 20.0:
+            results.append(
+                Finding(
+                    finding_id=f"{self.name}_missing",
+                    kind="method_fit",
+                    headline=f"'{text_column}' is missing in {missing_pct:.1f}% of rows",
+                    evidence={"missing_pct": missing_pct},
+                    confidence=0.8,
+                    surprise=0.0,
+                    caveats=[f"{missing_pct:.1f}% of rows have no value in '{text_column}'."],
+                )
+            )
+
+        return results
 
     def get_schema(self) -> dict[str, Any]:
         return {

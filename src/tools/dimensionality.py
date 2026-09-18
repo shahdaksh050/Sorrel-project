@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from src.core.findings import Finding
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.clustering import _select_cluster_features
 from src.tools.data_processing import _read_df
@@ -103,6 +104,76 @@ class DimensionalityAnalysisTool(BaseTool):
             "high_correlation_pairs": high_corr_pairs,
             "multicollinearity_risk": bool(high_corr_pairs),
         }
+
+    def findings(  # type: ignore[override]
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        results: list[Finding] = []
+
+        n_features = output.get("n_features")
+        n_for_threshold = output.get("n_components_for_threshold")
+        variance_threshold = output.get("variance_threshold")
+        if n_features and n_for_threshold:
+            reduction = 1.0 - (n_for_threshold / n_features)
+            if reduction > 0.15:
+                results.append(
+                    Finding(
+                        finding_id=f"{self.name}_variance",
+                        kind="dimensionality",
+                        headline=(
+                            f"{n_for_threshold} of {n_features} features capture "
+                            f"{variance_threshold:.0%} of the variance"
+                        ),
+                        detail=(
+                            "PCA on standardised features; components ranked by "
+                            "explained_variance_ratio."
+                        ),
+                        evidence={
+                            "n_features": n_features,
+                            "n_components_for_threshold": n_for_threshold,
+                            "explained_variance_ratio": output.get("explained_variance_ratio"),
+                        },
+                        measure="explained_variance",
+                        effect=round(reduction, 4),
+                        effect_kind="share",
+                        confidence=0.6,
+                        surprise=0.3,
+                    )
+                )
+
+        high_corr = output.get("high_correlation_pairs")
+        if high_corr:
+            top_pair = high_corr[0]
+            results.append(
+                Finding(
+                    finding_id=f"{self.name}_multicollinearity",
+                    kind="method_fit",
+                    headline=(
+                        f"{len(high_corr)} feature pair(s) are highly correlated "
+                        f"(top: '{top_pair.get('col_a')}' & '{top_pair.get('col_b')}', "
+                        f"r={top_pair.get('correlation')})"
+                    ),
+                    detail=(
+                        "|r| >= 0.9 between these features — treat as redundant for "
+                        "modelling; consider dropping one of each pair."
+                    ),
+                    evidence={"high_correlation_pairs": high_corr},
+                    measure="correlation",
+                    effect=top_pair.get("correlation"),
+                    effect_kind="r",
+                    confidence=0.8,
+                    surprise=0.2,
+                    caveats=[
+                        f"{len(high_corr)} redundant feature pair(s) detected "
+                        "(|r| >= 0.9) — multicollinearity risk for linear models."
+                    ],
+                )
+            )
+
+        return results
 
     def get_schema(self) -> dict[str, Any]:
         return {

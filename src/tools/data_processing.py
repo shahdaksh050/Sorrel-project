@@ -526,6 +526,7 @@ class DetectOutliersTool(BaseTool):
             raise ToolExecutionError(f"Unknown method '{method}'. Use: iqr, zscore, isolation_forest")
 
         total = report.get("total_outliers", 0)
+        report["row_count"] = row_count
         report["outlier_percentage"] = round(total / max(row_count, 1) * 100, 2)
         report["per_column_outliers"] = per_column_outliers
         report["per_column_detail"] = per_column_detail

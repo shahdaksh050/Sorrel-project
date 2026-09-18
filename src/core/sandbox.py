@@ -20,10 +20,12 @@ from __future__ import annotations
 import ast
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -57,7 +59,7 @@ STDOUT_CAP_CHARS: int = 8_000
 #: own execution namespace. Checked here (before the subprocess spawns) and
 #: again, defensively, inside _sandbox_worker._build_restricted_globals.
 RESERVED_GLOBAL_NAMES: frozenset[str] = frozenset(
-    {"df", "SCHEMA", "RESULT", "FINDING", "__builtins__"}
+    {"df", "SCHEMA", "RESULT", "FINDING", "PRIOR_RESULTS", "__builtins__"}
 )
 
 
@@ -202,152 +204,392 @@ def _validate_extra_globals(
     return None
 
 
+class SandboxBackend(ABC):
+    """Abstract strategy for executing code in an isolated sandbox."""
+
+    @abstractmethod
+    def execute(
+        self,
+        code: str,
+        dataset_ref: str,
+        extra_globals: dict[str, Any] | None = None,
+        prior_results: dict[str, Any] | None = None,
+        timeout_s: float = 20.0,
+        memory_limit_mb: int = 512,
+    ) -> SandboxResult:
+        """Execute code against dataset_ref and return a structured result."""
+        ...
+
+
+class SubprocessSandbox(SandboxBackend):
+    """
+    Subprocess sandbox backend.
+
+    Executes code in a separate Python subprocess running `_sandbox_worker.py`
+    with restricted builtins, AST static validation, memory capping, and
+    execution timeouts. Zero external dependencies.
+    """
+
+    def execute(
+        self,
+        code: str,
+        dataset_ref: str,
+        extra_globals: dict[str, Any] | None = None,
+        prior_results: dict[str, Any] | None = None,
+        timeout_s: float = 20.0,
+        memory_limit_mb: int = 512,
+    ) -> SandboxResult:
+        t0 = time.perf_counter()
+
+        static_error = _static_check(code)
+        if static_error is not None:
+            error_type, hint = static_error
+            return SandboxResult(
+                status="error", result=None, finding=None, stdout="",
+                error_type=error_type, traceback=None, hint=hint,
+                duration_ms=(time.perf_counter() - t0) * 1000,
+            )
+
+        extra_globals_error = _validate_extra_globals(extra_globals)
+        if extra_globals_error is not None:
+            error_type, hint = extra_globals_error
+            return SandboxResult(
+                status="error", result=None, finding=None, stdout="",
+                error_type=error_type, traceback=None, hint=hint,
+                duration_ms=(time.perf_counter() - t0) * 1000,
+            )
+
+        # ignore_cleanup_errors: the scratch dir is the killed child's cwd, and on
+        # Windows a rmtree over a directory whose handle a just-terminated process
+        # still holds raises PermissionError out of __exit__ — which would escape
+        # run_sandboxed and break the "never raises" contract above. Leaking a temp
+        # directory is the better failure mode.
+        with tempfile.TemporaryDirectory(
+            prefix="sandbox_", ignore_cleanup_errors=True
+        ) as scratch_dir:
+            input_path = Path(scratch_dir) / "input.json"
+            result_path = Path(scratch_dir) / "result.json"
+            input_path.write_text(
+                json.dumps(
+                    {
+                        "code": code,
+                        "dataset_ref": dataset_ref,
+                        "extra_globals": extra_globals,
+                        "prior_results": prior_results or {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            proc = subprocess.Popen(
+                [sys.executable, str(_WORKER_SCRIPT), str(input_path), str(result_path)],
+                cwd=scratch_dir,
+                env=_worker_env(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            try:
+                ps_proc: psutil.Process | None = psutil.Process(proc.pid)
+            except psutil.NoSuchProcess:
+                ps_proc = None
+
+            killed_as: str | None = None
+            while True:
+                try:
+                    proc.wait(timeout=_POLL_INTERVAL_S)
+                    break
+                except subprocess.TimeoutExpired:
+                    elapsed = time.perf_counter() - t0
+                    if elapsed > timeout_s:
+                        killed_as = "timeout"
+                    elif ps_proc is not None:
+                        try:
+                            rss_mb = ps_proc.memory_info().rss / (1024 * 1024)
+                            if rss_mb > memory_limit_mb:
+                                killed_as = "memory"
+                        except psutil.NoSuchProcess:
+                            pass
+                    if killed_as is not None:
+                        proc.kill()
+                        proc.wait()
+                        break
+
+            duration_ms = (time.perf_counter() - t0) * 1000
+
+            if killed_as == "timeout":
+                return SandboxResult(
+                    status="error", result=None, finding=None, stdout="",
+                    error_type="timeout",
+                    traceback=None,
+                    hint=(
+                        f"Execution exceeded {timeout_s:.0f}s. Avoid unbounded "
+                        "loops; operate on df directly instead of iterating rows."
+                    ),
+                    duration_ms=duration_ms,
+                )
+            if killed_as == "memory":
+                return SandboxResult(
+                    status="error", result=None, finding=None, stdout="",
+                    error_type="memory",
+                    traceback=None,
+                    hint=(
+                        f"Execution used more than {memory_limit_mb}MB. Avoid "
+                        "materializing full copies of large intermediate results."
+                    ),
+                    duration_ms=duration_ms,
+                )
+
+            if not result_path.exists():
+                return SandboxResult(
+                    status="error", result=None, finding=None, stdout="",
+                    error_type="runtime",
+                    traceback=f"Worker exited with code {proc.returncode} and wrote no result.",
+                    hint="The sandboxed process crashed before producing a result.",
+                    duration_ms=duration_ms,
+                )
+
+            try:
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                return SandboxResult(
+                    status="error", result=None, finding=None, stdout="",
+                    error_type="runtime",
+                    traceback=str(exc),
+                    hint="The sandboxed process produced an unreadable result.",
+                    duration_ms=duration_ms,
+                )
+
+            return SandboxResult(
+                status=payload["status"],
+                result=payload.get("result"),
+                finding=payload.get("finding"),
+                stdout=payload.get("stdout", ""),
+                error_type=payload.get("error_type"),
+                traceback=payload.get("traceback"),
+                hint=payload.get("hint"),
+                duration_ms=duration_ms,
+            )
+
+
+class DockerSandbox(SandboxBackend):
+    """
+    Hardened container sandbox backend using Docker.
+
+    Provides true OS-level isolation (namespaces, cgroups, network=none,
+    read-only filesystem, non-root user).
+    Ready for future deployment or production servers.
+    """
+
+    def __init__(self, image_tag: str = "dsa-sandbox:latest") -> None:
+        self.image_tag = image_tag
+
+    @staticmethod
+    def is_available() -> bool:
+        """Return True if docker executable exists and daemon is responsive."""
+        docker_bin = shutil.which("docker")
+        if not docker_bin:
+            return False
+        try:
+            res = subprocess.run(
+                ["docker", "info"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
+
+    def execute(
+        self,
+        code: str,
+        dataset_ref: str,
+        extra_globals: dict[str, Any] | None = None,
+        prior_results: dict[str, Any] | None = None,
+        timeout_s: float = 20.0,
+        memory_limit_mb: int = 512,
+    ) -> SandboxResult:
+        t0 = time.perf_counter()
+
+        static_error = _static_check(code)
+        if static_error is not None:
+            error_type, hint = static_error
+            return SandboxResult(
+                status="error", result=None, finding=None, stdout="",
+                error_type=error_type, traceback=None, hint=hint,
+                duration_ms=(time.perf_counter() - t0) * 1000,
+            )
+
+        extra_globals_error = _validate_extra_globals(extra_globals)
+        if extra_globals_error is not None:
+            error_type, hint = extra_globals_error
+            return SandboxResult(
+                status="error", result=None, finding=None, stdout="",
+                error_type=error_type, traceback=None, hint=hint,
+                duration_ms=(time.perf_counter() - t0) * 1000,
+            )
+
+        if not Path(dataset_ref).exists():
+            return SandboxResult(
+                status="error", result=None, finding=None, stdout="",
+                error_type="runtime", traceback=None,
+                hint=f"Dataset file not found: {dataset_ref}",
+                duration_ms=(time.perf_counter() - t0) * 1000,
+            )
+
+        with tempfile.TemporaryDirectory(
+            prefix="docker_sandbox_", ignore_cleanup_errors=True
+        ) as scratch_dir:
+            scratch_path = Path(scratch_dir)
+            dataset_source = Path(dataset_ref)
+            dataset_target = scratch_path / f"dataset{dataset_source.suffix}"
+            try:
+                shutil.copy2(dataset_source, dataset_target)
+            except Exception as exc:
+                return SandboxResult(
+                    status="error", result=None, finding=None, stdout="",
+                    error_type="runtime", traceback=str(exc),
+                    hint="Failed to prepare dataset for Docker sandbox.",
+                    duration_ms=(time.perf_counter() - t0) * 1000,
+                )
+
+            input_path = scratch_path / "input.json"
+            result_path = scratch_path / "result.json"
+
+            container_input = "/scratch/input.json"
+            container_result = "/scratch/result.json"
+            container_data = f"/scratch/{dataset_target.name}"
+
+            input_path.write_text(
+                json.dumps(
+                    {
+                        "code": code,
+                        "dataset_ref": container_data,
+                        "extra_globals": extra_globals,
+                        "prior_results": prior_results or {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cmd = [
+                "docker", "run", "--rm",
+                "--network", "none",
+                "--read-only",
+                "--tmpfs", "/tmp:rw,size=100m",
+                "-v", f"{scratch_path.resolve()}:/scratch:rw",
+                f"--memory={memory_limit_mb}m",
+                "--cpus=1.0",
+                "--pids-limit=50",
+                self.image_tag,
+                container_input,
+                container_result,
+            ]
+
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=timeout_s,
+                    text=True,
+                )
+            except subprocess.TimeoutExpired:
+                return SandboxResult(
+                    status="error", result=None, finding=None, stdout="",
+                    error_type="timeout",
+                    traceback=None,
+                    hint=f"Docker container execution exceeded {timeout_s:.0f}s.",
+                    duration_ms=(time.perf_counter() - t0) * 1000,
+                )
+            except Exception as exc:
+                return SandboxResult(
+                    status="error", result=None, finding=None, stdout="",
+                    error_type="runtime",
+                    traceback=str(exc),
+                    hint=f"Failed to run Docker sandbox: {exc}",
+                    duration_ms=(time.perf_counter() - t0) * 1000,
+                )
+
+            duration_ms = (time.perf_counter() - t0) * 1000
+
+            if not result_path.exists():
+                return SandboxResult(
+                    status="error", result=None, finding=None, stdout="",
+                    error_type="runtime",
+                    traceback=proc.stderr or proc.stdout,
+                    hint="The Docker container exited without writing a result.",
+                    duration_ms=duration_ms,
+                )
+
+            try:
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                return SandboxResult(
+                    status="error", result=None, finding=None, stdout="",
+                    error_type="runtime",
+                    traceback=str(exc),
+                    hint="The Docker container produced an unreadable result.",
+                    duration_ms=duration_ms,
+                )
+
+            return SandboxResult(
+                status=payload["status"],
+                result=payload.get("result"),
+                finding=payload.get("finding"),
+                stdout=payload.get("stdout", ""),
+                error_type=payload.get("error_type"),
+                traceback=payload.get("traceback"),
+                hint=payload.get("hint"),
+                duration_ms=duration_ms,
+            )
+
+
+def get_sandbox_backend(backend_name: str | None = None) -> SandboxBackend:
+    """
+    Return the active sandbox backend strategy.
+
+    Resolution:
+    1. Explicit backend_name argument ('docker' or 'subprocess').
+    2. Environment variable SANDBOX_BACKEND ('docker' or 'subprocess').
+    3. If 'docker' is requested, validates Docker daemon is available.
+       Defaults to SubprocessSandbox (zero external dependencies).
+    """
+    target = (backend_name or os.environ.get("SANDBOX_BACKEND", "")).strip().lower()
+
+    if target == "docker":
+        if DockerSandbox.is_available():
+            return DockerSandbox()
+        return SubprocessSandbox()
+
+    return SubprocessSandbox()
+
+
 def run_sandboxed(
     code: str,
     dataset_ref: str,
     extra_globals: dict[str, Any] | None = None,
+    prior_results: dict[str, Any] | None = None,
     timeout_s: float = 20.0,
     memory_limit_mb: int = 512,
+    backend: SandboxBackend | None = None,
 ) -> SandboxResult:
     """
     Execute `code` against the dataset at `dataset_ref` in an isolated
-    subprocess and return a structured result.
+    sandbox and return a structured result.
 
+    Delegates to the active SandboxBackend (SubprocessSandbox or DockerSandbox).
     `extra_globals`, when given, is JSON-validated and threaded into the
-    worker's restricted execution namespace as additional top-level names —
-    parameters reach generated code as data, never as templated source.
-
-    Never raises for a failure of the *sandboxed code* — syntax errors,
-    blocked imports, timeouts, and runtime exceptions all come back as
-    SandboxResult(status="error", ...).
+    worker's restricted execution namespace as additional top-level names.
+    `prior_results`, when given, is made available inside the sandbox as
+    a global dictionary named PRIOR_RESULTS.
     """
-    t0 = time.perf_counter()
-
-    static_error = _static_check(code)
-    if static_error is not None:
-        error_type, hint = static_error
-        return SandboxResult(
-            status="error", result=None, finding=None, stdout="",
-            error_type=error_type, traceback=None, hint=hint,
-            duration_ms=(time.perf_counter() - t0) * 1000,
-        )
-
-    extra_globals_error = _validate_extra_globals(extra_globals)
-    if extra_globals_error is not None:
-        error_type, hint = extra_globals_error
-        return SandboxResult(
-            status="error", result=None, finding=None, stdout="",
-            error_type=error_type, traceback=None, hint=hint,
-            duration_ms=(time.perf_counter() - t0) * 1000,
-        )
-
-    # ignore_cleanup_errors: the scratch dir is the killed child's cwd, and on
-    # Windows a rmtree over a directory whose handle a just-terminated process
-    # still holds raises PermissionError out of __exit__ — which would escape
-    # run_sandboxed and break the "never raises" contract above. Leaking a temp
-    # directory is the better failure mode.
-    with tempfile.TemporaryDirectory(
-        prefix="sandbox_", ignore_cleanup_errors=True
-    ) as scratch_dir:
-        input_path = Path(scratch_dir) / "input.json"
-        result_path = Path(scratch_dir) / "result.json"
-        input_path.write_text(
-            json.dumps(
-                {
-                    "code": code,
-                    "dataset_ref": dataset_ref,
-                    "extra_globals": extra_globals,
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        proc = subprocess.Popen(
-            [sys.executable, str(_WORKER_SCRIPT), str(input_path), str(result_path)],
-            cwd=scratch_dir,
-            env=_worker_env(),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        try:
-            ps_proc: psutil.Process | None = psutil.Process(proc.pid)
-        except psutil.NoSuchProcess:
-            ps_proc = None
-
-        killed_as: str | None = None
-        while True:
-            try:
-                proc.wait(timeout=_POLL_INTERVAL_S)
-                break
-            except subprocess.TimeoutExpired:
-                elapsed = time.perf_counter() - t0
-                if elapsed > timeout_s:
-                    killed_as = "timeout"
-                elif ps_proc is not None:
-                    try:
-                        rss_mb = ps_proc.memory_info().rss / (1024 * 1024)
-                        if rss_mb > memory_limit_mb:
-                            killed_as = "memory"
-                    except psutil.NoSuchProcess:
-                        pass
-                if killed_as is not None:
-                    proc.kill()
-                    proc.wait()
-                    break
-
-        duration_ms = (time.perf_counter() - t0) * 1000
-
-        if killed_as == "timeout":
-            return SandboxResult(
-                status="error", result=None, finding=None, stdout="",
-                error_type="timeout",
-                traceback=None,
-                hint=(
-                    f"Execution exceeded {timeout_s:.0f}s. Avoid unbounded "
-                    "loops; operate on df directly instead of iterating rows."
-                ),
-                duration_ms=duration_ms,
-            )
-        if killed_as == "memory":
-            return SandboxResult(
-                status="error", result=None, finding=None, stdout="",
-                error_type="memory",
-                traceback=None,
-                hint=(
-                    f"Execution used more than {memory_limit_mb}MB. Avoid "
-                    "materializing full copies of large intermediate results."
-                ),
-                duration_ms=duration_ms,
-            )
-
-        if not result_path.exists():
-            return SandboxResult(
-                status="error", result=None, finding=None, stdout="",
-                error_type="runtime",
-                traceback=f"Worker exited with code {proc.returncode} and wrote no result.",
-                hint="The sandboxed process crashed before producing a result.",
-                duration_ms=duration_ms,
-            )
-
-        try:
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            return SandboxResult(
-                status="error", result=None, finding=None, stdout="",
-                error_type="runtime",
-                traceback=str(exc),
-                hint="The sandboxed process produced an unreadable result.",
-                duration_ms=duration_ms,
-            )
-
-        return SandboxResult(
-            status=payload["status"],
-            result=payload.get("result"),
-            finding=payload.get("finding"),
-            stdout=payload.get("stdout", ""),
-            error_type=payload.get("error_type"),
-            traceback=payload.get("traceback"),
-            hint=payload.get("hint"),
-            duration_ms=duration_ms,
-        )
+    active_backend = backend or get_sandbox_backend()
+    return active_backend.execute(
+        code=code,
+        dataset_ref=dataset_ref,
+        extra_globals=extra_globals,
+        prior_results=prior_results,
+        timeout_s=timeout_s,
+        memory_limit_mb=memory_limit_mb,
+    )

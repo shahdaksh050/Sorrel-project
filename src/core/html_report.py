@@ -22,7 +22,6 @@ from typing import Any
 from src.core.chart_theme import vega_config
 from src.core.multiple_testing import apply_benjamini_hochberg
 
-
 # ---------------------------------------------------------------------------
 # 3a — executive summary: prefer the LLM's own `insights` over its raw
 # `reasoning` scratch text, which has leaked internal plumbing ("completed
@@ -48,15 +47,17 @@ def _strip_jargon_sentences(text: str) -> str:
 
 
 def _build_executive_summary(llm_insights: dict[str, Any]) -> str:
-    """Prefer `insights` (first 3-4, joined into prose) for the executive
-    summary; fall back to `reasoning` only when there are no insights.
-    Either way, jargon sentences are stripped before use."""
+    """Build the executive summary from `reasoning` (with internal-plumbing jargon
+    stripped). If `reasoning` is empty or only contained jargon, fall back to
+    joining the top `insights`."""
+    clean_reasoning = _strip_jargon_sentences(str(llm_insights.get("reasoning", "") or ""))
+    if clean_reasoning:
+        return clean_reasoning
     insights = llm_insights.get("insights") or []
     if insights:
         text = " ".join(str(i).strip().rstrip(".") + "." for i in insights[:4] if str(i).strip())
-    else:
-        text = str(llm_insights.get("reasoning", "") or "")
-    return _strip_jargon_sentences(text)
+        return _strip_jargon_sentences(text)
+    return ""
 
 
 def _model_was_trained(llm_insights: dict[str, Any], tool_results: list[dict[str, Any]]) -> bool:

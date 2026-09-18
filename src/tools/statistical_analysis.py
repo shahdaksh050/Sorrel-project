@@ -341,7 +341,7 @@ class SelectStatisticalTestTool(BaseTool):
         # exactly that pair, unchanged, for backward compatibility.
         family_mode = test_family or not group_supplied
         if not family_mode:
-            if group_column not in df.columns:
+            if group_column is None or group_column not in df.columns:
                 raise ToolExecutionError(f"Group column '{group_column}' not found.")
             result, _n = self._run_single_test(df, feature_column, group_column, alpha)
             return result
@@ -357,7 +357,7 @@ class SelectStatisticalTestTool(BaseTool):
         if profile is not None:
             for c in profile.measures():
                 if c.name in df.columns and df[c.name].dropna().nunique() > 1:
-                    return c.name
+                    return str(c.name)
         for col in df.columns:
             series = df[col]
             if not pd.api.types.is_numeric_dtype(series):
@@ -367,7 +367,7 @@ class SelectStatisticalTestTool(BaseTool):
                 continue
             if is_identifier_like(col, clean, len(clean)):
                 continue
-            return col
+            return str(col)
         return None
 
     def _eligible_dimensions(

@@ -270,7 +270,7 @@ class TestVerbatimMetricValidation:
         final = {"insights": ["The model reaches 0.999 accuracy."], "recommendations": []}
         flagged = agent._flag_unverified_claims(final)
         assert len(flagged) == 1
-        assert "[unverified: 0.999]" in final["insights"][0]
+        assert "[unverified: 0.999" in final["insights"][0]
 
     def test_small_integer_counts_are_not_flagged(
         self, agent: AgentController
@@ -286,6 +286,55 @@ class TestVerbatimMetricValidation:
         flagged = agent._flag_unverified_claims(final)
         assert len(flagged) == 1
         assert "cv_mean" in flagged[0]
+
+    def test_comma_formatted_large_number_is_verified(self, agent: AgentController) -> None:
+        from src.core.memory import ToolResult
+
+        agent.memory.append_tool_result(
+            ToolResult(
+                tool_name="detect_outliers",
+                status="success",
+                output={"total_outliers": 14349666, "summary": "Found 14,349,666 outliers."},
+            )
+        )
+        final = {
+            "insights": ["Global_reactive_power showed 14,349,666 outliers."],
+            "recommendations": [],
+        }
+        flagged = agent._flag_unverified_claims(final)
+        assert flagged == []
+        assert "[unverified:" not in final["insights"][0]
+
+    def test_dataset_row_count_with_comma_is_verified_in_attributed_sentence(
+        self, agent: AgentController
+    ) -> None:
+        from src.core.memory import DatasetMetadata, ToolResult
+
+        agent.memory.dataset_metadata = DatasetMetadata(
+            file_path="dummy.csv",
+            row_count=260640,
+            column_count=10,
+            columns=["col1"],
+            missing_values={},
+            numerical_cols=["col1"],
+            categorical_cols=[],
+            task_type="regression",
+        )
+        agent.memory.append_tool_result(
+            ToolResult(
+                tool_name="detect_outliers",
+                status="success",
+                output={"total_outliers": 14349, "summary": "Found 14,349 outliers."},
+            )
+        )
+        final = {
+            "insights": ["Across 260,640 records, 14,349 outliers were detected."],
+            "recommendations": [],
+        }
+        flagged = agent._flag_unverified_claims(final)
+        assert flagged == []
+        assert "[unverified:" not in final["insights"][0]
+
 
 
 # ---------------------------------------------------------------------------
@@ -375,3 +424,41 @@ class TestLLMClientParseJson:
         assert parsed["status"] == "in_progress"
         assert parsed["steps"][0]["tool_name"] == "clean_data"
         assert "line one" in parsed["reasoning"]
+
+
+class TestMinIterationsOrchestration:
+    def test_min_iterations_defaults_to_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MIN_ITERATIONS", raising=False)
+        agent = AgentController()
+        assert agent.min_iterations == 1
+
+    def test_min_iterations_reads_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MIN_ITERATIONS", "4")
+        agent = AgentController()
+        assert agent.min_iterations == 4
+
+    def test_min_iterations_reprompts_early_completion(
+        self, sample_csv: str, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        agent = AgentController(min_iterations=2, max_iterations=5, enable_rlm=False)
+        agent._output_dir = str(tmp_path / "output")
+
+        # LLM tries to complete on iteration 1, then provides steps on reprompt, then completes on iteration 2
+        step1 = {
+            "status": "in_progress",
+            "reasoning": "Exploring data.",
+            "steps": [
+                {
+                    "step_number": 1,
+                    "tool_name": "clean_data",
+                    "parameters": {"file_path": sample_csv},
+                    "rationale": "Clean initial data.",
+                }
+            ],
+        }
+        # First call: complete (early!). Second call (reprompt): step1. Third call (iter 2): FINAL_RESPONSE.
+        agent.llm_client = _ScriptedLLM([FINAL_RESPONSE, step1, FINAL_RESPONSE])  # type: ignore[assignment]
+        agent.load_dataset(sample_csv, target_hint="label", interactive=False)
+        final = agent.analyze()
+        assert final["status"] == "complete"
+        assert agent.memory.iteration_count >= 2

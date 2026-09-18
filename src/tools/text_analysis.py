@@ -108,7 +108,7 @@ class TextAnalysisTool(BaseTool):
             "top_tokens": top_tokens,
         }
 
-    def findings(  # type: ignore[override]
+    def findings(
         self,
         output: dict[str, Any],
         profile: DatasetProfile | None,

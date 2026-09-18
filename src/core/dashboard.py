@@ -687,11 +687,11 @@ def _time_series_chart(
     # findings (the exact "monthly mean quantity" vs "monthly total revenue"
     # mismatch this round's audit named). Only fall back to a local guess
     # when no tool output is available (e.g. the tool wasn't scheduled).
-    _GRAIN_FREQ = {"daily": "D", "weekly": "W", "monthly": "MS"}
+    grain_freq = {"daily": "D", "weekly": "W", "monthly": "MS"}
     unit_hint = col_by_name[value_col].unit_hint if col_by_name.get(value_col) else None
     tool_grain = str(ts_output.get("grain") or "") if ts_output else ""
     tool_agg = ts_output.get("aggregation") if ts_output else None
-    freq = _GRAIN_FREQ.get(tool_grain, "MS")
+    freq = grain_freq.get(tool_grain, "MS")
     use_sum = tool_agg == "sum" if tool_agg else unit_hint in ("currency", "count")
     agg = tool_agg or ("sum" if use_sum else "mean")
     resampled = (
@@ -1036,7 +1036,7 @@ def _cohort_charts(df: pd.DataFrame, cohort_output: dict[str, Any] | None) -> li
             n = len(ranked_rev)
             deciles: list[dict[str, Any]] = []
             for decile in range(1, 11):
-                cutoff = max(1, int(round(n * decile / 10)))
+                cutoff = max(1, round(n * decile / 10))
                 cumulative = float(ranked_rev.iloc[:cutoff].sum())
                 deciles.append({
                     "customer_decile_pct": decile * 10,

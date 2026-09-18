@@ -253,6 +253,14 @@ class DatasetMetadata:
         if self.high_cardinality_cols:
             hc = ", ".join(_sp(c) for c in self.high_cardinality_cols)
             lines.append(f"High-cardinality columns: {hc}")
+        if self.summary_stats:
+            stats_snippets = []
+            for col, stats in list(self.summary_stats.items())[:6]:
+                if isinstance(stats, dict):
+                    st_str = ", ".join(f"{k}={v}" for k, v in list(stats.items())[:4])
+                    stats_snippets.append(f"{_sp(col)} ({st_str})")
+            if stats_snippets:
+                lines.append(f"Key stats: {'; '.join(stats_snippets)}")
         return "\n".join(lines)
 
 

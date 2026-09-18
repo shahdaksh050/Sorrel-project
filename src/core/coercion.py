@@ -32,6 +32,9 @@ _PERCENT_RE = re.compile(r"^-?[\d,]+(\.\d+)?\s*%$")
 _THOUSANDS_RE = re.compile(r"^-?\d{1,3}(,\d{3})+$")
 _BOOL_TRUE = {"y", "yes", "true", "t"}
 _BOOL_FALSE = {"n", "no", "false", "f"}
+_COMMON_SENTINELS: frozenset[str] = frozenset({
+    "?", "-", "--", "na", "n/a", "#n/a", "null", "none", "nan", "", "missing", "unknown"
+})
 
 
 @dataclass
@@ -45,6 +48,7 @@ class Coercion:
     n_converted: int
     n_failed: int
     failed_examples: list[str] = field(default_factory=list)
+    is_sentinel_only: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -55,6 +59,7 @@ class Coercion:
             "n_converted": self.n_converted,
             "n_failed": self.n_failed,
             "failed_examples": self.failed_examples,
+            "is_sentinel_only": self.is_sentinel_only,
         }
 
 
@@ -149,7 +154,9 @@ def _detect_date_convention(values: pd.Series) -> tuple[str, bool] | None:
 
     Returns (rule_name, dayfirst) or None when this is not a date column.
     """
-    sample = values.head(2000)
+    # Ponytail: sample unique dates across the series so high-frequency
+    # (minute/hourly) datasets reveal days 13..31 even when head(2000) only covers Day 1.
+    sample = values.drop_duplicates().head(2000)
     if sample.empty:
         return None
     matches = sample.str.match(_DATE_LIKE_RE)
@@ -173,7 +180,8 @@ def _detect_date_convention(values: pd.Series) -> tuple[str, bool] | None:
 
 
 def _parse_dates(values: pd.Series, dayfirst: bool) -> pd.Series:
-    return pd.to_datetime(values, errors="coerce", dayfirst=dayfirst)
+    # Ponytail: format="mixed" parses with pandas C engine and suppresses the dateutil UserWarning
+    return pd.to_datetime(values, errors="coerce", dayfirst=dayfirst, format="mixed")
 
 
 def _try_coerce_column(
@@ -239,6 +247,7 @@ def coerce_types(df: pd.DataFrame, delimiter: str | None = None) -> tuple[pd.Dat
                 new_dates = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
                 new_dates.loc[non_null.index] = parsed_dates
                 out[col] = new_dates
+                date_failed = [str(x) for x in dict.fromkeys(failed.tolist())][:5]
                 coercions.append(
                     Coercion(
                         column=str(col),
@@ -247,9 +256,8 @@ def coerce_types(df: pd.DataFrame, delimiter: str | None = None) -> tuple[pd.Dat
                         rule=rule_name,
                         n_converted=converted,
                         n_failed=len(non_null) - converted,
-                        failed_examples=[
-                            str(x) for x in dict.fromkeys(failed.tolist())
-                        ][:5],
+                        failed_examples=date_failed,
+                        is_sentinel_only=bool(date_failed and all(str(x).strip().lower() in _COMMON_SENTINELS for x in date_failed)),
                     )
                 )
                 continue
@@ -266,6 +274,8 @@ def coerce_types(df: pd.DataFrame, delimiter: str | None = None) -> tuple[pd.Dat
             continue
 
         failed_examples = list(dict.fromkeys(non_null[~matched_mask].tolist()))[:5]
+        failed_examples_str = [str(x) for x in failed_examples]
+        is_sentinel = bool(failed_examples and all(str(x).strip().lower() in _COMMON_SENTINELS for x in failed_examples))
 
         new_col = pd.Series(pd.NA, index=series.index, dtype=object)
         new_col.loc[non_null.index] = parsed.to_numpy()
@@ -283,8 +293,55 @@ def coerce_types(df: pd.DataFrame, delimiter: str | None = None) -> tuple[pd.Dat
                 rule=rule,
                 n_converted=n_converted,
                 n_failed=n_failed,
-                failed_examples=[str(x) for x in failed_examples],
+                failed_examples=failed_examples_str,
+                is_sentinel_only=is_sentinel,
             )
         )
+
+    # Date + Time fusion: if there is a datetime column with midnight timestamps
+    # and a companion column containing time-of-day strings (HH:MM:SS), fuse them
+    # into a single comprehensive timestamp series so time-series tools have full
+    # sub-daily resolution.
+    time_cols = [
+        c for c in out.columns
+        if not pd.api.types.is_numeric_dtype(out[c])
+        and not pd.api.types.is_datetime64_any_dtype(out[c])
+        and not pd.api.types.is_bool_dtype(out[c])
+    ]
+    date_cols = [
+        c for c in out.columns
+        if pd.api.types.is_datetime64_any_dtype(out[c])
+    ]
+    if date_cols and time_cols:
+        for d_col in date_cols:
+            d_series = out[d_col].dropna()
+            if d_series.empty:
+                continue
+            sample_d = d_series.head(100)
+            if not ((sample_d.dt.hour == 0).all() and (sample_d.dt.minute == 0).all() and (sample_d.dt.second == 0).all()):
+                continue
+            for t_col in time_cols:
+                t_non_null = out[t_col].dropna().astype(str).str.strip()
+                if t_non_null.empty:
+                    continue
+                sample_t = t_non_null.head(100)
+                if (sample_t.str.match(r"^\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?$")).mean() >= 0.9:
+                    timedeltas = pd.to_timedelta(t_non_null, errors="coerce")
+                    valid_td = timedeltas.notna()
+                    if valid_td.mean() >= COERCE_MATCH_THRESHOLD:
+                        out[d_col] = out[d_col].add(timedeltas, fill_value=pd.Timedelta(0))
+                        coercions.append(
+                            Coercion(
+                                column=str(d_col),
+                                from_kind="date",
+                                to_kind="datetime",
+                                rule=f"date_time_fusion:{t_col}",
+                                n_converted=int(valid_td.sum()),
+                                n_failed=int((~valid_td).sum()),
+                                failed_examples=[str(x) for x in t_non_null[~valid_td].head(5)],
+                                is_sentinel_only=False,
+                            )
+                        )
+                        break
 
     return out, coercions

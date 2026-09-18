@@ -14,6 +14,7 @@ Anti-overfitting measures built in:
 """
 from __future__ import annotations
 
+import os
 import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -22,10 +23,9 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, OneToOneFeatureMixin, TransformerMixin
 
+from src.core.findings import Finding
 from src.core.io import DatasetReadError, read_any
 from src.tools.base import BaseTool, ToolExecutionError
-
-from src.core.findings import Finding
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata, MemorySystem
@@ -751,6 +751,28 @@ class TrainModelTool(BaseTool):
             X_train, X_test, y_train, y_test, cv, groups_train = _split_train_test(
                 X, y, df, split_strategy, group_column, task_type, test_size, n_cv_folds
             )
+            max_train_samples = int(os.getenv("MAX_TRAIN_SAMPLES", "50000"))
+            if max_train_samples > 0 and len(X_train) > max_train_samples:
+                orig_train_len = len(X_train)
+                if split_strategy == "time_series":
+                    X_train = X_train.iloc[-max_train_samples:]
+                    y_train = y_train.iloc[-max_train_samples:]
+                elif task_type == "classification" and y_train.nunique() > 1:
+                    from sklearn.model_selection import train_test_split as _tts
+                    X_train, _, y_train, _ = _tts(
+                        X_train, y_train, train_size=max_train_samples,
+                        stratify=y_train, random_state=42
+                    )
+                else:
+                    sample_idx = X_train.sample(n=max_train_samples, random_state=42).index
+                    X_train = X_train.loc[sample_idx]
+                    y_train = y_train.loc[sample_idx]
+                if groups_train is not None:
+                    groups_train = groups_train.loc[X_train.index]
+                treatments.append(
+                    f"Subsampled training set to {max_train_samples:,} rows (from {orig_train_len:,}) "
+                    "for fast, memory-bounded model training."
+                )
             scoring = "f1_weighted" if task_type == "classification" else "r2"
 
             # The skew decision only depends on X_train's numeric columns, not

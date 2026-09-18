@@ -120,10 +120,12 @@ def _build_restricted_globals(
     df: pd.DataFrame,
     schema: dict[str, str],
     extra_globals: dict[str, Any] | None = None,
+    prior_results: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     restricted: dict[str, Any] = {
         "df": df,
         "SCHEMA": schema,
+        "PRIOR_RESULTS": prior_results if prior_results is not None else {},
     }
     if extra_globals:
         # The parent process (run_sandboxed) already rejects any key
@@ -156,7 +158,10 @@ def _error_payload(
 
 
 def _execute(
-    code: str, dataset_ref: str, extra_globals: dict[str, Any] | None = None
+    code: str,
+    dataset_ref: str,
+    extra_globals: dict[str, Any] | None = None,
+    prior_results: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     t0 = time.perf_counter()
 
@@ -168,7 +173,9 @@ def _execute(
         )
 
     schema = _build_schema(df)
-    restricted_globals = _build_restricted_globals(df, schema, extra_globals)
+    restricted_globals = _build_restricted_globals(
+        df, schema, extra_globals, prior_results
+    )
     stdout_buf = io.StringIO()
 
     try:
@@ -189,11 +196,11 @@ def _execute(
     except Exception as exc:
         # Every failure should carry an actionable hint, not just a raw
         # traceback — lightweight models are markedly worse at
-        # self-diagnosing tracebacks unassisted. Fall back to the
-        # exception's own message when it's short enough to stand alone;
-        # a very long message is more noise than help as a one-line hint.
+        # self-diagnosing tracebacks unassisted.
+        exc_type = type(exc).__name__
         message = str(exc)
-        hint = message if message and len(message) <= 200 else None
+        msg_snippet = f": {message[:180]}…" if len(message) > 180 else (f": {message}" if message else "")
+        hint = f"{exc_type}{msg_snippet}"
         return _error_payload(
             "runtime", traceback.format_exc(), hint, t0, stdout_buf.getvalue()
         )
@@ -253,6 +260,7 @@ def main() -> None:
         payload_in["code"],
         payload_in["dataset_ref"],
         payload_in.get("extra_globals"),
+        payload_in.get("prior_results"),
     )
     Path(result_path).write_text(
         json.dumps(result, default=_json_default), encoding="utf-8"

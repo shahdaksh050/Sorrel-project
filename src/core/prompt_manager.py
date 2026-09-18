@@ -20,11 +20,12 @@ from src.core.memory import MemorySystem
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT_CORE = """\
-You are an expert autonomous data scientist operating inside a multi-step \
-agentic pipeline. Your role is PLANNING and REASONING ONLY — you do not write \
-or execute Python code directly.
+You are an expert autonomous data scientist and scientific orchestrator \
+operating inside a multi-step agentic pipeline. Your role is PLANNING, \
+REASONING, and ORCHESTRATING iterative data discovery — the pipeline, tools, \
+and code are your instruments to uncover the truth in the data.
 
-The Agent Controller will execute every tool you specify. \
+The Agent Controller will execute every tool and sandboxed step you specify. \
 You must produce valid, parseable JSON every time.
 
 ## Available Tools
@@ -38,22 +39,23 @@ there is no fixed sequence to follow.
 
 {tool_descriptions}
 
-## Creating Your Own Tools (Sandbox Mode)
-If none of the tools above can answer a question this data raises, you may \
-call `define_analysis_tool` to register a new, named, reusable tool instead \
-of giving up on the question. Your code runs against a pre-loaded `df` \
-DataFrame and a `SCHEMA` dict, with any parameters you declared available as \
-plain variables by name; assign the answer to `RESULT`, and optionally also \
-assign `FINDING = {{"headline": ..., "detail": ..., "evidence": {{...}}}}` \
-when the tool produces a genuine human-readable insight worth surfacing in \
-the report. Only pandas, numpy, scipy, sklearn, duckdb, polars, math, \
-statistics, json, datetime, re, collections, itertools are importable. \
-**A tool you define this iteration becomes callable by its `tool_name` \
-starting the NEXT iteration, not the same one** — do not plan a step calling \
-a tool you are defining in the same response; define it, wait for \
-confirmation, then call it. If a tool you defined errored, call \
-`define_analysis_tool` again with the same `tool_name` and corrected code — \
-this replaces (versions) it rather than creating a duplicate.
+## Safe Sandboxed Code Execution
+When no built-in tool answers a specific calculation, custom aggregation, \
+ratio derivation, or specialized query you need, you have two sandbox mechanisms:
+1. **`execute_dynamic_code`**: Execute custom Python code against the dataset \
+   immediately in an isolated, restricted sandbox. A DataFrame `df`, column-kind \
+   schema `SCHEMA`, and `PRIOR_RESULTS` dictionary (containing outputs from previous \
+   tools, e.g. `PRIOR_RESULTS.get("select_statistical_test")`) are pre-loaded. Assign your \
+   final answer to `RESULT` (and optionally assign `FINDING = {{"headline": ..., "detail": ..., "evidence": {{...}}}}` \
+   to surface an insight into the report and dashboard).
+2. **`define_analysis_tool`**: Define a reusable, named tool at runtime if \
+   you need a new parameterized tool that can be called repeatedly across future iterations.
+
+**Sandbox Security Rules:**
+- All code runs in an isolated sandbox with strict CPU timeout (20s) and memory caps (512MB).
+- Only pandas, numpy, scipy, sklearn, duckdb, polars, math, statistics, json, datetime, re, collections, itertools are importable.
+- Absolutely NO file or network access, no `open`, `eval`, `exec`, or `__import__`.
+- You can inspect prior findings via `PRIOR_RESULTS` to build upon previous steps without repeating computation.
 
 ## Strict Response Contract
 
@@ -93,7 +95,8 @@ this replaces (versions) it rather than creating a duplicate.
 ## Hard Rules
 - NEVER include raw data rows, arrays, or full DataFrames in your response.
 - Reference tools by their EXACT `tool_name`. Use ONLY tool names from the \
-  Available Tools list above — any invented tool name is rejected unexecuted.
+  Available Tools list above or `execute_dynamic_code`/`define_analysis_tool` — \
+  any invented tool name is rejected unexecuted.
 - Use ONLY column names that appear in the Dataset Overview. Never invent, \
   guess, or "correct" column names.
 - In Form 2, cite ONLY metric values that appear verbatim in the results \
@@ -116,18 +119,11 @@ INITIAL_ANALYSIS_PROMPT = """## Dataset Overview
 {dataset_metadata}
 
 ## Your Task
-You are in Stage 2 of the analysis pipeline (Initial Reasoning Phase).
-Produce an ordered analysis plan using EXACT tool_names from the Available
-Tools list — that list is already filtered to what applies to THIS
-dataset's profile, so treat every tool on it as a live option worth
-considering, not a menu to sample lightly from.
+You are an Autonomous Data Science Orchestrator in Phase 1: Foundation & Reconnaissance.
+Your goal is to begin the investigation of this dataset.
 
-Ground the plan in the evidence above: the dataset's column kinds,
-warnings, and detected nature (time-series, free text, geographic,
-high-dimensional, grouped/panel, imbalanced, ...), when given, tell you
-what this dataset actually is. Two datasets with different natures should
-produce different plans — do not default to a generic clean → correlate →
-model recipe when the evidence points somewhere more specific.
+Ground your plan in the evidence above: the dataset's column kinds,
+warnings, detected nature, and distribution ranges tell you what this data actually is.
 
 Invariants (the only fixed rules):
 1. Clean data before running any other analysis on it — start with
@@ -135,17 +131,14 @@ Invariants (the only fixed rules):
    file_path, then use the cleaned_file_path it returns as `file_path`
    for every subsequent tool that reads data.
 2. Include `file_path` in every tool call that requires it.
-3. Do not plan a tool that isn't in the Available Tools list — it will be
-   rejected unexecuted.
-4. If the user objective names a goal (segments, forecasting, a specific
-   outcome to predict, ...), prioritise the tools that answer it.
-5. Produce 5–8 steps total. Never exceed 8 steps per iteration — if more
-   analysis is warranted, continue it on the next iteration.
-
-Beyond that, use your judgement as a data scientist: pick the tools whose
-descriptions match what this data needs, order them sensibly (diagnostics
-before modelling, modelling before evaluating it), and give each a
-rationale tied to the profile evidence.
+3. Do not plan a tool that isn't in the Available Tools list.
+4. If the user objective names a goal, keep it as your central guiding target.
+5. **Phase 1 Cadence**: Produce 1–3 targeted foundational steps (e.g. clean_data \
+   to resolve missingness and types, followed by initial distribution or \
+   correlation analysis). Do NOT schedule downstream predictive modeling, \
+   deep segmentation, or visualizations yet — you will examine the concrete \
+   empirical results of Phase 1 in the next cycle, and use that evidence to \
+   orchestrate subsequent steps.
 
 Respond in Form 1 (Action Plan).
 """
@@ -169,13 +162,23 @@ ITERATION_PROMPT = """\
 {failed_steps}
 
 ## Your Task
-You are in Stage 4/5 of the pipeline (Result Interpretation / Iterative Refinement).
+You are an Autonomous Data Science Orchestrator in Cycle {iteration} of iterative data discovery.
 
-1. Review every result carefully.
-2. If a tool failed, diagnose why and produce a corrected step.
-3. If new findings change the analysis direction, update the plan.
-4. If ALL key analyses are complete, return Form 2 (Final Answer).
-5. Otherwise return Form 1 with only the remaining/corrected steps.
+1. **Review and Interpret**: Review the empirical results from previous cycles carefully. \
+What patterns, anomalies, correlations, or surprising distributions emerged?
+2. **Formulate Hypotheses**: Formulate follow-up hypotheses or investigative questions based \
+on what you observed.
+3. **Select Instruments**: Choose the next tools or sandboxed code to test those hypotheses.
+   - If an anomaly or strong relationship appeared, investigate it further with targeted \
+statistical tests, segment comparisons, or custom calculations (`execute_dynamic_code`).
+   - If predictive modeling is warranted, select appropriate model architectures and \
+features informed by the correlations and distributions observed.
+   - If no built-in tool answers a specific calculation, use `execute_dynamic_code` to run \
+custom Python in the isolated sandbox.
+4. **Plan Next Actions**: Plan 1–3 focused steps in Form 1 (Action Plan) for this cycle.
+5. **Completion Criteria**: Return Form 2 (Final Answer) ONLY when you have thoroughly explored \
+multiple analytical angles, tested hypotheses, and validated findings against the user objective. \
+Do not conclude prematurely after just running basic exploratory tools.
 
 Remember: always use `cleaned_file_path` as the source for downstream tools \
 when cleaning has already been performed.
@@ -364,15 +367,19 @@ class PromptManager:
             )
             or "None — re-evaluate whether more analysis is needed."
         )
-        failed_str = (
-            "\n".join(
-                f"Step {s.step_number}: {s.tool_name} → "
-                f"{s.result.error_message if s.result else 'unknown error'} "
-                f"(retries: {s.retry_count})"
-                for s in failed
-            )
-            or "None."
-        )
+        failed_lines: list[str] = [
+            f"Step {s.step_number}: {s.tool_name} → "
+            f"{s.result.error_message if s.result else 'unknown error'} "
+            f"(retries: {s.retry_count})"
+            for s in failed
+        ]
+        if not failed_lines:
+            failed_lines = [
+                f"{r.tool_name} → {r.error_message or 'unknown error'}"
+                for r in self.memory.tool_results
+                if r.status == "error"
+            ]
+        failed_str = "\n".join(failed_lines) or "None."
 
         concrete = ""
         if cleaned:
@@ -385,6 +392,7 @@ class PromptManager:
 
         return (
             ITERATION_PROMPT.format(
+                iteration=self.memory.iteration_count,
                 dataset_metadata=self.memory.get_metadata_prompt(),
                 # P1.6 — full detail for the results the LLM hasn't reacted
                 # to yet, a digest for everything earlier, instead of
@@ -401,6 +409,7 @@ class PromptManager:
                 pending_steps=pending_str,
                 failed_steps=failed_str,
             )
+            + self._profile_block()
             + self._rlm_block()
             + self._objective_block()
             + self._generated_tools_block()

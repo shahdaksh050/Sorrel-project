@@ -210,7 +210,7 @@ class ClusterDataTool(BaseTool):
             "model_path": str(model_path),
         }
 
-    def findings(  # type: ignore[override]
+    def findings(
         self,
         output: dict[str, Any],
         profile: DatasetProfile | None,

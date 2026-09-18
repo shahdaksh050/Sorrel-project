@@ -238,3 +238,37 @@ class TestRunSandboxed:
         result = sandbox.run_sandboxed(code, str(dataset))
         assert result.status == "ok"
         assert result.result == "a"
+
+    def test_prior_results_accessible_in_sandbox(self, tmp_path: Path) -> None:
+        dataset = single_column(tmp_path)
+        code = "RESULT = PRIOR_RESULTS.get('stat_test', {}).get('p_value', 0.0)\n"
+        result = sandbox.run_sandboxed(
+            code,
+            str(dataset),
+            prior_results={"stat_test": {"p_value": 0.042}},
+        )
+        assert result.status == "ok"
+        assert result.result == 0.042
+
+    def test_prior_results_defaults_to_empty_dict(self, tmp_path: Path) -> None:
+        dataset = single_column(tmp_path)
+        code = "RESULT = isinstance(PRIOR_RESULTS, dict) and len(PRIOR_RESULTS) == 0\n"
+        result = sandbox.run_sandboxed(code, str(dataset))
+        assert result.status == "ok"
+        assert result.result is True
+
+    def test_docker_sandbox_availability_check(self) -> None:
+        avail = sandbox.DockerSandbox.is_available()
+        assert isinstance(avail, bool)
+
+    def test_get_sandbox_backend_resolution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        backend_subp = sandbox.get_sandbox_backend("subprocess")
+        assert isinstance(backend_subp, sandbox.SubprocessSandbox)
+
+        monkeypatch.setenv("SANDBOX_BACKEND", "subprocess")
+        assert isinstance(sandbox.get_sandbox_backend(), sandbox.SubprocessSandbox)
+
+        monkeypatch.setattr(sandbox.DockerSandbox, "is_available", lambda: False)
+        # Even if docker requested, falls back gracefully to SubprocessSandbox
+        fallback = sandbox.get_sandbox_backend("docker")
+        assert isinstance(fallback, sandbox.SubprocessSandbox)

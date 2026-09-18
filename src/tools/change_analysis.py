@@ -93,7 +93,7 @@ def _pick_mover(
 
 def _period_label(ts: pd.Timestamp, grain_label: str) -> str:
     if grain_label == "monthly":
-        return ts.strftime("%Y-%m")
+        return str(ts.strftime("%Y-%m"))
     if grain_label == "weekly":
         return f"week of {ts.date()}"
     return str(ts.date())
@@ -302,7 +302,7 @@ class ChangeAnalysisTool(BaseTool):
         trailing_avg = float(trailing.mean()) if len(trailing) else None
         pct_change_vs_trailing = (
             (latest_value - trailing_avg) / trailing_avg
-            if trailing_avg not in (None, 0)
+            if trailing_avg is not None and trailing_avg != 0
             else None
         )
 

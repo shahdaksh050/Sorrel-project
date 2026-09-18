@@ -139,3 +139,28 @@ class TestProfileInjection:
 
     def test_no_profile_means_no_section(self, pm: PromptManager) -> None:
         assert "Data Profile" not in pm.get_initial_user_prompt()
+
+    def test_profile_summary_in_iteration_prompt(
+        self, pm: PromptManager, memory: MemorySystem
+    ) -> None:
+        memory.set_context(
+            "data_profile_summary",
+            "Data profile: quality score 88/100; 0 duplicate rows.",
+        )
+        prompt = pm.get_iteration_user_prompt()
+        assert "Data Profile" in prompt
+        assert "quality score 88/100" in prompt
+
+    def test_system_prompt_mentions_sandbox_and_dynamic_code(
+        self, pm: PromptManager
+    ) -> None:
+        prompt = pm.get_system_prompt()
+        assert "execute_dynamic_code" in prompt
+        assert "Safe Sandboxed Code Execution" in prompt
+
+    def test_initial_prompt_guides_phased_foundation(
+        self, pm: PromptManager
+    ) -> None:
+        prompt = pm.get_initial_user_prompt()
+        assert "Phase 1: Foundation & Reconnaissance" in prompt
+        assert "1–3 targeted foundational steps" in prompt

@@ -316,7 +316,7 @@ class CohortAnalysisTool(BaseTool):
         result["summary"] = "; ".join(parts) + "."
         return result
 
-    def findings(  # type: ignore[override]
+    def findings(
         self,
         output: dict[str, Any],
         profile: DatasetProfile | None,

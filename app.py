@@ -1809,7 +1809,15 @@ with st.sidebar:
         "google/gemma-2-27b-it",
         "deepseek-ai/deepseek-r1",
     ]
-    GEMINI_MODELS = ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash", "gemini-2.5-pro"]
+    GEMINI_MODELS = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-flash-latest",
+        "gemini-pro-latest",
+    ]
     LOCAL_MODELS = ["llama3.1", "llama3.2", "mistral", "qwen2.5", "deepseek-r1", "phi4"]
 
     if provider == "openai":
@@ -1833,10 +1841,11 @@ with st.sidebar:
         key_ph     = "sk-or-..."
 
     model_sel = st.selectbox("Model", model_list)
-    if provider in ("openrouter", "nvidia", "local"):
+    if provider in ("openrouter", "nvidia", "local", "gemini"):
         custom_m = st.text_input(
             "Custom model string (overrides above)",
             placeholder={
+                "gemini": "e.g. gemini-2.0-flash, gemini-1.5-flash, gemini-2.0-flash-exp",
                 "openrouter": "e.g. cohere/command-r-plus",
                 "nvidia": "e.g. nvidia/llama-3.1-nemotron-70b-instruct",
                 "local": "e.g. the exact tag your server has pulled/loaded",
@@ -1930,8 +1939,9 @@ with st.sidebar:
 
     # ── Analysis Settings ─────────────────────────────────────────────────────
     st.markdown('<div class="side-head">Analysis Settings</div>', unsafe_allow_html=True)
-    max_iter   = st.slider("Max iterations", 3, 25, 10)
-    enable_rlm = st.toggle("Enable recursive decomposition (Stage 6)", value=True)
+    min_iter   = st.slider("Min iterations", 1, 5, 1, help="Number of iterative discovery cycles. 1 is fast and recommended for quick analysis; increase for deeper multi-cycle discovery.")
+    max_iter   = st.slider("Max iterations", 1, 25, 5)
+    enable_rlm = st.toggle("Enable recursive decomposition (Stage 6)", value=False, help="Recursively breaks complex tasks into sub-problems. Turn on for deep exploration; keep off for fastest runtime.")
 
     st.divider()
 
@@ -2057,6 +2067,7 @@ if run_clicked:
     # Set env vars before importing src
     os.environ["LLM_PROVIDER"]          = provider
     os.environ["LLM_MODEL"]             = final_model
+    os.environ["MIN_ITERATIONS"]        = str(min_iter)
     os.environ["MAX_ITERATIONS"]        = str(max_iter)
     os.environ["ENABLE_RLM_INFERENCE"]  = "true" if enable_rlm else "false"
     os.environ["ENABLE_LLM"]            = "true" if use_llm else "false"
@@ -2102,12 +2113,16 @@ if run_clicked:
         _progress_lines.append(f"{_ico} Stage {num}: {_nm}" + (f"  {detail}" if detail else ""))
         _upd_live_ui()
 
+    # Initial live paint so stage progress is immediately visible upon clicking Run
+    _set_stage("1", "active", "Initializing run & preflight…")
+    _upd_live_ui()
+
     # Set up the expander right away
     with pipeline_slot.container():
-        with st.expander("Show how it's working", expanded=False):
+        with st.expander("Show how it's working", expanded=True):
             _draw_pipeline_rig(st.empty())
             st.markdown("#### The Team at Work")
-            st.markdown(_render_agent_grid([]), unsafe_allow_html=True)
+            st.markdown(_render_agent_grid(st.session_state["stage_log"]), unsafe_allow_html=True)
 
     # ── LLM preflight — fail fast with the REAL error instead of running
     #    the whole pipeline on the deterministic fallback ──────────────────
@@ -2136,6 +2151,7 @@ if run_clicked:
     try:
         _upd("1", "active", "ingesting…")
         agent = AgentController(
+            min_iterations=min_iter,
             max_iterations=max_iter,
             enable_rlm=enable_rlm,
             use_llm=use_llm,
@@ -2374,9 +2390,9 @@ if st.session_state.get("analysis_done"):
             (train_out.get("task_type") if train_out else None)
             or (meta.task_type if meta else "—") or "—"
         )
-        
+
         outlier_pct = str(outlier_out.get('outlier_percentage', '0')) if outlier_out else "0"
-        
+
         prof: dict[str, Any] = st.session_state.get("profile") or {}
         _q = int(prof.get("quality_score", 0))
 
@@ -2643,7 +2659,7 @@ if st.session_state.get("analysis_done"):
                     "Flags":     ", ".join(c.get("flags", [])),
                 } for c in prof.get("columns", [])]
                 st.dataframe(_safe_df(pd.DataFrame(_prows)), width='stretch')
-                
+
         if clean_out:
             with st.container(border=True):
                 st.markdown("#### 3. Data Cleaning")
@@ -2768,7 +2784,7 @@ if st.session_state.get("analysis_done"):
                 "<style>.dossier-card { background: var(--sheet-alt); border: 1px solid var(--rule); border-radius: var(--radius); padding: 1rem; margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.5rem; transition: transform 0.15s, box-shadow 0.15s; } .dossier-card:hover { transform: translateY(-2px); box-shadow: var(--lift-sm); }</style>",
                 unsafe_allow_html=True
             )
-            
+
             # File Cards Layout using Containers and Grid
             _dl_cols = st.columns(3)
             with _dl_cols[0]:
@@ -2810,7 +2826,7 @@ if st.session_state.get("analysis_done"):
                     _mds = sorted(_rdir.glob("*.md")) if _rdir.exists() else []
                     if _mds:
                         st.download_button(
-                            f"📝 Download Markdown",
+                            "📝 Download Markdown",
                             _mds[0].read_bytes(), _mds[0].name, mime="text/markdown",
                             key="dl_md_vault",
                             use_container_width=True,
@@ -2835,7 +2851,7 @@ if st.session_state.get("analysis_done"):
                             st.markdown(f"**{_mdl_f.name}**")
                             st.caption("Pickled model object ready for predictions.")
                             st.download_button(
-                                f"📦 Download",
+                                "📦 Download",
                                 _mdl_f.read_bytes(), _mdl_f.name,
                                 mime="application/octet-stream",
                                 key=f"dlm_vault_{_mdl_f.name}",
@@ -2884,5 +2900,6 @@ if (preview_df is None
 # ══════════════════════════════════════════════════════════════════════════════
 # MICRO-INTERACTIONS (Phase 3)
 # ══════════════════════════════════════════════════════════════════════════════
-from ui.animations import inject_micro_interactions
+from ui.animations import inject_micro_interactions  # noqa: E402
+
 inject_micro_interactions()

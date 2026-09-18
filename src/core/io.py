@@ -58,12 +58,14 @@ _SNIFF_SAMPLE_BYTES = 64 * 1024
 #: hard-coded as a fallback in case that private module moves.
 try:
     from pandas._libs.parsers import STR_NA_VALUES as _PANDAS_STR_NA_VALUES
-    NA_VALUES_KEEP_NONE_STRING: list[str] = sorted(_PANDAS_STR_NA_VALUES - {"None"})
+    NA_VALUES_KEEP_NONE_STRING: list[str] = sorted(
+        (_PANDAS_STR_NA_VALUES - {"None"}) | {"?", " ? ", "-999", "9999"}
+    )
 except ImportError:
     NA_VALUES_KEEP_NONE_STRING = [
         "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan",
         "1.#IND", "1.#QNAN", "<NA>", "N/A", "NA", "NULL", "NaN", "n/a",
-        "nan", "null",
+        "nan", "null", "?", " ? ", "-999", "9999",
     ]
 
 #: Depth at which nested JSON fields stop being flattened into dotted column

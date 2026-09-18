@@ -55,15 +55,17 @@ def _strip_jargon_sentences(text: str) -> str:
 
 
 def _build_executive_summary(llm_insights: dict[str, Any]) -> str:
-    """Prefer `insights` (first 3-4, joined into prose) for the executive
-    summary; fall back to `reasoning` only when there are no insights.
-    Either way, jargon sentences are stripped before use."""
+    """Build the executive summary from `reasoning` (with internal-plumbing jargon
+    stripped). If `reasoning` is empty or only contained jargon, fall back to
+    joining the top `insights`."""
+    clean_reasoning = _strip_jargon_sentences(str(llm_insights.get("reasoning", "") or ""))
+    if clean_reasoning:
+        return clean_reasoning
     insights = llm_insights.get("insights") or []
     if insights:
         text = " ".join(str(i).strip().rstrip(".") + "." for i in insights[:4] if str(i).strip())
-    else:
-        text = str(llm_insights.get("reasoning", "") or "")
-    return _strip_jargon_sentences(text)
+        return _strip_jargon_sentences(text)
+    return ""
 
 
 def _model_was_trained(llm_insights: dict[str, Any], tool_results: list[dict[str, Any]]) -> bool:
@@ -184,15 +186,15 @@ def _format_methodology(
         lines.append("")
     if analysis_decision:
         mode = analysis_decision.get("mode")
-        rationale = analysis_decision.get("rationale")
+        decision_rationale = analysis_decision.get("rationale")
         rejected = analysis_decision.get("alternatives_rejected") or []
-        if mode or rationale:
+        if mode or decision_rationale:
             if not lines:
                 lines += ["## Methodology", ""]
             lines.append(f"**Approach taken**: {mode or '—'}.")
-            if rationale:
+            if decision_rationale:
                 lines.append("")
-                lines.append(str(rationale))
+                lines.append(str(decision_rationale))
             if rejected:
                 lines.append("")
                 lines.append("Alternatives considered and not taken:")

@@ -91,3 +91,41 @@ class TestEuropeanDecimal:
         out, coercions = coerce_types(df, delimiter=",")
         assert out["value"].iloc[0] == 4500
         assert coercions[0].rule == "thousands"
+
+
+class TestHighFrequencyDateConvention:
+    def test_minute_frequency_dayfirst_detected(self) -> None:
+        """High-frequency minute data (1440 rows/day) has days <= 2 in first 2000 rows.
+        sampling from unique dates must correctly discover day 13+ and infer date_dayfirst."""
+        dates = ["01/01/2020"] * 1500 + ["02/01/2020"] * 1500 + ["15/01/2020"] * 100
+        df = pd.DataFrame({"record_date": dates})
+        out, coercions = coerce_types(df)
+        assert pd.api.types.is_datetime64_any_dtype(out["record_date"])
+        assert coercions[0].rule == "date_dayfirst"
+        # January 15th 2020
+        assert out["record_date"].iloc[-1] == pd.Timestamp("2020-01-15")
+
+
+class TestSentinelDetection:
+    def test_question_mark_sentinel_flagged_as_sentinel_only(self) -> None:
+        df = pd.DataFrame({"metric": ["12.5"] * 96 + ["?"] * 4})
+        out, coercions = coerce_types(df)
+        assert pd.api.types.is_numeric_dtype(out["metric"])
+        assert coercions[0].is_sentinel_only is True
+        assert coercions[0].n_failed == 4
+
+
+class TestDateTimeFusion:
+    def test_companion_date_and_time_fused(self) -> None:
+        df = pd.DataFrame({
+            "Date": ["16/12/2006", "17/12/2006"] * 20,
+            "Time": ["17:24:00", "08:30:15"] * 20,
+        })
+        out, coercions = coerce_types(df)
+        assert pd.api.types.is_datetime64_any_dtype(out["Date"])
+        # Should be fused into 2006-12-16 17:24:00
+        assert out["Date"].iloc[0] == pd.Timestamp("2006-12-16 17:24:00")
+        assert out["Date"].iloc[1] == pd.Timestamp("2006-12-17 08:30:15")
+        rules = [c.rule for c in coercions]
+        assert any("date_time_fusion" in r for r in rules)
+

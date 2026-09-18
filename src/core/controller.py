@@ -19,7 +19,6 @@ ARCHITECTURAL BOUNDARY:
 """
 from __future__ import annotations
 
-import copy
 import json
 import os
 import re
@@ -64,8 +63,8 @@ MAX_STEP_RETRIES = 2
 # flagged, not trusted silently.
 # ---------------------------------------------------------------------------
 
-#: Matches numeric literals (integers, decimals, negatives) in free text.
-_NUMBER_RE = re.compile(r"-?\d+\.\d+|-?\d+")
+#: Matches numeric literals (integers, decimals, negatives, comma-formatted) in free text.
+_NUMBER_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
 
 #: Single-digit integers are almost always counts ("3 models", "top 5
 #: features") rather than cited metrics, and are cheap to satisfy by
@@ -135,8 +134,13 @@ def _canon_number(value: Any, precision: int = 4) -> str:
     set-membership comparison, so '0.8', '0.80' and 0.7999999999999999
     (float round-trip noise) all match."""
     try:
-        return f"{round(float(value), precision):g}"
-    except (TypeError, ValueError):
+        if isinstance(value, str):
+            value = value.replace(",", "")
+        f = float(value)
+        if f.is_integer() and abs(f) < 1e15:
+            return str(int(f))
+        return f"{round(f, precision):g}"
+    except (TypeError, ValueError, OverflowError):
         return str(value)
 
 
@@ -174,8 +178,9 @@ def _collect_numbers(obj: Any, into: set[str]) -> None:
                 into.add(_canon_number(obj * 100, p))
     elif isinstance(obj, str):
         for match in _NUMBER_RE.finditer(obj):
+            val = match.group().replace(",", "")
             for p in _CANON_PRECISIONS:
-                into.add(_canon_number(match.group(), p))
+                into.add(_canon_number(val, p))
     elif isinstance(obj, dict):
         for v in obj.values():
             _collect_numbers(v, into)
@@ -382,12 +387,12 @@ class LLMClient:
             # otherwise invisible share of max_tokens on hidden reasoning
             # before writing any visible answer. Left uncapped, a normal
             # max_tokens budget can be entirely consumed by thinking, so the
-            # JSON answer gets truncated or never starts at all (observed:
-            # a 4096-token call spent ~3900 tokens thinking and returned 155
-            # tokens of cut-off prose). "low" caps that overhead — the agent
-            # already supplies its own higher-level reasoning across the
-            # iterative planning loop, so per-call deep thinking adds little.
-            create_kwargs["reasoning_effort"] = os.getenv("GEMINI_REASONING_EFFORT", "low")
+            # JSON answer gets truncated or never starts at all.
+            effort = os.getenv("GEMINI_REASONING_EFFORT", "").strip().lower()
+            if not effort and any(k in self.model.lower() for k in ("thinking", "2.5", "3.")):
+                effort = "low"
+            if effort and effort not in ("none", "off"):
+                create_kwargs["reasoning_effort"] = effort
         if self.provider == "openrouter":
             # Same failure mode as Gemini above, on OpenRouter's many
             # reasoning-capable (often free) models: hidden reasoning tokens
@@ -431,7 +436,15 @@ class LLMClient:
                 )
             return content
 
-        resp = client.chat.completions.create(**create_kwargs)
+        try:
+            resp = client.chat.completions.create(**create_kwargs)
+        except Exception as exc:
+            # If Google or any endpoint rejects reasoning_effort for this model, retry without it
+            if "reasoning_effort" in str(exc) and "reasoning_effort" in create_kwargs:
+                create_kwargs.pop("reasoning_effort", None)
+                resp = client.chat.completions.create(**create_kwargs)
+            else:
+                raise
         # OpenRouter can return HTTP 200 with an error body instead of raising
         # (invalid model slug, moderation, no credits). The SDK then yields
         # choices=None — surface the real message instead of a TypeError.
@@ -831,6 +844,7 @@ class AgentController:
         memory_persist_path: str | None = None,
         use_llm: bool | None = None,
         use_ml: bool | None = None,
+        min_iterations: int | None = None,
     ) -> None:
         # Capability switches. Both default on, and both are honest about
         # what they cost: with use_llm off the run is fully deterministic
@@ -846,6 +860,11 @@ class AgentController:
             use_ml
             if use_ml is not None
             else os.getenv("ENABLE_ML", "true").strip().lower() == "true"
+        )
+        self.min_iterations = (
+            min_iterations
+            if min_iterations is not None
+            else int(os.getenv("MIN_ITERATIONS", "1"))
         )
         self.max_iterations = (
             max_iterations
@@ -1373,9 +1392,37 @@ class AgentController:
 
                 # ---- Check for completion (Stage 7 trigger) ----
                 if llm_response.get("status") == "complete":
-                    console.print("\n[bold green]✅ LLM signalled analysis complete.[/]")
-                    final_result = llm_response
-                    break
+                    if iteration < self.min_iterations:
+                        console.print(
+                            f"[yellow]ℹ LLM signalled complete on iteration {iteration} "
+                            f"(< min_iterations {self.min_iterations}) — prompting for deeper hypothesis exploration.[/]"
+                        )
+                        continue_prompt = (
+                            user_prompt
+                            + f"\n\n[SYSTEM DIRECTIVE: Minimum exploration cycles not yet reached "
+                            f"(currently iteration {iteration} of minimum {self.min_iterations}). "
+                            "Do NOT return Form 2 yet. Formulate a specific follow-up hypothesis, anomaly check, "
+                            "or deeper investigation, and return Form 1 (Action Plan) with 1–3 steps. "
+                            "Use execute_dynamic_code if you need a custom calculation.]"
+                        )
+                        try:
+                            reprompt_res = self._rlm_engine.invoke(
+                                continue_prompt, depth=0, stage=f"{stage_label}:deepen_exploration"
+                            )
+                            if reprompt_res.get("status") != "complete":
+                                llm_response = reprompt_res
+                            else:
+                                console.print("\n[bold green]✅ LLM confirmed analysis complete.[/]")
+                                final_result = reprompt_res
+                                break
+                        except Exception as exc:
+                            console.print(f"[yellow]⚠ Exploration reprompt failed ({exc}) — accepting completion.[/]")
+                            final_result = llm_response
+                            break
+                    else:
+                        console.print("\n[bold green]✅ LLM signalled analysis complete.[/]")
+                        final_result = llm_response
+                        break
 
                 # ---- Parse plan steps (tolerant of malformed entries) ----
                 steps = self._parse_steps(llm_response)
@@ -1931,13 +1978,8 @@ class AgentController:
                     f"  [dim]↺ Step {step.step_number}: {step.tool_name} — "
                     f"identical to a prior successful step, reusing its result.[/]"
                 )
-                # Shallow-copy before this function mutates `.iteration`
-                # below — `cached` is the SAME ToolResult object already
-                # appended to memory.tool_results from its original
-                # iteration; mutating it in place would silently retag that
-                # earlier entry too, corrupting the "current vs. earlier"
-                # split get_results_summary_digest keys off `.iteration` for.
-                result = copy.copy(cached)
+                # Reuse the cached ToolResult object directly
+                result = cached
             else:
                 result = tool.run(**params)
                 if result.status == "success":
@@ -2264,6 +2306,10 @@ class AgentController:
             tool_pool = per_tool.setdefault(r.tool_name, set())
             _collect_numbers(r.to_dict(), tool_pool)
             global_pool |= tool_pool
+        if self.memory.dataset_metadata:
+            meta_pool: set[str] = set()
+            _collect_numbers(self.memory.dataset_metadata.__dict__, meta_pool)
+            global_pool |= meta_pool
         return global_pool, per_tool
 
     def _flag_unverified_claims(self, final_result: dict[str, Any]) -> list[str]:
@@ -2289,6 +2335,13 @@ class AgentController:
         ran_tools = {r.tool_name for r in self.memory.tool_results}
         flagged: list[str] = []
 
+        meta = self.memory.dataset_metadata
+        meta_pool: set[str] = set()
+        if meta:
+            for p in _CANON_PRECISIONS:
+                meta_pool.add(_canon_number(meta.row_count, p))
+                meta_pool.add(_canon_number(meta.column_count, p))
+
         for field in ("insights", "recommendations"):
             items = final_result.get(field)
             if not isinstance(items, list):
@@ -2300,7 +2353,7 @@ class AgentController:
                     m.group() for m in _NUMBER_RE.finditer(item)
                     if not (
                         "." not in m.group()
-                        and abs(int(m.group())) <= _UNVERIFIABLE_SKIP_ABS_INT
+                        and abs(int(m.group().replace(",", ""))) <= _UNVERIFIABLE_SKIP_ABS_INT
                     )
                 ]
                 if not claimed:
@@ -2316,7 +2369,8 @@ class AgentController:
                 })
                 if attributed_tools:
                     pool = set().union(*(per_tool_pools.get(t, set()) for t in attributed_tools))
-                    bad = sorted({n for n in claimed if _canon_number(n) not in pool})
+                    valid_pool = pool | meta_pool
+                    bad = sorted({n for n in claimed if _canon_number(n) not in valid_pool})
                     if bad:
                         attribution = "/".join(attributed_tools)
                         items[i] = (
@@ -2339,7 +2393,7 @@ class AgentController:
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     nums = [str(v)]
                 elif isinstance(v, str):
-                    nums = _NUMBER_RE.findall(v)
+                    nums = [m.group() for m in _NUMBER_RE.finditer(v)]
                 else:
                     continue
                 bad = sorted({n for n in nums if _canon_number(n) not in verified})

@@ -21,7 +21,16 @@ from rich.table import Table
 
 load_dotenv()
 
-console = Console()
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+console = Console(legacy_windows=False)
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +63,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help='Natural-language analysis goal, e.g. "what drives customer churn?".',
     )
+    parser.add_argument("--min-iterations", type=int, default=None, help="Min reasoning-execution cycles before completion.")
     parser.add_argument("--max-iterations", type=int, default=15, help="Max reasoning-execution cycles.")
     parser.add_argument("--no-rlm", action="store_true", help="Disable recursive decomposition (flat loop).")
     parser.add_argument(
@@ -158,6 +168,8 @@ def main() -> None:
         os.environ["LLM_PROVIDER"] = args.provider
     if args.local_base_url:
         os.environ["LOCAL_LLM_BASE_URL"] = args.local_base_url
+    if args.min_iterations is not None:
+        os.environ["MIN_ITERATIONS"] = str(args.min_iterations)
     os.environ["MAX_ITERATIONS"] = str(args.max_iterations)
     os.environ["OUTPUT_DIR"] = args.output_dir
     if args.no_rlm:
@@ -170,6 +182,7 @@ def main() -> None:
     from src.core.controller import AgentController
 
     agent = AgentController(
+        min_iterations=args.min_iterations,
         max_iterations=args.max_iterations,
         enable_rlm=not args.no_rlm,
         memory_persist_path=args.persist,

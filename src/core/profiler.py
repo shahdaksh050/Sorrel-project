@@ -375,6 +375,31 @@ class DatasetProfile:
             lines.append(f"Measures (summable quantities): {', '.join(measures[:8])}.")
         if flags:
             lines.append(f"Binary flags (not measures — never sum/log-transform): {', '.join(flags[:8])}.")
+        # Key numerical distributions (up to 6 columns)
+        num_stats_lines: list[str] = []
+        for c in self.columns:
+            if c.kind == "numeric" and c.stats:
+                s = c.stats
+                parts = []
+                if "min" in s and "max" in s:
+                    parts.append(f"range=[{s['min']}, {s['max']}]")
+                if "mean" in s:
+                    parts.append(f"mean={s['mean']}")
+                if "median" in s:
+                    parts.append(f"median={s['median']}")
+                if parts:
+                    num_stats_lines.append(f"{_sp(c.name)} ({', '.join(parts)})")
+        if num_stats_lines:
+            lines.append("Numeric distributions: " + "; ".join(num_stats_lines[:6]) + ".")
+
+        # Key categorical top values (up to 4 columns)
+        cat_dist_lines: list[str] = []
+        for c in self.columns:
+            if c.kind == "categorical" and c.top_values:
+                top_str = ", ".join(f"{_sp(k)}:{v}" for k, v in list(c.top_values.items())[:3])
+                cat_dist_lines.append(f"{_sp(c.name)}: [{top_str}]")
+        if cat_dist_lines:
+            lines.append("Top categories: " + "; ".join(cat_dist_lines[:4]) + ".")
         for match in self.domains:
             roles = ", ".join(f"{r}={_sp(c)}" for r, c in sorted(match.roles.items()))
             lines.append(
@@ -396,6 +421,11 @@ def _is_datetime_like(series: pd.Series) -> bool:
         return False
     sample = series.dropna().head(20)
     if sample.empty:
+        return False
+    # Ponytail: a pure time column like "00:00:00" has no date separators;
+    # pd.to_datetime prepends today's date, creating artificial timestamps.
+    sample_str = sample.astype(str)
+    if not sample_str.str.contains(r"[-/.]|^\d{8}$").any():
         return False
     try:
         parsed = pd.to_datetime(sample, errors="coerce", format="mixed")

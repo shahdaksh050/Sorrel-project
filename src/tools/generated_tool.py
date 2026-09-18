@@ -16,6 +16,7 @@ src.core.tool_factory.register_and_persist, called by the controller.
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,7 +40,7 @@ def _slug(text: str) -> str:
 
 if TYPE_CHECKING:
     from src.core.findings import Finding
-    from src.core.memory import DatasetMetadata
+    from src.core.memory import DatasetMetadata, MemorySystem
     from src.core.profiler import DatasetProfile
     from src.core.tool_factory import GeneratedToolSpec
 
@@ -59,6 +60,24 @@ class GeneratedTool(BaseTool):
     def get_schema(self) -> dict[str, Any]:
         return self.spec.params_schema
 
+    def prepare_params(
+        self, params: dict[str, Any], memory: MemorySystem, output_root: str
+    ) -> dict[str, Any]:
+        params = super().prepare_params(params, memory, output_root)
+        prior: dict[str, Any] = {}
+        for tr in memory.tool_results:
+            if tr.status == "success" and isinstance(tr.output, dict):
+                clean_output: dict[str, Any] = {}
+                for k, v in tr.output.items():
+                    try:
+                        json.dumps(v)
+                        clean_output[k] = v
+                    except (TypeError, OverflowError):
+                        continue
+                prior[tr.tool_name] = clean_output
+        params["_prior_results"] = prior
+        return params
+
     def execute(  # type: ignore[override]
         self,
         file_path: str,
@@ -69,6 +88,7 @@ class GeneratedTool(BaseTool):
         if not Path(file_path).exists():
             raise ToolExecutionError(f"Dataset file not found: {file_path}")
 
+        prior_results = kwargs.pop("_prior_results", None)
         # kwargs minus file_path reach the sandboxed code as plain data via
         # extra_globals — never templated into the code body (decision 2).
         extra_globals = {k: v for k, v in kwargs.items() if k != "file_path"}
@@ -77,6 +97,7 @@ class GeneratedTool(BaseTool):
             code=self.spec.code,
             dataset_ref=file_path,
             extra_globals=extra_globals,
+            prior_results=prior_results,
         )
 
         finding_payload = getattr(sandbox_result, "finding", None)

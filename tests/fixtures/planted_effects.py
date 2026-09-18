@@ -251,20 +251,11 @@ def generate_churn(
         }
     )
 
-    # segment_comparison.py computes lift against the whole-population
-    # baseline (every row, including the level itself) — its own docstring
-    # example is exactly this: "Month-to-month customers churn at 42% vs a
-    # 27% baseline (1.6x...)", where 27% is the *overall* churn rate, not
-    # the rate among the other two contract types alone. `MONTH_TO_MONTH_
-    # MULT - 1.0` (2.0) is the ratio against the OTHER levels' shared base
-    # rate (0.36 vs 0.12) — a different, larger number that this pipeline
-    # never reports. The population-weighted mean below is the number the
-    # tool will actually recover.
-    _population_mean_rate = (
-        CONTRACT_PROBS["month-to-month"] * MONTH_TO_MONTH_RATE
-        + (CONTRACT_PROBS["one-year"] + CONTRACT_PROBS["two-year"]) * BASE_RATE
-    )
-    _expected_lift_vs_population = MONTH_TO_MONTH_RATE / _population_mean_rate - 1.0
+    # segment_comparison.py computes lift against the rest-of-data baseline
+    # (the other levels: one-year and two-year), so the tested comparison,
+    # ratio, and lift is level vs everyone else (`rest_vals`).
+    # MONTH_TO_MONTH_RATE / BASE_RATE - 1.0 is 2.0 (ratio 3.0x).
+    _expected_lift_vs_rest = MONTH_TO_MONTH_RATE / BASE_RATE - 1.0
 
     plants: dict[str, Any] = {
         "dominant_categorical_driver": {
@@ -274,7 +265,7 @@ def generate_churn(
             "base_rate": BASE_RATE,             # 0.12
             "level_rate": MONTH_TO_MONTH_RATE,  # 0.36
             "multiple_of_base": MONTH_TO_MONTH_MULT,  # 3.0 (vs the OTHER levels only)
-            "expected_lift": _expected_lift_vs_population,  # 0.5 (vs whole-population baseline)
+            "expected_lift": _expected_lift_vs_rest,  # 2.0 (vs rest-of-data baseline)
         },
         "weak_numeric_driver": {
             "column": "monthly_charges",
@@ -290,7 +281,7 @@ def generate_churn(
                     "level": "month-to-month",
                     "measure": "churn",
                 },
-                "effect": _expected_lift_vs_population,  # 0.5 (vs whole-population baseline)
+                "effect": _expected_lift_vs_rest,  # 2.0 (vs rest-of-data baseline)
                 "effect_tol": 0.5,
             },
             {

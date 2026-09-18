@@ -264,7 +264,7 @@ class FinancialAnalysisTool(BaseTool):
             **metrics,
         }
 
-    def findings(  # type: ignore[override]
+    def findings(
         self,
         output: dict[str, Any],
         profile: DatasetProfile | None,

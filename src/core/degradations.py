@@ -58,10 +58,18 @@ def collect_degradations(
                 "any date-based chart or trend for this column."
             )
             continue
-        log.append(
-            f"Column '{c.get('column')}' repaired from string to {c.get('to_kind')} "
-            f"({c.get('rule')} rule): {c.get('n_converted')} converted, {c.get('n_failed')} left unparsed."
-        )
+        if c.get("is_sentinel_only"):
+            failed_ex = c.get("failed_examples")
+            examples_str = f" ('{failed_ex[0]}')" if isinstance(failed_ex, (list, tuple)) and failed_ex else ""
+            log.append(
+                f"Column '{c.get('column')}' repaired from string to {c.get('to_kind')} "
+                f"({c.get('rule')} rule): {c.get('n_converted')} converted, {c.get('n_failed')} sentinel/missing values{examples_str} converted to null."
+            )
+        else:
+            log.append(
+                f"Column '{c.get('column')}' repaired from string to {c.get('to_kind')} "
+                f"({c.get('rule')} rule): {c.get('n_converted')} converted, {c.get('n_failed')} left unparsed."
+            )
 
     if profile:
         if not profile.get("is_sufficient", True):

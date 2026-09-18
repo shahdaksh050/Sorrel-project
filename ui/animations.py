@@ -1,5 +1,6 @@
 import streamlit.components.v1 as components
 
+
 def inject_micro_interactions():
     """
     Injects Anime.js micro-interactions into the Streamlit parent DOM.
@@ -21,22 +22,22 @@ def inject_micro_interactions():
                     const prefix = el.getAttribute('data-prefix') || "";
                     const suffix = el.getAttribute('data-suffix') || "";
                     const isInt = parseInt(el.getAttribute('data-value')) === targetVal;
-                    
+
                     const duration = 1500;
                     const startTime = performance.now();
-                    
+
                     // easeOutExpo function
                     const easeOutExpo = (t) => t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
-                    
+
                     function updateCounter(currentTime) {
                         const elapsed = currentTime - startTime;
                         const progress = Math.min(elapsed / duration, 1);
                         const easedProgress = easeOutExpo(progress);
-                        
+
                         const currentVal = targetVal * easedProgress;
                         const formatted = isInt ? Math.round(currentVal) : currentVal.toFixed(1);
                         el.innerHTML = prefix + formatted + suffix;
-                        
+
                         if (progress < 1) {
                             requestAnimationFrame(updateCounter);
                         } else {
@@ -144,7 +145,7 @@ def inject_micro_interactions():
         } else {
             runAnimations();
         }
-        
+
         // Attach observer unconditionally so it always catches DOM updates (e.g., on theme change)
         const observer = new MutationObserver(() => {
             runAnimations();

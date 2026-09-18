@@ -134,7 +134,7 @@ def _fallback_numeric_column(df: pd.DataFrame, date_column: str) -> str | None:
 
 def _choose_value_column_and_aggregation(
     df: pd.DataFrame, date_column: str, requested: str | None
-) -> tuple[str | None, str, "DatasetProfile | None"]:
+) -> tuple[str | None, str, DatasetProfile | None]:
     """
     Resolve (value_column, aggregation, profile).
 

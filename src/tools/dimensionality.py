@@ -105,7 +105,7 @@ class DimensionalityAnalysisTool(BaseTool):
             "multicollinearity_risk": bool(high_corr_pairs),
         }
 
-    def findings(  # type: ignore[override]
+    def findings(
         self,
         output: dict[str, Any],
         profile: DatasetProfile | None,

@@ -139,6 +139,25 @@ class TestDetectOutliersTool:
         pct = result.output["outlier_percentage"]
         assert 0.0 <= pct <= 100.0
 
+    def test_row_count_in_output(self, sample_csv: str) -> None:
+        result = DetectOutliersTool().run(file_path=sample_csv, method="iqr")
+        assert "row_count" in result.output
+        assert result.output["row_count"] == 8
+
+    def test_question_mark_parsed_as_nan_by_ingest(self, tmp_path: pytest.TempPathFactory) -> None:
+        p = tmp_path / "sentinel.csv"
+        p.write_text("a,b\n1,2.5\n?,3.0\n3,?\n", encoding="utf-8")
+        result = IngestDatasetTool().run(file_path=str(p))
+        assert result.status == "success"
+        meta = result.output["metadata"]
+        assert meta["row_count"] == 3
+        # Both columns should be numerical because ? parsed as NaN
+        assert "a" in meta["numerical_cols"]
+        assert "b" in meta["numerical_cols"]
+        assert meta["missing_values"]["a"] == 1
+        assert meta["missing_values"]["b"] == 1
+
+
 
 # ---------------------------------------------------------------------------
 # Stage 3: CorrelationAnalysisTool

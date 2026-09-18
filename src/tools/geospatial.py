@@ -135,7 +135,7 @@ class GeospatialAnalysisTool(BaseTool):
             "densest_cells": densest_cells,
         }
 
-    def findings(  # type: ignore[override]
+    def findings(
         self,
         output: dict[str, Any],
         profile: DatasetProfile | None,

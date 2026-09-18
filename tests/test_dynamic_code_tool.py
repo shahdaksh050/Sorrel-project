@@ -55,6 +55,27 @@ class TestDynamicCodeExecutionTool:
         assert schema["file_path"]["required"] is True
         assert schema["code"]["required"] is True
 
+    def test_prepare_params_extracts_prior_results(self) -> None:
+        from src.core.memory import MemorySystem, ToolResult
+
+        tool = DynamicCodeExecutionTool()
+        memory = MemorySystem()
+        memory.append_tool_result(
+            ToolResult(
+                tool_name="select_statistical_test",
+                status="success",
+                output={"p_value": 0.005, "significant": True},
+            )
+        )
+        params = tool.prepare_params(
+            params={"file_path": "dummy.csv", "code": "RESULT = 1"},
+            memory=memory,
+            output_root="output",
+        )
+        assert "prior_results" in params
+        assert "select_statistical_test" in params["prior_results"]
+        assert params["prior_results"]["select_statistical_test"]["p_value"] == 0.005
+
 
 class TestRegistration:
     def test_tool_is_registered(self) -> None:

@@ -423,8 +423,16 @@ class MemorySystem:
         on every cycle (up to 48 entries by iteration 8), which grows
         linearly and re-bills tokens for results the LLM already reacted to.
         This gives the current iteration's results in full (the LLM's job
-        this cycle is to react to what just happened) and a one-line digest
-        for everything earlier.
+        this cycle is to react to what just happened) and a digest for
+        everything earlier.
+
+        Round 8 hardening — the digest used to be a bare "tool -> status"
+        line with no numbers at all, so once a result aged out of "current"
+        the LLM could never again cite anything from it verbatim (it only
+        ever saw the metrics for a SINGLE iteration's worth of results at a
+        time). Earlier successes now carry a small shrunk payload — key
+        numbers survive, at the cost of some tokens — while errors/skips
+        stay a one-liner since there's nothing numeric worth preserving.
         """
         if not self.tool_results:
             return "No tool results yet."
@@ -433,9 +441,17 @@ class MemorySystem:
 
         lines: list[str] = []
         if earlier:
-            lines.append("Earlier iterations (digest — full detail omitted, already reacted to):")
+            lines.append("Earlier iterations (digest — key numbers only, already reacted to):")
             for r in earlier:
-                lines.append(f"  [iter {r.iteration}] {r.tool_name} → {r.status}")
+                if r.status == "success":
+                    slim = {k: v for k, v in r.output.items() if k not in {"raw_data", "dataframe"}}
+                    shrunk = _shrink_to_fit(slim, 250)
+                    serialised = json.dumps(shrunk, default=str)
+                    lines.append(f"  [iter {r.iteration}] {r.tool_name} → success → {serialised}")
+                elif r.status == "skipped":
+                    lines.append(f"  [iter {r.iteration}] {r.tool_name} → skipped")
+                else:
+                    lines.append(f"  [iter {r.iteration}] {r.tool_name} → error")
         if current:
             lines.append("This iteration's results (in full):")
             for r in current:

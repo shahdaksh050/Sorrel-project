@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 from src.core.findings import Finding
 from src.core.profiler import profile_dataframe
@@ -76,6 +77,21 @@ _GRAIN_LABEL = {"daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}
 #: average is reported as a seasonal Finding (T5 triviality suppression
 #: keeps unremarkable months out of the finding list).
 _MONTH_LIFT_THRESHOLD = 0.15
+
+#: A month's factor is only *published* as a Finding once the series has
+#: seen that month in at least this many distinct calendar years — one
+#: weekly series spanning a single year produces a "month factor" for every
+#: month from a single observation each, which is a single number dressed
+#: up as a repeating season. Below this, the month stays in the tool's
+#: output/summary (marked "single-year, unreplicated") but not the finding
+#: list.
+_MIN_YEARS_FOR_MONTH_FINDING = 2
+
+#: At most this many calendar-month findings are published per run, ranked
+#: by |lift| — a single weekly/daily series has 12 months' worth of factors
+#: and publishing all of them (as opposed to, say, one real trend finding)
+#: is what let 7 month findings crowd the top of a 12-finding report.
+_MAX_MONTH_FINDINGS = 3
 
 #: Periods needed to cover roughly two full annual cycles at each grain —
 #: below this, a month-of-year factor and an underlying linear trend are
@@ -193,25 +209,51 @@ def _resample_series(
 
 def _month_of_year_factors(
     period_dates: pd.Series, values: np.ndarray
-) -> tuple[dict[str, float], dict[str, int]]:
+) -> tuple[dict[str, float], dict[str, int], dict[str, int], dict[str, float | None]]:
     """Each calendar month's average vs. the overall mean, as a signed
     fraction (0.4 = 40% above baseline). Computed on the resampled series so
     a monthly grain compares each month's own point, and a weekly/daily
-    grain compares the months' averaged points."""
+    grain compares the months' averaged points.
+
+    Alongside the lift, also returns:
+      - `years`: how many *distinct calendar years* contributed periods to
+        that month — a month factor computed from a single year is one
+        observation, not a replicated seasonal effect, however many
+        sub-periods (weeks/days) that one year contains.
+      - `p_values`: a Welch t-test (that month's periods vs. every other
+        period) p-value, where there's enough data to run one — a simple
+        significance check rather than treating any |lift| >= threshold as
+        equally credible regardless of sample size or spread.
+    """
     if len(values) < 4:
-        return {}, {}
+        return {}, {}, {}, {}
     s = pd.Series(values, index=pd.DatetimeIndex(period_dates))
     overall_mean = float(s.mean())
     if overall_mean == 0:
-        return {}, {}
+        return {}, {}, {}, {}
     grouped = s.groupby(s.index.month)
     factors: dict[str, float] = {}
     counts: dict[str, int] = {}
+    years: dict[str, int] = {}
+    p_values: dict[str, float | None] = {}
     for month_num, group in grouped:
         name = _MONTH_NAMES[int(month_num)]
         factors[name] = round((float(group.mean()) - overall_mean) / abs(overall_mean), 4)
         counts[name] = int(group.size)
-    return factors, counts
+        years[name] = int(pd.DatetimeIndex(group.index).year.nunique())
+
+        rest = s[~s.index.isin(group.index)]
+        p_val: float | None = None
+        if len(group) >= 2 and len(rest) >= 2 and group.nunique() >= 2:
+            try:
+                _stat, p = stats.ttest_ind(
+                    group.to_numpy(dtype=float), rest.to_numpy(dtype=float), equal_var=False
+                )
+                p_val = None if np.isnan(p) else round(float(p), 4)
+            except (ValueError, ZeroDivisionError):
+                p_val = None
+        p_values[name] = p_val
+    return factors, counts, years, p_values
 
 
 def _day_of_week_factors(working: pd.DataFrame, aggregation: str) -> dict[str, float]:
@@ -343,7 +385,9 @@ class TimeSeriesAnalysisTool(BaseTool):
         ]
 
         # ---- Calendar-aware seasonality (7.7) ----
-        month_factors, month_counts = _month_of_year_factors(period_dates, values)
+        month_factors, month_counts, month_years, month_p_values = _month_of_year_factors(
+            period_dates, values
+        )
         day_of_week_factors: dict[str, float] = {}
         if grain in ("daily", "weekly"):
             day_of_week_factors = _day_of_week_factors(working, aggregation)
@@ -354,12 +398,18 @@ class TimeSeriesAnalysisTool(BaseTool):
         agg_word = "total" if aggregation == "sum" else "average"
         series_label = f"{_GRAIN_LABEL[grain]} {agg_word} {value_column}"
 
+        # A month is "replicated" once the series has seen it in >= 2
+        # distinct calendar years — only those are safe to call a repeating
+        # season. The rest are still surfaced here (so the number isn't
+        # hidden), just clearly labelled as unreplicated single-year reads
+        # rather than left indistinguishable from a genuine seasonal effect.
         seasonal_note = ""
         if notable_months:
-            parts = [
-                f"{name} {lift * 100:+.0f}%" for name, lift in
-                sorted(notable_months.items(), key=lambda kv: -abs(kv[1]))
-            ]
+            parts = []
+            for name, lift in sorted(notable_months.items(), key=lambda kv: -abs(kv[1])):
+                replicated = month_years.get(name, 0) >= _MIN_YEARS_FOR_MONTH_FINDING
+                tag = "" if replicated else " [single-year, unreplicated]"
+                parts.append(f"{name} {lift * 100:+.0f}%{tag}")
             seasonal_note = f" Calendar seasonality: {', '.join(parts)} vs. the yearly average."
 
         return {
@@ -403,6 +453,8 @@ class TimeSeriesAnalysisTool(BaseTool):
             "seasonal_lags_detected": seasonal_lags_detected,
             "month_of_year_factors": month_factors,
             "month_of_year_counts": month_counts,
+            "month_of_year_years": month_years,
+            "month_of_year_p_values": month_p_values,
             "notable_months": notable_months,
             "day_of_week_factors": day_of_week_factors,
         }
@@ -474,15 +526,34 @@ class TimeSeriesAnalysisTool(BaseTool):
 
         notable_months = output.get("notable_months") or {}
         month_counts = output.get("month_of_year_counts") or {}
-        for month_name, lift in notable_months.items():
+        month_years = output.get("month_of_year_years") or {}
+        month_p_values = output.get("month_of_year_p_values") or {}
+
+        # Only publish a month as a Finding once it's replicated across >= 2
+        # distinct calendar years — a single-year series produces a "month
+        # factor" for every month from one observation each, which the
+        # summary text already flags but which should never have competed
+        # for a top-12 findings slot as if it were a proven repeating season.
+        replicated_months = {
+            name: lift for name, lift in notable_months.items()
+            if month_years.get(name, 0) >= _MIN_YEARS_FOR_MONTH_FINDING
+        }
+        # Cap to the strongest few by |lift| — publishing all 12 months
+        # (even replicated ones) crowds out every other tool's findings.
+        top_months = sorted(
+            replicated_months.items(), key=lambda kv: -abs(kv[1])
+        )[:_MAX_MONTH_FINDINGS]
+
+        for month_name, lift in top_months:
             direction_word = "above" if lift > 0 else "below"
-            single_observation = month_counts.get(month_name, 1) <= 1
+            p_value = month_p_values.get(month_name)
+            # Confidence now tracks the actual significance test instead of
+            # a constant (0.6/0.75 regardless of evidence strength): a small
+            # p-value earns high confidence, a large one is capped low. When
+            # no test could be run (degenerate variance), fall back to a
+            # modest default rather than a fixed high constant.
+            confidence = round(max(0.3, min(0.9, 1.0 - p_value)), 3) if p_value is not None else 0.4
             caveats: list[str] = []
-            if single_observation:
-                caveats.append(
-                    f"Only one {grain} period observed for {month_name} — this is a "
-                    "single data point, not an average across repeated years."
-                )
             if trend_confounded:
                 caveats.append(
                     "A statistically real trend is present and less than two years of "
@@ -498,8 +569,13 @@ class TimeSeriesAnalysisTool(BaseTool):
                 ),
                 detail=(
                     f"Calendar-month factor computed on the {grain}-resampled series "
-                    f"({month_counts.get(month_name, '?')} period(s) in {month_name}): "
+                    f"({month_counts.get(month_name, '?')} period(s) across "
+                    f"{month_years.get(month_name, '?')} years in {month_name}): "
                     f"{lift * 100:+.1f}% vs. the overall mean."
+                    + (
+                        f" Welch t-test vs. the rest of the year: p={p_value:.4g}."
+                        if p_value is not None else ""
+                    )
                 ),
                 evidence={
                     "value_column": value_column,
@@ -507,6 +583,7 @@ class TimeSeriesAnalysisTool(BaseTool):
                     "month": month_name,
                     "lift": lift,
                     "periods_in_month": month_counts.get(month_name),
+                    "years_observed": month_years.get(month_name),
                 },
                 source_tool=self.name,
                 measure=value_column,
@@ -514,7 +591,8 @@ class TimeSeriesAnalysisTool(BaseTool):
                 level=month_name,
                 effect=lift,
                 effect_kind="lift",
-                confidence=0.6 if single_observation else 0.75,
+                p_value=p_value,
+                confidence=confidence,
                 caveats=caveats,
                 chart_hint={"kind": "bar", "data": {"category": "month_of_year"}},
                 layer="analyst",

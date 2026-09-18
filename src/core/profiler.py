@@ -13,6 +13,9 @@ Pure computation — no file I/O, no LLM calls, deterministic.
 """
 from __future__ import annotations
 
+import copy
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -128,10 +131,16 @@ _ENTITY_NAME_HINTS = ("customer", "client", "user", "account", "patient", "membe
 _ENTITY_REPEAT_THRESHOLD = 1.5
 
 
-def _rows_per_value(df: pd.DataFrame, column: str) -> float:
-    """Mean rows per distinct value of `column`. 1.0 = one row per value."""
-    nunique = int(df[column].nunique(dropna=True))
-    return len(df) / nunique if nunique else 0.0
+def _rows_per_value(row_count: int, nunique: int) -> float:
+    """Mean rows per distinct value of a column, given its row count and
+    nunique. 1.0 = one row per value.
+
+    Takes the already-computed `nunique` (every ColumnProfile has one, from
+    `_profile_column`'s own `series.nunique(dropna=True)`) instead of a
+    `(df, column)` pair that would recompute it — the entity-detection block
+    below used to re-scan every entity-name-hinted column a second time
+    purely to redo a count `_profile_column` had already done."""
+    return row_count / nunique if nunique else 0.0
 
 
 def _infer_semantic_role(
@@ -514,14 +523,102 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
     )
 
 
+#: Bounded memoisation cache for profile_dataframe(). A single run now calls
+#: profile_dataframe on the *same* dataset up to 8 times (twice in
+#: controller.load_dataset, once for the dashboard, once each inside five
+#: tools), and profiling a wide dataset is not free — this trades a little
+#: memory for skipping the repeat work. Small (8 entries): a run touches at
+#: most a couple of distinct frames (raw + cleaned), this is headroom, not a
+#: general-purpose cache. Values are deep-copied on the way in and out (see
+#: profile_dataframe) because callers (controller.py) mutate the returned
+#: profile in place (`profile.domains = ...`, `.grain = ...`, `.entity_col
+#: = ...`) — sharing the cached object directly would leak one caller's
+#: mutation into every other caller's "fresh" profile.
+_PROFILE_CACHE_MAX_ENTRIES = 8
+_PROFILE_CACHE: OrderedDict[tuple[Any, ...], DatasetProfile] = OrderedDict()
+_PROFILE_CACHE_LOCK = threading.Lock()
+
+#: Row-count ceiling for computing a cache-key content fingerprint via
+#: pd.util.hash_pandas_object. That hash is a full pass over every cell, so
+#: fingerprinting a frame this large would cost more than just re-profiling
+#: it — past this size, profile_dataframe skips caching entirely.
+_PROFILE_CACHE_MAX_ROWS_FOR_FINGERPRINT = 200_000
+
+
+def _profile_cache_key(df: pd.DataFrame, target_column: str | None) -> tuple[Any, ...] | None:
+    """
+    Cache key for a profiling call, or None when the call should not be
+    cached at all.
+
+    Keyed on content, not object identity: every tool reads its own copy of
+    the dataset, so id(df) would differ on each call and the cache would
+    never hit across tools (the repeat-profiling this exists to remove).
+    Shape, columns, dtypes and a full-content fingerprint
+    (pd.util.hash_pandas_object summed to one int) identify the data itself;
+    a hash collision *and* every structural field matching is not a risk
+    worth guarding further here. Returns None (caller
+    must skip caching) when the frame is over the fingerprint row budget, or
+    when hashing fails outright — e.g. unhashable cells (lists/dicts) in an
+    object column, which hash_pandas_object cannot handle.
+    """
+    if len(df) > _PROFILE_CACHE_MAX_ROWS_FOR_FINGERPRINT:
+        return None
+    try:
+        fingerprint = int(pd.util.hash_pandas_object(df, index=True).sum())
+    except (TypeError, ValueError):
+        return None
+    return (
+        df.shape,
+        tuple(str(c) for c in df.columns),
+        tuple(str(dt) for dt in df.dtypes),
+        target_column,
+        fingerprint,
+    )
+
+
+def clear_profile_cache() -> None:
+    """Drop every cached profile. For tests and long-lived processes."""
+    with _PROFILE_CACHE_LOCK:
+        _PROFILE_CACHE.clear()
+
+
 def profile_dataframe(df: pd.DataFrame, target_column: str | None = None) -> DatasetProfile:
     """
     Build a full DatasetProfile from a DataFrame.
+
+    Memoised on (shape, columns, dtypes, target_column, content
+    fingerprint) — see _profile_cache_key — because the same frame is
+    profiled repeatedly within one run (controller.load_dataset does it
+    twice, the dashboard once more, and five tools profile their own input
+    on every call). Every call still gets its own DatasetProfile instance
+    (deep-copied off the cache) since callers mutate the object they get
+    back.
 
     Args:
         df:            The raw (uncleaned) dataset.
         target_column: Optional target — enables class-imbalance checks.
     """
+    key = _profile_cache_key(df, target_column)
+    if key is not None:
+        with _PROFILE_CACHE_LOCK:
+            cached = _PROFILE_CACHE.get(key)
+            if cached is not None:
+                _PROFILE_CACHE.move_to_end(key)
+                return copy.deepcopy(cached)
+
+    profile = _profile_dataframe_uncached(df, target_column)
+
+    if key is not None:
+        with _PROFILE_CACHE_LOCK:
+            _PROFILE_CACHE[key] = copy.deepcopy(profile)
+            while len(_PROFILE_CACHE) > _PROFILE_CACHE_MAX_ENTRIES:
+                _PROFILE_CACHE.popitem(last=False)
+    return profile
+
+
+def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = None) -> DatasetProfile:
+    """The actual profiling work — see profile_dataframe() for the memoised
+    public entry point every caller should use instead of this."""
     row_count = len(df)
     duplicate_rows = int(df.duplicated().sum())
     memory_mb = round(float(df.memory_usage(deep=True).sum()) / 1_048_576, 2)
@@ -644,8 +741,8 @@ def profile_dataframe(df: pd.DataFrame, target_column: str | None = None) -> Dat
         and 0 < c.nunique < row_count
     ]
     if entity_candidates:
-        best = max(entity_candidates, key=lambda c: _rows_per_value(df, c.name))
-        ratio = _rows_per_value(df, best.name)
+        best = max(entity_candidates, key=lambda c: _rows_per_value(row_count, c.nunique))
+        ratio = _rows_per_value(row_count, best.nunique)
         if ratio >= _ENTITY_REPEAT_THRESHOLD:
             entity_col = best.name
             rows_per_entity = round(ratio, 2)

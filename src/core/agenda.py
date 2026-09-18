@@ -135,13 +135,23 @@ def build_agenda(
             suggested_tool="train_model",
         ))
     elif decision and decision.get("mode") == "describe":
+        # `target` is None whenever mode == "describe" (that's what "not
+        # modelling" means, and load_dataset relies on it) — but a
+        # candidate column may still have been found and declined (see
+        # _decide_analysis_mode's "candidate" key). Prefer that for the
+        # question text so a real declined column is named instead of the
+        # question reading "Could 'None' be predicted?".
+        candidate = decision.get("candidate") or decision.get("target")
+        rationale = decision.get("rationale", "no prediction target fits this data.")
+        text = (
+            f"Could '{candidate}' be predicted? — declined: {rationale}"
+            if candidate
+            else f"Could a prediction target be found in this data? — declined: {rationale}"
+        )
         questions.append(Question(
-            text=(
-                f"Could '{decision.get('target')}' be predicted? — declined: "
-                f"{decision.get('rationale', 'no prediction target fits this data.')}"
-            ),
+            text=text,
             kind="model",
-            columns=[decision["target"]] if decision.get("target") else [],
+            columns=[candidate] if candidate else [],
             expected_value=0.0,
             suggested_tool=None,
         ))
@@ -176,15 +186,27 @@ def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> d
         if q.suggested_tool is None:
             unanswered.append(q)  # a declined question (e.g. modelling) is unanswered by definition
             continue
-        hit = any(
-            f.get("kind") in (q.kind, "segment_lift", "driver", "trend", "concentration", "change")
-            and (
-                f.get("measure") in q.columns
-                or f.get("dimension") in q.columns
-                or f.get("source_tool") == q.suggested_tool
+        kind_hit = (q.kind, "segment_lift", "driver", "trend", "concentration", "change")
+        if q.columns:
+            # A question that names specific columns is only answered by a
+            # finding that's actually ABOUT those columns — matching on
+            # source_tool alone let any finding from the right tool count
+            # for every question that tool could ever answer (e.g. one
+            # segment_comparison finding on an unrelated measure/dimension
+            # pair would mark every OTHER segment question "answered" too).
+            hit = any(
+                f.get("kind") in kind_hit
+                and (f.get("measure") in q.columns or f.get("dimension") in q.columns)
+                for f in findings
             )
-            for f in findings
-        )
+        else:
+            # No columns to check against (e.g. the general "which measures
+            # move together?" question) — the bare source_tool match is the
+            # only signal available, same as before.
+            hit = any(
+                f.get("kind") in kind_hit and f.get("source_tool") == q.suggested_tool
+                for f in findings
+            )
         (answered if hit else unanswered).append(q)
     return {
         "total": len(agenda),

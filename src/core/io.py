@@ -48,6 +48,24 @@ _CSV_DELIMITER_CANDIDATES = ",;\t|"
 #: Bytes read from the front of a text file to sniff its delimiter/headers.
 _SNIFF_SAMPLE_BYTES = 64 * 1024
 
+#: pandas' own default `na_values` (pandas._libs.parsers.STR_NA_VALUES),
+#: minus the literal string "None". pandas >= 2 treats "None" as NA by
+#: default, but real datasets legitimately use it as a category label (e.g.
+#: a Social_Media_Influence column of High/Medium/Low/None) — left as the
+#: default, one real "None" in five drops out and the column reads as 25%
+#: missing. "" is kept: an empty field is still NA. Derived from the pandas
+#: constant when importable (keeps this in sync with pandas' own list);
+#: hard-coded as a fallback in case that private module moves.
+try:
+    from pandas._libs.parsers import STR_NA_VALUES as _PANDAS_STR_NA_VALUES
+    NA_VALUES_KEEP_NONE_STRING: list[str] = sorted(_PANDAS_STR_NA_VALUES - {"None"})
+except ImportError:
+    NA_VALUES_KEEP_NONE_STRING = [
+        "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan",
+        "1.#IND", "1.#QNAN", "<NA>", "N/A", "NA", "NULL", "NaN", "n/a",
+        "nan", "null",
+    ]
+
 #: Depth at which nested JSON fields stop being flattened into dotted column
 #: names (address.city -> ...) and are left as dict/list cell values instead.
 #: Uncapped flattening on adversarial or deeply-nested input is an easy way
@@ -239,7 +257,12 @@ def _read_delimited(
         )
 
     try:
-        df = pd.read_csv(io.StringIO(text), sep=delimiter)
+        df = pd.read_csv(
+            io.StringIO(text),
+            sep=delimiter,
+            keep_default_na=False,
+            na_values=NA_VALUES_KEEP_NONE_STRING,
+        )
     except pd.errors.EmptyDataError as exc:
         raise DatasetReadError(f"'{path.name}' has no columns to parse.") from exc
 

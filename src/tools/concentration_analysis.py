@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from src.core.findings import Finding
-from src.core.profiler import profile_dataframe
+from src.core.profiler import _ENTITY_REPEAT_THRESHOLD, profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -69,6 +69,21 @@ def _pick_measure_columns(profile: DatasetProfile) -> list[ColumnProfile]:
     return sorted(measures, key=lambda c: (c.unit_hint != "currency", c.name))
 
 
+def _is_repeating_entity(profile: DatasetProfile, c: ColumnProfile) -> bool:
+    """A column is a genuine *entity* to concentrate over only if rows
+    actually repeat per value — one row per value (nunique == row_count,
+    e.g. a per-row Customer_ID / order line id) is a row key, not an
+    entity, and "top 10% of X" over it is just "top 10% of rows" wearing an
+    entity noun. Mirrors `profiler.py`'s own entity detection: same
+    rows-per-value formula and the same `_ENTITY_REPEAT_THRESHOLD` constant
+    (imported, since it's the stable part of that module's contract) so
+    this tool doesn't accept a column the profiler's own grain detection
+    would reject."""
+    if c.nunique <= 0 or c.nunique >= profile.row_count:
+        return False
+    return (profile.row_count / c.nunique) >= _ENTITY_REPEAT_THRESHOLD
+
+
 def _pick_entity_column(profile: DatasetProfile) -> str | None:
     if profile.entity_col:
         return profile.entity_col
@@ -76,6 +91,7 @@ def _pick_entity_column(profile: DatasetProfile) -> str | None:
         c for c in profile.columns
         if c.semantic_role in ("dimension", "identifier")
         and _MIN_ENTITY_CARD <= c.nunique <= _MAX_ENTITY_CARD
+        and _is_repeating_entity(profile, c)
     ]
     if candidates:
         return max(candidates, key=lambda c: c.nunique).name
@@ -83,6 +99,7 @@ def _pick_entity_column(profile: DatasetProfile) -> str | None:
         c for c in profile.columns
         if any(h in c.name.lower() for h in _ENTITY_NAME_HINTS)
         and _MIN_ENTITY_CARD <= c.nunique <= _MAX_ENTITY_CARD
+        and _is_repeating_entity(profile, c)
     ]
     if name_hint_candidates:
         return max(name_hint_candidates, key=lambda c: c.nunique).name
@@ -189,6 +206,26 @@ class ConcentrationAnalysisTool(BaseTool):
         if n_entities < 2:
             raise ToolExecutionError(
                 f"'{entity_column}' has fewer than 2 distinct entities — nothing to concentrate."
+            )
+
+        # Guard against a per-row identifier being used as the entity — not
+        # just for the auto-picked column (`_pick_entity_column` already
+        # filters these out) but also for an `entity_column` the caller (the
+        # LLM) passed explicitly, which skips that filter entirely. Without
+        # this, a Customer_ID that is unique per row silently produces
+        # n_entities == n_rows and a "top 10% of customers" claim that is
+        # really just "top 10% of rows" — same failure profiler.py's own
+        # entity detection avoids via `_ENTITY_REPEAT_THRESHOLD`.
+        rows_per_entity = len(work) / n_entities
+        if rows_per_entity < _ENTITY_REPEAT_THRESHOLD:
+            raise ToolExecutionError(
+                f"'{entity_column}' has {n_entities:,} distinct values across {len(work):,} "
+                f"rows ({rows_per_entity:.2f} rows/value) — that is essentially one row per "
+                f"value, not a repeating entity. Concentration over a per-row identifier is "
+                "meaningless (it would just report 'top 10% of rows' relabelled as "
+                f"'{_entity_noun(entity_column)}'). Pass a column that genuinely repeats per "
+                "entity (e.g. a customer/account id with multiple transactions/orders), or "
+                "aggregate the data to one row per entity first."
             )
 
         total_measure = float(grouped.sum())

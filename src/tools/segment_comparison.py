@@ -5,11 +5,19 @@ The one analysis missing everywhere in the codebase: "does this measure (or
 target rate) differ by segment, and by how much?" Generic column statistics
 answer "what is the mean of `amount`?"; this tool answers "is the West
 region's `amount` higher than everyone else's, and is that difference real
-or noise?" — the segment-vs-baseline comparison with lift, a significance
-test, sample size and a confidence interval that recovers sentences like:
+or noise?" — the segment-vs-rest-of-data comparison with lift, a
+significance test, sample size and a confidence interval that recovers
+sentences like:
 
-    "Month-to-month customers churn at 42% vs a 27% baseline (1.6x, n=812)."
-    "West-region orders run 25% above the company average (1.25x, n=340)."
+    "Month-to-month customers churn at 42% vs 27% for everyone else (1.6x, n=812 vs n=2,340)."
+    "West-region orders run 25% above every other region (1.25x, n=340 vs n=980)."
+
+The baseline in `ratio`/`lift`/the headline is always the REST of the data
+(every row NOT in that level) — the same population the significance test
+(`proportions_ztest`/`ttest_ind`) compares the level against — never the
+dataset-wide mean, which would include the segment itself and drift from
+what the p-value is actually testing. The dataset-wide mean is still kept
+as `overall_mean` in each comparison's evidence for reference.
 
 Two vocabularies:
   - `ratio`  = level_value / baseline_value — the "1.6x" multiplier a human
@@ -224,9 +232,12 @@ class SegmentComparisonTool(BaseTool):
         if work.empty:
             return []
 
-        baseline_mean = float(work[measure_column].mean())
-        if baseline_mean == 0:
-            return []
+        # Kept for reference only (evidence["overall_mean"]) — the tested
+        # comparison, and therefore ratio/lift/headline, is level vs the
+        # REST of the data (`rest_vals` below), not this overall figure.
+        # Using the overall mean as the divisor mixes the segment into its
+        # own baseline and drifts from what the p-value actually tests.
+        overall_mean = float(work[measure_column].mean())
 
         counts = work[dimension_column].value_counts()
         levels = counts.head(_MAX_LEVELS_TESTED).index.tolist()
@@ -239,6 +250,10 @@ class SegmentComparisonTool(BaseTool):
             n, n_rest = len(level_vals), len(rest_vals)
             if n < _MIN_LEVEL_N or n_rest < _MIN_LEVEL_N:
                 continue
+
+            baseline_mean = float(rest_vals.mean())
+            if baseline_mean == 0:
+                continue  # ratio/lift undefined vs a zero rest-of-data baseline
 
             level_mean = float(level_vals.mean())
             ratio = level_mean / baseline_mean
@@ -288,6 +303,7 @@ class SegmentComparisonTool(BaseTool):
                 "unit_hint": unit_hint,
                 "level_value": round(level_mean, 6),
                 "baseline_value": round(baseline_mean, 6),
+                "overall_mean": round(overall_mean, 6),
                 "ratio": round(ratio, 4),
                 "lift": round(lift, 4),
                 "n": n,
@@ -376,8 +392,8 @@ class SegmentComparisonTool(BaseTool):
         else:
             middle = f"average {c['measure']} of {level_str}"
         return (
-            f"{c['level']} {c['dimension']} {row_noun} {middle} vs a "
-            f"{baseline_str} baseline ({c['ratio']:.2f}x, n={c['n']:,})."
+            f"{c['level']} {c['dimension']} {row_noun} {middle} vs {baseline_str} "
+            f"for everyone else ({c['ratio']:.2f}x, n={c['n']:,} vs {c['n_rest']:,})."
         )
 
     def findings(

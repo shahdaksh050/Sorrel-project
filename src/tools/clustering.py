@@ -239,6 +239,7 @@ class ClusterDataTool(BaseTool):
                         "silhouette_score": silhouette,
                         "cluster_sizes": output.get("cluster_sizes"),
                     },
+                    source_tool=self.name,
                     measure="silhouette_score",
                     effect=round(silhouette, 4),
                     effect_kind="r",
@@ -271,6 +272,31 @@ class ClusterDataTool(BaseTool):
                 if deviation > 0.15:
                     total_rows = sum(sizes.values())
                     share = sizes[largest_name] / total_rows if total_rows else 0.0
+                    # This finding rides on the same cluster geometry as the
+                    # "segments" finding above, so it can't be more trustworthy
+                    # than its parent: cap its confidence at the parent's
+                    # (0.6 if separation isn't weak, else 0.35), and within
+                    # that ceiling scale down with the actual silhouette
+                    # rather than a flat constant. A weak silhouette (e.g.
+                    # 0.087) now lands at/near the floor instead of a
+                    # hard-coded 0.55 that ignored cluster quality entirely.
+                    parent_confidence = 0.6 if quality != "weak" else 0.35
+                    sil = float(silhouette) if silhouette is not None else 0.0
+                    profile_confidence = round(min(parent_confidence, max(0.2, sil)), 3)
+                    # `surprise` is gated the same way as confidence: a
+                    # profile deviation drawn from weakly-separated clusters
+                    # is not a noteworthy discovery the way the same
+                    # deviation would be inside genuinely distinct groups,
+                    # so it shouldn't get the sibling finding's full 0.3-0.4
+                    # surprise weight in the ranking.
+                    profile_surprise = 0.4 if quality != "weak" else 0.15
+                    profile_caveats: list[str] = []
+                    if quality == "weak":
+                        profile_caveats.append(
+                            f"Cluster separation is weak (silhouette={sil:.3f}) — this "
+                            "segment profile may not reflect a genuinely distinct group "
+                            "and should be treated as a soft pattern, not a hard segment."
+                        )
                     results.append(
                         Finding(
                             finding_id=f"{self.name}_{largest_name}_profile",
@@ -287,14 +313,18 @@ class ClusterDataTool(BaseTool):
                                 "defining_feature": defining_feature,
                                 "cluster_mean": largest_profile[defining_feature],
                                 "overall_mean": overall_mean[defining_feature],
+                                "silhouette_score": silhouette,
+                                "separation_quality": quality,
                             },
+                            source_tool=self.name,
                             measure=defining_feature,
                             dimension="cluster",
                             level=largest_name,
                             effect=round(min(deviation, 2.0), 4),
                             effect_kind="pct",
-                            confidence=0.55,
-                            surprise=0.4,
+                            confidence=profile_confidence,
+                            surprise=profile_surprise,
+                            caveats=profile_caveats,
                         )
                     )
 

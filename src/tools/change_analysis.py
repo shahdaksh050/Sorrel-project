@@ -70,6 +70,27 @@ def _grain_for_span(span_days: float) -> tuple[str, str]:
     return "D", "daily"
 
 
+def _pick_mover(
+    breakdown: list[dict[str, Any]] | None, total_change: float
+) -> dict[str, Any] | None:
+    """The segment to name as "biggest contributor" to the headline change:
+    the largest mover in the SAME direction as the total change — a segment
+    that moved opposite the headline didn't drive it, even if it happens to
+    have the largest absolute delta. Falls back to the largest absolute
+    mover (breakdown is already sorted that way) if none moved that way."""
+    if not breakdown:
+        return None
+    if total_change > 0:
+        same_dir = [r for r in breakdown if r["delta"] > 0]
+    elif total_change < 0:
+        same_dir = [r for r in breakdown if r["delta"] < 0]
+    else:
+        same_dir = []
+    if same_dir:
+        return max(same_dir, key=lambda r: abs(r["delta"]))
+    return breakdown[0]
+
+
 def _period_label(ts: pd.Timestamp, grain_label: str) -> str:
     if grain_label == "monthly":
         return ts.strftime("%Y-%m")
@@ -125,22 +146,41 @@ class ChangeAnalysisTool(BaseTool):
         freq: str,
         latest_period: pd.Timestamp,
         prior_period: pd.Timestamp,
+        total_change: float,
     ) -> list[dict[str, Any]] | None:
         """Best-effort: which segment moved the most between the two most
         recent periods. Returns None if the dimension can't be resolved
         against these rows — the core period-over-period result already
-        computed does not depend on this succeeding."""
+        computed does not depend on this succeeding.
+
+        `total_change` is the TOTAL series' actual latest-vs-prior change
+        (`latest_value - prior_value` from `execute()`), passed in so
+        `share_of_total_change_pct` reconciles to the headline number
+        instead of the sum of segment deltas, which can diverge from it.
+        """
         try:
             seg = df[[date_column, measure_column, dimension_column]].copy()
             seg[date_column] = pd.to_datetime(seg[date_column], errors="coerce")
             seg[measure_column] = pd.to_numeric(seg[measure_column], errors="coerce")
-            seg = seg.dropna(subset=[date_column, measure_column, dimension_column])
+            # Rows with a missing dimension value still count toward the
+            # TOTAL series — fold them into an explicit "(missing)" level
+            # instead of dropping them, so those rows are represented in
+            # the breakdown rather than silently disappearing from it.
+            # `.where(notna(), ...)` (not `.astype(object).fillna(...)`) is
+            # deliberate: it's dtype-agnostic across object/category/the
+            # pandas-3.0 `str` dtype, whose null sentinel isn't always
+            # `np.nan` and can survive an `astype(object)` round-trip.
+            dim = seg[dimension_column]
+            # astype(str) first: a categorical dimension would reject the
+            # new "(missing)" value in .where() (not a known category).
+            seg[dimension_column] = dim.astype(str).where(dim.notna(), "(missing)")
+            seg = seg.dropna(subset=[date_column, measure_column])
             if seg.empty:
                 return None
             grouped = (
                 seg.set_index(date_column)
                 .groupby(dimension_column)[measure_column]
-                .resample(freq)
+                .resample(freq, label="left", closed="left")
                 .agg(agg_func)
             )
             dates = grouped.index.get_level_values(1)
@@ -151,7 +191,6 @@ class ChangeAnalysisTool(BaseTool):
                 return None
             combined["delta"] = combined["latest"] - combined["prior"]
             combined = combined.reindex(combined["delta"].abs().sort_values(ascending=False).index)
-            total_delta = float(combined["delta"].sum())
             rows = []
             for level, row in combined.head(_TOP_N_SEGMENTS).iterrows():
                 delta = float(row["delta"])
@@ -160,8 +199,12 @@ class ChangeAnalysisTool(BaseTool):
                     "latest_value": round(float(row["latest"]), 4),
                     "prior_value": round(float(row["prior"]), 4),
                     "delta": round(delta, 4),
+                    # Signed: a segment that moved OPPOSITE the total change
+                    # (offsetting it) gets a negative share here, not just a
+                    # small one — this is "share of the headline move this
+                    # segment is responsible for," not "share of magnitude."
                     "share_of_total_change_pct": (
-                        round(delta / total_delta * 100, 1) if total_delta else None
+                        round(delta / total_change * 100, 1) if total_change else None
                     ),
                 })
             return rows
@@ -271,6 +314,7 @@ class ChangeAnalysisTool(BaseTool):
             breakdown = self._segment_breakdown(
                 df, date_column, measure_column, dimension_column,
                 agg_func, freq, latest_period, prior_period,
+                latest_value - prior_value,
             )
 
         latest_label = _period_label(latest_period, grain_label)
@@ -285,9 +329,13 @@ class ChangeAnalysisTool(BaseTool):
                 f"{measure_column} {direction} {abs(pct_change) * 100:.1f}% in "
                 f"{latest_label} vs the prior period."
             )
-            if breakdown:
-                top = breakdown[0]
-                summary += f" Largest mover: {top['level']} ({top['delta']:+,.2f})."
+            mover = _pick_mover(breakdown, latest_value - prior_value)
+            if mover:
+                contributor_word = "rise" if pct_change > 0 else "drop"
+                summary += (
+                    f" Biggest contributor to the {contributor_word}: "
+                    f"{mover['level']} ({mover['delta']:+,.2f})."
+                )
             if latest_period_partial:
                 summary += (
                     f" Note: the latest {grain_label} period is not yet complete in "
@@ -340,8 +388,14 @@ class ChangeAnalysisTool(BaseTool):
         )
         breakdown = output.get("segment_breakdown")
         if breakdown:
-            top = breakdown[0]
-            detail += f" Largest mover: {top['level']} ({top['delta']:+.2f})."
+            total_change = output.get("latest_value", 0.0) - output.get("prior_period_value", 0.0)
+            mover = _pick_mover(breakdown, total_change)
+            if mover:
+                contributor_word = "rise" if pct_change > 0 else "drop"
+                detail += (
+                    f" Biggest contributor to the {contributor_word}: "
+                    f"{mover['level']} ({mover['delta']:+.2f})."
+                )
 
         return [Finding(
             finding_id=f"change_{measure}_{latest_label}",

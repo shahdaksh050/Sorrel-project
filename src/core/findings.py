@@ -108,15 +108,54 @@ def is_trivial(finding: Finding) -> bool:
     return abs(finding.effect) < TRIVIAL_EFFECT_FLOOR
 
 
-def rank_findings(findings: list[Finding], suppress_trivial: bool = True) -> list[Finding]:
+def _diversify_by_source(findings: list[Finding], max_per_source: int) -> list[Finding]:
+    """Greedy source-diversity pass (importance order is assumed already
+    applied to `findings`): the first `max_per_source` findings seen for
+    each (source_tool, kind) bucket stay in place, everything past that cap
+    is pushed to the end (still in importance order among itself). Nothing
+    is dropped — a single tool/kind combination just can't monopolise the
+    front of the list the way 7 month-of-year findings from one time-series
+    call did in practice."""
+    counts: dict[tuple[str, str], int] = {}
+    head: list[Finding] = []
+    overflow: list[Finding] = []
+    for f in findings:
+        key = (f.source_tool, f.kind)
+        if counts.get(key, 0) < max_per_source:
+            head.append(f)
+            counts[key] = counts.get(key, 0) + 1
+        else:
+            overflow.append(f)
+    return head + overflow
+
+
+def rank_findings(
+    findings: list[Finding],
+    suppress_trivial: bool = True,
+    max_per_source: int | None = 2,
+) -> list[Finding]:
     """Compute importance for every finding and return them ranked
     descending. Trivial findings are dropped (not just sorted low) unless
     doing so would empty the list, so a genuinely flat dataset still reports
-    something rather than nothing."""
+    something rather than nothing.
+
+    `max_per_source` (default 2) then applies a source-diversity pass: at
+    most that many findings from the same (source_tool, kind) combination
+    are allowed into the front of the list before findings from other
+    tools/kinds get a turn. This is a reordering, not a filter — every
+    finding that survived trivial-suppression is still returned, just with
+    the rest of a dominant source's findings pushed after the more varied
+    front. Pass `max_per_source=None` to skip this and keep a plain
+    importance sort (e.g. for callers that want the raw ranking).
+    """
     for f in findings:
         f.compute_importance()
     ranked = sorted(findings, key=lambda f: f.importance, reverse=True)
     if not suppress_trivial:
-        return ranked
-    kept = [f for f in ranked if not is_trivial(f)]
-    return kept if kept else ranked
+        result = ranked
+    else:
+        kept = [f for f in ranked if not is_trivial(f)]
+        result = kept if kept else ranked
+    if max_per_source is None:
+        return result
+    return _diversify_by_source(result, max_per_source)

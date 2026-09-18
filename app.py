@@ -172,6 +172,18 @@ def _inject_theme_css() -> None:
 /* ── The page ── */
 #MainMenu, footer, .stAppDeployButton {{ visibility: hidden; }}
 header[data-testid="stHeader"] {{ background: transparent; }}
+/* The native run-status widget (spinner + "Stop") is the one piece of
+   stock Streamlit chrome the above rules don't touch — it's the only way
+   to interrupt a running analysis, so it stays, just re-themed to match
+   the Ledger palette instead of Streamlit's defaults. */
+[data-testid="stStatusWidget"] {{
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-pill);
+    box-shadow: var(--lift-sm);
+    color: var(--ink);
+}}
+[data-testid="stStatusWidget"] svg {{ color: var(--pen); }}
 .stApp {{
     background-color: var(--stock);
     background-image: none;
@@ -496,13 +508,14 @@ iframe:hover {{
 }}
 .agent-grid.org-chart-layout {{
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    /* auto-fit/minmax, not a fixed column count + viewport media query —
+       this grid can render inside a narrower container (e.g. the run
+       progress rail), and a viewport-width breakpoint doesn't know that.
+       Matches the same pattern .agent-grid/.kpi-tiles already use above. */
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: 20px;
     position: relative;
     padding: 20px 0;
-}}
-@media (max-width: 900px) {{
-    .agent-grid.org-chart-layout {{ grid-template-columns: repeat(2, 1fr); }}
 }}
 .agent-grid.org-chart-layout::before {{
     content: '';
@@ -2290,6 +2303,11 @@ if st.session_state.get("analysis_done"):
     dash: list[dict[str, Any]] | None = st.session_state.get("dashboard")
     profile: dict[str, Any] | None = st.session_state.get("profile")
 
+    # The run's LLM failure reason (set above from memory "llm_error") was
+    # stored but never rendered anywhere, so a planning call that silently
+    # fell back to the deterministic plan left no visible trace in the UI.
+    if st.session_state.get("llm_warning"):
+        st.warning(st.session_state["llm_warning"])
 
     # IMPROVEMENTS.md 7.21 (user-confirmed): 4 top-level tabs, findings-led.
     # "Your Helpers" (the agent grid / handoff stream) folds into Details as

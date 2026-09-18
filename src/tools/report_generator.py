@@ -13,6 +13,7 @@ via pandoc or any Markdown renderer.
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,6 +24,66 @@ from src.tools.base import BaseTool
 
 if TYPE_CHECKING:
     from src.core.memory import MemorySystem
+
+
+# ---------------------------------------------------------------------------
+# 3a — executive summary: prefer the LLM's own `insights` over its raw
+# `reasoning` scratch text, which has leaked internal plumbing ("completed
+# successfully across iter 1", "RLM Sub-Analysis Findings", "Form 2",
+# literal tool names) straight into shipped reports. Mirrored in
+# src.core.html_report so both reports agree on what the reader sees.
+# ---------------------------------------------------------------------------
+
+#: Word-bounded patterns (case-insensitive) that mark a sentence as internal
+#: plumbing rather than analyst-facing prose — see prompt_manager.py's
+#: "Form 1"/"Form 2"/iteration-numbered system prompt, which the model
+#: occasionally echoes back into its own reasoning/insights text.
+_JARGON_RE = re.compile(
+    r"\biter(ation)? \d|\brlm\b|\bsub-analys|\bform [12]\b|\btool results\b", re.IGNORECASE
+)
+
+
+def _strip_jargon_sentences(text: str) -> str:
+    """Drop any sentence containing internal-plumbing jargon. Splits on
+    sentence-ending punctuation — approximate, but the text here is prose
+    the LLM itself wrote, not something requiring a real parser."""
+    if not text:
+        return text
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    kept = [s for s in sentences if not _JARGON_RE.search(s)]
+    return " ".join(kept).strip()
+
+
+def _build_executive_summary(llm_insights: dict[str, Any]) -> str:
+    """Prefer `insights` (first 3-4, joined into prose) for the executive
+    summary; fall back to `reasoning` only when there are no insights.
+    Either way, jargon sentences are stripped before use."""
+    insights = llm_insights.get("insights") or []
+    if insights:
+        text = " ".join(str(i).strip().rstrip(".") + "." for i in insights[:4] if str(i).strip())
+    else:
+        text = str(llm_insights.get("reasoning", "") or "")
+    return _strip_jargon_sentences(text)
+
+
+def _model_was_trained(llm_insights: dict[str, Any], tool_results: list[dict[str, Any]]) -> bool:
+    """True only when a model was actually fitted (item 3b) — `best_model`
+    is the surest signal (TrainModelTool only ever runs for classification/
+    regression, so its presence already implies that task_type), backed up
+    by a successful `train_model` tool result in case `best_model` wasn't
+    threaded through `llm_insights`. Distinguishes a real "Model
+    Performance" section from a describe-only (EDA) run whose key_metrics
+    happens to be populated with something else (e.g. a gini_coefficient
+    from concentration_analysis)."""
+    if llm_insights.get("best_model"):
+        return True
+    return any(
+        r.get("tool_name") == "train_model"
+        and r.get("status") == "success"
+        and isinstance(r.get("output"), dict)
+        and r["output"].get("best_model")
+        for r in tool_results
+    )
 
 
 def _format_data_overview(
@@ -159,7 +220,7 @@ def _headline_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates = [f for f in findings if f.get("kind") not in _CAVEAT_FINDING_KINDS]
     preferred = [f for f in candidates if f.get("layer") in ("exec", "analyst")]
     pool = preferred if preferred else candidates
-    pool = sorted(pool, key=lambda f: f.get("importance") or 0.0, reverse=True)
+    pool = list(pool)  # keep rank_findings() order (source-diversity pass), no re-sort
     return pool[:_MAX_HEADLINE_FINDINGS]
 
 
@@ -168,7 +229,7 @@ def _evidence_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         f for f in findings
         if f.get("layer") == "analyst" and f.get("kind") not in _CAVEAT_FINDING_KINDS
     ]
-    pool = sorted(pool, key=lambda f: f.get("importance") or 0.0, reverse=True)
+    pool = list(pool)  # keep rank_findings() order (source-diversity pass), no re-sort
     return pool[:_MAX_EVIDENCE_FINDINGS]
 
 
@@ -232,6 +293,22 @@ def _format_evidence(findings: list[dict[str, Any]] | None) -> list[str]:
     return lines
 
 
+#: 3d — the controller now feeds the BH correction every family-mode test
+#: *and* every segment_comparison test in one run, which can run into the
+#: dozens. A table that long stops being readable, so only the most
+#: decision-relevant rows are shown: significant results first, then by
+#: ascending BH-adjusted p, capped at this many rows with a "N more not
+#: shown" trailer. Mirrored in src.core.html_report.
+_MAX_BH_ROWS = 15
+
+
+def _sort_bh_tests(bh: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        bh,
+        key=lambda t: (not t.get("significant_after_correction"), t.get("p_adjusted") or 1.0),
+    )
+
+
 def _format_limitations(
     data_profile: dict[str, Any] | None,
     statistical_test_pvalues: list[dict[str, Any]] | None,
@@ -274,14 +351,29 @@ def _format_limitations(
             f"Benjamini-Hochberg-corrected significance (FDR, α={_BH_ALPHA}):"
         )
         lines.append("")
-        lines.append("| Feature | Test | p-value | BH-adjusted p | Significant after correction |")
-        lines.append("|---------|------|---------|----------------|-------------------------------|")
-        for t in bh:
-            lines.append(
-                f"| {t.get('feature_column', '—')} | {t.get('test_name', '—')} | "
+        ordered = _sort_bh_tests(bh)
+        shown = ordered[:_MAX_BH_ROWS]
+        has_group = any(t.get("group_column") for t in shown)
+        if has_group:
+            lines.append("| Feature | Group | Test | p-value | BH-adjusted p | Significant after correction |")
+            lines.append("|---------|-------|------|---------|----------------|-------------------------------|")
+        else:
+            lines.append("| Feature | Test | p-value | BH-adjusted p | Significant after correction |")
+            lines.append("|---------|------|---------|----------------|-------------------------------|")
+        for t in shown:
+            row = f"| {t.get('feature_column', '—')} | "
+            if has_group:
+                row += f"{t.get('group_column') or '—'} | "
+            row += (
+                f"{t.get('test_name', '—')} | "
                 f"{t.get('p_value', 0):.4f} | {t.get('p_adjusted', 0):.4f} | "
                 f"{'Yes' if t.get('significant_after_correction') else 'No'} |"
             )
+            lines.append(row)
+        remaining = len(ordered) - len(shown)
+        if remaining > 0:
+            lines.append("")
+            lines.append(f"… {remaining} more test(s) not shown.")
         lines.append("")
 
     if unverified_claims:
@@ -440,6 +532,10 @@ class GenerateReportTool(BaseTool):
                 llm_insights = {}
         if not isinstance(llm_insights, dict):
             llm_insights = {}
+        # 3c — internal-only keys (e.g. "_rlm_usage") never belong in a
+        # report a human reads or in the raw JSON dump; drop them once,
+        # up front, so every render/write below is already clean.
+        llm_insights = {k: v for k, v in llm_insights.items() if not str(k).startswith("_")}
 
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -476,10 +572,13 @@ class GenerateReportTool(BaseTool):
         # (an old caller, or a run that produced none), so nothing regresses.
         md_lines += _format_top_findings(findings)
 
-        # Executive summary from LLM
-        reasoning = llm_insights.get("reasoning", "")
-        if reasoning:
-            md_lines += ["## Executive Summary", "", reasoning, ""]
+        # Executive summary — 3a: prefer `insights` over the LLM's raw
+        # `reasoning` scratch text (which has leaked plumbing like "iter 1"
+        # and "RLM Sub-Analysis Findings" into shipped reports), and strip
+        # any jargon sentences from whichever source is used.
+        executive_summary = _build_executive_summary(llm_insights)
+        if executive_summary:
+            md_lines += ["## Executive Summary", "", executive_summary, ""]
 
         insights = llm_insights.get("insights") or []
         recs = llm_insights.get("recommendations") or []
@@ -497,11 +596,15 @@ class GenerateReportTool(BaseTool):
                 md_lines.append(f"- {rec}")
             md_lines.append("")
 
-        # Model performance
+        # Model performance — 3b: only call this "Model Performance" when a
+        # model was actually trained; a describe-only (EDA) run's
+        # key_metrics can be populated with unrelated numbers (e.g. a
+        # gini_coefficient), which "Model Performance" would misrepresent.
         best_model = llm_insights.get("best_model")
         key_metrics = llm_insights.get("key_metrics", {})
         if best_model or key_metrics:
-            md_lines += ["## Model Performance", ""]
+            section_title = "Model Performance" if _model_was_trained(llm_insights, tool_results) else "Key Metrics"
+            md_lines += [f"## {section_title}", ""]
             if best_model:
                 md_lines.append(f"**Best model**: {best_model}")
             if key_metrics:

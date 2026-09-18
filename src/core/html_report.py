@@ -15,11 +15,64 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import time
 from typing import Any
 
 from src.core.chart_theme import vega_config
 from src.core.multiple_testing import apply_benjamini_hochberg
+
+
+# ---------------------------------------------------------------------------
+# 3a — executive summary: prefer the LLM's own `insights` over its raw
+# `reasoning` scratch text, which has leaked internal plumbing ("completed
+# successfully across iter 1", "RLM Sub-Analysis Findings", "Form 2",
+# literal tool names) straight into shipped reports. Mirrored in
+# src.tools.report_generator so both reports agree on what the reader sees.
+# ---------------------------------------------------------------------------
+
+_JARGON_RE = re.compile(
+    r"\biter(ation)? \d|\brlm\b|\bsub-analys|\bform [12]\b|\btool results\b", re.IGNORECASE
+)
+
+
+def _strip_jargon_sentences(text: str) -> str:
+    """Drop any sentence containing internal-plumbing jargon. Splits on
+    sentence-ending punctuation — approximate, but the text here is prose
+    the LLM itself wrote, not something requiring a real parser."""
+    if not text:
+        return text
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    kept = [s for s in sentences if not _JARGON_RE.search(s)]
+    return " ".join(kept).strip()
+
+
+def _build_executive_summary(llm_insights: dict[str, Any]) -> str:
+    """Prefer `insights` (first 3-4, joined into prose) for the executive
+    summary; fall back to `reasoning` only when there are no insights.
+    Either way, jargon sentences are stripped before use."""
+    insights = llm_insights.get("insights") or []
+    if insights:
+        text = " ".join(str(i).strip().rstrip(".") + "." for i in insights[:4] if str(i).strip())
+    else:
+        text = str(llm_insights.get("reasoning", "") or "")
+    return _strip_jargon_sentences(text)
+
+
+def _model_was_trained(llm_insights: dict[str, Any], tool_results: list[dict[str, Any]]) -> bool:
+    """True only when a model was actually fitted (item 3b) — see the
+    identical helper (and its full rationale) in
+    src.tools.report_generator, which this mirrors so the two reports agree
+    on when to title the section "Model Performance" vs "Key Metrics"."""
+    if llm_insights.get("best_model"):
+        return True
+    return any(
+        r.get("tool_name") == "train_model"
+        and r.get("status") == "success"
+        and isinstance(r.get("output"), dict)
+        and r["output"].get("best_model")
+        for r in tool_results
+    )
 
 # "Ledger" (DESIGN.md): warm paper, friendly ink, one terracotta pen.
 # The shared report is the same warm sheet as the console, printed.
@@ -153,7 +206,7 @@ def _headline_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates = [f for f in findings if f.get("kind") not in _CAVEAT_FINDING_KINDS]
     preferred = [f for f in candidates if f.get("layer") in ("exec", "analyst")]
     pool = preferred if preferred else candidates
-    pool = sorted(pool, key=lambda f: f.get("importance") or 0.0, reverse=True)
+    pool = list(pool)  # keep rank_findings() order (source-diversity pass), no re-sort
     return pool[:_MAX_HEADLINE_FINDINGS]
 
 
@@ -162,7 +215,7 @@ def _evidence_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         f for f in findings
         if f.get("layer") == "analyst" and f.get("kind") not in _CAVEAT_FINDING_KINDS
     ]
-    pool = sorted(pool, key=lambda f: f.get("importance") or 0.0, reverse=True)
+    pool = list(pool)  # keep rank_findings() order (source-diversity pass), no re-sort
     return pool[:_MAX_EVIDENCE_FINDINGS]
 
 
@@ -199,6 +252,19 @@ def _finding_evidence_html(finding: dict[str, Any]) -> str:
     if source:
         bits.append(f"<br><span style='color:var(--graphite);font-size:.78rem;'>source: {_esc(source)}</span>")
     return "".join(bits)
+
+
+#: 3d — mirrors src.tools.report_generator's _MAX_BH_ROWS/_sort_bh_tests:
+#: the controller now feeds the BH correction every family-mode test *and*
+#: every segment_comparison test in one run, which can run into the dozens.
+_MAX_BH_ROWS = 15
+
+
+def _sort_bh_tests(bh: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        bh,
+        key=lambda t: (not t.get("significant_after_correction"), t.get("p_adjusted") or 1.0),
+    )
 
 
 def build_html_report(
@@ -275,10 +341,13 @@ def build_html_report(
         sections.append(
             f'<div class="objective">You asked: {_esc(objective)}</div>'
         )
-    reasoning = llm_insights.get("reasoning", "")
-    if reasoning:
+    # 3a — prefer `insights` over the LLM's raw `reasoning` scratch text,
+    # which has leaked internal plumbing into shipped reports; strip any
+    # jargon sentences from whichever source ends up used.
+    executive_summary = _build_executive_summary(llm_insights)
+    if executive_summary:
         sections.append(
-            f"<h2>The short version</h2><div class='card exec'>{_esc(reasoning)}</div>"
+            f"<h2>The short version</h2><div class='card exec'>{_esc(executive_summary)}</div>"
         )
 
     # ---- 7.9 headline layer — top findings from the shared finding bus.
@@ -317,14 +386,18 @@ def build_html_report(
             + _cards(treatments, "treat")
         )
 
-    # ---- key metrics ----
+    # ---- key metrics — 3b: only call this "Model Performance" when a model
+    # was actually trained; a describe-only (EDA) run's key_metrics can be
+    # populated with unrelated numbers (e.g. a gini_coefficient), which
+    # "Model Performance" would misrepresent. ----
     key_metrics = llm_insights.get("key_metrics") or {}
     if key_metrics:
+        title = "Model Performance" if _model_was_trained(llm_insights, tool_results) else "Key Metrics"
         rows = "".join(
             f"<tr><td>{_esc(k)}</td><td>{_esc(v)}</td></tr>" for k, v in key_metrics.items()
         )
         sections.append(
-            "<h2>Key numbers</h2><table><tr><th>Metric</th><th>Value</th></tr>"
+            f"<h2>{_esc(title)}</h2><table><tr><th>Metric</th><th>Value</th></tr>"
             + rows + "</table>"
         )
 
@@ -433,23 +506,31 @@ def build_html_report(
     if limitation_cards or bh:
         sections.append("<h2>Limitations &amp; caveats</h2>" + _cards(limitation_cards, "warn"))
         if bh:
+            ordered = _sort_bh_tests(bh)
+            shown = ordered[:_MAX_BH_ROWS]
+            has_group = any(t.get("group_column") for t in shown)
             bh_rows = []
-            for t in bh:
+            for t in shown:
                 p_val = f"{t.get('p_value', 0):.4f}"
                 p_adj = f"{t.get('p_adjusted', 0):.4f}"
                 sig = "Yes" if t.get("significant_after_correction") else "No"
+                group_cell = f"<td>{_esc(t.get('group_column') or '—')}</td>" if has_group else ""
                 bh_rows.append(
                     f"<tr><td>{_esc(t.get('feature_column', '—'))}</td>"
+                    f"{group_cell}"
                     f"<td>{_esc(t.get('test_name', '—'))}</td>"
                     f"<td>{_esc(p_val)}</td><td>{_esc(p_adj)}</td><td>{sig}</td></tr>"
                 )
             rows = "".join(bh_rows)
+            group_header = "<th>Group</th>" if has_group else ""
+            remaining = len(ordered) - len(shown)
+            trailer = f"<p>… {remaining} more test(s) not shown.</p>" if remaining > 0 else ""
             sections.append(
                 f"<p>{len(bh)} statistical test(s) ran this session — "
                 "Benjamini-Hochberg-corrected significance (FDR, α=0.05):</p>"
-                "<table><tr><th>Feature</th><th>Test</th><th>p-value</th>"
+                f"<table><tr><th>Feature</th>{group_header}<th>Test</th><th>p-value</th>"
                 "<th>BH-adjusted p</th><th>Significant after correction</th></tr>"
-                + rows + "</table>"
+                + rows + "</table>" + trailer
             )
 
     sections.append(

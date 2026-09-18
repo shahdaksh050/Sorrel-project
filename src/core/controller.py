@@ -19,9 +19,11 @@ ARCHITECTURAL BOUNDARY:
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -69,6 +71,63 @@ _NUMBER_RE = re.compile(r"-?\d+\.\d+|-?\d+")
 #: features") rather than cited metrics, and are cheap to satisfy by
 #: coincidence — excluding them keeps the flag meaningful.
 _UNVERIFIABLE_SKIP_ABS_INT = 9
+
+# ---------------------------------------------------------------------------
+# Attribution-aware verification — a number existing ANYWHERE in the
+# pooled tool output isn't enough: "cleaning handled 503 missing values"
+# verified as long as 503 appeared in ANY tool's output, even when the real
+# clean_data result said "cleaned 0 missing values" and 503 was actually
+# ingest_dataset's row count. When an insight/recommendation sentence names
+# a specific kind of analysis, its numbers must come from the tool(s) that
+# analysis maps to, not merely from the run somewhere.
+# ---------------------------------------------------------------------------
+
+#: Keyword -> the tool name(s) whose own output pool a sentence containing
+#: that keyword must be checked against. Each key is a regex matched with a
+#: leading word boundary against the lower-cased claim text (so "chi-square"
+#: matches but "which" doesn't, and a prefix like "correlat" still covers
+#: "correlation"/"correlated"); a sentence can match several keywords/tools
+#: at once, in which case the union of their pools is used. Deliberately
+#: specific — a generic word ("test", "segment" alone) would pull ordinary
+#: prose into the stricter per-tool check and flag correct numbers.
+_KEYWORD_TOOL_MAP: dict[str, tuple[str, ...]] = {
+    r"clean": ("clean_data",),
+    r"imput": ("clean_data",),
+    r"outlier": ("detect_outliers",),
+    r"correlat": ("correlation_analysis",),
+    r"pca\b": ("dimensionality_analysis",),
+    r"principal component": ("dimensionality_analysis",),
+    r"dimensionality": ("dimensionality_analysis",),
+    r"cluster": ("cluster_data",),
+    r"silhouette": ("cluster_data",),
+    r"concentrat": ("concentration_analysis",),
+    r"gini": ("concentration_analysis",),
+    r"segments?\b": ("segment_comparison", "cluster_data"),
+    r"trend": ("time_series_analysis", "change_analysis"),
+    r"seasonal": ("time_series_analysis", "change_analysis"),
+    r"accuracy": ("train_model", "evaluate_model"),
+    r"f1\b": ("train_model", "evaluate_model"),
+    r"auc\b": ("train_model", "evaluate_model"),
+    r"r2\b": ("train_model", "evaluate_model"),
+    r"statistical test": ("select_statistical_test", "segment_comparison"),
+    r"p-?value": ("select_statistical_test", "segment_comparison"),
+    r"anova": ("select_statistical_test",),
+    r"chi-?squared?\b": ("select_statistical_test",),
+    r"mann-whitney": ("select_statistical_test",),
+    r"kruskal": ("select_statistical_test",),
+}
+_KEYWORD_TOOL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = tuple(
+    (re.compile(r"\b" + kw), tools) for kw, tools in _KEYWORD_TOOL_MAP.items()
+)
+
+#: Appended to a reasoning prompt when the first reply was unusable
+#: (non-JSON, truncated at max_tokens, or empty) — see analyze().
+_COMPACT_RETRY_NOTE = (
+    "\n\n## Retry Note\nYour previous reply could not be used (it was not "
+    "complete, valid JSON — possibly cut off by the output length limit). "
+    "Reply again with ONLY the JSON object: at most 8 steps, one short "
+    "sentence per rationale, no markdown fences, no text outside the JSON.\n"
+)
 
 
 def _canon_number(value: Any, precision: int = 4) -> str:
@@ -172,7 +231,18 @@ class LLMClient:
         # the zeros its own docstring warns about. Not every branch sets
         # this (the NVIDIA streaming path doesn't request usage in-stream —
         # left as a smaller follow-up), so it stays best-effort by design.
-        self._last_usage: dict[str, Any] | None = None
+        #
+        # Round 8 hardening — this LLMClient instance is shared across RLM
+        # worker threads (RLMEngine.decompose_and_invoke runs concurrent
+        # `call()`s on a ThreadPoolExecutor for Stage 6 decomposition), so a
+        # single `self._last_usage` instance attribute was a data race: one
+        # thread's dispatch could overwrite it between another thread's
+        # dispatch and its read, attaching the wrong call's usage (or
+        # nothing) to a response. threading.local() gives each thread its
+        # own slot, so `call()` always reads back exactly the usage its own
+        # `_dispatch()` just set, however many threads are calling this
+        # instance concurrently.
+        self._usage_local = threading.local()
 
     def ping(self) -> tuple[bool, str]:
         """
@@ -204,11 +274,30 @@ class LLMClient:
         Raises:
             ValueError: If the response cannot be parsed as JSON.
         """
-        self._last_usage = None
+        self._usage_local.value = None
+        self._usage_local.truncated = False
         raw = self._dispatch(system_prompt, user_prompt)
-        parsed = self._parse_json(raw)
-        if self._last_usage:
-            parsed["_rlm_usage"] = self._last_usage
+        try:
+            parsed = self._parse_json(raw)
+        except ValueError as exc:
+            # A reply cut off at max_tokens is the usual reason a long plan
+            # fails to parse — say so, instead of only "non-JSON", so the
+            # fix (raise LLM_MAX_TOKENS / lower reasoning effort) is obvious.
+            if getattr(self._usage_local, "truncated", False):
+                raise ValueError(
+                    f"LLM reply was truncated at max_tokens={self.max_tokens} "
+                    f"(finish_reason=length) and could not be repaired: {exc}"
+                ) from exc
+            raise
+        if not isinstance(parsed, dict):
+            # json.loads happily returns a list/str/number; every caller
+            # (and the `_rlm_usage` attach below) needs an object.
+            raise ValueError(
+                f"LLM returned JSON that is not an object ({type(parsed).__name__})."
+            )
+        usage = getattr(self._usage_local, "value", None)
+        if usage:
+            parsed["_rlm_usage"] = usage
         return parsed
 
     def _dispatch(self, system_prompt: str, user_prompt: str) -> str:
@@ -299,6 +388,15 @@ class LLMClient:
             # already supplies its own higher-level reasoning across the
             # iterative planning loop, so per-call deep thinking adds little.
             create_kwargs["reasoning_effort"] = os.getenv("GEMINI_REASONING_EFFORT", "low")
+        if self.provider == "openrouter":
+            # Same failure mode as Gemini above, on OpenRouter's many
+            # reasoning-capable (often free) models: hidden reasoning tokens
+            # count against max_tokens, so a long Form 1 plan gets truncated
+            # or never starts. OpenRouter's unified `reasoning` parameter caps
+            # that; models without reasoning ignore it. "none"/"off" omits it.
+            effort = os.getenv("OPENROUTER_REASONING_EFFORT", "low").strip().lower()
+            if effort not in ("", "none", "off"):
+                create_kwargs["extra_body"] = {"reasoning": {"effort": effort}}
         if self.provider == "nvidia":
             # NVIDIA NIM requires streaming; gpt-oss-120b also emits
             # reasoning_content chunks (chain-of-thought) before the answer.
@@ -350,11 +448,28 @@ class LLMClient:
                 f"account's data policy."
             )
         content = resp.choices[0].message.content
-        if content is None:
-            raise ValueError("LLM returned None content")
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        self._usage_local.truncated = finish_reason == "length"
+        if not content or not str(content).strip():
+            # Reasoning models (many OpenRouter free models) can spend the
+            # whole max_tokens budget on hidden reasoning and return no
+            # visible answer at all — name that case instead of a bare
+            # "None content", since the fix is budget/effort, not the prompt.
+            if finish_reason == "length":
+                raise ValueError(
+                    f"{self.provider} model '{self.model}' used the whole "
+                    f"max_tokens={self.max_tokens} budget without producing an answer "
+                    "(likely hidden reasoning) — raise LLM_MAX_TOKENS or lower "
+                    "OPENROUTER_REASONING_EFFORT."
+                )
+            raise ValueError(
+                f"LLM returned empty content (finish_reason={finish_reason!r})."
+            )
         usage = getattr(resp, "usage", None)
         if usage is not None:
-            self._last_usage = {
+            # Thread-local (see __init__) — this dispatch may be running on
+            # one of several concurrent RLM worker threads.
+            self._usage_local.value = {
                 "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
                 "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
                 "provider": self.provider,
@@ -382,7 +497,9 @@ class LLMClient:
         )
         usage = getattr(msg, "usage", None)
         if usage is not None:
-            self._last_usage = {
+            # Thread-local (see __init__) — this dispatch may be running on
+            # one of several concurrent RLM worker threads.
+            self._usage_local.value = {
                 "prompt_tokens": getattr(usage, "input_tokens", 0) or 0,
                 "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
                 "provider": "anthropic",
@@ -831,6 +948,12 @@ class AgentController:
             return {
                 "mode": "describe",
                 "target": None,
+                # "candidate" (Round 8) — a column WAS found, just too weak
+                # a signal to model on; kept distinct from `target` (whose
+                # None means "not modelling", and load_dataset relies on
+                # that) so downstream text (agenda.py) can still name the
+                # column it declined rather than saying "None".
+                "candidate": col,
                 "rationale": (
                     f"Candidate target '{col}' reached only {confidence:.0%} confidence "
                     f"(below the {_AUTODETECT_LOW:.0%} autonomy floor) — too weak a signal "
@@ -850,6 +973,7 @@ class AgentController:
                 return {
                     "mode": "describe",
                     "target": None,
+                    "candidate": col,
                     "rationale": (
                         f"'{col}' is a descriptive measure at transaction grain "
                         f"({'domain: ' + profile.domains[0].domain if profile.domains else 'repeat-row entity structure'}), "
@@ -866,12 +990,14 @@ class AgentController:
             return {
                 "mode": "model",
                 "target": col,
+                "candidate": col,
                 "rationale": f"Auto-detected target '{col}' (confidence {confidence:.0%}).",
                 "alternatives_rejected": [],
             }
         return {
             "mode": "describe",
             "target": None,
+            "candidate": None,
             "rationale": "No plausible target column found — proceeding with descriptive EDA.",
             "alternatives_rejected": [],
         }
@@ -1196,9 +1322,27 @@ class AgentController:
                 # iteration 1 falls back to a deterministic plan, later
                 # iterations synthesise a final answer from existing results.
                 try:
-                    llm_response = self._rlm_engine.invoke(
-                        user_prompt, depth=0, stage=stage_label
-                    )
+                    try:
+                        llm_response = self._rlm_engine.invoke(
+                            user_prompt, depth=0, stage=stage_label
+                        )
+                    except ValueError as first_exc:
+                        # A malformed/truncated/empty reply (ValueError from
+                        # LLMClient.call) is usually a one-off — one retry
+                        # asking for a compact plan is far cheaper than
+                        # discarding the LLM planner for the whole first
+                        # cycle. Transport errors (timeouts, rate limits) are
+                        # already retried by the SDK and fall straight
+                        # through to the fallback below.
+                        console.print(
+                            f"[yellow]⚠ Unusable LLM reply on iteration {iteration} "
+                            f"({first_exc}) — retrying once with a compact-JSON reminder.[/]"
+                        )
+                        llm_response = self._rlm_engine.invoke(
+                            user_prompt + _COMPACT_RETRY_NOTE,
+                            depth=0,
+                            stage=f"{stage_label}:retry",
+                        )
                     if llm_response.get("status") == "error":
                         raise RuntimeError(
                             str(llm_response.get("error", "Unknown LLM error"))
@@ -1210,6 +1354,17 @@ class AgentController:
                     )
                     if iteration == 1:
                         console.print("[yellow]  → Using deterministic fallback plan.[/]")
+                        # Record it in the degradations log both reports
+                        # render — otherwise, when a later cycle's LLM call
+                        # succeeds and supplies the final answer, nothing in
+                        # the report says the plan itself wasn't the LLM's.
+                        degradations = list(self.memory.get_context("degradations") or [])
+                        degradations.append(
+                            "LLM planning call failed on the first reasoning cycle "
+                            f"({type(exc).__name__}: {str(exc)[:200]}) — the analysis plan "
+                            "was chosen by the deterministic profile-driven fallback."
+                        )
+                        self.memory.set_context("degradations", degradations)
                         llm_response = self._build_fallback_plan()
                     else:
                         console.print("[yellow]  → Synthesising final report from results.[/]")
@@ -1257,6 +1412,17 @@ class AgentController:
                 except Exception as exc:
                     self.memory.set_context("llm_error", f"{type(exc).__name__}: {exc}")
                     final_result = self._deterministic_final()
+
+        # P3.1 — `final_result` is, on the "complete"/max-iteration paths,
+        # the raw LLM response dict returned by RLMEngine.invoke(), which
+        # LLMClient.call() may have stamped with `_rlm_usage` (this run's
+        # own token/cost accounting — see LLMClient.call). That's plumbing
+        # for RLMEngine's running totals, not an analytical result, and
+        # must not leak into the persisted report/raw JSON. The engine's
+        # own running totals are the real place for this to live.
+        final_result.pop("_rlm_usage", None)
+        if self._rlm_engine is not None:
+            self.memory.set_context("llm_usage", self._rlm_engine.usage_summary())
 
         # Every path through this loop must leave `findings` on the result —
         # the LLM-complete and max-iteration branches return the raw LLM
@@ -1765,7 +1931,13 @@ class AgentController:
                     f"  [dim]↺ Step {step.step_number}: {step.tool_name} — "
                     f"identical to a prior successful step, reusing its result.[/]"
                 )
-                result = cached
+                # Shallow-copy before this function mutates `.iteration`
+                # below — `cached` is the SAME ToolResult object already
+                # appended to memory.tool_results from its original
+                # iteration; mutating it in place would silently retag that
+                # earlier entry too, corrupting the "current vs. earlier"
+                # split get_results_summary_digest keys off `.iteration` for.
+                result = copy.copy(cached)
             else:
                 result = tool.run(**params)
                 if result.status == "success":
@@ -1820,18 +1992,53 @@ class AgentController:
             # every p-value produced in this run — accumulate them here so
             # the report (item 6) can correct at report time rather than
             # each hypothesis test correcting itself in isolation.
-            if (
-                step.tool_name == "select_statistical_test"
-                and result.status == "success"
-                and "p_value" in result.output
-            ):
+            if step.tool_name == "select_statistical_test" and result.status == "success":
                 pvalue_tests = self.memory.get_context("statistical_test_pvalues") or []
-                pvalue_tests.append({
-                    "step_number": step.step_number,
-                    "feature_column": result.output.get("feature_column"),
-                    "test_name": result.output.get("test_name"),
-                    "p_value": result.output["p_value"],
-                })
+                family = result.output.get("family_results")
+                if family:
+                    # Family mode (7.6) ran one test per eligible dimension,
+                    # not just the single strongest pairing surfaced at the
+                    # top level — recording only that one (the old
+                    # behaviour) under-counted how many tests this run
+                    # actually performed, which understates the multiple-
+                    # comparison correction at report time. Record every
+                    # pairing, with its own (raw, uncorrected) p_value.
+                    for entry in family:
+                        feature = entry.get("feature_column") or result.output.get("feature_column")
+                        group = entry.get("group_column")
+                        pvalue_tests.append({
+                            "step_number": step.step_number,
+                            "feature_column": f"{feature} by {group}" if group else feature,
+                            "test_name": entry.get("test_name"),
+                            "p_value": entry.get("p_value"),
+                        })
+                elif "p_value" in result.output:
+                    pvalue_tests.append({
+                        "step_number": step.step_number,
+                        "feature_column": result.output.get("feature_column"),
+                        "test_name": result.output.get("test_name"),
+                        "p_value": result.output["p_value"],
+                    })
+                self.memory.set_context("statistical_test_pvalues", pvalue_tests)
+
+            # segment_comparison (7.2) runs its own family of per-level
+            # tests (proportions z-test for a rate measure, Welch's t-test
+            # otherwise) — those belong in the same run-wide correction pool
+            # as select_statistical_test's, or a run that only ever calls
+            # this tool would report zero corrected tests despite having
+            # run many.
+            if step.tool_name == "segment_comparison" and result.status == "success":
+                pvalue_tests = self.memory.get_context("statistical_test_pvalues") or []
+                for c in result.output.get("comparisons", []):
+                    if c.get("p_value") is None:
+                        continue
+                    test_name = "proportions_ztest" if c.get("is_rate") else "welch_ttest"
+                    pvalue_tests.append({
+                        "step_number": step.step_number,
+                        "feature_column": f"{c.get('measure')} by {c.get('dimension')}={c.get('level')}",
+                        "test_name": test_name,
+                        "p_value": c["p_value"],
+                    })
                 self.memory.set_context("statistical_test_pvalues", pvalue_tests)
 
             if result.status == "error":
@@ -2041,10 +2248,23 @@ class AgentController:
     def _verified_number_pool(self) -> set[str]:
         """Every numeric literal that actually appears in accumulated tool
         results, canonicalised for verbatim-citation checking."""
-        pool: set[str] = set()
-        for r in self.memory.tool_results:
-            _collect_numbers(r.to_dict(), pool)
+        pool, _per_tool = self._verified_number_pools()
         return pool
+
+    def _verified_number_pools(self) -> tuple[set[str], dict[str, set[str]]]:
+        """Global pool (unchanged — every numeric literal across all tool
+        results) plus a pool per tool_name, so a claim keyword-attributed to
+        a specific kind of analysis (`_KEYWORD_TOOL_MAP`) can be checked
+        against only that tool's OWN output rather than the whole run's
+        pooled numbers — a row count from ingest_dataset's summary must not
+        verify a claim about what clean_data did."""
+        global_pool: set[str] = set()
+        per_tool: dict[str, set[str]] = {}
+        for r in self.memory.tool_results:
+            tool_pool = per_tool.setdefault(r.tool_name, set())
+            _collect_numbers(r.to_dict(), tool_pool)
+            global_pool |= tool_pool
+        return global_pool, per_tool
 
     def _flag_unverified_claims(self, final_result: dict[str, Any]) -> list[str]:
         """
@@ -2054,8 +2274,19 @@ class AgentController:
         that doesn't trace back to a real tool result is annotated
         in-place with `[unverified: ...]` (never silently trusted) and
         returned so the caller can log/report the hallucination rate.
+
+        Round 8 hardening — a number existing ANYWHERE in the pooled tool
+        output used to be enough to "verify" it, which passed claims that
+        cited the right number from the WRONG tool (e.g. citing
+        ingest_dataset's row count as clean_data's missing-value count,
+        since both numbers were in the pool). When a sentence names a
+        specific kind of analysis (`_KEYWORD_TOOL_MAP`) and that analysis's
+        tool(s) actually ran, its numbers are checked against only that
+        tool's own output; a sentence with no such keyword keeps the
+        original global-pool check.
         """
-        verified = self._verified_number_pool()
+        verified, per_tool_pools = self._verified_number_pools()
+        ran_tools = {r.tool_name for r in self.memory.tool_results}
         flagged: list[str] = []
 
         for field in ("insights", "recommendations"):
@@ -2072,6 +2303,31 @@ class AgentController:
                         and abs(int(m.group())) <= _UNVERIFIABLE_SKIP_ABS_INT
                     )
                 ]
+                if not claimed:
+                    continue
+
+                item_l = item.lower()
+                attributed_tools = sorted({
+                    tool
+                    for pattern, tools in _KEYWORD_TOOL_PATTERNS
+                    if pattern.search(item_l)
+                    for tool in tools
+                    if tool in ran_tools
+                })
+                if attributed_tools:
+                    pool = set().union(*(per_tool_pools.get(t, set()) for t in attributed_tools))
+                    bad = sorted({n for n in claimed if _canon_number(n) not in pool})
+                    if bad:
+                        attribution = "/".join(attributed_tools)
+                        items[i] = (
+                            f"{item} [unverified: {', '.join(bad)} "
+                            f"(not in {attribution} output)]"
+                        )
+                        flagged.append(
+                            f"{field}[{i}]: {', '.join(bad)} (attributed to {attribution})"
+                        )
+                    continue
+
                 bad = sorted({n for n in claimed if _canon_number(n) not in verified})
                 if bad:
                     items[i] = f"{item} [unverified: {', '.join(bad)}]"

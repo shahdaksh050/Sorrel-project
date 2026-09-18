@@ -386,10 +386,18 @@ class PromptManager:
         return (
             ITERATION_PROMPT.format(
                 dataset_metadata=self.memory.get_metadata_prompt(),
-                # P1.6 — full detail for this cycle's own results, a one-line
-                # digest for everything earlier, instead of re-sending every
-                # accumulated result on every iteration.
-                results_summary=self.memory.get_results_summary_digest(self.memory.iteration_count),
+                # P1.6 — full detail for the results the LLM hasn't reacted
+                # to yet, a digest for everything earlier, instead of
+                # re-sending every accumulated result on every iteration.
+                # Results are tagged with the iteration that PRODUCED them
+                # (controller._execute_steps sets result.iteration from
+                # memory.iteration_count, which this prompt builder itself
+                # bumped to the CURRENT cycle before this call — see
+                # analyze()'s loop) — so "iteration_count" here always names
+                # a bucket that's still empty; the results the LLM is
+                # actually seeing for the first time are the PREVIOUS
+                # cycle's, hence "- 1".
+                results_summary=self.memory.get_results_summary_digest(self.memory.iteration_count - 1),
                 pending_steps=pending_str,
                 failed_steps=failed_str,
             )

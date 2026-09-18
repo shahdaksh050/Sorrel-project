@@ -26,6 +26,37 @@ from __future__ import annotations
 
 from typing import Any
 
+__all__ = [
+    "STOCK_DAY",
+    "STOCK_NIGHT",
+    "SHEET_DAY",
+    "SHEET_NIGHT",
+    "INK_DAY",
+    "INK_NIGHT",
+    "GRAPHITE_DAY",
+    "GRAPHITE_NIGHT",
+    "PEN_DAY",
+    "PEN_NIGHT",
+    "RISK_DAY",
+    "RISK_NIGHT",
+    "POSITIVE_DAY",
+    "POSITIVE_NIGHT",
+    "RULE_DAY",
+    "RULE_NIGHT",
+    "RULE_FAINT_DAY",
+    "RULE_FAINT_NIGHT",
+    "ACCENT_DAY",
+    "ACCENT_NIGHT",
+    "CATEGORY_RANGE_DAY",
+    "CATEGORY_RANGE_NIGHT",
+    "FONT_HEADING",
+    "FONT_BODY",
+    "axis_format",
+    "humanize_label",
+    "humanize_axis_title",
+    "vega_config",
+]
+
 # ---------------------------------------------------------------------------
 # Tokens — transcribed from DESIGN.md's "Tokens — ink" table verbatim.
 # Day = light palette, Night = dark palette (`prefers-color-scheme: dark`).

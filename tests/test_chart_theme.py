@@ -3,7 +3,7 @@ intelligence: currency/percent/count axis formats and human-readable titles,
 so a chart shows "$67" and "Amount ($)" instead of "67.39" and "amount")."""
 from __future__ import annotations
 
-from src.core.chart_theme import axis_format, humanize_axis_title, vega_config
+from src.core.chart_theme import axis_format, humanize_axis_title, humanize_label, vega_config
 
 
 class TestAxisFormat:
@@ -51,6 +51,23 @@ class TestHumanizeAxisTitle:
 
     def test_single_word_column(self) -> None:
         assert humanize_axis_title("amount", "currency") == "Amount ($)"
+
+
+class TestHumanizeLabel:
+    def test_underscores_replaced_and_capitalized(self) -> None:
+        assert humanize_label("monthly_charges") == "Monthly Charges"
+
+    def test_acronyms_uppercased(self) -> None:
+        assert humanize_label("revenue_usd") == "Revenue USD"
+        assert humanize_label("total_kpi") == "Total KPI"
+        assert humanize_label("user_id") == "User ID"
+
+    def test_mixed_case_preserved(self) -> None:
+        assert humanize_label("iPhone_sales") == "iPhone Sales"
+        assert humanize_label("MRR") == "MRR"
+
+    def test_non_string_handled_safely(self) -> None:
+        assert humanize_label(123) == "123"  # type: ignore[arg-type]
 
 
 class TestVegaConfigUnaffected:

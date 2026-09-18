@@ -25,9 +25,17 @@ Spec shape (keys not listed here are dropped):
 """
 from __future__ import annotations
 
+import importlib
 import math
 from datetime import datetime
 from typing import Any
+
+import src.core.chart_theme
+
+# In long-running processes (e.g. Streamlit runner), chart_theme may have been
+# imported before humanize_label was defined. Reload defensively if stale.
+if not hasattr(src.core.chart_theme, "humanize_label"):
+    importlib.reload(src.core.chart_theme)
 
 from src.core.chart_theme import axis_format, humanize_axis_title, humanize_label
 

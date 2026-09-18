@@ -9,9 +9,17 @@ backlog) and given one line each in the [closed ledger](#closed-ledger) at
 the end. Everything visible in the body of this file is either Round 8 (live)
 or a still-open item carried forward from an earlier round.
 
-**Gate state, measured 2026-09-18 (end of the testing pass).**
+**Gate state, measured 2026-09-18 (end of the live-LLM testing pass, after the
+`_loads_lenient` fix and its regression test).**
 `pytest tests/ -q` (equivalently, the project's own default `-m "not slow"`
-addopts) → **472 passed, 1 deselected, 0 failed.** Round 8 initially shipped
+addopts) → **473 passed, 1 deselected, 0 failed** (472 plus the new
+`test_literal_newline_in_string_value_still_parses`). The
+`register_and_persist` cleanup that removed the stale `hasattr(memory,
+"add_generated_tool")` guard (see the live-LLM pass note below) initially left
+5 `test_tool_factory.py` tests red — their local `_FakeMemory` stubs predated
+the guard's removal and didn't implement `add_generated_tool`; fixed by
+updating the stubs, not the source, since `MemorySystem.add_generated_tool`
+was already real (`memory.py:481`). Round 8 initially shipped
 with no test files (an explicit interim user directive, "no testing, I'll
 test later") — that directive was then reversed the same day ("do the tests,
 make sure everything works well together"), and this gate state reflects the
@@ -431,7 +439,78 @@ beyond the manual verification already described:
   `ruff`/`mypy` clean on every file this pass touched. Two more `main.py
   --no-llm` smoke runs, both clean.
 
----
+### Live-LLM testing pass (2026-09-18, same day)
+
+Everything above (the 472-test suite plus the manual verification script) called
+`define_analysis_tool`/`GeneratedTool` directly — this pass was the first time
+Round 8 ran through an actual LLM's own plan, per the explicit gap the prior
+pass flagged as unverified. Provider: `openrouter` (real key confirmed present,
+never printed), model `nvidia/nemotron-3.5-lightning:free` — a small, free-tier
+model, not a frontier one; that fact matters for what this pass could and
+couldn't establish (see "Not established" below).
+
+`main.py` was run against `data/sample_customer_churn.csv` with an objective
+designed so no built-in tool answers it directly (a composite "service value
+score" across six add-on columns, asked once at a 0.5 cutoff and once at a
+stricter 0.3 cutoff) — specifically to see whether the model would define one
+parameterized tool and call it twice, per the design intent this round was
+built for.
+
+- **Real, deterministic bug found and fixed, independent of the specific
+  model**: iteration 1's LLM response was structurally complete — every brace
+  balanced, a `"reasoning"` field, presumably a `"steps"` array — but
+  contained a literal, unescaped newline inside the `"reasoning"` string
+  instead of an escaped `\n`. `LLMClient._parse_json` (`controller.py`)
+  called `json.loads` in strict mode at every repair stage (the initial
+  parse, the optional `json_repair` library, the manual truncation-repair,
+  and the brace-extraction fallback) — strict mode rejects any control
+  character inside a string with "Invalid control character," so **all four
+  repair layers failed identically** on input that was otherwise perfectly
+  parseable. The response was discarded, iteration 1 fell back to the
+  deterministic 9-tool plan, and the run's remaining iterations were spent
+  without ever giving the LLM a clean first look at the objective. Small/
+  free-tier models are exactly the ones most likely to skip `\n`-escaping in
+  natural-language fields, making this a real, recurring blocker to Round 8
+  ever being exercised live, not a one-off fluke of this specific response.
+  **Fix**: added `LLMClient._loads_lenient` (`controller.py`) — tries
+  `json.loads` strictly first, falls back to `strict=False` (which permits
+  raw control characters inside strings, the one thing wrong with this class
+  of response, without weakening any other validation) — and used it at all
+  four `json.loads` call sites inside `_parse_json`. Regression test added:
+  `tests/test_controller.py::TestLLMClientParseJson::test_literal_newline_in_string_value_still_parses`,
+  reproducing the exact live failure (a complete JSON object with a raw
+  newline embedded in a string field) and asserting it now parses instead of
+  raising.
+- **Real cleanup, not a behavior bug**: `tool_factory.register_and_persist`
+  still carried a `hasattr(memory, "add_generated_tool")` guard and a
+  `TODO(controller-integration)` comment claiming `MemorySystem` "does not
+  yet expose a generated-tools list" — stale from before the controller-
+  wiring pass landed `add_generated_tool`/`list_generated_tools` on
+  `MemorySystem` (`memory.py:481,494`). The guard was always true given the
+  current code (so no behavior changed), but the comment actively
+  misdescribed the persistence path as a no-op. Removed the guard and the
+  stale TODO; the call is now unconditional, matching what actually happens.
+- **Verified by reading the code, not by observing it live** (the run never
+  got far enough to exercise these paths before the JSON-parsing bug above
+  cut the first iteration short): the collision/version-bump contract
+  (design decision 4) — `ToolRegistry.register()` itself is an unguarded
+  overwrite, but `_maybe_register_generated_tool` calls `validate_spec` first
+  with `existing_tool_names` already excluding previously-generated names, so
+  a built-in-name collision is rejected before `register()` is ever called
+  and a same-name redefinition (self-correction) is correctly treated as a
+  version bump, not a collision — matches the interface contract exactly, no
+  bug found here despite it being the most likely place for one per the
+  original task brief.
+- **Not established this pass** (the run was stopped, by direction, before a
+  second iteration completed, once the JSON-parsing root cause above was
+  identified and fixed at the code level): whether a live model — including
+  a stronger one than this free-tier default — actually reaches for
+  `define_analysis_tool` for this objective, parameterizes the cutoff instead
+  of redefining the tool per call, and produces a final answer whose numbers
+  trace back to the tool's own `FINDING` evidence rather than being flagged
+  by `_flag_unverified_claims`. That live behavioral verification is
+  explicitly left to a follow-up run (by the user, not this session) now that
+  the JSON-parsing blocker is fixed.
 
 <!--
 

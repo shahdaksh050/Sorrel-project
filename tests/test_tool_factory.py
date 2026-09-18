@@ -179,7 +179,8 @@ class TestRegisterAndPersist:
                 self.registered[tool.name] = tool  # type: ignore[attr-defined]
 
         class _FakeMemory:
-            pass  # no add_generated_tool — exercises the hasattr guard
+            def add_generated_tool(self, spec_dict: dict) -> None:
+                pass
 
         registry = _FakeRegistry()
         spec = make_spec("row_counter", "counts rows", {}, "RESULT = len(df)\n", "fp1")
@@ -211,7 +212,8 @@ class TestRegisterAndPersist:
             def register(self, tool: object) -> None: pass
 
         class _FakeMemory:
-            pass
+            def add_generated_tool(self, spec_dict: dict) -> None:
+                pass
 
         spec = make_spec("row_counter", "counts rows", {}, "RESULT = len(df)\n", "fp1")
         register_and_persist(spec, _FakeRegistry(), _FakeMemory(), str(tmp_path))
@@ -224,7 +226,8 @@ class TestRegisterAndPersist:
             def register(self, tool: object) -> None: pass
 
         class _FakeMemory:
-            pass
+            def add_generated_tool(self, spec_dict: dict) -> None:
+                pass
 
         v1 = make_spec("row_counter", "v1", {}, "RESULT = 1\n", "fp1")
         register_and_persist(v1, _FakeRegistry(), _FakeMemory(), str(tmp_path))
@@ -251,7 +254,8 @@ class TestLoadPersistedTools:
             def register(self, tool: object) -> None: pass
 
         class _FakeMemory:
-            pass
+            def add_generated_tool(self, spec_dict: dict) -> None:
+                pass
 
         spec = make_spec("row_counter", "x", {}, "RESULT = 1\n", "fp-match")
         register_and_persist(spec, _FakeRegistry(), _FakeMemory(), str(tmp_path))
@@ -265,7 +269,8 @@ class TestLoadPersistedTools:
             def register(self, tool: object) -> None: pass
 
         class _FakeMemory:
-            pass
+            def add_generated_tool(self, spec_dict: dict) -> None:
+                pass
 
         spec = make_spec("row_counter", "x", {}, "RESULT = 1\n", "fp-a")
         register_and_persist(spec, _FakeRegistry(), _FakeMemory(), str(tmp_path))

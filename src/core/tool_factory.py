@@ -204,14 +204,9 @@ def register_and_persist(
     tool = GeneratedTool(spec)
     tool_registry.register(tool)
 
-    # TODO(controller-integration): MemorySystem does not yet expose a
-    # generated-tools list (src/core/memory.py owned by another Round-8
-    # agent). Once `add_generated_tool` lands there, this call persists the
-    # spec on MemorySystem the same way `memory.add_findings` persists
-    # findings. Until then this is a documented no-op guarded by hasattr so
-    # register_and_persist doesn't hard-fail while memory.py catches up.
-    if hasattr(memory, "add_generated_tool"):
-        memory.add_generated_tool(spec.to_dict())
+    # MemorySystem.add_generated_tool persists the spec the same way
+    # memory.add_findings persists findings (see memory.py).
+    memory.add_generated_tool(spec.to_dict())
 
     _persist_spec_to_disk(spec, output_root)
 

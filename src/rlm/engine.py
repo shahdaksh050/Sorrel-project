@@ -317,7 +317,12 @@ class RLMEngine:
 
         Returns:
             Dict mapping task_id -> LLM response dict, for the sub-tasks
-            actually run.
+            actually run. Sub-tasks skipped by the token budget or that
+            raised (a transient LLM/provider failure on that one call) are
+            both simply absent from the returned dict — one bad sub-task
+            must not discard the others that already succeeded, same
+            graceful-degradation rationale as the caller's own try/except
+            around this whole method.
         """
         for sub_task in sub_tasks:
             self.repl_env.set(f"subtask_ctx_{sub_task.task_id}", sub_task.context)
@@ -328,6 +333,12 @@ class RLMEngine:
                 prompt, depth=depth, stage=f"stage6:decompose:{sub_task.task_id}"
             )
 
+        def _run_safe(sub_task: RLMSubTask) -> tuple[RLMSubTask, dict[str, Any] | None, Exception | None]:
+            try:
+                return sub_task, _run(sub_task), None
+            except Exception as exc:  # per-sub-task isolation, see docstring
+                return sub_task, None, exc
+
         def _budget_exceeded() -> bool:
             return (
                 max_total_tokens is not None
@@ -336,15 +347,22 @@ class RLMEngine:
 
         completed: list[tuple[RLMSubTask, dict[str, Any]]] = []
 
+        def _record(sub_task: RLMSubTask, response: dict[str, Any] | None, exc: Exception | None) -> None:
+            if exc is not None:
+                console.print(f"[yellow]  ⚠ sub-task '{sub_task.task_id}' failed: {exc}[/]")
+                return
+            assert response is not None
+            completed.append((sub_task, response))
+
         if max_total_tokens is not None or len(sub_tasks) <= 1:
             for sub_task in sub_tasks:
                 if _budget_exceeded():
                     break
-                completed.append((sub_task, _run(sub_task)))
+                _record(*_run_safe(sub_task))
         else:
             with ThreadPoolExecutor(max_workers=min(_MAX_DECOMPOSE_WORKERS, len(sub_tasks))) as pool:
-                responses = list(pool.map(_run, sub_tasks))
-            completed = list(zip(sub_tasks, responses, strict=True))
+                for sub_task, response, exc in pool.map(_run_safe, sub_tasks):
+                    _record(sub_task, response, exc)
 
         results: dict[str, dict[str, Any]] = {}
         for sub_task, response in completed:

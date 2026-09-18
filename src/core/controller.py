@@ -99,6 +99,20 @@ def _collect_numbers(obj: Any, into: set[str]) -> None:
     if isinstance(obj, (int, float)):
         for p in _CANON_PRECISIONS:
             into.add(_canon_number(obj, p))
+        # Finding headlines and narrative text display rates/fractions as
+        # percentages (e.g. evidence["level_value"]=0.08596 renders as
+        # "8.6%"), while the raw tool output stores the fraction — a unit
+        # mismatch, not a rounding one, since _CANON_PRECISIONS already
+        # covers rounding (that's why "r=0.81" verifies against a stored
+        # 0.8109 but "8.6%" didn't verify against a stored 0.08596). This
+        # function sees only values, not keys, so it can't check the
+        # evidence dict's own `is_rate` flag — a numeric range guard is the
+        # generic equivalent: only fraction-range values get a *100 form,
+        # so this can't turn an unrelated large number into a false
+        # verification.
+        if -1.0 <= obj <= 1.0:
+            for p in _CANON_PRECISIONS:
+                into.add(_canon_number(obj * 100, p))
     elif isinstance(obj, str):
         for match in _NUMBER_RE.finditer(obj):
             for p in _CANON_PRECISIONS:
@@ -379,6 +393,28 @@ class LLMClient:
         raise ValueError("Anthropic response contained no text block.")
 
     @staticmethod
+    def _loads_lenient(text: str) -> dict[str, Any]:
+        """
+        json.loads with a fallback to strict=False.
+
+        Small/free-tier models routinely emit literal, unescaped newlines
+        (and other control characters) inside JSON string values — e.g. a
+        multi-line "reasoning" sentence — instead of the required `\\n`
+        escape. That is otherwise a *complete, well-formed* response (every
+        brace balanced, every field present); strict json.loads rejects it
+        anyway with "Invalid control character", which used to fall all the
+        way through to the truncation-repair/extraction paths below and
+        often still fail there too, discarding a perfectly good plan for a
+        cosmetic escaping mistake. strict=False accepts raw control
+        characters inside strings (the one thing wrong here) while still
+        rejecting genuinely malformed JSON.
+        """
+        try:
+            return cast(dict[str, Any], json.loads(text))
+        except json.JSONDecodeError:
+            return cast(dict[str, Any], json.loads(text, strict=False))
+
+    @staticmethod
     def _parse_json(raw: str) -> dict[str, Any]:
         # Strip markdown fences if present
         for fence in ("```json", "```"):
@@ -389,7 +425,7 @@ class LLMClient:
         cleaned = raw.strip()
 
         try:
-            return cast(dict[str, Any], json.loads(cleaned))
+            return LLMClient._loads_lenient(cleaned)
         except json.JSONDecodeError:
             pass
 
@@ -398,14 +434,14 @@ class LLMClient:
             from json_repair import repair_json
             candidate = repair_json(cleaned, return_objects=False)
             if candidate:
-                return cast(dict[str, Any], json.loads(candidate))
+                return LLMClient._loads_lenient(candidate)
         except (ImportError, json.JSONDecodeError):
             pass
 
         # Manual repair: close open strings/structures and fix trailing : or ,
         repaired = LLMClient._repair_truncated_json(cleaned)
         try:
-            return cast(dict[str, Any], json.loads(repaired))
+            return LLMClient._loads_lenient(repaired)
         except json.JSONDecodeError:
             pass
 
@@ -419,7 +455,7 @@ class LLMClient:
         if extracted is not None:
             for candidate in (extracted, LLMClient._repair_truncated_json(extracted)):
                 try:
-                    return cast(dict[str, Any], json.loads(candidate))
+                    return LLMClient._loads_lenient(candidate)
                 except json.JSONDecodeError:
                     continue
 
@@ -1974,11 +2010,22 @@ class AgentController:
                 context_summary=ctx_summary,
             )
 
-        sub_results = self._rlm_engine.decompose_and_invoke(
-            sub_tasks=sub_tasks,
-            prompt_builder=build_prompt,
-            depth=1,
-        )
+        # Graceful degradation, same rationale as the stage-2 planning call
+        # (line ~1184): decomposition results are optional context for final
+        # synthesis, not a required step, so a transient LLM/API failure here
+        # (rate limit, timeout, provider outage) must not abort the run —
+        # it should just mean synthesis proceeds without the extra detail.
+        try:
+            sub_results = self._rlm_engine.decompose_and_invoke(
+                sub_tasks=sub_tasks,
+                prompt_builder=build_prompt,
+                depth=1,
+            )
+        except Exception as exc:
+            self.memory.set_context("rlm_decomposition_error", f"{type(exc).__name__}: {exc}")
+            console.print(f"[yellow]⚠ RLM decomposition failed: {exc}[/]")
+            console.print("[yellow]  → Continuing without sub-task decomposition.[/]")
+            return
 
         # Store sub-results in memory context for final synthesis
         self.memory.set_context("rlm_sub_results", sub_results)

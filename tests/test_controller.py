@@ -358,3 +358,20 @@ class TestLLMClientParseJson:
     def test_garbage_raises_value_error(self) -> None:
         with pytest.raises(ValueError):
             LLMClient._parse_json("complete nonsense !!!")
+
+    def test_literal_newline_in_string_value_still_parses(self) -> None:
+        """Observed live against a small OpenRouter model (Round 8 testing
+        pass): a structurally complete response whose "reasoning" string
+        contains a literal, unescaped newline instead of `\\n`. Strict
+        json.loads rejects this as "Invalid control character" even though
+        every brace is balanced and no data is missing — must not be treated
+        as unparseable."""
+        raw = (
+            '{"status": "in_progress", "reasoning": "line one\n'
+            'line two", "steps": [{"step_number": 1, "tool_name": "clean_data", '
+            '"parameters": {}, "rationale": "start here"}]}'
+        )
+        parsed = LLMClient._parse_json(raw)
+        assert parsed["status"] == "in_progress"
+        assert parsed["steps"][0]["tool_name"] == "clean_data"
+        assert "line one" in parsed["reasoning"]

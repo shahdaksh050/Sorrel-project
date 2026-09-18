@@ -642,8 +642,13 @@ class CorrelationAnalysisTool(BaseTool):
     """
     Compute feature correlation matrix and identify top correlations.
 
-    Supports Pearson, Spearman, and Kendall methods.
-    Returns both global top pairs and target-specific correlations.
+    Supports Pearson, Spearman, Kendall, and "auto" (Pearson, switching to
+    Spearman for any pair involving a severely skewed column, where a few
+    extreme values would otherwise dominate r). Only measure/ordinal columns
+    are used — a correlation with a row ID, a 0/1 flag or an integer-coded
+    dimension is not a relationship between quantities. Correlations are pairwise-complete: a
+    missing value in one column never drops the row from unrelated pairs.
+    Returns both global top pairs (with p-values) and target correlations.
     """
 
     name = "correlation_analysis"
@@ -651,7 +656,8 @@ class CorrelationAnalysisTool(BaseTool):
         "Compute correlation matrix for numerical features. "
         "Returns top correlated pairs and, if target_column is given, "
         "correlations of all features with the target. "
-        "Methods: 'pearson' (default), 'spearman', 'kendall'."
+        "Methods: 'auto' (default: Pearson, Spearman for skewed columns), "
+        "'pearson', 'spearman', 'kendall'."
     )
 
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
@@ -662,18 +668,50 @@ class CorrelationAnalysisTool(BaseTool):
     def execute(  # type: ignore[override]
         self,
         file_path: str,
-        method: str = "pearson",
+        method: str = "auto",
         top_n: int = 10,
         target_column: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
+        from scipy import stats
+
+        from src.core.profiler import SEVERE_SKEW_THRESHOLD, profile_dataframe
+
         df = _read_df(file_path)
-        num_df = df.select_dtypes(include="number").dropna()
+        num_df = df.select_dtypes(include="number")
+        try:
+            roles = {c.name: c.semantic_role for c in profile_dataframe(df).columns}
+        except Exception:
+            roles = {}
+        # Only quantities: integer-coded identifiers, flags, years and
+        # region codes are numeric in storage but not measures.
+        num_df = num_df[[
+            c for c in num_df.columns
+            if c == target_column or not roles or roles.get(str(c)) in ("measure", "ordinal")
+        ]]
 
         if num_df.shape[1] < 2:
             raise ToolExecutionError("Need at least 2 numerical columns for correlation analysis.")
 
-        corr = num_df.corr(method=method)
+        # DataFrame.corr is pairwise-complete, so no global dropna.
+        if method == "auto":
+            skewed = {
+                c for c in num_df.columns
+                if abs(float(num_df[c].skew())) >= SEVERE_SKEW_THRESHOLD
+            }
+            corr = num_df.corr(method="pearson")
+            if skewed:
+                spearman = num_df.corr(method="spearman")
+                use_rank = np.array([[a in skewed or b in skewed for b in corr.columns] for a in corr.columns])
+                corr = corr.where(~use_rank, spearman)
+        else:
+            skewed = set()
+            corr = num_df.corr(method=method)
+
+        def _pair_method(a: str, b: str) -> str:
+            if method != "auto":
+                return method
+            return "spearman" if a in skewed or b in skewed else "pearson"
 
         # Top correlated pairs (exclude self-correlations)
         pairs: list[dict[str, Any]] = []
@@ -685,6 +723,17 @@ class CorrelationAnalysisTool(BaseTool):
                     pairs.append({"col_a": ca, "col_b": cb, "correlation": round(val, 4)})
         pairs.sort(key=lambda x: abs(x["correlation"]), reverse=True)
         top_pairs = pairs[:top_n]
+        tests = {"pearson": stats.pearsonr, "spearman": stats.spearmanr, "kendall": stats.kendalltau}
+        for pair in top_pairs:
+            both = num_df[[pair["col_a"], pair["col_b"]]].dropna()
+            pair_method = _pair_method(pair["col_a"], pair["col_b"])
+            pair["method"] = pair_method
+            pair["n"] = len(both)
+            try:
+                p_val = float(tests[pair_method](both.iloc[:, 0], both.iloc[:, 1])[1])
+                pair["p_value"] = None if np.isnan(p_val) else round(p_val, 6)
+            except (ValueError, KeyError):
+                pair["p_value"] = None
 
         # Target correlations
         target_corrs: dict[str, float] = {}
@@ -733,9 +782,9 @@ class CorrelationAnalysisTool(BaseTool):
             # dict shape as a correlation magnitude, comparable across
             # features. Unlike Pearson r it has no sign (there's no single
             # "direction" across 3+ unordered classes).
-            classes = df[target_column].loc[num_df.index]
             for c in num_df.columns:
-                feature = num_df[c]
+                feature = num_df[c].dropna()
+                classes = df[target_column].loc[feature.index]
                 groups = [
                     feature[classes == cls].to_numpy()
                     for cls in classes.dropna().unique()
@@ -757,7 +806,8 @@ class CorrelationAnalysisTool(BaseTool):
 
         top_summary = (
             f"Top pair: {top_pairs[0]['col_a']} ↔ {top_pairs[0]['col_b']} "
-            f"(r={top_pairs[0]['correlation']})"
+            f"(r={top_pairs[0]['correlation']}, {top_pairs[0]['method']}, "
+            f"p={top_pairs[0]['p_value']})"
             if top_pairs
             else "No pairs"
         )
@@ -767,13 +817,14 @@ class CorrelationAnalysisTool(BaseTool):
                 f"Correlation ({method}) on {len(cols)} features. {top_summary}."
             ),
             "method": method,
+            "spearman_columns": sorted(str(c) for c in skewed),
             "top_correlations": top_pairs,
             "target_correlations": target_corrs,
             "target_correlation_method": target_corr_method,
             "target_encoded_binary": target_encoded,
             "features_analyzed": cols,
             "n_features": len(cols),
-            "n_samples": int(num_df.shape[0]),
+            "n_samples": int(num_df.dropna(how="all").shape[0]),
         }
 
     def findings(
@@ -813,20 +864,29 @@ class CorrelationAnalysisTool(BaseTool):
             if r is None or col_a is None or col_b is None or abs(r) < _CORR_FINDING_THRESHOLD:
                 continue
             both_measures = col_a in measure_names and col_b in measure_names
+            pair_method = pair.get("method", method)
+            p_value = pair.get("p_value")
+            pair_n = pair.get("n", n_samples)
             results.append(Finding(
                 finding_id=f"{self.name}_{i}_{col_a}_{col_b}",
                 kind="correlation",
                 headline=f"{col_a} and {col_b} move together (r={r:.2f})",
                 detail=(
-                    f"{method.capitalize()} correlation between '{col_a}' and "
-                    f"'{col_b}' is r={r:.2f} (n={n_samples if n_samples else 'unknown'})."
+                    f"{str(pair_method).capitalize()} correlation between '{col_a}' and "
+                    f"'{col_b}' is r={r:.2f} (n={pair_n if pair_n else 'unknown'}"
+                    + (f", p={p_value:.3g}" if p_value is not None else "")
+                    + ")."
                 ),
-                evidence={"col_a": col_a, "col_b": col_b, "correlation": r, "method": method},
+                evidence={
+                    "col_a": col_a, "col_b": col_b, "correlation": r,
+                    "method": pair_method, "p_value": p_value, "n": pair_n,
+                },
                 source_tool=self.name,
                 measure=col_a,
                 dimension=None if both_measures else col_b,
                 effect=r,
                 effect_kind="r",
+                p_value=p_value,
                 confidence=confidence,
                 layer="analyst",
             ))
@@ -837,7 +897,10 @@ class CorrelationAnalysisTool(BaseTool):
             "file_path": {"type": "string", "description": "Path to dataset.", "required": True},
             "method": {
                 "type": "string",
-                "description": "pearson | spearman | kendall. Default: pearson.",
+                "description": (
+                    "auto | pearson | spearman | kendall. Default: auto (Pearson, "
+                    "Spearman for pairs involving a severely skewed column)."
+                ),
                 "required": False,
             },
             "top_n": {

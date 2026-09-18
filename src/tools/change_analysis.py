@@ -19,12 +19,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 
 from src.core.findings import Finding
 from src.core.profiler import profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
+from src.tools.time_series import is_partial_final_period, measure_aggregation
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
@@ -37,6 +39,10 @@ _WEEKLY_SPAN_DAYS = 60
 
 #: A period-over-period move smaller than this is noise, not a story (T5).
 _MIN_CHANGE_FOR_FINDING = 0.10
+#: ...and neither is one within this multiple of the series' own typical
+#: period-over-period movement — a 15% swing in a series that routinely
+#: swings 20% is an ordinary period.
+_VOLATILITY_MULTIPLE = 2.0
 
 #: Segment-breakdown dimension cardinality window, mirroring segment_comparison.
 _MIN_DIM_CARD = 2
@@ -258,7 +264,7 @@ class ChangeAnalysisTool(BaseTool):
         freq, grain_label = _grain_for_span(float(span_days))
 
         cp = next((c for c in profile.columns if c.name == measure_column), None)
-        agg_func = "mean" if cp and cp.unit_hint == "percent" else "sum"
+        agg_func = measure_aggregation(cp)
 
         series = (
             work.set_index(date_column)[measure_column]
@@ -275,21 +281,21 @@ class ChangeAnalysisTool(BaseTool):
         # A dataset extract very often stops mid-period (e.g. the file ends
         # May 15th), which makes the trailing bucket look like a real drop
         # against a full prior month/week when it is really just fewer days
-        # of data. If the trailing period covers well under a full period
-        # and there is another full period to fall back to, drop it rather
-        # than report a manufactured decline.
+        # of data. Drop it when there is another full period to fall back to.
         latest_period_partial = False
-        max_date = work[date_column].max()
-        next_start = pd.date_range(start=series.index[-1], periods=2, freq=freq)[-1]
-        period_len = next_start - series.index[-1]
-        elapsed = max_date - series.index[-1]
-        coverage = (elapsed / period_len) if period_len > pd.Timedelta(0) else 1.0
-        if coverage < 0.8:
+        dropped_partial_period: str | None = None
+        counts = (
+            work.set_index(date_column)[measure_column]
+            .resample(freq, label="left", closed="left")
+            .count()
+        )
+        counts = counts[counts > 0]
+        if is_partial_final_period(counts, work[date_column].max(), freq):
             if len(series) >= 3:
+                dropped_partial_period = _period_label(series.index[-1], grain_label)
                 series = series.iloc[:-1]
             else:
                 latest_period_partial = True
-
         latest_period = series.index[-1]
         prior_period = series.index[-2]
         latest_value = float(series.iloc[-1])
@@ -299,6 +305,13 @@ class ChangeAnalysisTool(BaseTool):
         )
 
         trailing = series.iloc[:-1]
+        # The series' own noise floor: the median absolute period-over-period
+        # move before the latest period.
+        prior_moves = trailing.pct_change().abs().replace([np.inf, -np.inf], np.nan).dropna()
+        typical_volatility = float(prior_moves.median()) if len(prior_moves) else None
+        change_threshold = max(
+            _MIN_CHANGE_FOR_FINDING, _VOLATILITY_MULTIPLE * (typical_volatility or 0.0)
+        )
         trailing_avg = float(trailing.mean()) if len(trailing) else None
         pct_change_vs_trailing = (
             (latest_value - trailing_avg) / trailing_avg
@@ -318,16 +331,22 @@ class ChangeAnalysisTool(BaseTool):
             )
 
         latest_label = _period_label(latest_period, grain_label)
+        measure_label = f"{'total' if agg_func == 'sum' else 'average'} {measure_column}"
         if pct_change is None:
             summary = (
-                f"{measure_column} moved from 0 to {latest_value:,.2f} in {latest_label} "
+                f"{measure_label} moved from 0 to {latest_value:,.2f} in {latest_label} "
                 "vs the prior period (prior period was zero — percent change undefined)."
             )
         else:
             direction = "rose" if pct_change > 0 else "fell"
             summary = (
-                f"{measure_column} {direction} {abs(pct_change) * 100:.1f}% in "
-                f"{latest_label} vs the prior period."
+                f"{measure_label} {direction} {abs(pct_change) * 100:.1f}% in "
+                f"{latest_label} vs the prior period"
+                + (
+                    f" (typical move {typical_volatility * 100:.1f}% per period)."
+                    if typical_volatility is not None
+                    else "."
+                )
             )
             mover = _pick_mover(breakdown, latest_value - prior_value)
             if mover:
@@ -341,6 +360,8 @@ class ChangeAnalysisTool(BaseTool):
                     f" Note: the latest {grain_label} period is not yet complete in "
                     "this data, so the comparison may understate it."
                 )
+        if dropped_partial_period:
+            summary += f" The incomplete final period ({dropped_partial_period}) was excluded."
 
         return {
             "summary": summary,
@@ -355,6 +376,11 @@ class ChangeAnalysisTool(BaseTool):
             "pct_change": round(pct_change, 6) if pct_change is not None else None,
             "trailing_avg": round(trailing_avg, 4) if trailing_avg is not None else None,
             "latest_period_partial": latest_period_partial,
+            "dropped_partial_period": dropped_partial_period,
+            "typical_volatility": (
+                round(typical_volatility, 6) if typical_volatility is not None else None
+            ),
+            "change_threshold": round(change_threshold, 6),
             "pct_change_vs_trailing_avg": (
                 round(pct_change_vs_trailing, 6) if pct_change_vs_trailing is not None else None
             ),
@@ -371,20 +397,24 @@ class ChangeAnalysisTool(BaseTool):
         measure = output.get("measure_column")
         if pct_change is None or measure is None:
             return []
-        if abs(pct_change) < _MIN_CHANGE_FOR_FINDING:
-            return []  # T5: period-to-period noise, not a story
+        threshold = output.get("change_threshold") or _MIN_CHANGE_FOR_FINDING
+        if abs(pct_change) < threshold:
+            return []  # T5: within the series' normal period-to-period noise
         if output.get("latest_period_partial"):
             return []  # an incomplete trailing period is a method-fit issue, not a finding
 
         direction = "rose" if pct_change > 0 else "fell"
         latest_label = output.get("latest_period", "the latest period")
+        agg_word = "Total" if output.get("aggregation") == "sum" else "Average"
         headline = (
-            f"{measure} {direction} {abs(pct_change) * 100:.1f}% in {latest_label} "
+            f"{agg_word} {measure} {direction} {abs(pct_change) * 100:.1f}% in {latest_label} "
             "vs the prior period."
         )
         detail = (
             f"{output.get('period_grain', 'period')} grain; "
-            f"{output.get('prior_period_value')} -> {output.get('latest_value')}."
+            f"{output.get('prior_period_value')} -> {output.get('latest_value')}; "
+            f"flag threshold {threshold * 100:.1f}% (max of 10% and 2x the typical "
+            f"period-over-period move)."
         )
         breakdown = output.get("segment_breakdown")
         if breakdown:

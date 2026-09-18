@@ -416,6 +416,10 @@ _LEAKAGE_PURITY = 0.99
 #: check rather than a finding. Genuine business problems do not score here.
 _NEAR_PERFECT_SCORE = 0.99
 
+#: Distinct timestamps a datetime column needs before it is treated as the
+#: dataset's time axis for a chronological split.
+_MIN_TIME_AXIS_VALUES = 20
+
 #: Below this many distinct feature values the "determines the target"
 #: test is vacuous — a column that is unique per row trivially "predicts"
 #: anything, which is a different defect (an identifier) already handled.
@@ -556,14 +560,29 @@ class TrainModelTool(BaseTool):
         params = super().prepare_params(params, memory, output_root)
         if not params.get("split_strategy"):
             profile = memory.get_context("data_profile") or {}
-            datetime_cols = profile.get("datetime_cols") or []
-            panel_cols = profile.get("panel_group_cols") or []
-            if profile.get("is_time_series") and datetime_cols:
+            nunique = {c.get("name"): c.get("nunique", 0) for c in profile.get("columns") or []}
+            # Only a genuine time axis orders the rows: enough distinct
+            # timestamps to form a sequence, and not a per-person attribute
+            # like a birth date that carries no "past vs future" meaning.
+            time_axis = next(
+                (
+                    c for c in profile.get("datetime_cols") or []
+                    if nunique.get(c, 0) >= _MIN_TIME_AXIS_VALUES
+                    and not any(h in c.lower() for h in ("birth", "dob"))
+                ),
+                None,
+            )
+            # Grouped splitting is about the same entity repeating across
+            # rows (customer_id, patient_id) — never a low-cardinality
+            # dimension like gender, which would hold out a whole category.
+            entity_col = profile.get("entity_col")
+            rows_per_entity = profile.get("rows_per_entity") or 0.0
+            if profile.get("is_time_series") and time_axis:
                 params["split_strategy"] = "time_series"
-                params.setdefault("time_column", datetime_cols[0])
-            elif panel_cols:
+                params.setdefault("time_column", time_axis)
+            elif entity_col and rows_per_entity > 1.5 and entity_col != params.get("target_column"):
                 params["split_strategy"] = "panel"
-                params.setdefault("group_column", panel_cols[0])
+                params.setdefault("group_column", entity_col)
         return params
 
     def findings(
@@ -588,9 +607,13 @@ class TrainModelTool(BaseTool):
         target_column = metadata.target_column if metadata else None
         cv_mean = best.get("cv_mean")
         cv_std = best.get("cv_std")
+        baseline = output.get("baseline_cv_mean")
+        lift = output.get("lift_over_baseline")
 
         if best_model and best_model != "none" and isinstance(cv_mean, (int, float)):
             scoring_label = "F1 (weighted)" if task_type == "classification" else "R2"
+            # Lift below this over a no-skill predictor is not a result.
+            weak = isinstance(lift, (int, float)) and lift < 0.05
             found.append(
                 Finding(
                     finding_id=f"{self.name}_best_model",
@@ -599,6 +622,11 @@ class TrainModelTool(BaseTool):
                         f"{best_model} best predicts {target_column or 'the target'} "
                         f"— cross-validated {scoring_label} = {cv_mean:.3f}"
                         + (f" (+/- {cv_std:.3f})" if isinstance(cv_std, (int, float)) else "")
+                        + (
+                            f", {lift:+.3f} over a no-skill baseline ({baseline:.3f})"
+                            if isinstance(lift, (int, float)) and isinstance(baseline, (int, float))
+                            else ""
+                        )
                     ),
                     detail=(
                         f"Selected from {len(models_trained)} candidate model(s) trained on a "
@@ -610,12 +638,19 @@ class TrainModelTool(BaseTool):
                             name: res.get("cv_mean") for name, res in models_trained.items()
                         },
                         "best_model": best_model,
+                        "baseline_cv_mean": baseline,
+                        "lift_over_baseline": lift,
                     },
                     source_tool=self.name,
                     measure=target_column,
                     effect=round(float(cv_mean), 4),
                     effect_kind="share",
-                    confidence=0.7,
+                    caveats=(
+                        ["Model barely beats a no-skill baseline — not a usable predictor."]
+                        if weak
+                        else []
+                    ),
+                    confidence=0.3 if weak else 0.7,
                     layer="analyst",
                 )
             )
@@ -872,6 +907,33 @@ class TrainModelTool(BaseTool):
 
             best_model = self._pick_best(results)
 
+            # A CV score only means something against what a no-skill
+            # predictor scores on the same folds — F1 0.82 on an 80%-majority
+            # target is barely better than always guessing the majority. On
+            # weighted F1, guessing the majority scores poorly on a balanced
+            # multiclass target, so the stronger of the two no-skill
+            # classifiers is the bar.
+            from sklearn.dummy import DummyClassifier, DummyRegressor
+
+            dummies = (
+                [
+                    DummyClassifier(strategy="most_frequent"),
+                    DummyClassifier(strategy="stratified", random_state=42),
+                ]
+                if task_type == "classification"
+                else [DummyRegressor(strategy="mean")]
+            )
+            try:
+                baseline_cv_mean = round(max(
+                    float(cross_val_score(
+                        dummy, X_train, y_train, groups=groups_train,
+                        cv=cv, scoring=scoring, n_jobs=1,
+                    ).mean())
+                    for dummy in dummies
+                ), 4)
+            except Exception:
+                baseline_cv_mean = None
+
         else:
             # Clustering
             X_train, X_test = X, X
@@ -901,6 +963,13 @@ class TrainModelTool(BaseTool):
             best_model = next(iter(results))
 
         best_summary = results.get(best_model, {})
+        if task_type not in {"classification", "regression"}:
+            baseline_cv_mean = None
+        lift_over_baseline = (
+            round(float(best_summary["cv_mean"]) - baseline_cv_mean, 4)
+            if baseline_cv_mean is not None and isinstance(best_summary.get("cv_mean"), (int, float))
+            else None
+        )
 
         # A near-perfect score is itself evidence, even when no single column
         # explains it. Total = Unit Price x Qty is a definition spread across
@@ -933,11 +1002,18 @@ class TrainModelTool(BaseTool):
                 f"Best: {best_model} | "
                 f"CV mean={best_summary.get('cv_mean', 'N/A')} "
                 f"± {best_summary.get('cv_std', 'N/A')}."
-                f"{leak_note}"
+                + (
+                    f" Baseline (no-skill) CV={baseline_cv_mean}, lift={lift_over_baseline:+.4f}."
+                    if lift_over_baseline is not None
+                    else ""
+                )
+                + f"{leak_note}"
             ),
             "task_type": task_type,
             "models_trained": results,
             "best_model": best_model,
+            "baseline_cv_mean": baseline_cv_mean,
+            "lift_over_baseline": lift_over_baseline,
             "class_labels": class_labels,
             "overfit_warnings": overfit_warnings,
             "leakage_warnings": leakage_warnings,

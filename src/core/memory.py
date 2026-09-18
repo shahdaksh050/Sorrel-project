@@ -219,9 +219,14 @@ class DatasetMetadata:
             return "regression"
         return "classification"  # default for object/string targets
 
-    def to_prompt_string(self) -> str:
+    def to_prompt_string(self, compact: bool = False) -> str:
         """
         Render a compact, LLM-friendly metadata summary (≈200 tokens).
+
+        `compact` drops the column listings and stats — used when the data
+        profile (which describes every column in more detail) is also in the
+        prompt, so a small model's context isn't spent on the same columns
+        twice.
 
         All dataset-derived strings (column names, class labels) pass through
         sanitize_for_prompt so a hostile dataset cannot inject instructions
@@ -240,8 +245,13 @@ class DatasetMetadata:
         lines = [
             f"Dataset: {_sp(Path(self.file_path).name)}",
             f"Shape: {self.row_count:,} rows × {self.column_count} columns",
-            f"Numerical ({len(self.numerical_cols)}): {num_cols}",
-            f"Categorical ({len(self.categorical_cols)}): {cat_cols}",
+        ]
+        if not compact:
+            lines += [
+                f"Numerical ({len(self.numerical_cols)}): {num_cols}",
+                f"Categorical ({len(self.categorical_cols)}): {cat_cols}",
+            ]
+        lines += [
             f"Missing values: {missing_total:,} total cells across "
             f"{sum(1 for v in self.missing_values.values() if v > 0)} columns",
             f"Target: {target_note}",
@@ -250,6 +260,8 @@ class DatasetMetadata:
         if self.class_balance:
             bal = ", ".join(f"{_sp(k)}={v}" for k, v in list(self.class_balance.items())[:6])
             lines.append(f"Class balance: {bal}")
+        if compact:
+            return "\n".join(lines)
         if self.high_cardinality_cols:
             hc = ", ".join(_sp(c) for c in self.high_cardinality_cols)
             lines.append(f"High-cardinality columns: {hc}")
@@ -351,11 +363,11 @@ class MemorySystem:
             )
         )
 
-    def get_metadata_prompt(self) -> str:
+    def get_metadata_prompt(self, compact: bool = False) -> str:
         """Return compact metadata string for LLM context injection."""
         if not self.dataset_metadata:
             raise ValueError("No dataset metadata. Call store_dataset_metadata() first.")
-        return self.dataset_metadata.to_prompt_string()
+        return self.dataset_metadata.to_prompt_string(compact=compact)
 
     # ------------------------------------------------------------------
     # Stage 2 — Analysis plan (LLM-generated)

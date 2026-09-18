@@ -14,6 +14,7 @@ Pure computation — no file I/O, no LLM calls, deterministic.
 from __future__ import annotations
 
 import copy
+import re
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -106,29 +107,100 @@ _ORDINAL_NAME_HINTS = (
     "satisfaction", "nps", "rank", "severity", "star",
 )
 
-#: Column-name fragments that hint a measure is money.
+#: Whole name tokens (see _name_tokens) that hint a measure is money.
+#: "value" is deliberately absent — "measured_value", "sensor_value" and
+#: "p_value" are not currency.
 _CURRENCY_NAME_HINTS = (
     "price", "amount", "revenue", "cost", "salary", "income", "sales",
     "profit", "margin", "spend", "fee", "charge", "payment", "balance",
-    "value", "wage", "expense", "discount", "fare", "budget", "arpu",
+    "wage", "expense", "discount", "fare", "budget", "arpu", "usd", "eur",
 )
-#: Column-name fragments that hint a measure is a percentage/rate already
-#: expressed on a 0-100 or 0-1 scale.
-_PERCENT_NAME_HINTS = ("pct", "percent", "rate", "ratio", "share", "margin_pct")
-#: Column-name fragments that hint a measure is a plain count.
+#: Tokens that always mean a percentage, and tokens that do only when the
+#: values sit on a 0-1 / 0-100 scale ("heart_rate" is a rate, not a percent).
+_PERCENT_NAME_HINTS = ("pct", "percent", "percentage", "perc")
+_RATIO_NAME_HINTS = ("rate", "ratio", "share", "proportion", "fraction")
+#: Qualifiers that make a "rate" a physical/price quantity, not a percent.
+_NON_PERCENT_RATE_QUALIFIERS = (
+    "heart", "pulse", "respiratory", "respiration", "breathing", "resp",
+    "exchange", "hourly", "daily", "flow", "sampling", "frame", "bit",
+)
+#: Tokens that hint a measure is a plain count.
 _COUNT_NAME_HINTS = ("count", "qty", "quantity", "units", "orders", "visits", "clicks", "views")
 
-#: Column-name fragments that hint a column identifies an "entity" whose
-#: repeat-row structure defines the dataset's grain (one row per order line,
-#: many rows per customer). Mirrors the entity roles src.core.domains looks
-#: for, kept independent to avoid a profiler -> domains import cycle
-#: (domains.py imports DatasetProfile from this module).
-_ENTITY_NAME_HINTS = ("customer", "client", "user", "account", "patient", "member", "employee", "subscriber")
+#: Tokens that mark a measure additive (a total is meaningful) versus a
+#: level/intensity whose total is meaningless (summing temperatures). Unknown
+#: measures default to mean — the safe choice for science/sensor data.
+_SUM_NAME_HINTS = (
+    "amount", "revenue", "sales", "cost", "quantity", "qty", "units", "volume",
+    "count", "orders", "visits", "clicks", "views", "spend", "total", "sessions",
+    "transactions", "purchases", "downloads", "installs", "impressions",
+)
+_DURATION_NAME_HINTS = ("duration", "hours", "minutes", "seconds", "mins", "secs")
+_MEAN_NAME_HINTS = (
+    "temperature", "temp", "age", "score", "pressure", "bp", "heart", "pulse",
+    "bmi", "height", "weight", "speed", "velocity", "level", "index", "avg",
+    "average", "mean", "median", "latitude", "longitude", "lat", "lon", "lng",
+    "humidity", "ph", "density", "concentration", "rating", "price", "rate",
+    "ratio", "pct", "percent", "percentage", "glucose", "cholesterol", "std",
+)
+#: Share of negative values above which a non-currency measure is treated as
+#: a signed level (temperature anomaly, return, residual), not a total.
+_NEGATIVE_SHARE_FOR_MEAN = 0.05
+
+#: Whole name tokens that mark an integer column as a coded category (a
+#: calendar part, a class/group code) rather than a quantity to sum or
+#: average. Identifier tokens (id/code/zip...) come from _ID_NAME_HINTS via
+#: has_identifier_name_hint plus the zip/postal extras below.
+_CODED_DIMENSION_HINTS = (
+    "year", "month", "day", "week", "quarter", "hour", "weekday", "dow",
+    "zip", "zipcode", "postal", "postcode", "category", "class", "group",
+    "type", "region", "segment", "cluster", "cohort",
+)
+#: Tokens that, next to a coded-dimension token, say the column is a
+#: quantity after all ("class_size", "group_count", "total_days").
+_QUANTITY_NAME_TOKENS = ("size", "count", "num", "n", "total", "amount", "avg", "mean", "qty")
+#: Cardinality ceiling for an integer column to be read as a coded category.
+_CODED_DIMENSION_MAX_CARD = 100
+
+#: Tokens that hint a column identifies an "entity" whose repeat-row
+#: structure defines the dataset's grain (many rows per customer, per
+#: sensor, per player). Whole-token match. Mirrors the entity roles
+#: src.core.domains looks for, kept independent to avoid a profiler ->
+#: domains import cycle (domains.py imports DatasetProfile from this module).
+_ENTITY_NAME_HINTS = (
+    "customer", "client", "user", "account", "patient", "member", "employee",
+    "subscriber", "sensor", "device", "station", "subject", "participant",
+    "player", "team", "store", "shop", "site", "machine", "vehicle", "school",
+    "hospital", "company", "firm", "ticker", "symbol", "product", "sku",
+    "household", "person", "respondent", "meter", "asset", "fund", "branch",
+    "clinic", "farm", "animal",
+)
+#: Geographic tokens that only name an entity when the table repeats them
+#: over time (country-year panels); otherwise they are just dimensions.
+_GEO_ENTITY_NAME_HINTS = ("country", "state", "city", "county", "province", "district")
 
 #: Rows-per-unique-value above which a candidate entity column is treated as
 #: this dataset's grain-defining entity (i.e. genuinely repeats, not just
 #: incidentally non-unique).
 _ENTITY_REPEAT_THRESHOLD = 1.5
+
+#: Row budget for the panel-structure probe (head of the frame — a random
+#: sample would break the timestamp overlap the probe measures).
+_PANEL_PROBE_ROWS = 20_000
+
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def _name_tokens(name: str) -> list[str]:
+    """Column name -> lowercase tokens, split on camelCase and any
+    non-alphanumeric ("heartRate", "heart-rate", "heart_rate" -> heart, rate)."""
+    return [t for t in _NON_ALNUM.split(_CAMEL_BOUNDARY.sub("_", str(name)).lower()) if t]
+
+
+def _has_token(tokens: list[str], hints: tuple[str, ...]) -> bool:
+    """Whole-token match, tolerating a plural "s" ("charges" -> charge)."""
+    return any(t in hints or (t.endswith("s") and t[:-1] in hints) for t in tokens)
 
 
 def _rows_per_value(row_count: int, nunique: int) -> float:
@@ -170,6 +242,10 @@ def _infer_semantic_role(
             is_integer_valued = False
         if is_integer_valued and nunique == 2:
             return SEMANTIC_FLAG
+        if is_integer_valued:
+            coded_role = _coded_integer_role(name, len(series), nunique)
+            if coded_role:
+                return coded_role
         name_l = name.lower()
         if (
             is_integer_valued
@@ -181,21 +257,82 @@ def _infer_semantic_role(
     return SEMANTIC_DIMENSION
 
 
-def _infer_unit_hint(name: str, semantic_role: str) -> str | None:
+#: Last-token identifier words for integer-coded keys. Narrower than
+#: _ID_NAME_HINTS on purpose: "index"/"number"/"no" also end genuine
+#: measures ("uv_index", "room_number" counts) and must not demote them.
+_CODED_KEY_TOKENS = ("id", "ids", "uuid", "guid", "key", "code", "zip", "zipcode", "postal", "postcode")
+
+
+def _coded_integer_role(name: str, row_count: int, nunique: int) -> str | None:
+    """Role for an integer column whose *name* says it is a code, not a
+    quantity — a calendar part (year, month, hour), a class/group/region
+    code, or a repeating entity key (an int customer_id). Such columns must
+    never be summed or averaged; returns None when the name gives no such
+    signal and the column stays a measure/ordinal candidate."""
+    tokens = _name_tokens(name)
+    if not tokens:
+        return None
+    if tokens[-1] in _CODED_KEY_TOKENS or tokens[-1] in _ENTITY_NAME_HINTS:
+        repeats = _rows_per_value(row_count, nunique) >= _ENTITY_REPEAT_THRESHOLD
+        if repeats or nunique <= _CODED_DIMENSION_MAX_CARD:
+            return SEMANTIC_IDENTIFIER if nunique > _PANEL_GROUP_MAX_CARD else SEMANTIC_DIMENSION
+    if (
+        any(t in _CODED_DIMENSION_HINTS for t in tokens)
+        and not any(t in _QUANTITY_NAME_TOKENS for t in tokens)
+        and nunique <= _CODED_DIMENSION_MAX_CARD
+    ):
+        return SEMANTIC_DIMENSION
+    return None
+
+
+def _infer_unit_hint(name: str, semantic_role: str, stats: dict[str, Any]) -> str | None:
     """Cheap name-based unit inference for measures — a fuller version would
     thread src.core.coercion's currency/percent detection through, but that
     detection happens at read time and is discarded before profiling runs
-    today; this heuristic gets the common cases without that plumbing."""
+    today; this heuristic gets the common cases without that plumbing.
+    Whole-token matching only, and "rate"/"ratio"/"share" count as a percent
+    only on a 0-1 or 0-100 scale without a physical qualifier — a
+    heart_rate of 72 bpm is not 72%."""
     if semantic_role != SEMANTIC_MEASURE:
         return None
-    name_l = name.lower()
-    if any(h in name_l for h in _PERCENT_NAME_HINTS):
+    tokens = _name_tokens(name)
+    if _has_token(tokens, _PERCENT_NAME_HINTS) or name.rstrip().endswith("%"):
         return "percent"
-    if any(h in name_l for h in _CURRENCY_NAME_HINTS):
+    lo, hi = stats.get("min"), stats.get("max")
+    if (
+        _has_token(tokens, _RATIO_NAME_HINTS)
+        and not any(t in _NON_PERCENT_RATE_QUALIFIERS for t in tokens)
+        and lo is not None and hi is not None
+        and ((-1.0 <= lo and hi <= 1.0) or (0.0 <= lo and hi <= 100.0))
+    ):
+        return "percent"
+    if _has_token(tokens, _CURRENCY_NAME_HINTS):
         return "currency"
-    if any(h in name_l for h in _COUNT_NAME_HINTS):
+    if _has_token(tokens, _COUNT_NAME_HINTS):
         return "count"
     return None
+
+
+def _infer_aggregation(
+    name: str, semantic_role: str, unit_hint: str | None, stats: dict[str, Any]
+) -> str | None:
+    """"sum" when a total of this measure is meaningful (revenue, units,
+    visits), "mean" when only an average is (temperature, age, a rate).
+    Name lists are checked before unit_hint so a mis-tagged unit can never
+    make a level summable; unknown measures default to "mean", the safe
+    choice for science/sensor data. None for non-measures."""
+    if semantic_role != SEMANTIC_MEASURE:
+        return None
+    tokens = _name_tokens(name)
+    if unit_hint == "percent" or _has_token(tokens, _MEAN_NAME_HINTS):
+        return "mean"
+    if unit_hint != "currency" and stats.get("negative_pct", 0.0) > _NEGATIVE_SHARE_FOR_MEAN * 100:
+        return "mean"
+    if unit_hint in ("currency", "count") or _has_token(tokens, _SUM_NAME_HINTS):
+        return "sum"
+    if _has_token(tokens, _DURATION_NAME_HINTS) and stats.get("min", -1.0) >= 0:
+        return "sum"
+    return "mean"
 
 
 @dataclass
@@ -208,13 +345,14 @@ class ColumnProfile:
     missing_count: int
     missing_pct: float
     nunique: int
-    stats: dict[str, float] = field(default_factory=dict)      # numeric columns
+    stats: dict[str, Any] = field(default_factory=dict)        # numeric: mean/std/min/max/median/q1/q3/skew/zero_pct/negative_pct; datetime: start/end/frequency; boolean: mean
     top_values: dict[str, int] = field(default_factory=dict)   # categorical columns
     flags: list[str] = field(default_factory=list)
 
     # ---- T1 semantic layer (7.3) ----
     semantic_role: str = SEMANTIC_DIMENSION   # measure | dimension | flag | ordinal | identifier | time | text | constant
     unit_hint: str | None = None              # currency | percent | count | None
+    aggregation: str | None = None            # sum | mean for measures (is a total meaningful?); None otherwise
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -229,6 +367,7 @@ class ColumnProfile:
             "flags": self.flags,
             "semantic_role": self.semantic_role,
             "unit_hint": self.unit_hint,
+            "aggregation": self.aggregation,
         }
 
     def is_measure(self) -> bool:
@@ -285,6 +424,9 @@ class DatasetProfile:
     grain: list[str] = field(default_factory=list)
     entity_col: str | None = None
     rows_per_entity: float | None = None
+    #: Sampling frequency of the first datetime column (hourly | daily |
+    #: weekly | monthly | quarterly | yearly | irregular), None without one.
+    time_frequency: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -308,6 +450,7 @@ class DatasetProfile:
             "grain": self.grain,
             "entity_col": self.entity_col,
             "rows_per_entity": self.rows_per_entity,
+            "time_frequency": self.time_frequency,
         }
 
     def columns_of_kind(self, *kinds: str) -> list[ColumnProfile]:
@@ -325,92 +468,129 @@ class DatasetProfile:
     def has_geo(self) -> bool:
         return bool(self.geo_lat_col and self.geo_lon_col)
 
-    def to_prompt_string(self, max_warnings: int = 8) -> str:
+    def to_prompt_string(self, max_warnings: int = 8, max_columns: int = 40) -> str:
         """
-        Compact profile summary (~150 tokens) for LLM context injection.
+        Dense profile summary for LLM context injection: dataset-level facts,
+        then one short line per column (up to `max_columns`) so a planner
+        sees every column of a wide dataset, not a sample of them.
 
-        Column names are dataset-derived (untrusted) and are sanitised before
-        they reach a prompt. Warnings embed column names too, so they pass
-        through the same sanitiser.
+        Column names and category values are dataset-derived (untrusted) and
+        are sanitised before they reach a prompt. Warnings embed column
+        names too, so they pass through the same sanitiser.
         """
         from src.core.security import sanitize_for_prompt as _sp
 
-        kind_counts: dict[str, int] = {}
-        for col in self.columns:
-            kind_counts[col.kind] = kind_counts.get(col.kind, 0) + 1
-        kinds = ", ".join(f"{v} {k}" for k, v in sorted(kind_counts.items()))
         lines = [
-            f"Data profile: quality score {self.quality_score}/100; "
-            f"{self.duplicate_rows} duplicate rows; column kinds: {kinds}.",
+            f"Data profile: {self.row_count:,} rows x {self.column_count} columns; "
+            f"quality score {self.quality_score}/100; {self.duplicate_rows} duplicate rows.",
         ]
         if not self.is_sufficient:
             lines.append(f"INSUFFICIENT DATA: {self.sufficiency_reason or 'too few rows.'}")
-        skewed = [_sp(c.name) for c in self.columns if "severe_skew" in c.flags]
-        if skewed:
-            lines.append(f"Severely skewed numerics: {', '.join(skewed[:6])}.")
-        ids = [_sp(c.name) for c in self.columns if c.kind == "identifier"]
-        if ids:
-            lines.append(f"Identifier columns (exclude from modelling): {', '.join(ids[:6])}.")
         nature: list[str] = []
         if self.is_time_series:
-            nature.append(f"time-series (datetime column(s): {', '.join(_sp(c) for c in self.datetime_cols[:3])})")
+            freq = f", {self.time_frequency}" if self.time_frequency else ""
+            nature.append(f"time-series ({', '.join(_sp(c) for c in self.datetime_cols[:3])}{freq})")
         if self.text_cols:
-            nature.append(f"free-text column(s): {', '.join(_sp(c) for c in self.text_cols[:3])}")
+            nature.append(f"free text ({', '.join(_sp(c) for c in self.text_cols[:3])})")
         if self.has_geo():
-            nature.append(f"geographic coordinates ({_sp(self.geo_lat_col or '')}, {_sp(self.geo_lon_col or '')})")
+            nature.append(f"geo coordinates ({_sp(self.geo_lat_col or '')}, {_sp(self.geo_lon_col or '')})")
         if self.is_high_dimensional:
-            nature.append("high-dimensional (many numeric features — watch multicollinearity)")
+            nature.append("high-dimensional (watch multicollinearity)")
         if self.panel_group_cols:
-            nature.append(f"grouped/panel structure via: {', '.join(_sp(c) for c in self.panel_group_cols[:3])}")
+            nature.append(f"entity x time panel via {', '.join(_sp(c) for c in self.panel_group_cols[:3])}")
         if self.entity_col and self.rows_per_entity:
-            nature.append(
-                f"repeat-row grain via '{_sp(self.entity_col)}' "
-                f"({self.rows_per_entity:.1f} rows/entity)"
-            )
+            nature.append(f"{self.rows_per_entity:.1f} rows per '{_sp(self.entity_col)}'")
+        if self.grain:
+            nature.append(f"row grain: {', '.join(_sp(c) for c in self.grain)}")
         if nature:
             lines.append("Data nature: " + "; ".join(nature) + ".")
-        measures = [_sp(c.name) for c in self.measures()]
-        flags = [_sp(c.name) for c in self.columns if c.semantic_role == SEMANTIC_FLAG]
-        if measures:
-            lines.append(f"Measures (summable quantities): {', '.join(measures[:8])}.")
-        if flags:
-            lines.append(f"Binary flags (not measures — never sum/log-transform): {', '.join(flags[:8])}.")
-        # Key numerical distributions (up to 6 columns)
-        num_stats_lines: list[str] = []
-        for c in self.columns:
-            if c.kind == "numeric" and c.stats:
-                s = c.stats
-                parts = []
-                if "min" in s and "max" in s:
-                    parts.append(f"range=[{s['min']}, {s['max']}]")
-                if "mean" in s:
-                    parts.append(f"mean={s['mean']}")
-                if "median" in s:
-                    parts.append(f"median={s['median']}")
-                if parts:
-                    num_stats_lines.append(f"{_sp(c.name)} ({', '.join(parts)})")
-        if num_stats_lines:
-            lines.append("Numeric distributions: " + "; ".join(num_stats_lines[:6]) + ".")
-
-        # Key categorical top values (up to 4 columns)
-        cat_dist_lines: list[str] = []
-        for c in self.columns:
-            if c.kind == "categorical" and c.top_values:
-                top_str = ", ".join(f"{_sp(k)}:{v}" for k, v in list(c.top_values.items())[:3])
-                cat_dist_lines.append(f"{_sp(c.name)}: [{top_str}]")
-        if cat_dist_lines:
-            lines.append("Top categories: " + "; ".join(cat_dist_lines[:4]) + ".")
         for match in self.domains:
             roles = ", ".join(f"{r}={_sp(c)}" for r, c in sorted(match.roles.items()))
             lines.append(
-                f"Data domain: {match.domain} (confidence {match.confidence:.2f}) "
-                f"— roles: {roles}."
+                f"Data domain: {match.domain} (confidence {match.confidence:.2f}) — roles: {roles}."
             )
+        lines.append(
+            "Roles: measure=quantity (agg=sum: totals meaningful; agg=mean: average only); "
+            "dimension=group-by; flag=0/1 indicator (rate, never sum); ordinal=ranked scale; "
+            "identifier=key (never model on it)."
+        )
+        lines.append("Columns:")
+        for c in self.columns[:max_columns]:
+            head = c.semantic_role + (f"/{c.unit_hint}" if c.unit_hint else "")
+            if c.aggregation:
+                head += f", agg={c.aggregation}"
+            facts = self._column_facts(c, _sp)
+            lines.append(f"- {_sp(c.name)}: {head}" + (f" — {facts}" if facts else ""))
+        rest = self.columns[max_columns:]
+        if rest:
+            role_counts: dict[str, int] = {}
+            for c in rest:
+                role_counts[c.semantic_role] = role_counts.get(c.semantic_role, 0) + 1
+            summary = ", ".join(f"{v} {k}" for k, v in sorted(role_counts.items()))
+            lines.append(f"- ...and {len(rest)} more columns ({summary}).")
         if self.warnings:
             lines.append(
                 "Warnings: " + " | ".join(_sp(w, max_len=160) for w in self.warnings[:max_warnings])
             )
         return "\n".join(lines)
+
+    def _column_facts(self, c: ColumnProfile, _sp: Any) -> str:
+        """Key facts for one column's prompt line, chosen by semantic role."""
+        s = c.stats
+        facts: list[str] = []
+        role = c.semantic_role
+        if role == SEMANTIC_TIME:
+            if "start" in s:
+                span = f"{_short_ts(s['start'])}..{_short_ts(s['end'])}"
+                facts.append(span + (f", {s['frequency']}" if s.get("frequency") else ""))
+        elif role == SEMANTIC_FLAG:
+            rate = s.get("mean")
+            if rate is not None and (c.kind == "boolean" or (s.get("min") == 0 and s.get("max") == 1)):
+                facts.append(f"{rate:.0%} positive")
+            elif c.top_values:
+                facts.append(self._level_shares(c, _sp))
+        elif role in (SEMANTIC_MEASURE, SEMANTIC_ORDINAL) and "median" in s:
+            facts.append(f"median {_num(s['median'])}")
+            if "q1" in s:
+                facts.append(f"IQR {_num(s['q1'])}–{_num(s['q3'])}")
+            facts.append(f"range {_num(s['min'])}–{_num(s['max'])}")
+            if "severe_skew" in c.flags:
+                facts.append("skewed")
+            if s.get("zero_pct", 0) >= 10:
+                facts.append(f"{s['zero_pct']:.0f}% zeros")
+        elif role in (SEMANTIC_DIMENSION, SEMANTIC_IDENTIFIER):
+            if c.top_values:
+                facts.append(self._level_shares(c, _sp))
+            elif "min" in s:
+                facts.append(f"{c.nunique:,} codes {_num(s['min'])}–{_num(s['max'])}")
+            else:
+                facts.append(f"{c.nunique:,} unique")
+        elif role == SEMANTIC_TEXT and "avg_word_count" in s:
+            facts.append(f"free text, ~{s['avg_word_count']:.0f} words")
+        if c.missing_pct > 0:
+            facts.append(f"{c.missing_pct:g}% missing")
+        return ", ".join(facts)
+
+    def _level_shares(self, c: ColumnProfile, _sp: Any) -> str:
+        """"N levels: a 50%, b 30%, c 12%" from a column's top values."""
+        present = max(1, self.row_count - c.missing_count)
+        top = ", ".join(
+            f"{_sp(k, max_len=30)} {v / present:.0%}" for k, v in list(c.top_values.items())[:3]
+        )
+        return f"{c.nunique:,} levels: {top}"
+
+
+def _num(value: float) -> str:
+    """Compact number for prompt text: 12,345 / 54.6 / 0.0312."""
+    v = float(value)
+    if abs(v) >= 1000:
+        return f"{v:,.0f}"
+    return f"{v:.3g}"
+
+
+def _short_ts(value: str) -> str:
+    """Drop a midnight time part from a timestamp string."""
+    return value[:-9] if value.endswith(" 00:00:00") else value
 
 
 def _is_datetime_like(series: pd.Series) -> bool:
@@ -432,6 +612,41 @@ def _is_datetime_like(series: pd.Series) -> bool:
     except (ValueError, TypeError):
         return False
     return bool(parsed.notna().mean() >= 0.9)
+
+
+#: (label, nominal step in days) for time_frequency; a median gap within
+#: _FREQ_TOLERANCE of a step names the series' frequency.
+_FREQUENCIES = (
+    ("hourly", 1 / 24), ("daily", 1.0), ("weekly", 7.0), ("monthly", 30.44),
+    ("quarterly", 91.3), ("yearly", 365.25),
+)
+_FREQ_TOLERANCE = (0.75, 1.3)
+
+
+def _datetime_stats(series: pd.Series) -> dict[str, Any]:
+    """Range and inferred frequency of a datetime(-like) column: the median
+    gap between sorted distinct timestamps names the frequency, "irregular"
+    when fewer than half the gaps agree with it (a gappy business-day series
+    still reads daily). Parses distinct values only, so it stays cheap."""
+    values = series.dropna().unique()
+    if not pd.api.types.is_datetime64_any_dtype(series):
+        values = pd.to_datetime(pd.Series(values), errors="coerce", format="mixed").dropna().unique()
+    ts = pd.Series(pd.to_datetime(values)).sort_values()
+    if ts.empty:
+        return {}
+    stats: dict[str, Any] = {"start": str(ts.iloc[0]), "end": str(ts.iloc[-1])}
+    if len(ts) >= 3:
+        gaps = ts.diff().dropna().dt.total_seconds() / 86_400
+        median_gap = float(gaps.median())
+        frequency = "irregular"
+        for label, step in _FREQUENCIES:
+            lo, hi = step * _FREQ_TOLERANCE[0], step * _FREQ_TOLERANCE[1]
+            if lo <= median_gap <= hi:
+                if float(gaps.between(lo, hi).mean()) >= 0.5:
+                    frequency = label
+                break
+        stats["frequency"] = frequency
+    return stats
 
 
 def has_identifier_name_hint(name: str) -> bool:
@@ -472,7 +687,7 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
     missing_pct = round(100.0 * missing / row_count, 2) if row_count else 0.0
     nunique = int(series.nunique(dropna=True))
     flags: list[str] = []
-    stats: dict[str, float] = {}
+    stats: dict[str, Any] = {}
     top_values: dict[str, int] = {}
 
     # Free-text probe, computed early: a review/comment column is very often
@@ -496,10 +711,14 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
         flags.append("constant")
     elif pd.api.types.is_bool_dtype(series):
         kind = "boolean"
+        clean = series.dropna()
+        if not clean.empty:
+            stats["mean"] = round(float(clean.astype(float).mean()), 4)
     # Datetime check must precede the identifier check: a daily time index is
     # 100% unique but is a time axis, not an ID.
     elif _is_datetime_like(series):
         kind = "datetime"
+        stats = _datetime_stats(series)
     elif free_text_avg_words is not None and free_text_avg_words >= FREE_TEXT_AVG_WORDS:
         kind = "text"
         flags.append("free_text")
@@ -517,6 +736,10 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
                 "min": round(float(clean.min()), 4),
                 "max": round(float(clean.max()), 4),
                 "median": round(float(clean.median()), 4),
+                "q1": round(float(clean.quantile(0.25)), 4),
+                "q3": round(float(clean.quantile(0.75)), 4),
+                "zero_pct": round(100.0 * float((clean == 0).mean()), 2),
+                "negative_pct": round(100.0 * float((clean < 0).mean()), 2),
             }
             if len(clean) > 2:
                 skew = float(clean.skew())
@@ -536,7 +759,8 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
         flags.append("high_missing")
 
     semantic_role = _infer_semantic_role(name, series, kind, nunique, flags)
-    unit_hint = _infer_unit_hint(name, semantic_role)
+    unit_hint = _infer_unit_hint(name, semantic_role, stats)
+    aggregation = _infer_aggregation(name, semantic_role, unit_hint, stats)
 
     return ColumnProfile(
         name=name,
@@ -550,6 +774,7 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
         flags=flags,
         semantic_role=semantic_role,
         unit_hint=unit_hint,
+        aggregation=aggregation,
     )
 
 
@@ -646,6 +871,45 @@ def profile_dataframe(df: pd.DataFrame, target_column: str | None = None) -> Dat
     return profile
 
 
+def _panel_group_cols(
+    df: pd.DataFrame,
+    columns: list[ColumnProfile],
+    datetime_cols: list[str],
+    entity_col: str | None,
+) -> list[str]:
+    """Columns that are genuine entity x time panel keys: each (level,
+    timestamp) pair is near-unique AND the typical level is observed at
+    most of the timestamps (every station reports at the same instants). A
+    gender column in a transaction log spans the dates too, but carries many
+    rows per (gender, date) — a segment, not a panel, and splitting a model
+    by it would be wrong; a customer_id that buys on a handful of dates
+    fails the coverage test. The detected entity is exempt from
+    the cardinality ceiling (a 5,000-sensor panel is still a panel) but not
+    from the probe. Probed on the head of the frame to stay cheap."""
+    if not datetime_cols:
+        return []
+    dt = datetime_cols[0]
+    sample = df.head(_PANEL_PROBE_ROWS)
+    result: list[str] = []
+    for col in columns:
+        if (
+            col.name == dt
+            or col.semantic_role not in (SEMANTIC_DIMENSION, SEMANTIC_FLAG, SEMANTIC_IDENTIFIER)
+            or (
+                col.name != entity_col
+                and not _PANEL_GROUP_MIN_CARD <= col.nunique <= _PANEL_GROUP_MAX_CARD
+            )
+        ):
+            continue
+        pairs = sample[[col.name, dt]].dropna()
+        if pairs.empty or float(pairs.duplicated().mean()) > 0.1:
+            continue
+        coverage = pairs.groupby(col.name)[dt].nunique() / max(1, pairs[dt].nunique())
+        if float(coverage.median()) >= 0.5:
+            result.append(col.name)
+    return result
+
+
 def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = None) -> DatasetProfile:
     """The actual profiling work — see profile_dataframe() for the memoised
     public entry point every caller should use instead of this."""
@@ -727,7 +991,12 @@ def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = No
 
     text_cols = [c.name for c in columns if c.kind == "text"]
 
-    numeric_cols = [c.name for c in columns if c.kind == "numeric"]
+    # Integer-coded dimensions/keys (year, store_id) are stored as numbers
+    # but are not features in the multicollinearity sense.
+    numeric_cols = [
+        c.name for c in columns
+        if c.kind == "numeric" and c.semantic_role not in (SEMANTIC_DIMENSION, SEMANTIC_IDENTIFIER)
+    ]
     geo_lat_col: str | None = None
     geo_lon_col: str | None = None
     for col in columns:
@@ -744,40 +1013,47 @@ def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = No
 
     is_high_dimensional = len(numeric_cols) >= HIGH_DIMENSIONAL_THRESHOLD
 
-    panel_group_cols: list[str] = []
-    if datetime_cols:
-        for col in columns:
-            if (
-                col.kind in ("categorical", "boolean")
-                and _PANEL_GROUP_MIN_CARD <= col.nunique <= _PANEL_GROUP_MAX_CARD
-            ):
-                panel_group_cols.append(col.name)
-
     # ---- Grain / entity structure (T1) — one row *is* what? An identifier
     # column that is 100% unique is a clean row key; failing that, a
-    # dimension whose name hints at an entity (customer, order, patient...)
-    # and whose rows-per-value ratio is well above 1 describes a repeat-row
-    # grain (e.g. "10 rows per customer") even with no single-column key. ----
+    # column whose name says it is an entity (customer, sensor, player,
+    # station...) and whose rows-per-value ratio is well above 1 describes a
+    # repeat-row grain (e.g. "10 rows per customer") even with no
+    # single-column key. The most-repeating candidate wins (as before the
+    # hint list was generalised); hint order only breaks ties. ----
     grain: list[str] = []
     entity_col: str | None = None
     rows_per_entity: float | None = None
     id_key = next((c.name for c in columns if c.kind == "identifier" and c.nunique == row_count and row_count > 0), None)
     if id_key:
         grain = [id_key]
-    entity_candidates = [
-        c for c in columns
-        if c.semantic_role in (SEMANTIC_IDENTIFIER, SEMANTIC_DIMENSION)
-        and any(h in c.name.lower() for h in _ENTITY_NAME_HINTS)
-        and 0 < c.nunique < row_count
-    ]
-    if entity_candidates:
-        best = max(entity_candidates, key=lambda c: _rows_per_value(row_count, c.nunique))
-        ratio = _rows_per_value(row_count, best.nunique)
-        if ratio >= _ENTITY_REPEAT_THRESHOLD:
-            entity_col = best.name
-            rows_per_entity = round(ratio, 2)
-            if not grain:
-                grain = [best.name] + (datetime_cols[:1] if datetime_cols else [])
+    entity_hints = _ENTITY_NAME_HINTS + (_GEO_ENTITY_NAME_HINTS if datetime_cols else ())
+    ranked: list[tuple[float, int, ColumnProfile]] = []
+    for c in columns:
+        if c.semantic_role not in (SEMANTIC_IDENTIFIER, SEMANTIC_DIMENSION) or not 1 < c.nunique < row_count:
+            continue
+        ratio = _rows_per_value(row_count, c.nunique)
+        if ratio < _ENTITY_REPEAT_THRESHOLD:
+            continue
+        tokens = _name_tokens(c.name)
+        if tokens and tokens[-1] in entity_hints:
+            hint = tokens[-1]
+        elif tokens and tokens[-1] in (*_CODED_KEY_TOKENS, "name"):
+            hint = next((t for t in tokens[:-1] if t in entity_hints), "")
+        else:
+            hint = ""
+        if hint:
+            ranked.append((-ratio, entity_hints.index(hint), c))
+    if ranked:
+        neg_ratio, _, best = min(ranked, key=lambda item: item[:2])
+        entity_col = best.name
+        rows_per_entity = round(-neg_ratio, 2)
+        if not grain:
+            grain = [best.name] + (datetime_cols[:1] if datetime_cols else [])
+
+    panel_group_cols = _panel_group_cols(df, columns, datetime_cols, entity_col)
+    time_frequency = next(
+        (c.stats.get("frequency") for c in columns if c.kind == "datetime"), None
+    )
 
     return DatasetProfile(
         row_count=row_count,
@@ -799,4 +1075,5 @@ def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = No
         grain=grain,
         entity_col=entity_col,
         rows_per_entity=rows_per_entity,
+        time_frequency=time_frequency,
     )

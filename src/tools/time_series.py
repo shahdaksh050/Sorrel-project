@@ -35,7 +35,7 @@ from src.tools.data_processing import _read_df
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
-    from src.core.profiler import DatasetProfile
+    from src.core.profiler import ColumnProfile, DatasetProfile
 
 #: Candidate seasonal lags checked via autocorrelation (weekly/monthly/yearly-ish).
 #: Lag sets are grain-relative (a lag is "N periods", not "N days") — a lag
@@ -106,6 +106,47 @@ _MONTH_NAMES = {
 }
 
 
+#: A trailing period is "partial" when the data covers less than this share
+#: of its calendar span AND it holds fewer rows than this share of a typical
+#: period — the row-count half keeps one-row-per-month data (dated on the 1st)
+#: from being mistaken for an incomplete month.
+_PARTIAL_PERIOD_COVERAGE = 0.9
+
+
+def measure_aggregation(col: ColumnProfile | None) -> str:
+    """How a measure combines across rows within a period: "sum" when it is
+    additive (revenue, counts), "mean" when it is not (temperature, a rate,
+    a score). Reads the profile's `aggregation` when present and falls back
+    to the unit hint (percent -> mean) otherwise."""
+    agg = getattr(col, "aggregation", None)
+    if agg in ("sum", "mean"):
+        return str(agg)
+    return "mean" if col is not None and col.unit_hint == "percent" else "sum"
+
+
+def is_partial_final_period(counts: pd.Series, last_timestamp: pd.Timestamp, freq: str) -> bool:
+    """True when the final bucket of a left-labelled resample (`counts` =
+    rows per bucket) covers materially less time and fewer rows than a full
+    period — the usual shape of an extract that stops mid-month, which
+    otherwise reads as a sudden drop in the last period."""
+    if len(counts) < 2:
+        return False
+    start = counts.index[-1]
+    end = pd.date_range(start=start, periods=2, freq=freq)[-1]
+    # Date-only timestamps (midnight) stand for the whole day they name.
+    observed_end = (
+        last_timestamp + pd.Timedelta(days=1)
+        if last_timestamp == last_timestamp.normalize()
+        else last_timestamp
+    )
+    coverage = (observed_end - start) / (end - start) if end > start else 1.0
+    typical_rows = float(counts.iloc[:-1].median())
+    return bool(
+        coverage < _PARTIAL_PERIOD_COVERAGE
+        and counts.iloc[-1] < _PARTIAL_PERIOD_COVERAGE * typical_rows
+    )
+
+
 def _autodetect_datetime_column(df: pd.DataFrame) -> str | None:
     for col in df.columns:
         series = df[col]
@@ -139,10 +180,9 @@ def _choose_value_column_and_aggregation(
     Resolve (value_column, aggregation, profile).
 
     An explicitly requested column always wins on *which* column — only the
-    automatic pick is profile-driven. Either way, `aggregation` defaults to
-    "sum" (additive money/count measures) unless the resolved column reads
-    as a rate/percentage (`unit_hint == "percent"`), in which case "mean" is
-    correct. When multiple measures are candidates, one with
+    automatic pick is profile-driven. Either way, `aggregation` follows the
+    measure's additivity (`measure_aggregation`): "sum" for money/counts,
+    "mean" for non-additive measures such as rates, levels or readings. When multiple measures are candidates, one with
     `unit_hint == "currency"` is preferred over an arbitrary numeric pick —
     a revenue question is the most common one — otherwise the profile's
     highest-variance measure is used.
@@ -156,8 +196,7 @@ def _choose_value_column_and_aggregation(
         col_profile = next(
             (c for c in (profile.columns if profile else []) if c.name == requested), None
         )
-        aggregation = "mean" if col_profile and col_profile.unit_hint == "percent" else "sum"
-        return requested, aggregation, profile
+        return requested, measure_aggregation(col_profile), profile
 
     if profile is not None:
         measures = [c for c in profile.measures() if c.name != date_column and c.name in df.columns]
@@ -165,8 +204,7 @@ def _choose_value_column_and_aggregation(
             currency = [c for c in measures if c.unit_hint == "currency"]
             pool = currency if currency else measures
             best = max(pool, key=lambda c: (c.stats.get("std") or 0.0) ** 2)
-            aggregation = "mean" if best.unit_hint == "percent" else "sum"
-            return best.name, aggregation, profile
+            return best.name, measure_aggregation(best), profile
 
     return _fallback_numeric_column(df, date_column), "sum", profile
 
@@ -188,7 +226,9 @@ def _resample(working: pd.DataFrame, grain: str, aggregation: str) -> pd.DataFra
     fabricated as zero — the tool aggregates observed data, it doesn't
     assume unobserved periods were genuinely zero."""
     indexed = working.set_index("_date")["_value"]
-    resampled = indexed.resample(_GRAIN_FREQ[grain])
+    # Left-labelled so every period is named by its start (weeks included),
+    # which is what is_partial_final_period measures coverage from.
+    resampled = indexed.resample(_GRAIN_FREQ[grain], label="left", closed="left")
     agg = resampled.sum(min_count=1) if aggregation == "sum" else resampled.mean()
     agg = agg.dropna()
     return pd.DataFrame({"_period": agg.index, "_value": agg.to_numpy(dtype=float)})
@@ -337,6 +377,21 @@ class TimeSeriesAnalysisTool(BaseTool):
                 f"for time-series diagnostics."
             )
 
+        # The final bucket of an extract is usually incomplete; left in, a
+        # half-month of sales reads as a collapse at the end of the series.
+        dropped_partial_period: str | None = None
+        counts = (
+            working.set_index("_date")["_value"]
+            .resample(_GRAIN_FREQ[grain], label="left", closed="left")
+            .count()
+        )
+        counts = counts[counts > 0]
+        if len(resampled) > 3 and is_partial_final_period(
+            counts, working["_date"].iloc[-1], _GRAIN_FREQ[grain]
+        ):
+            dropped_partial_period = str(pd.Timestamp(resampled["_period"].iloc[-1]).date())
+            resampled = resampled.iloc[:-1]
+
         values = resampled["_value"].to_numpy(dtype=float)
         period_dates = pd.to_datetime(resampled["_period"])
         t = np.arange(len(values), dtype=float)
@@ -434,10 +489,16 @@ class TimeSeriesAnalysisTool(BaseTool):
                     else ""
                 )
                 + seasonal_note
+                + (
+                    f" Final period starting {dropped_partial_period} excluded as incomplete."
+                    if dropped_partial_period
+                    else ""
+                )
             ),
             "date_column": date_column,
             "value_column": value_column,
             "aggregation": aggregation,
+            "dropped_partial_period": dropped_partial_period,
             "grain": grain,
             "series_label": series_label,
             "chart_title": series_label,
@@ -471,6 +532,8 @@ class TimeSeriesAnalysisTool(BaseTool):
         r_squared = output.get("trend_r_squared")
         direction = output.get("trend_direction")
         slope = output.get("trend_slope")
+        agg_word = "Total" if output.get("aggregation") == "sum" else "Average"
+        measure_label = f"{agg_word} {value_column}"
 
         if (
             r_squared is not None
@@ -482,7 +545,7 @@ class TimeSeriesAnalysisTool(BaseTool):
                 finding_id="",
                 kind="trend",
                 headline=(
-                    f"{value_column} is {direction} across {output.get('periods_used')} "
+                    f"{measure_label} is {direction} across {output.get('periods_used')} "
                     f"{grain} periods (slope={slope}, R²={r_squared})."
                 ),
                 detail=(
@@ -564,7 +627,7 @@ class TimeSeriesAnalysisTool(BaseTool):
                 finding_id="",
                 kind="change",
                 headline=(
-                    f"{month_name} {value_column} runs {abs(lift) * 100:.0f}% "
+                    f"{month_name} {measure_label.lower()} runs {abs(lift) * 100:.0f}% "
                     f"{direction_word} the yearly average"
                 ),
                 detail=(
@@ -623,9 +686,9 @@ class TimeSeriesAnalysisTool(BaseTool):
             "aggregation": {
                 "type": "string",
                 "description": (
-                    "How to aggregate the value per period: 'sum' (default for additive "
-                    "money/count measures) or 'mean' (for rates/percentages). Auto-chosen "
-                    "from the column's unit hint if omitted."
+                    "How to aggregate the value per period: 'sum' (additive money/count "
+                    "measures) or 'mean' (rates, levels, readings). Auto-chosen from the "
+                    "column's profiled additivity if omitted."
                 ),
                 "required": False,
             },

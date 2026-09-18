@@ -106,6 +106,34 @@ All ML training tools must implement:
 
 ---
 
+## AI Safety & Governance — LLM-Authored Code
+
+Code the LLM writes (`execute_dynamic_code`, `define_analysis_tool`, generated tools) runs only through `src/core/sandbox.py`. The layers and threat model are documented in that module's docstring; the rules for changing it:
+
+| Rule | Where |
+| :--- | :--- |
+| Every code-executing tool sets `executes_code = True` — that flag is what governance keys on (kill switch, budget, audit). | `src/tools/base.py` |
+| New sandbox capabilities are exposed as methods on the pre-bound `dsa` toolkit, never by widening `ALLOWED_MODULES`. A module goes on the allowlist only if all of its I/O is Python-level (visible to the audit hook) — native-I/O libraries (duckdb, polars) stay off. | `src/core/sandbox_toolkit.py` |
+| The toolkit decides file locations: `dsa.run` pins reads/writes to the scratch dir and rejects `file_path`, `output_dir` and `_`-prefixed params. Toolkit state is `_`-prefixed (the static policy blocks `_` attributes). | `src/core/sandbox_toolkit.py` |
+| The worker's environment is an allowlist — never `dict(os.environ)`. No credential reaches sandboxed code. | `sandbox._worker_env` |
+| Validation gates entry into the registry, not just authorship: persisted generated tools are re-checked on load. | `tool_factory.load_persisted_tools` |
+| Dataset- and code-derived text entering a prompt goes through `sanitize_for_prompt`; the system prompt declares those sections data, not instructions. | `src/core/prompt_manager.py` |
+| LLM/dataset text rendered as HTML is `html.escape`d. | `src/core/html_report.py`, `app.py` |
+
+Operator controls (environment):
+
+| Variable | Default | Effect |
+| :--- | :--- | :--- |
+| `ENABLE_CODE_EXECUTION` | `true` | `false` hides every code-executing tool from the planner and rejects steps naming one. |
+| `MAX_CODE_EXECUTIONS` | `40` | Sandbox runs allowed per analysis; further steps are refused and logged. |
+| `SANDBOX_BACKEND` | `subprocess` | `docker` adds a kernel boundary (image: `Dockerfile`; rebuild after changing `src/`). |
+| `SANDBOX_REQUIRE_ISOLATION` | `false` | `true` runs code only in Docker — never falls back to the subprocess backend. Set it whenever datasets or objectives come from untrusted users. |
+| `SANDBOX_TIMEOUT_S` / `SANDBOX_MEMORY_MB` | `45` / `1024` | Per-execution wall-clock and process-tree RSS limits. |
+
+Every execution and refusal is appended to `<output_dir>/audit/code_executions.jsonl` (full code, SHA-256, outcome, backend); a run summary is in `final_result["governance"]`.
+
+---
+
 ## Success Criteria for Every Task
 
 Each agent task must satisfy all of the following before marking complete:

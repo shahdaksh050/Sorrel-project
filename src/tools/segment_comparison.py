@@ -26,6 +26,11 @@ Two vocabularies:
     difference" is 0.0 and triviality/ranking thresholds behave sanely
     (a ratio is centred on 1.0, which a zero-floor threshold can't filter).
 
+A ratio only means something on a ratio scale. Ordinal scores and
+non-additive measures that can be zero or negative (temperature, a
+balance, a z-score) are compared by `difference` (level - rest) and
+Cohen's d instead, with `effect_kind` saying which one a row carries.
+
 A dimension is only ever compared against a *family* of tests — every level
 of every (measure, dimension) pair considered — and the whole family is
 corrected together with Benjamini-Hochberg (src.core.multiple_testing),
@@ -34,6 +39,7 @@ never one ad hoc pair at a time.
 from __future__ import annotations
 
 import re
+from itertools import zip_longest
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -45,6 +51,7 @@ from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.profiler import profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
+from src.tools.time_series import measure_aggregation
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
@@ -75,6 +82,8 @@ _ALPHA = 0.05
 #: to baseline to not be a story" — the triviality-suppression floor for
 #: this tool specifically (T5).
 _MIN_LIFT_FOR_FINDING = 0.05
+#: The same floor for difference-scale comparisons: a "small" Cohen's d.
+_MIN_D_FOR_FINDING = 0.2
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
@@ -114,7 +123,7 @@ def _pick_measure_columns(profile: DatasetProfile) -> list[ColumnProfile]:
     dimension at all on a classification-target dataset — which is exactly
     the bug this fixes.
     """
-    measures = list(profile.measures()) + list(profile.columns_of_role("flag"))
+    measures = list(profile.measures()) + list(profile.columns_of_role("flag", "ordinal"))
     return sorted(measures, key=lambda c: (c.unit_hint != "currency", c.name))
 
 
@@ -216,7 +225,10 @@ class SegmentComparisonTool(BaseTool):
         # (e.g. `churn`) are always eligible measures — but a column can
         # never be meaningfully compared against itself (every "level"
         # trivially has a mean/rate equal to itself, baseline included).
-        pairs = [(m, d) for m in measures for d in dims if m != d]
+        # Round-robin across measures before capping — measure-major order
+        # would spend the whole budget on the first measure or two.
+        per_measure = [[(m, d) for d in dims if m != d] for m in measures]
+        pairs = [p for tier in zip_longest(*per_measure) for p in tier if p]
         return pairs[:_MAX_PAIRS]
 
     def _compare_one(
@@ -231,6 +243,13 @@ class SegmentComparisonTool(BaseTool):
         work = work.dropna(subset=[dimension_column, measure_column])
         if work.empty:
             return []
+
+        # Ratios need a ratio scale: an ordinal score, or a non-additive
+        # measure that can be zero/negative, is compared by difference.
+        by_difference = not is_rate and (
+            (cp is not None and cp.semantic_role == "ordinal")
+            or (measure_aggregation(cp) == "mean" and float(work[measure_column].min()) <= 0)
+        )
 
         # Kept for reference only (evidence["overall_mean"]) — the tested
         # comparison, and therefore ratio/lift/headline, is level vs the
@@ -252,12 +271,24 @@ class SegmentComparisonTool(BaseTool):
                 continue
 
             baseline_mean = float(rest_vals.mean())
-            if baseline_mean == 0:
-                continue  # ratio/lift undefined vs a zero rest-of-data baseline
-
             level_mean = float(level_vals.mean())
-            ratio = level_mean / baseline_mean
-            lift = ratio - 1.0
+            ratio: float | None
+            lift: float | None
+            if by_difference:
+                pooled_var = (
+                    (n - 1) * float(level_vals.var(ddof=1)) + (n_rest - 1) * float(rest_vals.var(ddof=1))
+                ) / (n + n_rest - 2)
+                if not pooled_var > 0:
+                    continue
+                ratio, lift = None, None
+                effect = (level_mean - baseline_mean) / pooled_var ** 0.5
+                effect_kind = "cohens_d"
+            else:
+                if baseline_mean == 0:
+                    continue  # ratio/lift undefined vs a zero rest-of-data baseline
+                ratio = level_mean / baseline_mean
+                lift = ratio - 1.0
+                effect, effect_kind = lift, "lift"
 
             p_value: float | None
             ci_lo: float | None
@@ -304,8 +335,11 @@ class SegmentComparisonTool(BaseTool):
                 "level_value": round(level_mean, 6),
                 "baseline_value": round(baseline_mean, 6),
                 "overall_mean": round(overall_mean, 6),
-                "ratio": round(ratio, 4),
-                "lift": round(lift, 4),
+                "ratio": round(ratio, 4) if ratio is not None else None,
+                "lift": round(lift, 4) if lift is not None else None,
+                "difference": round(level_mean - baseline_mean, 6),
+                "effect": round(effect, 4),
+                "effect_kind": effect_kind,
                 "n": n,
                 "n_rest": n_rest,
                 "p_value": p_value,
@@ -368,7 +402,12 @@ class SegmentComparisonTool(BaseTool):
             c["significant_after_correction"] = False
 
         all_rows = corrected + untestable
-        all_rows.sort(key=lambda c: abs(c["lift"]) * c["n"], reverse=True)
+        # Lift and Cohen's d are on different scales; rank each as a multiple
+        # of its own triviality floor so neither kind wins by units alone.
+        floors = {"cohens_d": _MIN_D_FOR_FINDING, "lift": _MIN_LIFT_FOR_FINDING}
+        all_rows.sort(
+            key=lambda c: abs(c["effect"]) / floors[c["effect_kind"]] * c["n"], reverse=True
+        )
 
         row_noun = _row_noun(df)
         best = all_rows[0]
@@ -391,9 +430,13 @@ class SegmentComparisonTool(BaseTool):
             middle = f"show a {c['measure']} rate of {level_str}"
         else:
             middle = f"average {c['measure']} of {level_str}"
+        if c.get("effect_kind") == "cohens_d":
+            comparison = f"difference {c['difference']:+,.2f}, d={c['effect']:.2f}"
+        else:
+            comparison = f"{c['ratio']:.2f}x"
         return (
             f"{c['level']} {c['dimension']} {row_noun} {middle} vs {baseline_str} "
-            f"for everyone else ({c['ratio']:.2f}x, n={c['n']:,} vs {c['n_rest']:,})."
+            f"for everyone else ({comparison}, n={c['n']:,} vs {c['n_rest']:,})."
         )
 
     def findings(
@@ -413,7 +456,11 @@ class SegmentComparisonTool(BaseTool):
         for i, c in enumerate(comparisons):
             if not c.get("significant_after_correction"):
                 continue
-            if c.get("lift") is None or abs(c["lift"]) < _MIN_LIFT_FOR_FINDING:
+            # Old cached output predates `effect`/`effect_kind`: it is all lift.
+            effect_kind = c.get("effect_kind", "lift")
+            effect = c.get("effect", c.get("lift"))
+            floor = _MIN_D_FOR_FINDING if effect_kind == "cohens_d" else _MIN_LIFT_FOR_FINDING
+            if effect is None or abs(effect) < floor:
                 continue
             headline = self._headline({**c, "unit_hint": c.get("unit_hint")}, row_noun)
             results.append(Finding(
@@ -432,12 +479,12 @@ class SegmentComparisonTool(BaseTool):
                 measure=c["measure"],
                 dimension=c["dimension"],
                 level=c["level"],
-                effect=c["lift"],
-                effect_kind="lift",
+                effect=effect,
+                effect_kind=effect_kind,
                 p_value=c["p_value"],
                 p_adjusted=c["p_adjusted"],
                 confidence=min(1.0, c["n"] / 200.0),
-                surprise=min(1.0, abs(c["lift"])),
+                surprise=min(1.0, abs(effect)),
             ))
         return results
 

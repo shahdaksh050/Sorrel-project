@@ -12,6 +12,7 @@ Contract:
 """
 from __future__ import annotations
 
+import json
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -28,6 +29,52 @@ if TYPE_CHECKING:
 class ToolExecutionError(Exception):
     """Raised when a tool encounters an unrecoverable, expected error."""
     pass
+
+
+#: A prior tool output whose JSON exceeds this is cut down to its small
+#: values before being shipped into the sandbox as PRIOR_RESULTS.
+PRIOR_RESULT_CAP_CHARS = 20_000
+_PRIOR_VALUE_CAP_CHARS = 2_000
+
+
+def _needs_cleaned_redirect(file_path: Any, memory: MemorySystem) -> bool:
+    """Redirect to the cleaned dataset unless the planner named a derived
+    dataset this run registered (execute_dynamic_code's `save_as`). Only
+    registered paths are honoured — an arbitrary existing path from the
+    planner would otherwise let a tool read any file on disk into a prompt."""
+    if not file_path or not isinstance(file_path, str):
+        return True
+    derived = memory.get_context("derived_datasets") or {}
+    try:
+        target = Path(file_path).resolve()
+        registered = {
+            Path(info["path"]).resolve()
+            for info in derived.values()
+            if isinstance(info, dict) and info.get("path")
+        }
+    except OSError:
+        return True
+    return target not in registered
+
+
+def collect_prior_results(memory: MemorySystem) -> dict[str, Any]:
+    """{tool_name: JSON-safe output} of every successful step so far, for the
+    sandbox's PRIOR_RESULTS. Oversized outputs keep only their small values
+    (summary, scalars, short lists) so the subprocess input stays lean."""
+    prior: dict[str, Any] = {}
+    for tr in memory.tool_results:
+        if tr.status != "success" or not isinstance(tr.output, dict):
+            continue
+        sizes: dict[str, int] = {}
+        for k, v in tr.output.items():
+            try:
+                sizes[k] = len(json.dumps(v))
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if sum(sizes.values()) > PRIOR_RESULT_CAP_CHARS:
+            sizes = {k: n for k, n in sizes.items() if n <= _PRIOR_VALUE_CAP_CHARS}
+        prior[tr.tool_name] = {k: tr.output[k] for k in sizes}
+    return prior
 
 
 class BaseTool(ABC):
@@ -60,6 +107,11 @@ class BaseTool(ABC):
     #: True when this tool is meaningless without a reachable LLM (e.g. it
     #: executes LLM-generated code). Excluded outright in no-LLM mode.
     requires_llm: ClassVar[bool] = False
+
+    #: True when this tool executes LLM-authored code in the sandbox. Such
+    #: tools are governed (src/core/governance.py): hidden when code
+    #: execution is disabled, budgeted per run, and audit-logged.
+    executes_code: ClassVar[bool] = False
 
     #: {memory_context_key: param_name} — filled in from MemorySystem
     #: context whenever the plan step left `param_name` empty. Covers the
@@ -118,7 +170,7 @@ class BaseTool(ABC):
         params = dict(params)
         if self.uses_cleaned_file:
             cleaned = memory.get_context("cleaned_file_path")
-            if cleaned and "file_path" in params:
+            if cleaned and "file_path" in params and _needs_cleaned_redirect(params["file_path"], memory):
                 params["file_path"] = cleaned
         if self.output_subdir and not params.get("output_dir"):
             params["output_dir"] = str(Path(output_root) / self.output_subdir)

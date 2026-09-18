@@ -98,10 +98,17 @@ class GeospatialAnalysisTool(BaseTool):
         centroid = {"lat": round(float(lat.mean()), 5), "lon": round(float(lon.mean()), 5)}
 
         grid_size = max(2, int(grid_size))
-        lat_bins = np.linspace(bounding_box["min_lat"], bounding_box["max_lat"], grid_size + 1)
-        lon_bins = np.linspace(bounding_box["min_lon"], bounding_box["max_lon"], grid_size + 1)
-        lat_idx = np.clip(np.digitize(lat, lat_bins) - 1, 0, grid_size - 1)
-        lon_idx = np.clip(np.digitize(lon, lon_bins) - 1, 0, grid_size - 1)
+        # Grid over the 1st-99th percentile box: a handful of stray points
+        # (a mistyped coordinate, one overseas office) would otherwise
+        # stretch the grid so that everything else lands in a few cells.
+        lat_lo, lat_hi = np.quantile(lat, [0.01, 0.99])
+        lon_lo, lon_hi = np.quantile(lon, [0.01, 0.99])
+        in_box = (lat >= lat_lo) & (lat <= lat_hi) & (lon >= lon_lo) & (lon <= lon_hi)
+        grid_lat, grid_lon = lat[in_box], lon[in_box]
+        lat_bins = np.linspace(lat_lo, lat_hi, grid_size + 1)
+        lon_bins = np.linspace(lon_lo, lon_hi, grid_size + 1)
+        lat_idx = np.clip(np.digitize(grid_lat, lat_bins) - 1, 0, grid_size - 1)
+        lon_idx = np.clip(np.digitize(grid_lon, lon_bins) - 1, 0, grid_size - 1)
 
         cell_counts: dict[tuple[int, int], int] = {}
         for li, lo_i in zip(lat_idx, lon_idx, strict=True):
@@ -133,6 +140,12 @@ class GeospatialAnalysisTool(BaseTool):
             "centroid": centroid,
             "grid_size": grid_size,
             "densest_cells": densest_cells,
+            # Uniform expectation over cells that hold any point at all —
+            # the full bounding box is mostly ocean/empty land for real
+            # data, so 1/grid² makes every dataset look like a hotspot.
+            "grid_points": int(in_box.sum()),
+            "occupied_cells": len(cell_counts),
+            "uniform_share": round(1.0 / len(cell_counts), 6),
         }
 
     def findings(
@@ -149,10 +162,12 @@ class GeospatialAnalysisTool(BaseTool):
 
         top_cell = densest_cells[0]
         count = top_cell.get("count", 0)
-        share = count / n_points if n_points else 0.0
-        expected_share = 1.0 / (grid_size ** 2)
-        # Suppress when the densest cell is no denser than a uniform scatter
-        # would produce by chance — no real geographic concentration (T5).
+        grid_points = output.get("grid_points") or n_points
+        share = count / grid_points
+        occupied = output.get("occupied_cells") or grid_size ** 2
+        expected_share = 1.0 / occupied
+        # Suppress when the densest cell is no denser than an even spread
+        # over the occupied cells — no real geographic concentration (T5).
         if share < expected_share * 2.0:
             return []
 
@@ -161,17 +176,21 @@ class GeospatialAnalysisTool(BaseTool):
                 finding_id=f"{self.name}_hotspot",
                 kind="geospatial",
                 headline=(
-                    f"A single grid cell holds {count:,} of {n_points:,} points "
-                    f"({share * 100:.1f}% of all coordinates)"
+                    f"A single grid cell holds {count:,} of {grid_points:,} gridded points "
+                    f"({share * 100:.1f}%, {share / expected_share:.1f}x "
+                    f"an even spread over the {occupied} occupied cells)"
                 ),
                 detail=(
                     f"Densest cell spans lat {top_cell.get('lat_range')}, "
-                    f"lon {top_cell.get('lon_range')}, on a {grid_size}x{grid_size} grid."
+                    f"lon {top_cell.get('lon_range')}, on a {grid_size}x{grid_size} grid over "
+                    "the 1st-99th percentile coordinate box."
                 ),
                 evidence={
                     "densest_cell": top_cell,
                     "n_points": n_points,
                     "grid_size": grid_size,
+                    "occupied_cells": occupied,
+                    "uniform_share": round(expected_share, 6),
                     "centroid": output.get("centroid"),
                 },
                 measure="point_density",

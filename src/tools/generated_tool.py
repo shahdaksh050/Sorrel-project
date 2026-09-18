@@ -16,27 +16,12 @@ src.core.tool_factory.register_and_persist, called by the controller.
 """
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src.core.sandbox import run_sandboxed
-from src.tools.base import BaseTool, ToolExecutionError
-
-#: Matches the deterministic finding_id convention every other
-#: finding-emitting tool uses (e.g. concentration_analysis.py's
-#: f"concentration_{measure}_{entity}", segment_comparison.py's slugged
-#: composite ids) — never Python's built-in hash(), which is
-#: process-randomized (PYTHONHASHSEED) and would make finding_id differ
-#: between two identical runs, breaking BaseTool's documented "same inputs
-#: -> same outputs" contract and any report/dashboard binding keyed on it.
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-
-def _slug(text: str) -> str:
-    return _SLUG_RE.sub("_", text.lower()).strip("_") or "na"
-
+from src.tools.base import BaseTool, ToolExecutionError, collect_prior_results
+from src.tools.dynamic_code import sandbox_failure_message, sandbox_findings, sandbox_output
 
 if TYPE_CHECKING:
     from src.core.findings import Finding
@@ -51,6 +36,9 @@ class GeneratedTool(BaseTool):
     execute_dynamic_code."""
 
     requires_llm = True  # invisible to the --no-llm deterministic planner (decision 5)
+    executes_code = True
+    #: A DF_OUT set by the tool body is saved as derived/<tool name>.parquet.
+    output_subdir = "derived"
 
     def __init__(self, spec: GeneratedToolSpec) -> None:
         self.spec = spec
@@ -64,18 +52,7 @@ class GeneratedTool(BaseTool):
         self, params: dict[str, Any], memory: MemorySystem, output_root: str
     ) -> dict[str, Any]:
         params = super().prepare_params(params, memory, output_root)
-        prior: dict[str, Any] = {}
-        for tr in memory.tool_results:
-            if tr.status == "success" and isinstance(tr.output, dict):
-                clean_output: dict[str, Any] = {}
-                for k, v in tr.output.items():
-                    try:
-                        json.dumps(v)
-                        clean_output[k] = v
-                    except (TypeError, OverflowError):
-                        continue
-                prior[tr.tool_name] = clean_output
-        params["_prior_results"] = prior
+        params["_prior_results"] = collect_prior_results(memory)
         return params
 
     def execute(  # type: ignore[override]
@@ -89,6 +66,8 @@ class GeneratedTool(BaseTool):
             raise ToolExecutionError(f"Dataset file not found: {file_path}")
 
         prior_results = kwargs.pop("_prior_results", None)
+        output_dir = kwargs.pop("output_dir", None)
+        out_dir = Path(output_dir) if output_dir else Path(file_path).parent / "derived"
         # kwargs minus file_path reach the sandboxed code as plain data via
         # extra_globals — never templated into the code body (decision 2).
         extra_globals = {k: v for k, v in kwargs.items() if k != "file_path"}
@@ -98,47 +77,11 @@ class GeneratedTool(BaseTool):
             dataset_ref=file_path,
             extra_globals=extra_globals,
             prior_results=prior_results,
+            derived_dest=str(out_dir / f"{self.name}.parquet"),
         )
-
-        finding_payload = getattr(sandbox_result, "finding", None)
-
         if sandbox_result.status != "ok":
-            return {
-                "summary": (
-                    f"Execution failed ({sandbox_result.error_type}): "
-                    f"{sandbox_result.hint or 'see traceback for details.'}"
-                ),
-                "status": "error",
-                "result": None,
-                "stdout": sandbox_result.stdout,
-                "error_type": sandbox_result.error_type,
-                "traceback": sandbox_result.traceback,
-                "hint": sandbox_result.hint,
-                "duration_ms": sandbox_result.duration_ms,
-            }
-
-        output: dict[str, Any] = {
-            "summary": f"Executed '{self.name}' successfully in {sandbox_result.duration_ms:.0f} ms.",
-            "status": "ok",
-            "result": sandbox_result.result,
-            "stdout": sandbox_result.stdout,
-            "error_type": None,
-            "traceback": None,
-            "hint": None,
-            "duration_ms": sandbox_result.duration_ms,
-        }
-
-        # Decision 7: FINDING evidence numbers must also land in `output`
-        # itself, verbatim, so controller._flag_unverified_claims can verify
-        # any narrative built from this finding against the tool's own
-        # output — not a workaround, a requirement.
-        if isinstance(finding_payload, dict):
-            output["finding_payload"] = finding_payload
-            evidence = finding_payload.get("evidence")
-            if isinstance(evidence, dict):
-                output["evidence"] = dict(evidence)
-
-        return output
+            raise ToolExecutionError(sandbox_failure_message(sandbox_result))
+        return sandbox_output(sandbox_result, f"'{self.name}'", self.name)
 
     def findings(
         self,
@@ -146,32 +89,4 @@ class GeneratedTool(BaseTool):
         profile: DatasetProfile | None,
         metadata: DatasetMetadata | None,
     ) -> list[Finding]:
-        try:
-            payload = output.get("finding_payload")
-            if not isinstance(payload, dict):
-                return []
-
-            headline = payload.get("headline") or payload.get("summary")
-            if not headline or not isinstance(headline, str):
-                return []
-
-            from src.core.findings import Finding
-
-            evidence = payload.get("evidence")
-            if not isinstance(evidence, dict):
-                evidence = {}
-
-            finding = Finding(
-                finding_id=f"{self.name}_{_slug(headline)[:60]}",
-                kind="generated_tool",
-                headline=headline,
-                detail=str(payload.get("detail", "")),
-                evidence=evidence,
-                source_tool=self.name,
-                caveats=["AI-generated analysis tool"],
-            )
-            return [finding]
-        except Exception:
-            # findings() must never raise — a malformed FINDING payload
-            # from LLM-authored code means "no finding", not a crash.
-            return []
+        return sandbox_findings(output, self.name, "generated_tool", "AI-generated analysis tool")

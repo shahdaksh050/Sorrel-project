@@ -19,16 +19,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.core.sandbox import ALLOWED_MODULES_TEXT, _static_check, run_sandboxed
-from src.tools.base import BaseTool
+from src.tools.base import BaseTool, collect_prior_results
+
+if TYPE_CHECKING:
+    from src.core.memory import MemorySystem
 
 
 class DefineAnalysisToolTool(BaseTool):
     """Validate (and optionally smoke-test) a proposed new analysis tool."""
 
     requires_llm = True
+    executes_code = True
 
     name = "define_analysis_tool"
     description = (
@@ -38,14 +42,16 @@ class DefineAnalysisToolTool(BaseTool):
         "register the tool — it validates your proposed code and, if a "
         "dataset is given, smoke-tests it once, then reports whether the "
         "tool is ready to be created. Code contract: a pandas DataFrame "
-        "`df` and a `SCHEMA` dict (column name -> semantic kind) are "
+        "`df`, a `SCHEMA` dict (column name -> semantic kind), `PRIOR_RESULTS` "
+        "and the `dsa` toolkit (as in execute_dynamic_code) are "
         "pre-loaded; any parameter you declare in params_schema is "
         "available as a plain variable of that name; you must assign the "
         "final answer to a variable named RESULT. You may also assign "
         "FINDING = {'headline': ..., 'detail': ..., 'evidence': {...}} to "
         "surface a real, human-readable insight into the report and "
         "dashboard — use this whenever your tool discovers something "
-        "worth reporting, not just a computed value. Only "
+        "worth reporting, not just a computed value; CHART = dsa.chart...(...) "
+        "adds a chart and DF_OUT = frame saves a derived dataset. Only "
         f"{ALLOWED_MODULES_TEXT} may be imported; no file or network "
         "access, no eval/exec/open. After this tool reports "
         "status == 'ready', the tool becomes callable by tool_name on a "
@@ -106,6 +112,15 @@ class DefineAnalysisToolTool(BaseTool):
             },
         }
 
+    def prepare_params(
+        self, params: dict[str, Any], memory: MemorySystem, output_root: str
+    ) -> dict[str, Any]:
+        # Smoke-test parity: the generated tool will see PRIOR_RESULTS in
+        # production, so the smoke test must run against the same namespace.
+        params = super().prepare_params(params, memory, output_root)
+        params["_prior_results"] = collect_prior_results(memory)
+        return params
+
     def execute(  # type: ignore[override]
         self,
         tool_name: str,
@@ -114,6 +129,7 @@ class DefineAnalysisToolTool(BaseTool):
         code: str,
         example_params: dict[str, Any] | None = None,
         file_path: str | None = None,
+        _prior_results: dict[str, Any] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         # params_schema may arrive as a dict or as a JSON-encoded string —
@@ -173,7 +189,7 @@ class DefineAnalysisToolTool(BaseTool):
                 code=code,
                 dataset_ref=file_path,
                 extra_globals=example_params or {},
-                timeout_s=10.0,
+                prior_results=_prior_results,
             )
             if sandbox_result.status != "ok":
                 return {
@@ -192,7 +208,10 @@ class DefineAnalysisToolTool(BaseTool):
                 ),
                 "status": "ready",
                 "spec": spec,
-                "hint": None,
+                "hint": (
+                    f"CHART was rejected and will be dropped: {sandbox_result.chart_error}"
+                    if sandbox_result.chart_error else None
+                ),
             }
 
         return {

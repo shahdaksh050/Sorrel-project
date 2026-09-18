@@ -8,9 +8,12 @@ customer); this tool generalises it to *any* file with a measure and an
 entity-like dimension, independent of the transactional domain match.
 
 Triviality suppression (T5): a uniform distribution across N entities gives
-each roughly 1/N of the total, so the top 10% would hold ~10% of it by
-construction. A top-10% share only slightly above 10-15% says nothing —
-`findings()` skips it.
+the top k of them k/N of the total by construction — with 4 entities the
+"top 10%" is one entity and holds 25% of an even split. `findings()` only
+reports a share well above that uniform expectation, over enough entities.
+
+Only additive measures (revenue, counts) are concentrated: "the top 10% of
+stations hold 30% of total temperature" is not a quantity.
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ from src.core.findings import Finding
 from src.core.profiler import _ENTITY_REPEAT_THRESHOLD, profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
+from src.tools.time_series import measure_aggregation
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
@@ -34,9 +38,12 @@ if TYPE_CHECKING:
 _MIN_ENTITY_CARD = 5
 _MAX_ENTITY_CARD = 10_000
 
-#: A top-10% share at or below this is what a near-uniform distribution
-#: would already produce — not a real concentration story.
-_UNIFORM_SHARE_CEILING = 0.15
+#: The top-10% share must reach this multiple of its uniform expectation
+#: (k/N) before it is a concentration story...
+_MIN_LIFT_OVER_UNIFORM = 1.5
+#: ...over at least this many entities — below it the "top 10%" is one or
+#: two entities and any share is trivially large.
+_MIN_ENTITIES_FOR_FINDING = 10
 
 _ENTITY_NOUNS = {
     "customer": "customers", "client": "clients", "user": "users",
@@ -65,7 +72,7 @@ def _entity_noun(column_name: str) -> str:
 
 
 def _pick_measure_columns(profile: DatasetProfile) -> list[ColumnProfile]:
-    measures = list(profile.measures())
+    measures = [c for c in profile.measures() if measure_aggregation(c) == "sum"]
     return sorted(measures, key=lambda c: (c.unit_hint != "currency", c.name))
 
 
@@ -158,6 +165,7 @@ class ConcentrationAnalysisTool(BaseTool):
         file_path: str,
         measure_column: str | None = None,
         entity_column: str | None = None,
+        allow_non_additive: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
         df = _read_df(file_path)
@@ -178,6 +186,15 @@ class ConcentrationAnalysisTool(BaseTool):
                     "No numeric measure column found. Pass measure_column explicitly."
                 )
             measure_column = candidates[0].name
+
+        cp = next((c for c in profile.columns if c.name == measure_column), None)
+        if measure_aggregation(cp) != "sum" and not allow_non_additive:
+            raise ToolExecutionError(
+                f"'{measure_column}' is not an additive measure (it averages rather than "
+                "sums across rows), so a share of its total held by top entities is not "
+                "meaningful. Pick an additive measure (revenue, counts), or pass "
+                "allow_non_additive=true to force it."
+            )
 
         if not entity_column:
             entity_column = _pick_entity_column(profile)
@@ -235,16 +252,19 @@ class ConcentrationAnalysisTool(BaseTool):
             )
 
         shares: dict[int, float] = {}
+        uniform: dict[int, float] = {}
         for pct in (10, 20, 50):
             cutoff = max(1, int(np.ceil(n_entities * pct / 100.0)))
             shares[pct] = float(grouped.head(cutoff).sum()) / total_measure
+            uniform[pct] = cutoff / n_entities
 
         gini = _gini(grouped.to_numpy())
         noun = _entity_noun(entity_column)
 
         summary = (
             f"The top 10% of {noun} account for {shares[10] * 100:.1f}% of "
-            f"{measure_column} (Gini={gini:.2f}, n={n_entities:,})."
+            f"total {measure_column} (vs {uniform[10] * 100:.1f}% under an even split; "
+            f"Gini={gini:.2f}, n={n_entities:,})."
         )
 
         return {
@@ -256,6 +276,8 @@ class ConcentrationAnalysisTool(BaseTool):
             "top_10_pct_share": round(shares[10], 4),
             "top_20_pct_share": round(shares[20], 4),
             "top_50_pct_share": round(shares[50], 4),
+            "uniform_share": round(uniform[10], 4),
+            "aggregation": "sum",
             "gini_coefficient": round(gini, 4),
         }
 
@@ -270,11 +292,16 @@ class ConcentrationAnalysisTool(BaseTool):
         entity = output.get("entity_column")
         if share10 is None or measure is None or entity is None:
             return []
-        if share10 <= _UNIFORM_SHARE_CEILING:
-            return []  # T5: no more concentrated than a uniform split would be
+        n_entities = output.get("n_entities") or 0
+        uniform = output.get("uniform_share") or 0.10
+        if n_entities < _MIN_ENTITIES_FOR_FINDING or share10 < _MIN_LIFT_OVER_UNIFORM * uniform:
+            return []  # T5: no more concentrated than an even split would be
 
         noun = _entity_noun(entity)
-        headline = f"The top 10% of {noun} account for {share10 * 100:.1f}% of {measure}"
+        headline = (
+            f"The top 10% of {noun} account for {share10 * 100:.1f}% of total {measure} "
+            f"({share10 / uniform:.1f}x an even split)"
+        )
         return [Finding(
             finding_id=f"concentration_{measure}_{entity}",
             kind="concentration",
@@ -292,7 +319,7 @@ class ConcentrationAnalysisTool(BaseTool):
             effect=share10,
             effect_kind="share",
             confidence=min(1.0, (output.get("n_entities") or 0) / 200.0),
-            surprise=min(1.0, max(0.0, share10 - 0.10)),
+            surprise=min(1.0, max(0.0, share10 - uniform)),
         )]
 
     def get_schema(self) -> dict[str, Any]:
@@ -305,8 +332,16 @@ class ConcentrationAnalysisTool(BaseTool):
             "measure_column": {
                 "type": "string",
                 "description": (
-                    "Numeric measure to sum per entity (revenue, spend...). "
+                    "Additive numeric measure to sum per entity (revenue, spend, counts). "
                     "Auto-selected (preferring a currency measure) when omitted."
+                ),
+                "required": False,
+            },
+            "allow_non_additive": {
+                "type": "boolean",
+                "description": (
+                    "Force concentration on a non-additive measure (rate, level, score). "
+                    "Default false: such measures are refused."
                 ),
                 "required": False,
             },

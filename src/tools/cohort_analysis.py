@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
-from src.core.domains import domain_confidence, resolve_column
+from src.core.domains import domain_confidence, normalize_name, resolve_column
 from src.core.findings import Finding
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
@@ -136,6 +136,17 @@ class CohortAnalysisTool(BaseTool):
         claimed.add(order_column or "")
         product_column = product_column or resolve_column(
             df, ("product", "item", "sku", "article", "category"), claimed)
+        claimed.add(product_column or "")
+
+        # A per-unit price is not line revenue: summing it ignores how many
+        # units each line sold. Multiply by a quantity column when one exists.
+        quantity_column: str | None = None
+        amount_tokens = normalize_name(amount_column or "").split("_")
+        is_unit_price = bool(
+            {"price", "unitprice", "rate", "cost"} & set(amount_tokens)
+        ) and not {"total", "amount", "revenue", "sales", "line"} & set(amount_tokens)
+        if is_unit_price:
+            quantity_column = resolve_column(df, ("quantity", "qty", "units"), claimed)
 
         if date_column is None or date_column not in df.columns:
             raise ToolExecutionError("No date column found. Pass date_column explicitly.")
@@ -145,6 +156,18 @@ class CohortAnalysisTool(BaseTool):
         work = df.copy()
         work[date_column] = pd.to_datetime(work[date_column], errors="coerce")
         work[amount_column] = pd.to_numeric(work[amount_column], errors="coerce")
+        if quantity_column:
+            work[amount_column] = work[amount_column] * pd.to_numeric(
+                work[quantity_column], errors="coerce"
+            )
+            revenue_basis = f"{amount_column} x {quantity_column}"
+        elif is_unit_price:
+            revenue_basis = (
+                f"approximated: sum of unit price '{amount_column}' (no quantity column "
+                "found), so revenue ignores units per line"
+            )
+        else:
+            revenue_basis = amount_column
         work = work.dropna(subset=[date_column, amount_column])
         if work.empty:
             raise ToolExecutionError(
@@ -157,6 +180,8 @@ class CohortAnalysisTool(BaseTool):
         result: dict[str, Any] = {
             "date_column": date_column,
             "amount_column": amount_column,
+            "quantity_column": quantity_column,
+            "revenue_basis": revenue_basis,
             "transaction_count": len(work),
             "date_range": {
                 "start": str(work[date_column].min().date()),
@@ -313,6 +338,8 @@ class CohortAnalysisTool(BaseTool):
                 f"top 10% of customers drive "
                 f"{result['revenue_share_of_top_10pct_customers']:.1f}% of revenue"
             )
+        if is_unit_price and not quantity_column:
+            parts.append(f"revenue is {revenue_basis}")
         result["summary"] = "; ".join(parts) + "."
         return result
 
@@ -342,6 +369,7 @@ class CohortAnalysisTool(BaseTool):
                         "transaction_count": output.get("transaction_count"),
                         "total_revenue": output.get("total_revenue"),
                         "customer_count": output.get("customer_count"),
+                        "revenue_basis": output.get("revenue_basis"),
                     },
                     measure="revenue",
                     confidence=0.75,

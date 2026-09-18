@@ -60,20 +60,29 @@ def build_agenda(
     if profile is None:
         return []
 
+    from src.core.profiler import SEMANTIC_ORDINAL
+
     questions: list[Question] = []
     objective_l = objective.lower()
     measures = profile.measures()
     dimensions = profile.dimensions()
+    # Ordinal scales (satisfaction 1-5) are compared by their mean across
+    # segments just like a measure, but never summed or trended as totals.
+    segment_measures = [*measures[:3], *profile.columns_of_role(SEMANTIC_ORDINAL)[:2]]
 
     # "Which segments differ most?" — one per (measure, dimension) pair,
     # capped so a wide dataset doesn't produce a combinatorial agenda.
-    for measure in measures[:3]:
+    for measure in segment_measures:
         for dim in dimensions[:4]:
             if dim.nunique < 2 or dim.nunique > 20:
                 continue
             value = 0.7 if measure.unit_hint == "currency" else 0.5
             questions.append(Question(
-                text=f"Does '{measure.name}' differ meaningfully by '{dim.name}'?",
+                text=(
+                    f"Does '{measure.name}' (total and per-row average) differ meaningfully by '{dim.name}'?"
+                    if measure.aggregation == "sum"
+                    else f"Does average '{measure.name}' differ meaningfully by '{dim.name}'?"
+                ),
                 kind="segment",
                 columns=[measure.name, dim.name],
                 expected_value=value,
@@ -95,14 +104,14 @@ def build_agenda(
     if profile.is_time_series and measures:
         for measure in measures[:2]:
             questions.append(Question(
-                text=f"Is '{measure.name}' trending or seasonal over time, and what changed most recently?",
+                text=f"Is {_stat(measure)} '{measure.name}' trending or seasonal over time, and what changed most recently?",
                 kind="trend",
                 columns=[measure.name, *profile.datetime_cols[:1]],
                 expected_value=0.75,
                 suggested_tool="time_series_analysis",
             ))
             questions.append(Question(
-                text=f"What was the most recent period-over-period change in '{measure.name}'?",
+                text=f"What was the most recent period-over-period change in {_stat(measure)} '{measure.name}'?",
                 kind="trend",
                 columns=[measure.name, *profile.datetime_cols[:1]],
                 expected_value=0.6,
@@ -120,6 +129,19 @@ def build_agenda(
             expected_value=0.4,
             suggested_tool="correlation_analysis",
         ))
+
+    # Fallback so a dataset with no dimension, entity or time axis (a sensor
+    # dump, a lab table) still gets an agenda: ask about each top measure's
+    # distribution and outliers (a generic "what correlates" doesn't count).
+    if not any(q.kind != "relationship" for q in questions):
+        for measure in [*measures[:3], *profile.columns_of_role(SEMANTIC_ORDINAL)[:1]]:
+            questions.append(Question(
+                text=f"How is '{measure.name}' distributed, and which values are outliers?",
+                kind="distribution",
+                columns=[measure.name],
+                expected_value=0.45,
+                suggested_tool="detect_outliers",
+            ))
 
     # Modelling question — only on the agenda at all when the analysis-mode
     # decision (7.4) actually chose to model; a "describe" decision means
@@ -169,6 +191,12 @@ def build_agenda(
     return questions
 
 
+def _stat(column: Any) -> str:
+    """Aggregation-aware wording: "total" for an additive measure, "average"
+    for everything else (levels, rates, ordinal scales)."""
+    return "total" if getattr(column, "aggregation", None) == "sum" else "average"
+
+
 def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Match agenda questions against what the finding bus actually produced,
@@ -187,7 +215,11 @@ def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> d
             unanswered.append(q)  # a declined question (e.g. modelling) is unanswered by definition
             continue
         kind_hit = (q.kind, "segment_lift", "driver", "trend", "concentration", "change")
-        if q.columns:
+        if q.kind == "distribution":
+            # detect_outliers reports method_fit findings that carry no
+            # measure column, so its having reported at all is the answer.
+            hit = any(f.get("source_tool") == q.suggested_tool for f in findings)
+        elif q.columns:
             # A question that names specific columns is only answered by a
             # finding that's actually ABOUT those columns — matching on
             # source_tool alone let any finding from the right tool count

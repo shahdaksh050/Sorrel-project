@@ -8,7 +8,9 @@ column exists (or the user asks about segments), the agent can discover
 natural groups in the data:
 
   - KMeans with automatic k selection via silhouette score (k = 2..max_k)
-  - Standard-scaled numeric features; identifiers/constants/datetimes excluded
+  - Standard-scaled continuous measures only: the target, identifiers, flags,
+    ordinal codes, coordinates and year/time columns are excluded, and
+    severely right-skewed non-negative features are log1p'd first
   - Per-cluster profiles (feature means) so clusters are interpretable
   - 2-D PCA coordinates (sampled) for the dashboard scatter
   - Deterministic throughout (random_state=42)
@@ -16,12 +18,14 @@ natural groups in the data:
 from __future__ import annotations
 
 import pickle
+import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pandas as pd
 
 from src.core.findings import Finding
+from src.core.profiler import SEVERE_SKEW_THRESHOLD, profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.ml_pipeline import _read_df
 
@@ -40,26 +44,50 @@ PCA_POINT_CAP = 1_000
 MAX_PROFILE_FEATURES = 8
 
 
-def _select_cluster_features(df: pd.DataFrame) -> pd.DataFrame:
+#: Name fragments marking a column as a coordinate or calendar field —
+#: numeric, but distance on them is not a similarity between rows.
+_NON_FEATURE_NAME_TOKENS = frozenset({
+    "lat", "latitude", "lon", "lng", "long", "longitude",
+    "year", "yr", "month", "day", "week", "hour", "quarter", "zip", "zipcode",
+})
+
+
+def _select_cluster_features(
+    df: pd.DataFrame, profile: DatasetProfile | None, target_column: str | None
+) -> pd.DataFrame:
     """
     Numeric feature matrix suitable for distance-based clustering.
 
-    Excludes datetimes, constants, and identifier-like columns (near-unique
-    integers — cluster geometry on row IDs is meaningless).
+    Only continuous measures qualify: the target (clustering on it just
+    rediscovers the label), identifiers, 0/1 flags, ordinal codes,
+    coordinates and year/time columns all carry numbers whose distances mean
+    nothing. Uses the profile's semantic roles when available, and the
+    near-unique-integer identifier check either way.
     """
+    roles = {c.name: c.semantic_role for c in profile.columns} if profile else {}
+    geo = {profile.geo_lat_col, profile.geo_lon_col} if profile else set()
     keep: list[str] = []
     n = max(len(df), 1)
     for col in df.columns:
         series = df[col]
+        name_l = str(col).lower()
+        if col == target_column or col in geo:
+            continue
+        if roles and roles.get(str(col)) != "measure":
+            continue
         if pd.api.types.is_datetime64_any_dtype(series):
             continue
         if not pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
             continue
-        nunique = series.nunique(dropna=True)
-        if nunique <= 1:
+        if _NON_FEATURE_NAME_TOKENS & set(re.split(r"[^a-z]+", name_l)):
             continue
+        nunique = series.nunique(dropna=True)
+        if nunique <= 2:
+            continue  # constant or flag
         if pd.api.types.is_integer_dtype(series) and nunique / n >= 0.98:
             continue  # identifier-like
+        if pd.api.types.is_integer_dtype(series) and series.between(1900, 2100).all():
+            continue  # calendar year stored as a number
         keep.append(str(col))
     return df[keep]
 
@@ -79,6 +107,7 @@ class ClusterDataTool(BaseTool):
         "asks about segments/groups/personas."
     )
     output_subdir = "models"
+    requires_context: ClassVar[dict[str, str]] = {"target_column": "target_column"}
 
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
         if metadata and metadata.target_column:
@@ -93,6 +122,7 @@ class ClusterDataTool(BaseTool):
         n_clusters: int | None = None,
         max_k: int = DEFAULT_MAX_K,
         output_dir: str = "output/models",
+        target_column: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         import numpy as np
@@ -102,13 +132,18 @@ class ClusterDataTool(BaseTool):
         from sklearn.preprocessing import StandardScaler
 
         df = _read_df(file_path)
-        features = _select_cluster_features(df)
+        try:
+            profile = profile_dataframe(df)
+        except Exception:
+            profile = None
+        features = _select_cluster_features(df, profile, target_column)
 
         if features.shape[1] < 2:
             raise ToolExecutionError(
                 "Clustering needs at least 2 usable numeric features; "
                 f"found {features.shape[1]}. Identifier, constant, datetime and "
-                "non-numeric columns are excluded."
+                "non-numeric columns are excluded, as are the target, flags, ordinal codes, "
+                "coordinates and year/time columns."
             )
         if len(features) < 20:
             raise ToolExecutionError(
@@ -117,8 +152,16 @@ class ClusterDataTool(BaseTool):
 
         # Median-impute then standardise — KMeans is distance-based
         filled = features.fillna(features.median(numeric_only=True))
+        # A heavy right tail (income, spend) otherwise dominates the
+        # Euclidean distance and KMeans just splits off the outliers.
+        log_features = [
+            c for c in filled.columns
+            if float(filled[c].min()) >= 0 and float(filled[c].skew()) >= SEVERE_SKEW_THRESHOLD
+        ]
+        model_input = filled.copy()
+        model_input[log_features] = np.log1p(model_input[log_features])
         scaler = StandardScaler()
-        X = scaler.fit_transform(filled)
+        X = scaler.fit_transform(model_input)
 
         rng = np.random.default_rng(42)
         sil_idx = (
@@ -186,7 +229,10 @@ class ClusterDataTool(BaseTool):
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         model_path = Path(output_dir) / "kmeans.pkl"
         with open(model_path, "wb") as f:
-            pickle.dump({"scaler": scaler, "kmeans": best_model, "features": list(features.columns)}, f)
+            pickle.dump({
+                "scaler": scaler, "kmeans": best_model, "features": list(features.columns),
+                "log1p_features": log_features,
+            }, f)
 
         quality = (
             "strong" if best_score >= 0.5
@@ -205,6 +251,7 @@ class ClusterDataTool(BaseTool):
             "cluster_sizes": cluster_sizes,
             "cluster_profiles": cluster_profiles,
             "features_used": list(features.columns),
+            "log1p_features": log_features,
             "pca_points": pca_points,
             "pca_explained_variance": [round(float(v), 4) for v in pca.explained_variance_ratio_],
             "model_path": str(model_path),
@@ -255,9 +302,12 @@ class ClusterDataTool(BaseTool):
             largest_name = max(sizes, key=lambda k: sizes[k])
             largest_profile = profiles.get(largest_name) or {}
             feature_names = list(largest_profile.keys())
-            if feature_names:
+            total = sum(sizes.get(name, 0) for name in profiles)
+            if feature_names and total:
+                # Row-weighted: the data's actual mean, not an average of
+                # cluster means that over-weights small clusters.
                 overall_mean = {
-                    f: sum(p.get(f, 0.0) for p in profiles.values()) / len(profiles)
+                    f: sum(p.get(f, 0.0) * sizes.get(name, 0) for name, p in profiles.items()) / total
                     for f in feature_names
                 }
 
@@ -305,7 +355,7 @@ class ClusterDataTool(BaseTool):
                                 f"Largest segment ({largest_name}, {sizes[largest_name]:,} rows, "
                                 f"{share * 100:.1f}% of data) stands out on '{defining_feature}' "
                                 f"(mean {largest_profile[defining_feature]:.3g} vs "
-                                f"{overall_mean[defining_feature]:.3g} across segments)"
+                                f"{overall_mean[defining_feature]:.3g} overall)"
                             ),
                             evidence={
                                 "cluster": largest_name,
@@ -346,6 +396,11 @@ class ClusterDataTool(BaseTool):
             "output_dir": {
                 "type": "string",
                 "description": "Directory for the saved clustering model.",
+                "required": False,
+            },
+            "target_column": {
+                "type": "string",
+                "description": "Target/label column to exclude from the clustering features.",
                 "required": False,
             },
         }

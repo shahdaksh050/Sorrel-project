@@ -49,6 +49,10 @@ _FREQUENCY_TABLE: tuple[tuple[float, int, str], ...] = (
 #: are too noisy to report as point estimates.
 _MIN_RETURNS_FOR_ANNUALISATION = 20
 
+#: A multi-symbol panel is analysed per instrument for at most this many
+#: symbols (those with the most observations).
+_MAX_SYMBOLS = 10
+
 
 def _infer_periods_per_year(dates: pd.Series) -> tuple[int, str, float]:
     """(periods_per_year, label, median_gap_days) from observed spacing."""
@@ -166,6 +170,24 @@ class FinancialAnalysisTool(BaseTool):
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
         return domain_confidence(profile, "financial")
 
+    def default_params(
+        self, profile: DatasetProfile | None, metadata: DatasetMetadata | None
+    ) -> dict[str, Any]:
+        # The domain layer already resolved the date/price/symbol roles; a
+        # multi-ticker file analysed without its symbol column would be
+        # concatenated into one meaningless price series.
+        match = next(
+            (d for d in (profile.domains if profile else []) if d.domain == "financial"), None
+        )
+        if match is None:
+            return {}
+        params = {
+            "date_column": match.column_for("date"),
+            "price_column": match.column_for("close"),
+            "symbol_column": match.column_for("symbol"),
+        }
+        return {k: v for k, v in params.items() if v}
+
     def execute(  # type: ignore[override]
         self,
         file_path: str,
@@ -183,6 +205,14 @@ class FinancialAnalysisTool(BaseTool):
         claimed.add(date_column or "")
         price_column = price_column or resolve_column(
             df, ("adj_close", "close", "closing", "price", "nav"), claimed)
+        claimed.add(price_column or "")
+        if symbol_column is None:
+            candidate = resolve_column(
+                df, ("symbol", "ticker", "instrument", "security", "isin"), claimed)
+            # Only a column that genuinely splits the rows into several
+            # repeated series is a symbol key.
+            if candidate is not None and 2 <= df[candidate].nunique() <= len(df) / 3:
+                symbol_column = candidate
         if date_column is None or date_column not in df.columns:
             raise ToolExecutionError(
                 "No date column found. Pass date_column explicitly."
@@ -210,7 +240,10 @@ class FinancialAnalysisTool(BaseTool):
 
         if symbol_column:
             per_symbol: dict[str, Any] = {}
-            for symbol, group in working.groupby(symbol_column, sort=True):
+            symbol_counts = working[symbol_column].value_counts()
+            analysed = set(symbol_counts.head(_MAX_SYMBOLS).index)
+            capped = working[working[symbol_column].isin(analysed)]
+            for symbol, group in capped.groupby(symbol_column, sort=True):
                 metrics = _series_metrics(group, date_column, price_column)
                 if metrics is not None:
                     per_symbol[str(symbol)] = metrics
@@ -227,7 +260,14 @@ class FinancialAnalysisTool(BaseTool):
             worst_name, worst = ranked[-1]
             return {
                 "summary": (
-                    f"Analysed {len(per_symbol)} instrument(s) on '{price_column}'. "
+                    f"Analysed {len(per_symbol)} instrument(s) on '{price_column}'"
+                    + (
+                        f" (the {_MAX_SYMBOLS} with most observations of "
+                        f"{len(symbol_counts)})"
+                        if len(symbol_counts) > _MAX_SYMBOLS
+                        else ""
+                    )
+                    + ". "
                     f"Best: {best_name} ({best['total_return_pct']:+.2f}%); "
                     f"worst: {worst_name} ({worst['total_return_pct']:+.2f}%)."
                 ),
@@ -236,6 +276,7 @@ class FinancialAnalysisTool(BaseTool):
                 "price_column": price_column,
                 "symbol_column": symbol_column,
                 "instrument_count": len(per_symbol),
+                "symbols_in_data": len(symbol_counts),
                 "per_symbol": per_symbol,
                 "best_performer": {"symbol": best_name, **best},
                 "worst_performer": {"symbol": worst_name, **worst},
@@ -434,8 +475,8 @@ class FinancialAnalysisTool(BaseTool):
             "symbol_column": {
                 "type": "string",
                 "description": (
-                    "Instrument/ticker column. Supply for a multi-symbol panel so "
-                    "each instrument is analysed separately."
+                    "Instrument/ticker column. Auto-detected when omitted; a "
+                    f"multi-symbol panel is analysed per instrument (up to {_MAX_SYMBOLS})."
                 ),
                 "required": False,
             },

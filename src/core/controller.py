@@ -19,6 +19,7 @@ ARCHITECTURAL BOUNDARY:
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -37,7 +38,8 @@ from src.core.coercion import coerce_types
 from src.core.dashboard import build_dashboard, dashboard_to_json
 from src.core.degradations import collect_degradations
 from src.core.domains import infer_domains
-from src.core.findings import Finding
+from src.core.findings import Finding, score_objective_fit
+from src.core.governance import CodeGovernor, code_execution_enabled
 from src.core.io import read_any
 from src.core.memory import AnalysisStep, DatasetMetadata, MemorySystem, ToolResult
 from src.core.profiler import DatasetProfile, profile_dataframe
@@ -54,6 +56,10 @@ def _read_dataframe(file_path: str) -> pd.DataFrame:
 
 # Max retries before abandoning a failed step
 MAX_STEP_RETRIES = 2
+#: Code-running tools fail as part of normal self-correction (a wrong column
+#: name, a pandas idiom) — each failure returns a hint the next attempt uses,
+#: so they get a larger budget than a deterministic tool that is simply broken.
+MAX_CODE_STEP_RETRIES = 5
 
 # ---------------------------------------------------------------------------
 # Verbatim-metric validation (P0.7) — SYSTEM_PROMPT_CORE tells the LLM to
@@ -807,6 +813,7 @@ class ToolRegistry:
             if s > 0.0
             and not (getattr(t, "requires_ml", False) and not use_ml)
             and not (getattr(t, "requires_llm", False) and not use_llm)
+            and not (getattr(t, "executes_code", False) and not code_execution_enabled())
         ]
         relevant.sort(key=lambda ts: ts[1], reverse=True)
         return [t for t, _ in relevant]
@@ -899,6 +906,8 @@ class AgentController:
                 Path("output", "latest.txt").write_text(self._output_dir, encoding="utf-8")
             except OSError:
                 pass
+        # Governance for LLM-authored code: kill switch, per-run budget, audit log.
+        self._governor = CodeGovernor(self._output_dir, self.memory.session_id)
         # Natural-language analysis objective supplied by the user (optional).
         self.objective: str = os.getenv("USER_OBJECTIVE", "").strip()
         if self.objective:
@@ -1273,7 +1282,15 @@ class AgentController:
             use_ml=self.use_ml,
             use_llm=self.use_llm,
         )
-        self._prompt_manager = PromptManager(self.memory, tool_desc)
+        self._prompt_manager = PromptManager(self.memory, tool_desc, self.max_iterations)
+        if self.use_llm:
+            # The deterministic plan doubles as the planner's cycle-1 draft:
+            # a small model that edits a profile-grounded plan does far
+            # better than one planning from a blank page.
+            try:
+                self.memory.set_context("draft_plan", self._build_fallback_plan()["steps"])
+            except Exception:
+                pass
         self._rlm_engine = RLMEngine(
             llm_callable=self.llm_client.call,
             system_prompt=self._prompt_manager.get_system_prompt(),
@@ -1390,6 +1407,9 @@ class AgentController:
                         final_result = self._deterministic_final()
                         break
 
+                if iteration == 1:
+                    self._store_data_understanding(llm_response)
+
                 # ---- Check for completion (Stage 7 trigger) ----
                 if llm_response.get("status") == "complete":
                     if iteration < self.min_iterations:
@@ -1478,6 +1498,11 @@ class AgentController:
         # regardless of which branch produced the final answer.
         if "findings" not in final_result:
             final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
+        if self.memory.get_context("data_understanding"):
+            final_result.setdefault("data_understanding", self.memory.get_context("data_understanding"))
+        governance = self._governor.summary()
+        self.memory.set_context("governance", governance)
+        final_result["governance"] = governance
         try:
             agenda = self.memory.get_context("question_agenda") or []
             final_result["coverage"] = coverage_report(
@@ -1512,6 +1537,39 @@ class AgentController:
     # Resilience helpers — plan parsing and LLM-failure fallbacks
     # ------------------------------------------------------------------
 
+    #: Caps on the planner's cycle-1 data_understanding block — it is carried
+    #: into every later prompt, so an over-long answer taxes every cycle.
+    _UNDERSTANDING_TEXT_KEYS = ("subject", "domain", "time_column")
+    _UNDERSTANDING_LIST_KEYS = ("key_measures", "key_dimensions", "caveats", "questions")
+
+    def _store_data_understanding(self, llm_response: dict[str, Any]) -> None:
+        """Keep the planner's cycle-1 `data_understanding`, bounded, in
+        memory context: the prompts carry it forward and the reports can
+        show how the agent read the data. Column lists are filtered to real
+        columns so a hallucinated name never propagates."""
+        raw = llm_response.get("data_understanding")
+        if not isinstance(raw, dict):
+            return
+        columns = set(self.memory.dataset_metadata.columns) if self.memory.dataset_metadata else set()
+        clean: dict[str, Any] = {}
+        for key in self._UNDERSTANDING_TEXT_KEYS:
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip() and value.strip().lower() != "null":
+                clean[key] = value.strip()[:160]
+        if clean.get("time_column") and clean["time_column"] not in columns:
+            clean.pop("time_column")
+        for key in self._UNDERSTANDING_LIST_KEYS:
+            values = raw.get(key)
+            if not isinstance(values, list):
+                continue
+            items = [str(v).strip()[:160] for v in values if str(v).strip()]
+            if key in ("key_measures", "key_dimensions"):
+                items = [v for v in items if v in columns]
+            if items:
+                clean[key] = items[:6]
+        if clean:
+            self.memory.set_context("data_understanding", clean)
+
     def _parse_steps(self, llm_response: dict[str, Any]) -> list[AnalysisStep]:
         """
         Parse LLM plan steps, skipping malformed entries instead of crashing.
@@ -1529,12 +1587,25 @@ class AgentController:
             if not isinstance(s, dict):
                 continue
             tool_name = s.get("tool_name")
-            if not isinstance(tool_name, str) or not tool_name:
+            if not isinstance(tool_name, str) or not tool_name.strip():
                 continue
-            if not self.tool_registry.has(tool_name):
+            # Small models decorate names ("functions.clean_data", " Clean_Data").
+            tool_name = tool_name.strip().split(".")[-1]
+            if not self.tool_registry.has(tool_name) and self.tool_registry.has(tool_name.lower()):
+                tool_name = tool_name.lower()
+            if not self.tool_registry.has(tool_name) or (
+                getattr(self.tool_registry.get(tool_name), "executes_code", False)
+                and not code_execution_enabled()
+            ):
                 rejected.append(tool_name)
                 continue
             parameters = s.get("parameters", {})
+            if isinstance(parameters, str):
+                # ...and sometimes send the parameter object as a JSON string.
+                try:
+                    parameters = json.loads(parameters)
+                except json.JSONDecodeError:
+                    parameters = {}
             if not isinstance(parameters, dict):
                 parameters = {}
             step_number = s.get("step_number")
@@ -1893,6 +1964,43 @@ class AgentController:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _code_of(tool: Any, params: dict[str, Any]) -> str:
+        """The LLM-authored code a code-executing step runs: inline for
+        execute_dynamic_code/define_analysis_tool, the spec body for a
+        generated tool."""
+        code = params.get("code")
+        if isinstance(code, str):
+            return code
+        spec = getattr(tool, "spec", None)
+        return str(getattr(spec, "code", "") or "")
+
+    def _resolve_file_path(self, tool: Any, params: dict[str, Any]) -> dict[str, Any]:
+        """
+        The planner may omit file_path (the system prompt tells it to) or
+        name a derived dataset instead of giving its path. Fill in the raw
+        dataset path — BaseTool.prepare_params then redirects it to the
+        cleaned file — or the derived dataset's path.
+        """
+        try:
+            schema = tool.get_schema()
+        except Exception:
+            schema = {}
+        if "file_path" not in schema:
+            return params
+        params = dict(params)
+        derived = self.memory.get_context("derived_datasets") or {}
+        current = params.get("file_path")
+        if isinstance(current, str) and current in derived:
+            params["file_path"] = derived[current]["path"]
+        elif not current and self.memory.dataset_metadata is not None:
+            params["file_path"] = self.memory.dataset_metadata.file_path
+        return params
+
+    #: Params injected from run state (not chosen by the planner) that must
+    #: not key the step cache — they change every step and are large.
+    _CACHE_EXCLUDED_PARAMS = frozenset({"prior_results", "_prior_results"})
+
+    @staticmethod
     def _step_cache_key(tool_name: str, params: dict[str, Any]) -> str:
         """
         Content-address a step: same tool, same resolved params, same input
@@ -1901,6 +2009,8 @@ class AgentController:
         """
         parts = [tool_name]
         for key in sorted(params):
+            if key in AgentController._CACHE_EXCLUDED_PARAMS:
+                continue
             value = params[key]
             parts.append(f"{key}={value!r}")
             if isinstance(value, str):
@@ -1921,10 +2031,16 @@ class AgentController:
         """
         total_steps = len(steps)
         for idx, step in enumerate(steps, 1):
-            if self._tool_failure_counts.get(step.tool_name, 0) >= MAX_STEP_RETRIES:
+            budget = (
+                MAX_CODE_STEP_RETRIES
+                if self.tool_registry.has(step.tool_name)
+                and getattr(self.tool_registry.get(step.tool_name), "executes_code", False)
+                else MAX_STEP_RETRIES
+            )
+            if self._tool_failure_counts.get(step.tool_name, 0) >= budget:
                 console.print(
                     f"  [yellow]⏭ Step {step.step_number}: {step.tool_name} skipped "
-                    f"(exceeded {MAX_STEP_RETRIES} retries).[/]"
+                    f"(exceeded {budget} retries).[/]"
                 )
                 skip_result = ToolResult(
                     tool_name=step.tool_name,
@@ -1932,7 +2048,7 @@ class AgentController:
                     output={
                         "summary": (
                             f"Skipped: '{step.tool_name}' already failed "
-                            f"{MAX_STEP_RETRIES} times. Do not plan it again."
+                            f"{budget} times. Do not plan it again."
                         )
                     },
                 )
@@ -1969,7 +2085,27 @@ class AgentController:
             # (best_model_path, forced test_size, report result injection)
             # all live on the tool itself instead of growing this if-ladder
             # every time a new tool needs to plug into the pipeline.
-            params = tool.prepare_params(step.parameters, self.memory, self._output_dir)
+            params = tool.prepare_params(
+                self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
+            )
+
+            executes_code = getattr(tool, "executes_code", False)
+            if executes_code:
+                refusal = self._governor.refusal_reason()
+                if refusal:
+                    console.print(f"  [yellow]⛔ Step {step.step_number}: {step.tool_name} refused — {refusal}[/]")
+                    self._governor.record(
+                        tool_name=step.tool_name, code=self._code_of(tool, params), params=params,
+                        status="refused", iteration=self.memory.iteration_count,
+                        step_number=step.step_number, error=refusal, refused=True,
+                    )
+                    refused_result = ToolResult(
+                        tool_name=step.tool_name, status="skipped",
+                        output={"summary": f"Refused by governance policy: {refusal}"},
+                    )
+                    self.memory.append_tool_result(refused_result)
+                    self.memory.mark_step_complete(step.step_number, refused_result)
+                    continue
 
             cache_key = self._step_cache_key(step.tool_name, params)
             cached = self._step_cache.get(cache_key)
@@ -1978,12 +2114,22 @@ class AgentController:
                     f"  [dim]↺ Step {step.step_number}: {step.tool_name} — "
                     f"identical to a prior successful step, reusing its result.[/]"
                 )
-                # Reuse the cached ToolResult object directly
-                result = cached
+                # Shallow-copy before `.iteration` is retagged below — `cached`
+                # is the same object already in memory.tool_results from its
+                # original cycle, and get_results_summary_digest splits
+                # "current" vs "earlier" on that field.
+                result = copy.copy(cached)
             else:
                 result = tool.run(**params)
                 if result.status == "success":
                     self._step_cache[cache_key] = result
+                if executes_code:
+                    self._governor.record(
+                        tool_name=step.tool_name, code=self._code_of(tool, params), params=params,
+                        status=result.status, iteration=self.memory.iteration_count,
+                        step_number=step.step_number, output=result.output,
+                        error=result.error_message,
+                    )
             result.iteration = self.memory.iteration_count
             self.memory.append_tool_result(result)
             self.memory.mark_step_complete(step.step_number, result)
@@ -2001,12 +2147,29 @@ class AgentController:
                     new_findings = []
                     console.print(f"  [yellow]⚠ findings() failed for {step.tool_name} (non-fatal): {exc}[/]")
                 if new_findings:
+                    seen_ids = {f.finding_id for f in self.memory.findings}
                     for i, finding in enumerate(new_findings):
                         if not finding.finding_id:
                             finding.finding_id = f"{step.tool_name}_{step.step_number}_{i}"
+                        # Charts and reports key on finding_id; the same tool
+                        # run twice (e.g. dsa.run on two frames) must not collide.
+                        if finding.finding_id in seen_ids:
+                            finding.finding_id = f"{finding.finding_id}_i{self.memory.iteration_count}s{step.step_number}_{i}"
+                        seen_ids.add(finding.finding_id)
                         if not finding.source_tool:
                             finding.source_tool = step.tool_name
+                        if self.objective:
+                            finding.objective_fit = score_objective_fit(finding, self.objective)
                     self.memory.add_findings(new_findings)
+
+                derived = result.output.get("derived_dataset")
+                if isinstance(derived, dict) and derived.get("name") and derived.get("path"):
+                    registry = dict(self.memory.get_context("derived_datasets") or {})
+                    registry[str(derived["name"])] = derived
+                    self.memory.set_context("derived_datasets", registry)
+                    console.print(
+                        f"  [dim]Derived dataset '{derived['name']}' → {derived['path']}[/]"
+                    )
 
             # Round 8 — dynamic tool creation. define_analysis_tool's own
             # execute() is pure (per AGENTS.md's layer rule, it never touches
@@ -2310,6 +2473,19 @@ class AgentController:
             meta_pool: set[str] = set()
             _collect_numbers(self.memory.dataset_metadata.__dict__, meta_pool)
             global_pool |= meta_pool
+        # Findings are computed by tool code from tool output (ratios, shares,
+        # differences), and the synthesis prompt tells the LLM to copy their
+        # numbers — a derived headline number is verified, not invented.
+        # Scope of the guarantee: `custom_analysis` findings come from
+        # LLM-authored sandbox code, so their numbers are verified as "computed
+        # by code that actually ran on the data", not as "produced by a
+        # built-in tool". This check catches numbers invented at synthesis
+        # time; the audit log (governance.py) is the record of what that code was.
+        for f in self.memory.findings:
+            finding_pool: set[str] = set()
+            _collect_numbers([f.headline, f.detail, f.evidence, f.effect], finding_pool)
+            per_tool.setdefault(f.source_tool, set()).update(finding_pool)
+            global_pool |= finding_pool
         return global_pool, per_tool
 
     def _flag_unverified_claims(self, final_result: dict[str, Any]) -> list[str]:

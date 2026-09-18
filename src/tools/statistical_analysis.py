@@ -79,6 +79,18 @@ _EFFECT_KIND_THRESHOLDS: dict[str, float] = {
     "epsilon_squared": PRACTICAL_THRESHOLD_ETA2,
 }
 
+#: A "large" effect per metric (Cohen's conventions). Effect sizes of
+#: different kinds are not on one scale — d=0.5 and V=0.3 are both
+#: "medium" — so family ranking compares each against its own large value.
+_EFFECT_KIND_LARGE: dict[str, float] = {
+    "cohens_d": 0.8,
+    "hedges_g": 0.8,
+    "rank_biserial": 0.5,
+    "cramers_v": 0.3,
+    "eta_squared": 0.14,
+    "epsilon_squared": 0.14,
+}
+
 #: Findings below this p_adjusted are candidates for the finding bus (7.6
 #: item 4) — matches the tool's own default alpha.
 _FINDING_P_THRESHOLD = 0.05
@@ -459,15 +471,24 @@ class SelectStatisticalTestTool(BaseTool):
                 "effect_kind": r["effect_size_metric"],
                 "p_value": r["p_value"],
                 "n": totals[dim],
+                "interpretation": r.get("interpretation", ""),
             }
             for dim, r in raw_results.items()
         ]
         corrected = apply_benjamini_hochberg(pvalue_tests, alpha=alpha)
-        # Rank by effect size (magnitude), not p-value — a family of tests
-        # can include several significant-but-negligible pairings once BH
-        # correction is applied to enough of them; effect size is what
-        # actually answers "which pairing matters" (7.6 item 2).
-        ranked = sorted(corrected, key=lambda e: (-abs(e["effect_size"]), e["p_adjusted"]))
+        # Pairings that survive BH correction first; within that, by effect
+        # size normalised to its own metric's "large" value — raw effect
+        # sizes of different kinds (d vs V vs eta2) are not comparable, and
+        # a family of tests can include several significant-but-negligible
+        # pairings once BH is applied to enough of them (7.6 item 2).
+        ranked = sorted(
+            corrected,
+            key=lambda e: (
+                not e["significant_after_correction"],
+                -abs(e["effect_size"]) / _EFFECT_KIND_LARGE.get(e["effect_kind"], 0.8),
+                e["p_adjusted"],
+            ),
+        )
 
         top_group = ranked[0]["group_column"]
         result = dict(raw_results[top_group])
@@ -729,6 +750,7 @@ class SelectStatisticalTestTool(BaseTool):
                     "p_value": p.get("p_value"),
                     "p_adjusted": p.get("p_adjusted"),
                     "n": p.get("n"),
+                    "interpretation": p.get("interpretation", ""),
                 }
                 for p in family
             ]
@@ -747,6 +769,7 @@ class SelectStatisticalTestTool(BaseTool):
                 # significance bar consistent with `significant` above.
                 "p_adjusted": output.get("p_value"),
                 "n": None,
+                "interpretation": output.get("interpretation", ""),
             }]
 
         results: list[Finding] = []
@@ -768,7 +791,7 @@ class SelectStatisticalTestTool(BaseTool):
                 finding_id=f"{self.name}:{measure}:{dimension}",
                 kind="test",
                 headline=headline,
-                detail=output.get("interpretation", ""),
+                detail=c["interpretation"],
                 evidence={
                     "test_name": c["test_name"],
                     "p_value": c["p_value"],

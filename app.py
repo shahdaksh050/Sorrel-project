@@ -853,11 +853,11 @@ def _stage_card(num: str, name: str,
     """One row of the stage ledger. Numbered: the pipeline is a real sequence."""
     cls = {"done": "done", "active": "active",
            "skipped": "skip", "error": "err"}.get(status, "")
-    det = f'<span class="detail">{detail}</span>' if detail else ""
+    det = f'<span class="detail">{html.escape(str(detail))}</span>' if detail else ""
     aria = ' aria-live="polite"' if status == "active" else ""
     return (f'<div class="sc {cls}"{aria}>'
             f'<span class="sc-num">{num.zfill(2)}</span>'
-            f'<span class="nm">{name}</span>{det}</div>')
+            f'<span class="nm">{html.escape(str(name))}</span>{det}</div>')
 
 
 def _render_steps_list(stage_log: list[tuple[str, str, str]]) -> str:
@@ -932,7 +932,9 @@ def _gauge(label: str, value: str, sub: str = "", *, flag: bool = False) -> str:
     steps down rather than wrapping mid-word and pulling the strip's rules out
     of alignment.
     """
+    value = str(value)
     fit = "" if len(value) <= 11 else " long" if len(value) <= 18 else " longer"
+    value, label, sub = html.escape(value), html.escape(str(label)), html.escape(str(sub))
     sub_html = f'<div class="s">{sub}</div>' if sub else ""
     return (f'<div class="gauge{fit}{" flag" if flag else ""}">'
             f'<div class="v">{value}</div>'
@@ -956,9 +958,9 @@ def _section(title: str, note: str = "", level: str = "h3") -> None:
 
     No tracked-caps label floats above it — the rule is the structure.
     """
-    note_html = f'<div class="note">{note}</div>' if note else ""
+    note_html = f'<div class="note">{html.escape(str(note))}</div>' if note else ""
     st.markdown(
-        f'<div class="sect"><{level}>{title}</{level}>{note_html}</div>',
+        f'<div class="sect"><{level}>{html.escape(str(title))}</{level}>{note_html}</div>',
         unsafe_allow_html=True,
     )
 
@@ -1318,7 +1320,7 @@ def _render_agent_grid(
                 </summary>
                 <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed var(--rule); font-size: 0.95rem;">
                     <div style="margin-bottom: 0.5rem;"><strong>Rule:</strong> {ag['desc']}</div>
-                    <div style="color: var(--pen); font-weight: 600;"><strong>Found:</strong> {agent_output}</div>
+                    <div style="color: var(--pen); font-weight: 600;"><strong>Found:</strong> {html.escape(str(agent_output))}</div>
                 </div>
             </details>
         </div>
@@ -1345,7 +1347,7 @@ def _render_handoff_stream(progress_lines: list[str], tool_results: list[dict[st
             items_html.append(f"""
             <div class="handoff-item">
                 <div class="handoff-meta">{meta}</div>
-                <div class="handoff-text">{clean_text}</div>
+                <div class="handoff-text">{html.escape(clean_text)}</div>
             </div>
             """.strip())
     elif tool_results:
@@ -1356,8 +1358,8 @@ def _render_handoff_stream(progress_lines: list[str], tool_results: list[dict[st
             time_ms = r.get("execution_time_ms", 0)
             items_html.append(f"""
             <div class="handoff-item">
-                <div class="handoff-meta">{name} · {status} · {time_ms:.0f}ms</div>
-                <div class="handoff-text">{summary}</div>
+                <div class="handoff-meta">{html.escape(str(name))} · {html.escape(str(status))} · {time_ms:.0f}ms</div>
+                <div class="handoff-text">{html.escape(str(summary))}</div>
             </div>
             """.strip())
     else:
@@ -2478,7 +2480,7 @@ if st.session_state.get("analysis_done"):
             st.caption(f"⚠ {len(_unanswered)} question(s) considered, not answered.")
             with st.expander("What wasn't answered, and why"):
                 for _u in _unanswered:
-                    st.markdown(f"- {html.escape(str(_u.get('text', '')))}")
+                    st.markdown(f"- {_u.get('text', '')}")
 
         # ── Ask a follow-up question (IMPROVEMENTS.md 7.20, scoped down):
         # a plain keyword search over the finding bus — no new tool calls,

@@ -120,17 +120,35 @@ def axis_format(unit_hint: str | None) -> dict[str, str]:
     return dict(_UNIT_FORMATS.get(unit_hint or "", {}))
 
 
+#: Short tokens that read as acronyms, not words, once a column is humanised.
+_ACRONYMS: frozenset[str] = frozenset(
+    {"id", "usd", "eur", "gbp", "inr", "kpi", "roi", "gdp", "pca", "rfm", "url", "sku", "ltv", "cac", "aov"}
+)
+
+
+def humanize_label(name: str) -> str:
+    """Raw column/field name -> readable label: `revenue_usd` -> "Revenue USD".
+
+    Underscores become spaces; all-lowercase words are capitalised; words the
+    author already cased (`MRR`, `iPhone`) are left alone. The one helper for
+    every chart title, axis title and tooltip title.
+    """
+    words = str(name).replace("_", " ").split()
+    return " ".join(
+        w.upper() if w.lower() in _ACRONYMS else (w.capitalize() if w.islower() else w)
+        for w in words
+    )
+
+
 def humanize_axis_title(column: str, unit_hint: str | None = None) -> str:
     """Human-readable axis/tooltip title for a raw column name.
 
-    Title-cases the column name and replaces underscores with spaces, then
-    appends a unit suffix for a known currency/percent hint — e.g. a column
-    literally named `amount` with `unit_hint == "currency"` becomes
-    `"Amount ($)"` instead of the bare string `"amount"`. `count`/`None`
-    get no suffix (a plain, already-legible title is left alone).
+    `humanize_label` plus a unit suffix for a known currency/percent hint —
+    e.g. a column literally named `amount` with `unit_hint == "currency"`
+    becomes `"Amount ($)"` instead of the bare string `"amount"`.
+    `count`/`None` get no suffix (a plain, already-legible title is left alone).
     """
-    title = column.replace("_", " ").strip().title()
-    return title + _UNIT_TITLE_SUFFIX.get(unit_hint or "", "")
+    return humanize_label(column) + _UNIT_TITLE_SUFFIX.get(unit_hint or "", "")
 
 
 def vega_config(dark: bool = False) -> dict[str, Any]:

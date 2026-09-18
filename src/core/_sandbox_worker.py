@@ -11,9 +11,13 @@ from __future__ import annotations
 import builtins as _builtins_module
 import contextlib
 import datetime
+import difflib
 import io
 import json
+import os
+import re
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -22,20 +26,27 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.core.chart_spec import validate_chart_spec
 from src.core.io import read_any
 from src.core.profiler import profile_dataframe
 from src.core.sandbox import (
-    ALLOWED_MODULES,
     ALLOWED_MODULES_TEXT,
     BLOCKED_BUILTIN_NAMES,
     RESERVED_GLOBAL_NAMES,
     RESULT_VAR_NAME,
     STDOUT_CAP_CHARS,
+    _blocked_module,
 )
+from src.core.sandbox_toolkit import Toolkit, frame_for_disk
 
 #: Optional companion to RESULT — a top-level `FINDING = {...}` in the
 #: sandboxed code, JSON-converted the same way RESULT is. Never required.
 FINDING_VAR_NAME: str = "FINDING"
+
+#: Optional declarative chart (src/core/chart_spec.py) and optional derived
+#: DataFrame to persist — both never required.
+CHART_VAR_NAME: str = "CHART"
+DF_OUT_VAR_NAME: str = "DF_OUT"
 
 #: `src.*` is importable here because run_sandboxed (src/core/sandbox.py)
 #: sets PYTHONPATH to the repo root on this subprocess's environment —
@@ -88,6 +99,8 @@ def _json_default(value: Any) -> Any:
 def _restricted_import(
     real_import: Any,
 ) -> Any:
+    # Only the sandboxed code's own `import` statements come through here —
+    # library-internal imports resolve against each library's real builtins.
     def _import(
         name: str,
         globals: dict[str, Any] | None = None,
@@ -95,15 +108,113 @@ def _restricted_import(
         fromlist: tuple[str, ...] = (),
         level: int = 0,
     ) -> Any:
-        top_level = name.split(".")[0]
-        if top_level not in ALLOWED_MODULES:
+        if level or _blocked_module(name) or any(
+            str(item).startswith("_") or _blocked_module(f"{name}.{item}") for item in fromlist or ()
+        ):
             raise ImportError(
-                f"Only {ALLOWED_MODULES_TEXT} are available. "
-                f"Import of '{name}' is not permitted in the sandbox."
+                f"Only {ALLOWED_MODULES_TEXT} are available (without their I/O "
+                f"submodules). Import of '{name}' is not permitted in the sandbox."
             )
         return real_import(name, globals, locals, fromlist, level)
 
     return _import
+
+
+class SandboxPolicyError(PermissionError):
+    """Raised by the runtime audit hook. A PermissionError so library code
+    that already tolerates an unwritable path (e.g. bytecode caching) keeps
+    working, while the sandboxed code sees a clear, fixable message."""
+
+
+#: Audit events denied outright once sandboxed code starts: process
+#: creation, networking, raw memory access, environment mutation, registry.
+_DENIED_EVENTS: frozenset[str] = frozenset({
+    "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty",
+    "os.startfile", "os.kill", "os.killpg", "os.putenv", "os.unsetenv",
+    "subprocess.Popen", "_winapi.CreateProcess", "pty.spawn",
+    "socket.connect", "socket.bind", "socket.getaddrinfo", "socket.gethostbyname",
+    "socket.gethostbyaddr", "socket.sendto", "socket.sendmsg", "urllib.Request",
+    "webbrowser.open", "ctypes.cdata", "ctypes.cdata/buffer", "ctypes.string_at",
+    "ctypes.wstring_at",
+})
+# Not denied, deliberately: sys._getframe (pandas warnings, namedtuple),
+# object.__setattr__ (lazy library imports patch classes) and ctypes.dlopen
+# (threadpoolctl inspects BLAS) are routine library behaviour; the static
+# `_`-attribute ban already keeps sandboxed code itself away from them.
+_DENIED_PREFIXES: tuple[str, ...] = ("winreg.", "msvcrt.", "_posixsubprocess.")
+
+#: Filesystem-mutating events: allowed only inside the scratch dir.
+_PATH_WRITE_EVENTS: frozenset[str] = frozenset({
+    "os.remove", "os.rename", "os.rmdir", "os.mkdir", "os.chmod", "os.chown",
+    "os.link", "os.symlink", "os.truncate", "os.utime", "shutil.rmtree",
+    "shutil.copyfile", "shutil.copytree", "shutil.move", "shutil.make_archive",
+})
+#: Directory-listing events: allowed wherever reads are.
+_PATH_READ_EVENTS: frozenset[str] = frozenset({"os.listdir", "os.scandir", "glob.glob"})
+
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+
+
+def _install_runtime_policy(scratch_dir: Path) -> None:
+    """
+    Install the sandbox's runtime policy as a sys.addaudithook hook. Called
+    immediately before exec; audit hooks cannot be removed, so the policy
+    holds for everything the process does afterwards — sandboxed code, the
+    libraries it calls, dsa.run tools, and result serialisation.
+
+    Reads are allowed from the scratch dir, the interpreter's own library
+    directories (lazy imports, tz data) and the project's src/ package
+    (dsa.run imports tools lazily); writes only inside the scratch dir.
+    """
+    scratch = scratch_dir.resolve()
+    read_roots = {scratch, Path(__file__).resolve().parents[1]}  # src/
+    for prefix in {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}:
+        read_roots.add(Path(prefix).resolve())
+
+    def _within(raw: Any, roots: set[Path]) -> bool:
+        if isinstance(raw, int):
+            return True  # an already-open descriptor; opening it was checked
+        try:
+            path = Path(os.fsdecode(raw))
+            path = (path if path.is_absolute() else scratch / path).resolve()
+        except (TypeError, ValueError, OSError):
+            return False
+        return any(path == root or root in path.parents for root in roots)
+
+    busy = threading.local()
+
+    def _hook(event: str, args: tuple[Any, ...]) -> None:
+        # Path resolution below can raise audit events of its own; checking
+        # those recursively would loop, and they only serve this check.
+        if getattr(busy, "active", False):
+            return
+        busy.active = True
+        try:
+            _check(event, args)
+        finally:
+            busy.active = False
+
+    def _check(event: str, args: tuple[Any, ...]) -> None:
+        if event in _DENIED_EVENTS or event.startswith(_DENIED_PREFIXES):
+            raise SandboxPolicyError(f"Sandbox policy: '{event}' is not permitted.")
+        if event == "open":
+            path, mode, flags = (*args, None, None, None)[:3]
+            writes = (
+                any(c in str(mode) for c in "wax+") if isinstance(mode, str)
+                else bool(isinstance(flags, int) and flags & _WRITE_FLAGS)
+            )
+            if not _within(path, {scratch} if writes else read_roots):
+                raise SandboxPolicyError(
+                    f"Sandbox policy: {'writing' if writes else 'reading'} files outside the "
+                    "sandbox is not permitted. df is already loaded; use DF_OUT to save data."
+                )
+        elif event in _PATH_WRITE_EVENTS:
+            if not all(_within(a, {scratch}) for a in args[:2] if isinstance(a, (str, bytes, os.PathLike))):
+                raise SandboxPolicyError(f"Sandbox policy: '{event}' outside the sandbox is not permitted.")
+        elif event in _PATH_READ_EVENTS and args and not _within(args[0], read_roots):
+            raise SandboxPolicyError(f"Sandbox policy: '{event}' outside the sandbox is not permitted.")
+
+    sys.addaudithook(_hook)
 
 
 def _build_restricted_builtins() -> dict[str, Any]:
@@ -121,12 +232,15 @@ def _build_restricted_globals(
     schema: dict[str, str],
     extra_globals: dict[str, Any] | None = None,
     prior_results: dict[str, Any] | None = None,
+    toolkit: Toolkit | None = None,
 ) -> dict[str, Any]:
     restricted: dict[str, Any] = {
         "df": df,
         "SCHEMA": schema,
         "PRIOR_RESULTS": prior_results if prior_results is not None else {},
     }
+    if toolkit is not None:
+        restricted["dsa"] = toolkit
     if extra_globals:
         # The parent process (run_sandboxed) already rejects any key
         # colliding with RESERVED_GLOBAL_NAMES before this subprocess is
@@ -157,11 +271,60 @@ def _error_payload(
     }
 
 
+def _runtime_hint(exc: Exception, code: str, df: pd.DataFrame) -> str:
+    """Error type + message, the failing line of the user's code, and for a
+    KeyError the closest real column names — small models fix code far more
+    reliably when told where it broke and what the column is actually called."""
+    message = str(exc)
+    msg_snippet = f": {message[:180]}…" if len(message) > 180 else (f": {message}" if message else "")
+    hint = f"{type(exc).__name__}{msg_snippet}"
+
+    # <sandboxed_code> has no linecache entry, so read the line from `code`.
+    lineno = None
+    for frame in traceback.extract_tb(exc.__traceback__):
+        if frame.filename == "<sandboxed_code>":
+            lineno = frame.lineno
+    lines = code.splitlines()
+    if lineno is not None and 0 < lineno <= len(lines):
+        hint += f" (line {lineno}: {lines[lineno - 1].strip()[:160]})"
+
+    if isinstance(exc, KeyError) and exc.args:
+        columns = [str(c) for c in df.columns]
+        key = str(exc.args[0])
+        names = re.findall(r"'([^']+)'", key) if "not in index" in key else [key]
+        for name in names:
+            if name in columns:
+                continue
+            close = difflib.get_close_matches(name, columns, n=5, cutoff=0.5)
+            hint += (
+                f" '{name}' is not a column of df; closest: {close}." if close
+                else f" df columns are: {columns[:30]}."
+            )
+    return hint
+
+
+def _save_derived(value: Any, derived_output_path: str | None) -> dict[str, Any]:
+    """Persist DF_OUT for the parent to copy out. The worker writes it — user
+    code never gets file access."""
+    if not isinstance(value, pd.DataFrame):
+        return {"derived_error": f"DF_OUT must be a pandas DataFrame, got {type(value).__name__}."}
+    if not derived_output_path:
+        return {"derived_error": "DF_OUT was set but this call does not save derived data (pass save_as)."}
+    frame = frame_for_disk(value)
+    try:
+        frame.to_parquet(derived_output_path, index=False)
+    except Exception as exc:
+        return {"derived_error": f"Could not save DF_OUT as parquet: {exc}"}
+    return {"derived_rows": len(frame), "derived_columns": [str(c) for c in frame.columns]}
+
+
 def _execute(
     code: str,
     dataset_ref: str,
     extra_globals: dict[str, Any] | None = None,
     prior_results: dict[str, Any] | None = None,
+    scratch_dir: str | None = None,
+    derived_output_path: str | None = None,
 ) -> dict[str, Any]:
     t0 = time.perf_counter()
 
@@ -173,14 +336,17 @@ def _execute(
         )
 
     schema = _build_schema(df)
+    toolkit = Toolkit(df, scratch_dir or Path.cwd())
     restricted_globals = _build_restricted_globals(
-        df, schema, extra_globals, prior_results
+        df, schema, extra_globals, prior_results, toolkit
     )
     stdout_buf = io.StringIO()
 
     try:
+        compiled = compile(code, "<sandboxed_code>", "exec")
+        _install_runtime_policy(Path(scratch_dir or Path.cwd()))
         with contextlib.redirect_stdout(stdout_buf):
-            exec(compile(code, "<sandboxed_code>", "exec"), restricted_globals)
+            exec(compiled, restricted_globals)
     except ImportError as exc:
         return _error_payload(
             "import_blocked", traceback.format_exc(), str(exc), t0, stdout_buf.getvalue()
@@ -197,12 +363,12 @@ def _execute(
         # Every failure should carry an actionable hint, not just a raw
         # traceback — lightweight models are markedly worse at
         # self-diagnosing tracebacks unassisted.
-        exc_type = type(exc).__name__
-        message = str(exc)
-        msg_snippet = f": {message[:180]}…" if len(message) > 180 else (f": {message}" if message else "")
-        hint = f"{exc_type}{msg_snippet}"
         return _error_payload(
-            "runtime", traceback.format_exc(), hint, t0, stdout_buf.getvalue()
+            "runtime",
+            traceback.format_exc(),
+            _runtime_hint(exc, code, df),
+            t0,
+            stdout_buf.getvalue(),
         )
 
     if RESULT_VAR_NAME not in restricted_globals:
@@ -241,10 +407,27 @@ def _execute(
         except Exception:
             finding_payload = None
 
+    # CHART and DF_OUT are optional too: a bad one is reported back as
+    # chart_error / derived_error, never turned into an execution failure.
+    chart, chart_error = None, None
+    raw_chart = restricted_globals.get(CHART_VAR_NAME)
+    if raw_chart is not None:
+        chart, chart_error = validate_chart_spec(raw_chart)
+        if chart is not None and isinstance(raw_chart, dict) and raw_chart.get("truncated"):
+            chart["truncated"] = True  # a dsa.chart spec was already capped once
+
+    derived: dict[str, Any] = {}
+    if restricted_globals.get(DF_OUT_VAR_NAME) is not None:
+        derived = _save_derived(restricted_globals[DF_OUT_VAR_NAME], derived_output_path)
+
     return {
         "status": "ok",
         "result": converted,
         "finding": finding_payload,
+        "chart": chart,
+        "chart_error": chart_error,
+        "tool_findings": toolkit.collected_findings(),
+        **derived,
         "stdout": _cap(stdout_buf.getvalue()),
         "error_type": None,
         "traceback": None,
@@ -256,11 +439,15 @@ def _execute(
 def main() -> None:
     input_path, result_path = sys.argv[1], sys.argv[2]
     payload_in = json.loads(Path(input_path).read_text(encoding="utf-8"))
+    # input.json lives in the scratch dir under both backends (host temp dir
+    # for SubprocessSandbox, /scratch for DockerSandbox, whose cwd is /app).
     result = _execute(
         payload_in["code"],
         payload_in["dataset_ref"],
         payload_in.get("extra_globals"),
         payload_in.get("prior_results"),
+        scratch_dir=str(Path(input_path).parent),
+        derived_output_path=payload_in.get("derived_output_path"),
     )
     Path(result_path).write_text(
         json.dumps(result, default=_json_default), encoding="utf-8"

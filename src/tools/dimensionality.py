@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from src.core.findings import Finding
+from src.core.profiler import profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.clustering import _select_cluster_features
 from src.tools.data_processing import _read_df
@@ -56,7 +57,7 @@ class DimensionalityAnalysisTool(BaseTool):
         df = _read_df(file_path)
         if target_column and target_column in df.columns:
             df = df.drop(columns=[target_column])
-        features = _select_cluster_features(df)
+        features = _select_cluster_features(df, profile_dataframe(df), None)
 
         if features.shape[1] < 2:
             raise ToolExecutionError(

@@ -257,9 +257,15 @@ def load_persisted_tools(output_root: str, dataset_fingerprint: str) -> list[Gen
         if payload.get("dataset_fingerprint") != dataset_fingerprint:
             continue
         try:
-            specs.append(GeneratedToolSpec.from_dict(payload))
+            spec = GeneratedToolSpec.from_dict(payload)
         except KeyError:
             continue
+        # A spec file on disk is editable by anyone with filesystem access and
+        # may predate the current sandbox policy — validation gates every
+        # entry into the registry, not just the moment the code was authored.
+        if not isinstance(spec.code, str) or _static_check(spec.code) is not None:
+            continue
+        specs.append(spec)
     return specs
 
 

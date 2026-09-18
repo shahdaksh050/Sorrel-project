@@ -19,6 +19,7 @@ so rather than letting a reader infer the stronger claim.
 """
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -43,6 +44,14 @@ _INACTIVE_TOKENS = frozenset(
      "separated", "quit", "churned", "no", "false", "0"}
 )
 _ACTIVE_TOKENS = frozenset({"active", "employed", "current", "yes", "true", "1"})
+#: Affirmative tokens. Their meaning depends on the column: "Attrition=Yes"
+#: means the person left, "Active=Yes" means they stayed.
+_AFFIRMATIVE_TOKENS = frozenset({"yes", "true", "1", "y"})
+#: Column-name fragments marking a departure flag (affirmative = departed).
+_DEPARTURE_NAME_TOKENS = (
+    "attrition", "left", "churn", "terminated", "exited", "quit",
+    "separated", "resigned",
+)
 
 _TOP_N = 12
 
@@ -118,16 +127,35 @@ def _pay_gap_between(
     return levels, gap
 
 
+def _is_departure_named(name: object) -> bool:
+    """True when the column name says an affirmative value means departed."""
+    parts = re.split(r"[^a-z]+", str(name).lower())
+    return any(p in _DEPARTURE_NAME_TOKENS for p in parts) or any(
+        t in str(name).lower() for t in ("attrition", "churn")
+    )
+
+
 def _resolve_status(series: pd.Series) -> pd.Series | None:
-    """Map a status/attrition column to True=departed, False=active."""
+    """Map a status/attrition column to True=departed, False=active.
+
+    Polarity comes from the column name: on a departure-named column
+    (Attrition, Left, Churn, ...) yes/true/1 means departed; on a
+    status/active-named column yes/true/1 means still employed.
+    """
+    departure = _is_departure_named(series.name)
     if pd.api.types.is_bool_dtype(series):
-        return series.astype(bool)
+        flags = series.astype(bool)
+        return flags if departure else ~flags
     tokens = series.dropna().astype(str).str.strip().str.lower()
     if tokens.empty:
         return None
     distinct = set(tokens.unique())
     if distinct & _INACTIVE_TOKENS or distinct & _ACTIVE_TOKENS:
-        return series.astype(str).str.strip().str.lower().isin(_INACTIVE_TOKENS)
+        normalised = series.astype(str).str.strip().str.lower()
+        if departure:
+            inactive = (_INACTIVE_TOKENS - {"no", "false", "0"}) | _AFFIRMATIVE_TOKENS
+            return normalised.isin(inactive)
+        return normalised.isin(_INACTIVE_TOKENS)
     return None
 
 

@@ -14,17 +14,21 @@ import datetime
 import difflib
 import io
 import json
+import math
 import os
 import re
 import sys
 import threading
 import time
 import traceback
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import scipy
+from scipy import stats
 
 from src.core.chart_spec import validate_chart_spec
 from src.core.io import read_any
@@ -155,19 +159,43 @@ _PATH_READ_EVENTS: frozenset[str] = frozenset({"os.listdir", "os.scandir", "glob
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 
 
-def _install_runtime_policy(scratch_dir: Path) -> None:
+#: Audit hooks cannot be removed, so the hook is installed once per process
+#: and gated by these. `_policy_enforced` is a plain flag, not thread-local:
+#: a thread that sandboxed code starts (via joblib/sklearn callbacks) must
+#: stay under the policy too.
+_policy_installed: bool = False
+_policy_enforced: bool = False
+_policy_scratch: Path = Path(".")
+
+
+@contextlib.contextmanager
+def _policy_enforcement(scratch_dir: Path) -> Iterator[None]:
+    """Enforce the runtime policy for the duration of the block — sandboxed
+    code, the libraries it calls, dsa.run tools, and result serialisation."""
+    global _policy_enforced, _policy_scratch
+    _policy_scratch = scratch_dir.resolve()
+    _install_runtime_policy()
+    _policy_enforced = True
+    try:
+        yield
+    finally:
+        _policy_enforced = False
+
+
+def _install_runtime_policy() -> None:
     """
-    Install the sandbox's runtime policy as a sys.addaudithook hook. Called
-    immediately before exec; audit hooks cannot be removed, so the policy
-    holds for everything the process does afterwards — sandboxed code, the
-    libraries it calls, dsa.run tools, and result serialisation.
+    Install the sandbox's runtime policy as a sys.addaudithook hook.
 
     Reads are allowed from the scratch dir, the interpreter's own library
     directories (lazy imports, tz data) and the project's src/ package
     (dsa.run imports tools lazily); writes only inside the scratch dir.
     """
-    scratch = scratch_dir.resolve()
-    read_roots = {scratch, Path(__file__).resolve().parents[1]}  # src/
+    global _policy_installed
+    if _policy_installed:
+        return
+    _policy_installed = True
+
+    read_roots = {Path(__file__).resolve().parents[1]}  # src/
     for prefix in {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}:
         read_roots.add(Path(prefix).resolve())
 
@@ -176,7 +204,7 @@ def _install_runtime_policy(scratch_dir: Path) -> None:
             return True  # an already-open descriptor; opening it was checked
         try:
             path = Path(os.fsdecode(raw))
-            path = (path if path.is_absolute() else scratch / path).resolve()
+            path = (path if path.is_absolute() else _policy_scratch / path).resolve()
         except (TypeError, ValueError, OSError):
             return False
         return any(path == root or root in path.parents for root in roots)
@@ -184,6 +212,8 @@ def _install_runtime_policy(scratch_dir: Path) -> None:
     busy = threading.local()
 
     def _hook(event: str, args: tuple[Any, ...]) -> None:
+        if not _policy_enforced:
+            return
         # Path resolution below can raise audit events of its own; checking
         # those recursively would loop, and they only serve this check.
         if getattr(busy, "active", False):
@@ -203,15 +233,15 @@ def _install_runtime_policy(scratch_dir: Path) -> None:
                 any(c in str(mode) for c in "wax+") if isinstance(mode, str)
                 else bool(isinstance(flags, int) and flags & _WRITE_FLAGS)
             )
-            if not _within(path, {scratch} if writes else read_roots):
+            if not _within(path, {_policy_scratch} if writes else read_roots | {_policy_scratch}):
                 raise SandboxPolicyError(
                     f"Sandbox policy: {'writing' if writes else 'reading'} files outside the "
                     "sandbox is not permitted. df is already loaded; use DF_OUT to save data."
                 )
         elif event in _PATH_WRITE_EVENTS:
-            if not all(_within(a, {scratch}) for a in args[:2] if isinstance(a, (str, bytes, os.PathLike))):
+            if not all(_within(a, {_policy_scratch}) for a in args[:2] if isinstance(a, (str, bytes, os.PathLike))):
                 raise SandboxPolicyError(f"Sandbox policy: '{event}' outside the sandbox is not permitted.")
-        elif event in _PATH_READ_EVENTS and args and not _within(args[0], read_roots):
+        elif event in _PATH_READ_EVENTS and args and not _within(args[0], read_roots | {_policy_scratch}):
             raise SandboxPolicyError(f"Sandbox policy: '{event}' outside the sandbox is not permitted.")
 
     sys.addaudithook(_hook)
@@ -236,6 +266,11 @@ def _build_restricted_globals(
 ) -> dict[str, Any]:
     restricted: dict[str, Any] = {
         "df": df,
+        "pd": pd,
+        "np": np,
+        "scipy": scipy,
+        "stats": stats,
+        "math": math,
         "SCHEMA": schema,
         "PRIOR_RESULTS": prior_results if prior_results is not None else {},
     }
@@ -340,11 +375,26 @@ def _execute(
     restricted_globals = _build_restricted_globals(
         df, schema, extra_globals, prior_results, toolkit
     )
+    with _policy_enforcement(Path(scratch_dir or Path.cwd())):
+        return _run_restricted(
+            code, df, restricted_globals, toolkit, derived_output_path, t0
+        )
+
+
+def _run_restricted(
+    code: str,
+    df: pd.DataFrame,
+    restricted_globals: dict[str, Any],
+    toolkit: Toolkit,
+    derived_output_path: str | None,
+    t0: float,
+) -> dict[str, Any]:
+    """Exec the caller's code and package its outputs; runs under the runtime
+    policy, which also covers serialising objects the code produced."""
     stdout_buf = io.StringIO()
 
     try:
         compiled = compile(code, "<sandboxed_code>", "exec")
-        _install_runtime_policy(Path(scratch_dir or Path.cwd()))
         with contextlib.redirect_stdout(stdout_buf):
             exec(compiled, restricted_globals)
     except ImportError as exc:

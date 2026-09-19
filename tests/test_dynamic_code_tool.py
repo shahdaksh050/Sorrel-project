@@ -21,22 +21,20 @@ class TestDynamicCodeExecutionTool:
         assert output["status"] == "ok"
         assert isinstance(output["result"], float)
 
-    def test_execute_reports_sandbox_failure_without_raising(self, tmp_path: Path) -> None:
+    def test_execute_raises_on_sandbox_failure(self, tmp_path: Path) -> None:
         dataset = single_column(tmp_path)
         tool = DynamicCodeExecutionTool()
-        output = tool.execute(file_path=str(dataset), code="x = 1\n")  # no RESULT
-        assert output["status"] == "error"
-        assert output["error_type"] == "static_check"
-        assert "summary" in output
+        with pytest.raises(ToolExecutionError, match="static_check"):
+            tool.execute(file_path=str(dataset), code="x = 1\n")  # no RESULT
 
-    def test_run_wraps_sandbox_failure_as_tool_success(self, tmp_path: Path) -> None:
-        # The tool did its job (ran the sandbox and reported faithfully);
-        # the *generated code* failing is not a tool-infrastructure error.
+    def test_run_records_sandbox_failure_as_tool_error(self, tmp_path: Path) -> None:
+        # The controller's retry budget and failure accounting key on
+        # ToolResult.status, so failing generated code must not read as success.
         dataset = single_column(tmp_path)
         tool = DynamicCodeExecutionTool()
         tool_result = tool.run(file_path=str(dataset), code="x = 1\n")
-        assert tool_result.status == "success"
-        assert tool_result.output["status"] == "error"
+        assert tool_result.status == "error"
+        assert "static_check" in (tool_result.error_message or "")
 
     def test_empty_code_raises(self, tmp_path: Path) -> None:
         dataset = single_column(tmp_path)

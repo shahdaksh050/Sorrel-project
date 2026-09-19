@@ -58,6 +58,9 @@ def collect_degradations(
                 "any date-based chart or trend for this column."
             )
             continue
+        if c.get("rule") == "sentinel":
+            log.append(c.get("detail") or f"Column '{c.get('column')}': {c.get('n_failed')} placeholder values treated as missing.")
+            continue
         if c.get("is_sentinel_only"):
             failed_ex = c.get("failed_examples")
             examples_str = f" ('{failed_ex[0]}')" if isinstance(failed_ex, (list, tuple)) and failed_ex else ""

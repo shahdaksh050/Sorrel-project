@@ -55,6 +55,7 @@ def sandbox_output(result: SandboxResult, label: str, derived_name: str | None) 
     summary = f"{label} ran in {result.duration_ms:.0f} ms. RESULT: {preview}"
 
     output: dict[str, Any] = {
+        "status": "ok",
         "result": result.result,
         "stdout": result.stdout,
         "duration_ms": result.duration_ms,
@@ -166,7 +167,8 @@ class DynamicCodeExecutionTool(BaseTool):
         "dsa.run(tool_name, df=frame, **params) runs a built-in analysis tool on any "
         "frame; dsa.tools(), dsa.profile(frame), dsa.compare_groups(frame, measure, by), "
         "dsa.summarize(series), dsa.effect_size(a, b); dsa.chart.bar/line/area/scatter/"
-        "histogram/heatmap(data, x, y, ...) build a chart spec. Assign RESULT (required); "
+        "histogram/heatmap(data, x, y, ...) build a chart spec (heatmap: long y=col, color=value; or "
+        "wide y=[cols], scale='zscore'; dsa.chart.corr_heatmap(df)). Assign RESULT (required); "
         "optionally FINDING = {'headline', 'detail', 'evidence': {...}}, CHART = dsa.chart...(...), "
         "and DF_OUT = frame with parameter save_as to keep a derived dataset. No file or "
         f"network access; imports only from {ALLOWED_MODULES_TEXT}."

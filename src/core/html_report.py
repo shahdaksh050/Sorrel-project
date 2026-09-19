@@ -21,6 +21,7 @@ from typing import Any
 
 from src.core.chart_theme import vega_config
 from src.core.multiple_testing import apply_benjamini_hochberg
+from src.core.plain_language import describe_uncertainty, plainify
 
 # ---------------------------------------------------------------------------
 # 3a — executive summary: prefer the LLM's own `insights` over its raw
@@ -52,11 +53,11 @@ def _build_executive_summary(llm_insights: dict[str, Any]) -> str:
     joining the top `insights`."""
     clean_reasoning = _strip_jargon_sentences(str(llm_insights.get("reasoning", "") or ""))
     if clean_reasoning:
-        return clean_reasoning
+        return plainify(clean_reasoning)
     insights = llm_insights.get("insights") or []
     if insights:
         text = " ".join(str(i).strip().rstrip(".") + "." for i in insights[:4] if str(i).strip())
-        return _strip_jargon_sentences(text)
+        return plainify(_strip_jargon_sentences(text))
     return ""
 
 
@@ -227,10 +228,13 @@ def _caveat_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _finding_evidence_html(finding: dict[str, Any]) -> str:
     """One evidence card: headline, analyst-facing detail, and the raw
     evidence numbers (effect/p-value/confidence) traceable to a tool result."""
-    bits: list[str] = [f"<strong>{_esc(finding.get('headline', ''))}</strong>"]
+    bits: list[str] = [f"<strong>{_esc(plainify(str(finding.get('headline', ''))))}</strong>"]
     detail = finding.get("detail")
     if detail:
-        bits.append(f"<br>{_esc(detail)}")
+        bits.append(f"<br>{_esc(plainify(str(detail)))}")
+    confidence = describe_uncertainty(finding)
+    if confidence:
+        bits.append(f"<br>{_esc(confidence)}")
     numeric_bits: list[str] = []
     effect = finding.get("effect")
     if effect is not None:
@@ -436,7 +440,7 @@ def build_html_report(
     top_findings = _headline_findings(findings)
     if top_findings:
         headline_cards = "\n".join(
-            f'<div class="card {"exec" if i == 0 else "insight"}">{_esc(f.get("headline", ""))}</div>'
+            f'<div class="card {"exec" if i == 0 else "insight"}">{_esc(plainify(str(f.get("headline", ""))))}</div>'
             for i, f in enumerate(top_findings)
         )
         sections.append("<h2>Top findings</h2>" + headline_cards)
@@ -444,10 +448,10 @@ def build_html_report(
     # ---- insights & recommendations ----
     insights = llm_insights.get("insights") or []
     if insights:
-        sections.append("<h2>What the data shows</h2>" + _cards(insights, "insight"))
+        sections.append("<h2>What the data shows</h2>" + _cards([plainify(str(i)) for i in insights], "insight"))
     recs = llm_insights.get("recommendations") or []
     if recs:
-        sections.append("<h2>What to do next</h2>" + _cards(recs, "rec"))
+        sections.append("<h2>What to do next</h2>" + _cards([plainify(str(r)) for r in recs], "rec"))
 
     # ---- drivers (explainability) ----
     eval_out = _find_tool_output(tool_results, "evaluate_model")
@@ -497,15 +501,18 @@ def build_html_report(
         chart_divs = "".join(
             f'<div class="chart"><h3>{_esc(c.get("title", ""))}</h3>'
             + (f'<p><strong>{_esc(c["caption"])}</strong></p>' if c.get("caption") else "")
-            + f'<p>{_esc(c.get("description", ""))}</p>'
-            f'<div class="vega-holder" id="chart_{i}"></div></div>'
+            + (f'<p>{_esc(c["description"])}</p>' if c.get("description") and c["description"] != c.get("caption") else "")
+            + f'<div class="vega-holder" id="chart_{i}"></div></div>'
             for i, c in enumerate(charts)
         )
         # Colors are injected here, at render time, from the shared theme
         # module — never stored in the spec itself — so this same HTML file
         # renders correctly whichever way the viewer's OS/browser theme is
         # set (7.17 / Q1: one chart theme module, no baked-in colors).
-        specs = [dict(c.get("spec", {}), width="container") for c in charts]
+        specs = [
+            dict(c.get("spec", {}), width="container") if {"mark", "layer"} & set(c.get("spec", {})) else c.get("spec", {})
+            for c in charts
+        ]
         specs_json = json.dumps(specs, default=str).replace("</", "<\\/")
         day_cfg_json = json.dumps(vega_config(dark=False), default=str).replace("</", "<\\/")
         night_cfg_json = json.dumps(vega_config(dark=True), default=str).replace("</", "<\\/")
@@ -589,7 +596,7 @@ def build_html_report(
     # 7.9 — method-fit / coverage-gap findings are caveats, not headline
     # insights (src.core.findings.is_trivial never suppresses them for
     # exactly this reason); this is where they belong.
-    limitation_cards.extend(f.get("headline", "") for f in _caveat_findings(findings))
+    limitation_cards.extend(plainify(str(f.get("headline", ""))) for f in _caveat_findings(findings))
 
     bh = apply_benjamini_hochberg(statistical_test_pvalues or [])
     if limitation_cards or bh:

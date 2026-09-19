@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from src.core.html_report import data_understanding_rows, governance_rows
 from src.core.multiple_testing import DEFAULT_ALPHA as _BH_ALPHA
 from src.core.multiple_testing import apply_benjamini_hochberg as _apply_benjamini_hochberg
+from src.core.plain_language import describe_uncertainty, plainify
 from src.tools.base import BaseTool
 
 if TYPE_CHECKING:
@@ -61,11 +62,11 @@ def _build_executive_summary(llm_insights: dict[str, Any]) -> str:
     joining the top `insights`."""
     clean_reasoning = _strip_jargon_sentences(str(llm_insights.get("reasoning", "") or ""))
     if clean_reasoning:
-        return clean_reasoning
+        return plainify(clean_reasoning)
     insights = llm_insights.get("insights") or []
     if insights:
         text = " ".join(str(i).strip().rstrip(".") + "." for i in insights[:4] if str(i).strip())
-        return _strip_jargon_sentences(text)
+        return plainify(_strip_jargon_sentences(text))
     return ""
 
 
@@ -286,14 +287,15 @@ def _format_top_findings(findings: list[dict[str, Any]] | None) -> list[str]:
         return []
     lines = ["## Top Findings", ""]
     for i, f in enumerate(top, 1):
-        lines.append(f"{i}. {f.get('headline', '')}")
+        lines.append(f"{i}. {plainify(str(f.get('headline', '')))}")
     lines.append("")
     return lines
 
 
 def _format_evidence(findings: list[dict[str, Any]] | None) -> list[str]:
     """The analyst layer: every finding's detail/evidence dict, effect sizes
-    and p-values — the traceable numbers behind the headlines above. This is
+    and p-values — the traceable numbers behind the headlines above, listed
+    exactly as computed under a plain-language sentence. This is
     exactly where a tool's own `findings()` (e.g. cohort_analysis's revenue-
     concentration or RFM-lift findings) now reaches the report regardless of
     whether it also has a bespoke subsection in `_format_additional_analyses`."""
@@ -302,11 +304,15 @@ def _format_evidence(findings: list[dict[str, Any]] | None) -> list[str]:
         return []
     lines = ["## Evidence", ""]
     for f in evidence:
-        lines.append(f"### {f.get('headline', '')}")
+        lines.append(f"### {plainify(str(f.get('headline', '')))}")
         lines.append("")
         detail = f.get("detail")
         if detail:
-            lines.append(str(detail))
+            lines.append(plainify(str(detail)))
+            lines.append("")
+        confidence = describe_uncertainty(f)
+        if confidence:
+            lines.append(confidence)
             lines.append("")
         bits: list[str] = []
         effect = f.get("effect")
@@ -371,7 +377,7 @@ def _format_limitations(
 
         degradations = collect_degradations(None, None, data_profile, profile_status)
     caveat_findings = [
-        str(f.get("headline", "")) for f in _caveat_findings(findings or []) if f.get("headline")
+        plainify(str(f.get("headline", ""))) for f in _caveat_findings(findings or []) if f.get("headline")
     ]
     bh = _apply_benjamini_hochberg(statistical_test_pvalues or [])
     if not (degradations or bh or unverified_claims or caveat_findings):
@@ -627,14 +633,14 @@ class GenerateReportTool(BaseTool):
         if insights and not findings:
             md_lines += ["## Key Insights", ""]
             for i, insight in enumerate(insights, 1):
-                md_lines.append(f"{i}. {insight}")
+                md_lines.append(f"{i}. {plainify(str(insight))}")
             md_lines.append("")
 
         # Recommendations
         if recs:
             md_lines += ["## Recommendations", ""]
             for rec in recs:
-                md_lines.append(f"- {rec}")
+                md_lines.append(f"- {plainify(str(rec))}")
             md_lines.append("")
 
         # Model performance — 3b: only call this "Model Performance" when a

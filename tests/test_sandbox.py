@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -160,6 +161,9 @@ class TestRunSandboxed:
 
             def memory_info(self) -> _FakeMemInfo:
                 return _FakeMemInfo()
+
+            def children(self, recursive: bool = True) -> list[Any]:
+                return []
 
         monkeypatch.setattr(sandbox.psutil, "Process", _FakePsProcess)
         dataset = single_column(tmp_path)

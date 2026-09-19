@@ -134,7 +134,9 @@ Operator controls (environment):
 | `LOCAL_ONLY` | `false` | Refuse every non-local LLM provider; the run degrades to deterministic mode instead. |
 | `MAX_LLM_TOKENS_PER_RUN` | `0` (off) | Token cap per analysis; when reached the run stops calling the LLM and synthesises deterministically. |
 | `AUDIT_LLM_FULL_TEXT` | `false` | LLM calls are audited as hashes + sizes in `audit/llm_calls.jsonl`; `true` also stores full prompt/response text. |
-| `LLM_JSON_FORMAT` / `LLM_CONTEXT_TOKENS` | `true` / `16000` | Provider JSON mode; prompt budget the planner prompts are compacted to fit. |
+| `LLM_JSON_FORMAT` / `LLM_CONTEXT_TOKENS` | `true` / auto | Provider JSON mode; prompt budget the planner prompts are compacted to fit (auto = the model's known context window, `src/core/model_telemetry.py`). |
+| `LLM_RPM_LIMIT` / `LLM_TPM_LIMIT` | catalog / headers | Per-minute request/token ceilings the limiter paces to; `0` disables. A 429 backs off for the provider's `Retry-After` (max 60 s), and a longer wait fails fast. |
+| `LLM_REASONING_EFFORT` | adaptive | `none`/`low`/`medium`/`high` forces one level; `adaptive` lets the controller pick per stage. |
 | `ENABLE_TOOL_LIBRARY` / `GENERATED_TOOL_LIBRARY` | `false` / `output/tool_library` | Reuse validated generated tools across runs on schema-compatible data. |
 
 Every execution and refusal is appended to `<output_dir>/audit/code_executions.jsonl` (full code, SHA-256, outcome, backend), every LLM call to `<output_dir>/audit/llm_calls.jsonl`; a run summary is in `final_result["governance"]` and shown in the app's Details tab.

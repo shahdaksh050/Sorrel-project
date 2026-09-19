@@ -63,12 +63,11 @@ class TestExecute:
         assert "finding_payload" not in output
         assert "evidence" not in output
 
-    def test_sandbox_error_surfaces_without_raising(self, tmp_path: Path) -> None:
+    def test_sandbox_error_raises(self, tmp_path: Path) -> None:
         dataset = single_column(tmp_path)
         tool = GeneratedTool(_spec("RESULT = 1 / 0\n"))
-        output = tool.execute(file_path=str(dataset))
-        assert output["status"] == "error"
-        assert output["error_type"] == "runtime"
+        with pytest.raises(ToolExecutionError, match="runtime"):
+            tool.execute(file_path=str(dataset))
 
     def test_empty_code_raises(self, tmp_path: Path) -> None:
         dataset = single_column(tmp_path)
@@ -81,12 +80,12 @@ class TestExecute:
         with pytest.raises(ToolExecutionError):
             tool.execute(file_path=str(tmp_path / "nope.csv"))
 
-    def test_run_wraps_sandbox_failure_as_tool_success(self, tmp_path: Path) -> None:
+    def test_run_records_sandbox_failure_as_tool_error(self, tmp_path: Path) -> None:
         dataset = single_column(tmp_path)
         tool = GeneratedTool(_spec("x = 1\n"))  # no RESULT
         tool_result = tool.run(file_path=str(dataset))
-        assert tool_result.status == "success"
-        assert tool_result.output["status"] == "error"
+        assert tool_result.status == "error"
+        assert "static_check" in (tool_result.error_message or "")
 
 
 class TestGetSchemaAndIdentity:

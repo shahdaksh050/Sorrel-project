@@ -19,13 +19,15 @@ ARCHITECTURAL BOUNDARY:
 """
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pandas as pd
 from rich.console import Console
@@ -59,6 +61,7 @@ from src.core.llm_client import _DEFAULT_MODELS as _DEFAULT_MODELS
 from src.core.llm_client import LLMClient as LLMClient
 from src.core.llm_client import LocalOnlyError as LocalOnlyError
 from src.core.memory import AnalysisStep, DatasetMetadata, MemorySystem, ToolResult
+from src.core.model_telemetry import get_limiter
 from src.core.multiple_testing import adjust_findings_run_level
 from src.core.profiler import DatasetProfile, profile_dataframe
 from src.core.prompt_manager import ARCHETYPES, PromptManager
@@ -70,6 +73,18 @@ from src.core.tool_registry import _short_tool_description as _short_tool_descri
 from src.rlm.engine import RLMEngine, RLMSubTask
 
 console = Console()
+
+
+class _PreparedStep(NamedTuple):
+    """A plan step resolved against run state and cleared to execute."""
+
+    idx: int
+    step: AnalysisStep
+    tool: Any
+    params: dict[str, Any]
+    dropped_note: str
+    cache_key: str
+    cached: ToolResult | None
 
 
 def _read_dataframe(file_path: str) -> pd.DataFrame:
@@ -92,6 +107,12 @@ _COMPACT_RETRY_NOTE = (
     "Reply again with ONLY the JSON object: at most 8 steps, one short "
     "sentence per rationale, no markdown fences, no text outside the JSON.\n"
 )
+
+#: Ceiling on the prompt budget derived from the model's context window. A
+#: 1M-token window is not a reason to send 750k-token planner prompts: cost
+#: and latency grow with prompt size while the ranked findings already keep
+#: what matters compact. LLM_CONTEXT_TOKENS, when set, overrides all of this.
+_MAX_PLANNER_CONTEXT_TOKENS = 32_000
 
 # Target auto-detection confidence thresholds
 _AUTODETECT_HIGH = 0.75   # proceed autonomously above this
@@ -216,6 +237,17 @@ class AgentController:
         "predict", "forecast", "model", "classif", "regress",
         "estimate", "will churn", "likely to", "propensity",
     )
+
+    #: Read-only analytical tools that only read the dataset file and touch
+    #: no shared run state, so a cycle's consecutive steps of these can run
+    #: concurrently. Excluded on purpose: tools that read `prior_results`
+    #: (generate_visualizations, generate_report), model training/clustering
+    #: (CPU- and memory-heavy), and anything that executes LLM-authored code.
+    _CONCURRENT_SAFE_TOOLS: frozenset[str] = frozenset({
+        "detect_outliers", "correlation_analysis", "select_statistical_test",
+        "segment_comparison", "time_series_analysis", "text_analysis",
+        "geospatial_analysis", "experiment_analysis", "anomaly_analysis",
+    })
 
     def _decide_analysis_mode(self, col: str | None, confidence: float) -> dict[str, Any]:
         """
@@ -635,8 +667,18 @@ class AgentController:
             use_ml=self.use_ml,
             use_llm=self.use_llm,
         )
+        ctx_tokens = (
+            min(self.llm_client.get_context_window(), _MAX_PLANNER_CONTEXT_TOKENS)
+            if self.use_llm and not os.getenv("LLM_CONTEXT_TOKENS")
+            else None
+        )
         self._prompt_manager = PromptManager(
-            self.memory, tool_desc, self.max_iterations, short_tool_descriptions=short_desc
+            self.memory,
+            tool_desc,
+            self.max_iterations,
+            short_tool_descriptions=short_desc,
+            use_ml=self.use_ml,
+            context_tokens=ctx_tokens,
         )
         if self.use_llm:
             # The deterministic plan doubles as the planner's cycle-1 draft:
@@ -826,7 +868,15 @@ class AgentController:
                     console.print(
                         f"[yellow]⚠ No valid steps on iteration {iteration} — synthesising final report.[/]"
                     )
-                    final_result = self._deterministic_final()
+                    final_result = self._final_synthesis("stage7:no_steps_synthesis")
+                    break
+                # ---- No-progress exit: the planner only repeats work already done ----
+                if iteration >= max(2, self.min_iterations) and self._all_steps_cached(steps):
+                    console.print(
+                        f"\n[bold green]✅ Iteration {iteration} re-planned only completed steps — "
+                        "analysis has converged.[/]"
+                    )
+                    final_result = self._final_synthesis("stage7:converged_synthesis")
                     break
                 self.memory.store_analysis_plan(steps)
 
@@ -845,19 +895,7 @@ class AgentController:
             else:
                 # Max iterations reached
                 console.print("[yellow]⚠ Max iterations reached — generating final report.[/]")
-                final_prompt = self._prompt_manager.get_final_interpretation_prompt()
-                try:
-                    if self._llm_budget_exhausted():
-                        raise RuntimeError("LLM token cap reached")
-                    self.llm_client.stage = "stage7:max_iter_synthesis"
-                    final_result = self._rlm_engine.invoke(
-                        final_prompt, depth=0, stage="stage7:max_iter_synthesis"
-                    )
-                    if final_result.get("status") == "error":
-                        raise RuntimeError(str(final_result.get("error", "Unknown LLM error")))
-                except Exception as exc:
-                    self.memory.set_context("llm_error", f"{type(exc).__name__}: {exc}")
-                    final_result = self._deterministic_final()
+                final_result = self._final_synthesis("stage7:max_iter_synthesis")
 
         # P3.1 — `final_result` is, on the "complete"/max-iteration paths,
         # the raw LLM response dict returned by RLMEngine.invoke(), which
@@ -882,6 +920,20 @@ class AgentController:
         governance = self._governor.summary(self.memory.get_context("llm_usage"))
         self.memory.set_context("governance", governance)
         final_result["governance"] = governance
+        if self.use_llm:
+            profile = get_limiter().get_profile(self.llm_client.provider, self.llm_client.model)
+            api_telem = {
+                "provider": profile.provider,
+                "model": profile.model,
+                "context_window": profile.context_window,
+                "rpm_limit": profile.rpm_limit,
+                "rpm_remaining": profile.rpm_remaining,
+                "tpm_limit": profile.tpm_limit,
+                "tpm_remaining": profile.tpm_remaining,
+                "speed_tag": profile.speed_tag,
+            }
+            final_result["api_telemetry"] = api_telem
+            self.memory.set_context("api_telemetry", api_telem)
         try:
             agenda = self.memory.get_context("question_agenda") or []
             final_result["coverage"] = coverage_report(
@@ -911,6 +963,42 @@ class AgentController:
             self._rlm_engine.print_reasoning_trace()
 
         return final_result
+
+    def _final_synthesis(self, stage: str) -> dict[str, Any]:
+        """One LLM call for the final interpretation of everything found so
+        far; the deterministic synthesis when the LLM is off, capped, failing,
+        or does not return a usable Form 2 reply."""
+        if not self.use_llm or self._prompt_manager is None or self._rlm_engine is None:
+            return self._deterministic_final()
+        try:
+            if self._llm_budget_exhausted():
+                raise RuntimeError("LLM token cap reached")
+            self.llm_client.stage = stage
+            result = self._rlm_engine.invoke(
+                self._prompt_manager.get_final_interpretation_prompt(), depth=0, stage=stage
+            )
+            if result.get("status") == "error":
+                raise RuntimeError(str(result.get("error", "Unknown LLM error")))
+            if result.get("status") != "complete" or not result.get("insights"):
+                raise RuntimeError("final interpretation reply had no insights")
+            return result
+        except Exception as exc:
+            self.memory.set_context("llm_error", f"{type(exc).__name__}: {exc}")
+            return self._deterministic_final()
+
+    def _all_steps_cached(self, steps: list[AnalysisStep]) -> bool:
+        """True when every planned step would be answered from the step cache."""
+        for step in steps:
+            if not self.tool_registry.has(step.tool_name):
+                return False
+            tool = self.tool_registry.get(step.tool_name)
+            params = tool.prepare_params(
+                self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
+            )
+            params, _dropped, errors = self._validate_step(tool, step.parameters, params)
+            if errors or self._step_cache_key(step.tool_name, params) not in self._step_cache:
+                return False
+        return bool(steps)
 
     # ------------------------------------------------------------------
     # Resilience helpers — plan parsing and LLM-failure fallbacks
@@ -1407,6 +1495,46 @@ class AgentController:
         spec = getattr(tool, "spec", None)
         return str(getattr(spec, "code", "") or "")
 
+    #: Import roots / sklearn submodules and bare estimator names that fit
+    #: predictive or clustering models. Preprocessing, metrics and other
+    #: utility submodules are not listed — scaling a column is not "machine
+    #: learning".
+    _ML_IMPORT_ROOTS = frozenset({"xgboost", "lightgbm", "catboost"})
+    _ML_SKLEARN_MODULES = frozenset({
+        "ensemble", "linear_model", "tree", "svm", "neighbors", "naive_bayes",
+        "neural_network", "cluster", "mixture", "gaussian_process",
+        "discriminant_analysis", "cross_decomposition",
+    })
+    _ML_ESTIMATORS = frozenset({
+        "KMeans", "SVC", "SVR", "LogisticRegression", "LinearRegression", "Ridge", "Lasso",
+    })
+
+    @classmethod
+    def _detects_ml_code(cls, code: str) -> bool:
+        """Whether LLM-authored code imports a model-fitting library."""
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                modules = [f"{node.module}.{alias.name}" for alias in node.names]
+            elif isinstance(node, ast.Name):
+                if node.id in cls._ML_ESTIMATORS or node.id.endswith(("Classifier", "Regressor")):
+                    return True
+                continue
+            else:
+                continue
+            for module in modules:
+                parts = module.split(".")
+                if parts[0] in cls._ML_IMPORT_ROOTS or (
+                    parts[0] == "sklearn" and (len(parts) == 1 or parts[1] in cls._ML_SKLEARN_MODULES)
+                ):
+                    return True
+        return False
+
     def _resolve_file_path(self, tool: Any, params: dict[str, Any]) -> dict[str, Any]:
         """
         The planner may omit file_path (the system prompt tells it to) or
@@ -1472,318 +1600,303 @@ class AgentController:
                     parts.append(f"{key}.stat={stat.st_mtime_ns}:{stat.st_size}")
         return "|".join(parts)
 
+    def _record_step(self, step: AnalysisStep, result: ToolResult) -> None:
+        """Append a step's outcome, tagged with the current cycle, to memory."""
+        result.iteration = self.memory.iteration_count
+        self.memory.append_tool_result(result)
+        self.memory.mark_step_complete(step.step_number, result)
+
+    def _process_step_result(self, prepared: _PreparedStep, result: ToolResult, total_steps: int) -> None:
+        """Record a freshly executed step and fold its output into run state."""
+        idx, step, tool, params = prepared.idx, prepared.step, prepared.tool, prepared.params
+        executes_code = getattr(tool, "executes_code", False)
+        if result.status == "success":
+            self._step_cache[prepared.cache_key] = result
+        if executes_code:
+            self._governor.record(
+                tool_name=step.tool_name, code=self._code_of(tool, params), params=params,
+                status=result.status, iteration=self.memory.iteration_count,
+                step_number=step.step_number, output=result.output,
+                error=result.error_message,
+            )
+        if prepared.dropped_note:
+            if result.status == "success":
+                result.output = {**result.output, "plan_note": prepared.dropped_note}
+            else:
+                result.error_message = f"{result.error_message or ''} ({prepared.dropped_note})".strip()
+        self._record_step(step, result)
+
+        if result.status == "success":
+            try:
+                new_findings: list[Finding] = tool.findings(result.output, self.last_profile, self.memory.dataset_metadata)
+            except Exception as exc:
+                new_findings = []
+                console.print(f"  [yellow]⚠ findings() failed for {step.tool_name} (non-fatal): {exc}[/]")
+            if new_findings:
+                seen_ids = {f.finding_id for f in self.memory.findings}
+                for i, finding in enumerate(new_findings):
+                    if not finding.finding_id:
+                        finding.finding_id = f"{step.tool_name}_{step.step_number}_{i}"
+                    if finding.finding_id in seen_ids:
+                        finding.finding_id = f"{finding.finding_id}_i{self.memory.iteration_count}s{step.step_number}_{i}"
+                    seen_ids.add(finding.finding_id)
+                    if not finding.source_tool:
+                        finding.source_tool = step.tool_name
+                    if self.objective:
+                        finding.objective_fit = score_objective_fit(finding, self.objective)
+                    if not isinstance(finding.evidence, dict):
+                        finding.evidence = {}
+                    unit = finding.evidence.get("unit_of_analysis") or result.output.get("unit_of_analysis")
+                    if isinstance(unit, str) and unit and unit != "row":
+                        finding.evidence["unit_of_analysis"] = unit
+                        note = f"Counts are per '{unit}' (repeated rows aggregated), not per row."
+                        if note not in finding.caveats:
+                            finding.caveats.append(note)
+                self.memory.add_findings(new_findings)
+                if any(f.p_value is not None for f in new_findings):
+                    try:
+                        adjust_findings_run_level(self.memory.findings)
+                    except Exception as exc:
+                        console.print(f"  [yellow]⚠ Run-level FDR correction skipped (non-fatal): {exc}[/]")
+
+            derived = result.output.get("derived_dataset")
+            if isinstance(derived, dict) and derived.get("name") and derived.get("path"):
+                registry = dict(self.memory.get_context("derived_datasets") or {})
+                registry[str(derived["name"])] = derived
+                self.memory.set_context("derived_datasets", registry)
+                console.print(
+                    f"  [dim]Derived dataset '{derived['name']}' → {derived['path']}[/]"
+                )
+
+        if step.tool_name == "define_analysis_tool" and result.status == "success":
+            self._maybe_register_generated_tool(result)
+
+        rationales = self.memory.get_context("plan_rationales") or []
+        rationales.append({
+            "step_number": step.step_number,
+            "tool_name": step.tool_name,
+            "rationale": step.rationale,
+        })
+        self.memory.set_context("plan_rationales", rationales)
+
+        if step.tool_name == "select_statistical_test" and result.status == "success":
+            pvalue_tests = self.memory.get_context("statistical_test_pvalues") or []
+            family = result.output.get("family_results")
+            if family:
+                for entry in family:
+                    feature = entry.get("feature_column") or result.output.get("feature_column")
+                    group = entry.get("group_column")
+                    pvalue_tests.append({
+                        "step_number": step.step_number,
+                        "feature_column": f"{feature} by {group}" if group else feature,
+                        "test_name": entry.get("test_name"),
+                        "p_value": entry.get("p_value"),
+                    })
+            elif "p_value" in result.output:
+                pvalue_tests.append({
+                    "step_number": step.step_number,
+                    "feature_column": result.output.get("feature_column"),
+                    "test_name": result.output.get("test_name"),
+                    "p_value": result.output["p_value"],
+                })
+            self.memory.set_context("statistical_test_pvalues", pvalue_tests)
+
+        if step.tool_name == "segment_comparison" and result.status == "success":
+            pvalue_tests = self.memory.get_context("statistical_test_pvalues") or []
+            for c in result.output.get("comparisons", []):
+                if c.get("p_value") is None:
+                    continue
+                test_name = "proportions_ztest" if c.get("is_rate") else "welch_ttest"
+                pvalue_tests.append({
+                    "step_number": step.step_number,
+                    "feature_column": f"{c.get('measure')} by {c.get('dimension')}={c.get('level')}",
+                    "test_name": test_name,
+                    "p_value": c["p_value"],
+                })
+            self.memory.set_context("statistical_test_pvalues", pvalue_tests)
+
+        if result.status == "error":
+            self._tool_failure_counts[step.tool_name] = (
+                self._tool_failure_counts.get(step.tool_name, 0) + 1
+            )
+            self.memory.increment_retry(step.step_number)
+
+        if step.tool_name == "train_model" and result.status == "success":
+            best = result.output.get("best_model", "")
+            mt = result.output.get("models_trained", {})
+            if best and best in mt:
+                model_path = mt[best].get("model_path", "")
+                if model_path:
+                    self.memory.set_context("best_model_path", model_path)
+                    self.memory.set_context("best_model_name", best)
+            trained_test_size = result.output.get("test_size")
+            if trained_test_size is not None:
+                self.memory.set_context("train_test_size", trained_test_size)
+            trained_split_strategy = result.output.get("split_strategy")
+            if trained_split_strategy in ("random", "time_series", "panel"):
+                self.memory.set_context("split_strategy", trained_split_strategy)
+                self.memory.set_context("split_time_column", result.output.get("time_column"))
+                self.memory.set_context("split_group_column", result.output.get("group_column"))
+
+        if step.tool_name == "clean_data" and result.status == "success":
+            cleaned_path = result.output.get("cleaned_file_path")
+            if cleaned_path:
+                self.memory.set_context("cleaned_file_path", cleaned_path)
+                console.print(
+                    f"  [dim]Cleaned file stored → {cleaned_path}[/]"
+                )
+
+        if self.on_step_callback:
+            summary = result.output.get("summary", "")[:80] if result.status == "success" else result.error_message
+            self.on_step_callback(step.tool_name, result.status, f"{idx}/{total_steps} done — {summary}")
+
+    def _step_budget(self, step: AnalysisStep) -> int:
+        """Failures a tool may accumulate before its steps are skipped."""
+        is_code_tool = self.tool_registry.has(step.tool_name) and getattr(
+            self.tool_registry.get(step.tool_name), "executes_code", False
+        )
+        return MAX_CODE_STEP_RETRIES if is_code_tool else MAX_STEP_RETRIES
+
+    def _prepare_step(self, idx: int, step: AnalysisStep, total_steps: int) -> _PreparedStep | None:
+        """
+        Resolve a step against current run state and run every pre-execution
+        gate (retry budget, registry, plan validation, ML switch, governance).
+        A step that fails a gate is recorded here and yields None.
+        """
+        budget = self._step_budget(step)
+        if self._tool_failure_counts.get(step.tool_name, 0) >= budget:
+            console.print(
+                f"  [yellow]⏭ Step {step.step_number}: {step.tool_name} skipped "
+                f"(exceeded {budget} retries).[/]"
+            )
+            self._record_step(step, ToolResult(
+                tool_name=step.tool_name, status="skipped",
+                output={"summary": f"Skipped: '{step.tool_name}' already failed {budget} times. Do not plan it again."},
+            ))
+            return None
+        # Defense in depth: _parse_steps filters unknown tools, but never
+        # let a registry miss crash the whole pipeline.
+        try:
+            tool = self.tool_registry.get(step.tool_name)
+        except KeyError as exc:
+            self._record_step(step, ToolResult(
+                tool_name=step.tool_name, status="error", output={}, error_message=str(exc),
+            ))
+            return None
+
+        # Parameter resolution is driven by each tool's own declarations
+        # (BaseTool.prepare_params) so this controller never grows a per-tool
+        # if-ladder. It must run after earlier steps of the cycle have been
+        # recorded: it reads cleaned_file_path, best_model_path and the like.
+        params = tool.prepare_params(
+            self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
+        )
+        # Plan validation: an invalid step never runs (and never spends
+        # code-execution budget); its error — with close column matches —
+        # goes back to the planner and counts against the retry budget.
+        params, dropped, plan_errors = self._validate_step(tool, step.parameters, params)
+        dropped_note = f"Ignored unknown parameter(s): {', '.join(dropped)}." if dropped else ""
+        if dropped:
+            console.print(f"  [yellow]⚠ Step {step.step_number}: {step.tool_name} — {dropped_note}[/]")
+        if plan_errors:
+            message = " ".join(["Plan validation failed, step not run:", *plan_errors, dropped_note]).strip()
+            console.print(f"  [yellow]✗ Step {step.step_number}: {step.tool_name} — {message}[/]")
+            self._record_step(step, ToolResult(
+                tool_name=step.tool_name, status="error", output={}, error_message=message,
+            ))
+            self._tool_failure_counts[step.tool_name] = self._tool_failure_counts.get(step.tool_name, 0) + 1
+            self.memory.increment_retry(step.step_number)
+            if self.on_step_callback:
+                self.on_step_callback(step.tool_name, "error", f"{idx}/{total_steps} — {message[:80]}")
+            return None
+
+        if getattr(tool, "executes_code", False):
+            code = self._code_of(tool, params)
+            refusal = (
+                "Machine learning is turned off for this analysis (use_ml=False); ML code was not run."
+                if not self.use_ml and self._detects_ml_code(code)
+                else self._governor.refusal_reason()
+            )
+            if refusal:
+                console.print(f"  [yellow]⛔ Step {step.step_number}: {step.tool_name} refused — {refusal}[/]")
+                self._governor.record(
+                    tool_name=step.tool_name, code=code, params=params,
+                    status="refused", iteration=self.memory.iteration_count,
+                    step_number=step.step_number, error=refusal, refused=True,
+                )
+                self._record_step(step, ToolResult(
+                    tool_name=step.tool_name, status="skipped",
+                    output={"summary": f"Refused by policy: {refusal}"},
+                ))
+                return None
+
+        cache_key = self._step_cache_key(step.tool_name, params)
+        cached = self._step_cache.get(cache_key)
+        if cached is None:
+            console.print(f"  [cyan]→ Step {step.step_number}: {step.tool_name}[/] [dim]{step.rationale[:60]}[/]")
+            if self.on_step_callback:
+                self.on_step_callback(step.tool_name, "running", f"{idx}/{total_steps} — {step.tool_name}…")
+        return _PreparedStep(idx, step, tool, params, dropped_note, cache_key, cached)
+
+    def _record_cached_step(self, prepared: _PreparedStep, total_steps: int) -> None:
+        """Answer a step from the cache. Only the result is re-recorded (so
+        this cycle's digest shows it): its findings, p-values and context
+        side effects already exist from the original run, and repeating them
+        would duplicate findings and inflate the multiple-testing family."""
+        assert prepared.cached is not None
+        step = prepared.step
+        console.print(
+            f"  [dim]↺ Step {step.step_number}: {step.tool_name} — "
+            f"identical to a prior successful step, reusing its result.[/]"
+        )
+        result = copy.copy(prepared.cached)
+        result.output = {
+            **result.output,
+            "plan_note": (
+                f"Identical to the iteration-{prepared.cached.iteration} step; its result was "
+                "reused, not recomputed. Plan something new instead of repeating it."
+            ),
+        }
+        self._record_step(step, result)
+        if self.on_step_callback:
+            summary = str(result.output.get("summary", ""))[:80]
+            self.on_step_callback(step.tool_name, "success", f"{prepared.idx}/{total_steps} done — {summary}")
+
+    def _run_batch(self, batch: list[tuple[int, AnalysisStep]], total_steps: int) -> None:
+        """Prepare and execute consecutive steps; a batch of two or more
+        uncached steps runs concurrently, and results are recorded in plan
+        order either way so findings and ids stay deterministic."""
+        prepared = [p for idx, step in batch if (p := self._prepare_step(idx, step, total_steps)) is not None]
+        to_run = [p for p in prepared if p.cached is None]
+        results: dict[int, ToolResult] = {}
+        if len(to_run) > 1:
+            with ThreadPoolExecutor(max_workers=min(4, len(to_run))) as pool:
+                outcomes = pool.map(lambda p: p.tool.run(**p.params), to_run)
+                results = {p.idx: result for p, result in zip(to_run, outcomes, strict=True)}
+        for p in prepared:
+            if p.cached is not None:
+                self._record_cached_step(p, total_steps)
+            else:
+                result = results[p.idx] if p.idx in results else p.tool.run(**p.params)
+                self._process_step_result(p, result, total_steps)
+
     def _execute_steps(self, steps: list[AnalysisStep]) -> None:
         """
-        Stage 3 — execute each tool in the plan with retry budgets.
-
-        Retry logic: failures are counted per tool across iterations
-        (the LLM re-plans with fresh step objects each cycle). Once a
-        tool has failed MAX_STEP_RETRIES times it is skipped instead of
-        executed again, so one broken tool can never stall the pipeline.
+        Stage 3 — execute the plan with retry budgets. clean_data goes first
+        (later steps read the cleaned file); runs of independent read-only
+        analytical tools execute concurrently, everything else sequentially.
         """
-        total_steps = len(steps)
-        for idx, step in enumerate(steps, 1):
-            budget = (
-                MAX_CODE_STEP_RETRIES
-                if self.tool_registry.has(step.tool_name)
-                and getattr(self.tool_registry.get(step.tool_name), "executes_code", False)
-                else MAX_STEP_RETRIES
-            )
-            if self._tool_failure_counts.get(step.tool_name, 0) >= budget:
-                console.print(
-                    f"  [yellow]⏭ Step {step.step_number}: {step.tool_name} skipped "
-                    f"(exceeded {budget} retries).[/]"
-                )
-                skip_result = ToolResult(
-                    tool_name=step.tool_name,
-                    status="skipped",
-                    output={
-                        "summary": (
-                            f"Skipped: '{step.tool_name}' already failed "
-                            f"{budget} times. Do not plan it again."
-                        )
-                    },
-                )
-                self.memory.append_tool_result(skip_result)
-                self.memory.mark_step_complete(step.step_number, skip_result)
+        ordered = sorted(steps, key=lambda s: s.tool_name != "clean_data")
+        total_steps = len(ordered)
+        batch: list[tuple[int, AnalysisStep]] = []
+        for idx, step in enumerate(ordered, 1):
+            if step.tool_name in self._CONCURRENT_SAFE_TOOLS:
+                batch.append((idx, step))
                 continue
-
-            console.print(
-                f"  [cyan]→ Step {step.step_number}: {step.tool_name}[/] "
-                f"[dim]{step.rationale[:60]}[/]"
-            )
-            # Fire pre-execution callback
-            if self.on_step_callback:
-                self.on_step_callback(step.tool_name, "running",
-                                      f"{idx}/{total_steps} — {step.tool_name}…")
-            # Defense in depth: _parse_steps filters unknown tools, but never
-            # let a registry miss crash the whole pipeline.
-            try:
-                tool = self.tool_registry.get(step.tool_name)
-            except KeyError as exc:
-                result = ToolResult(
-                    tool_name=step.tool_name,
-                    status="error",
-                    output={},
-                    error_message=str(exc),
-                )
-                self.memory.append_tool_result(result)
-                self.memory.mark_step_complete(step.step_number, result)
-                continue
-
-            # Generic parameter resolution, driven by each tool's own
-            # declarations (BaseTool.prepare_params) — cleaned_file_path
-            # redirection, output_dir injection, and any bespoke overrides
-            # (best_model_path, forced test_size, report result injection)
-            # all live on the tool itself instead of growing this if-ladder
-            # every time a new tool needs to plug into the pipeline.
-            params = tool.prepare_params(
-                self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
-            )
-
-            # Plan validation: an invalid step never runs (and never spends
-            # code-execution budget); its error — with close column matches —
-            # goes back to the planner and counts against the retry budget.
-            params, dropped, plan_errors = self._validate_step(tool, step.parameters, params)
-            dropped_note = f"Ignored unknown parameter(s): {', '.join(dropped)}." if dropped else ""
-            if dropped:
-                console.print(f"  [yellow]⚠ Step {step.step_number}: {step.tool_name} — {dropped_note}[/]")
-            if plan_errors:
-                message = " ".join(["Plan validation failed, step not run:", *plan_errors, dropped_note]).strip()
-                console.print(f"  [yellow]✗ Step {step.step_number}: {step.tool_name} — {message}[/]")
-                invalid = ToolResult(
-                    tool_name=step.tool_name, status="error", output={}, error_message=message,
-                    iteration=self.memory.iteration_count,
-                )
-                self.memory.append_tool_result(invalid)
-                self.memory.mark_step_complete(step.step_number, invalid)
-                self._tool_failure_counts[step.tool_name] = self._tool_failure_counts.get(step.tool_name, 0) + 1
-                self.memory.increment_retry(step.step_number)
-                if self.on_step_callback:
-                    self.on_step_callback(step.tool_name, "error", f"{idx}/{total_steps} — {message[:80]}")
-                continue
-
-            executes_code = getattr(tool, "executes_code", False)
-            if executes_code:
-                refusal = self._governor.refusal_reason()
-                if refusal:
-                    console.print(f"  [yellow]⛔ Step {step.step_number}: {step.tool_name} refused — {refusal}[/]")
-                    self._governor.record(
-                        tool_name=step.tool_name, code=self._code_of(tool, params), params=params,
-                        status="refused", iteration=self.memory.iteration_count,
-                        step_number=step.step_number, error=refusal, refused=True,
-                    )
-                    refused_result = ToolResult(
-                        tool_name=step.tool_name, status="skipped",
-                        output={"summary": f"Refused by governance policy: {refusal}"},
-                    )
-                    self.memory.append_tool_result(refused_result)
-                    self.memory.mark_step_complete(step.step_number, refused_result)
-                    continue
-
-            cache_key = self._step_cache_key(step.tool_name, params)
-            cached = self._step_cache.get(cache_key)
-            if cached is not None:
-                console.print(
-                    f"  [dim]↺ Step {step.step_number}: {step.tool_name} — "
-                    f"identical to a prior successful step, reusing its result.[/]"
-                )
-                # Shallow-copy before `.iteration` is retagged below — `cached`
-                # is the same object already in memory.tool_results from its
-                # original cycle, and get_results_summary_digest splits
-                # "current" vs "earlier" on that field.
-                result = copy.copy(cached)
-            else:
-                result = tool.run(**params)
-                if result.status == "success":
-                    self._step_cache[cache_key] = result
-                if executes_code:
-                    self._governor.record(
-                        tool_name=step.tool_name, code=self._code_of(tool, params), params=params,
-                        status=result.status, iteration=self.memory.iteration_count,
-                        step_number=step.step_number, output=result.output,
-                        error=result.error_message,
-                    )
-            result.iteration = self.memory.iteration_count
-            if dropped_note:
-                if result.status == "success":
-                    result.output = {**result.output, "plan_note": dropped_note}
-                else:
-                    result.error_message = f"{result.error_message or ''} ({dropped_note})".strip()
-            self.memory.append_tool_result(result)
-            self.memory.mark_step_complete(step.step_number, result)
-
-            # Finding bus (7.1) — project this tool's own output into the
-            # shared Finding list right after it succeeds, so every surface
-            # (deterministic synthesis, both reports, the dashboard) reads
-            # one ranked list instead of each re-deriving its own narrative
-            # from raw tool JSON. A tool with no findings() override (data
-            # prep tools) contributes nothing here, which is correct.
-            if result.status == "success":
-                try:
-                    new_findings: list[Finding] = tool.findings(result.output, self.last_profile, self.memory.dataset_metadata)
-                except Exception as exc:
-                    new_findings = []
-                    console.print(f"  [yellow]⚠ findings() failed for {step.tool_name} (non-fatal): {exc}[/]")
-                if new_findings:
-                    seen_ids = {f.finding_id for f in self.memory.findings}
-                    for i, finding in enumerate(new_findings):
-                        if not finding.finding_id:
-                            finding.finding_id = f"{step.tool_name}_{step.step_number}_{i}"
-                        # Charts and reports key on finding_id; the same tool
-                        # run twice (e.g. dsa.run on two frames) must not collide.
-                        if finding.finding_id in seen_ids:
-                            finding.finding_id = f"{finding.finding_id}_i{self.memory.iteration_count}s{step.step_number}_{i}"
-                        seen_ids.add(finding.finding_id)
-                        if not finding.source_tool:
-                            finding.source_tool = step.tool_name
-                        if self.objective:
-                            finding.objective_fit = score_objective_fit(finding, self.objective)
-                        # Entity-level tools count entities, row-level tools
-                        # count rows; a report mixing "n=200" and "n=2,000"
-                        # must say which unit each n is in.
-                        if not isinstance(finding.evidence, dict):
-                            finding.evidence = {}
-                        unit = finding.evidence.get("unit_of_analysis") or result.output.get("unit_of_analysis")
-                        if isinstance(unit, str) and unit and unit != "row":
-                            finding.evidence["unit_of_analysis"] = unit
-                            note = f"Counts are per '{unit}' (repeated rows aggregated), not per row."
-                            if note not in finding.caveats:
-                                finding.caveats.append(note)
-                    self.memory.add_findings(new_findings)
-                    # One BH family per run: re-correct every p-value found
-                    # so far, across tools, before anything ranks them.
-                    if any(f.p_value is not None for f in new_findings):
-                        try:
-                            adjust_findings_run_level(self.memory.findings)
-                        except Exception as exc:
-                            console.print(f"  [yellow]⚠ Run-level FDR correction skipped (non-fatal): {exc}[/]")
-
-                derived = result.output.get("derived_dataset")
-                if isinstance(derived, dict) and derived.get("name") and derived.get("path"):
-                    registry = dict(self.memory.get_context("derived_datasets") or {})
-                    registry[str(derived["name"])] = derived
-                    self.memory.set_context("derived_datasets", registry)
-                    console.print(
-                        f"  [dim]Derived dataset '{derived['name']}' → {derived['path']}[/]"
-                    )
-
-            # Round 8 — dynamic tool creation. define_analysis_tool's own
-            # execute() is pure (per AGENTS.md's layer rule, it never touches
-            # the registry or memory) — it only validates and smoke-tests a
-            # proposed tool and reports output["status"] == "ready"/"error".
-            # Registration is the controller's job, same precedent as
-            # "clean_data succeeds -> controller sets cleaned_file_path".
-            if step.tool_name == "define_analysis_tool" and result.status == "success":
-                self._maybe_register_generated_tool(result)
-
-            # Item 6 (report restructure): the planner is required to give a
-            # rationale for every step (prompt_manager.py), but it was only
-            # ever shown truncated in a console panel and then discarded.
-            # Accumulate it here so the report's Methodology section can
-            # pair each executed tool with why it was chosen.
-            rationales = self.memory.get_context("plan_rationales") or []
-            rationales.append({
-                "step_number": step.step_number,
-                "tool_name": step.tool_name,
-                "rationale": step.rationale,
-            })
-            self.memory.set_context("plan_rationales", rationales)
-
-            # Item 4 (statistical rigor): Benjamini-Hochberg correction needs
-            # every p-value produced in this run — accumulate them here so
-            # the report (item 6) can correct at report time rather than
-            # each hypothesis test correcting itself in isolation.
-            if step.tool_name == "select_statistical_test" and result.status == "success":
-                pvalue_tests = self.memory.get_context("statistical_test_pvalues") or []
-                family = result.output.get("family_results")
-                if family:
-                    # Family mode (7.6) ran one test per eligible dimension,
-                    # not just the single strongest pairing surfaced at the
-                    # top level — recording only that one (the old
-                    # behaviour) under-counted how many tests this run
-                    # actually performed, which understates the multiple-
-                    # comparison correction at report time. Record every
-                    # pairing, with its own (raw, uncorrected) p_value.
-                    for entry in family:
-                        feature = entry.get("feature_column") or result.output.get("feature_column")
-                        group = entry.get("group_column")
-                        pvalue_tests.append({
-                            "step_number": step.step_number,
-                            "feature_column": f"{feature} by {group}" if group else feature,
-                            "test_name": entry.get("test_name"),
-                            "p_value": entry.get("p_value"),
-                        })
-                elif "p_value" in result.output:
-                    pvalue_tests.append({
-                        "step_number": step.step_number,
-                        "feature_column": result.output.get("feature_column"),
-                        "test_name": result.output.get("test_name"),
-                        "p_value": result.output["p_value"],
-                    })
-                self.memory.set_context("statistical_test_pvalues", pvalue_tests)
-
-            # segment_comparison (7.2) runs its own family of per-level
-            # tests (proportions z-test for a rate measure, Welch's t-test
-            # otherwise) — those belong in the same run-wide correction pool
-            # as select_statistical_test's, or a run that only ever calls
-            # this tool would report zero corrected tests despite having
-            # run many.
-            if step.tool_name == "segment_comparison" and result.status == "success":
-                pvalue_tests = self.memory.get_context("statistical_test_pvalues") or []
-                for c in result.output.get("comparisons", []):
-                    if c.get("p_value") is None:
-                        continue
-                    test_name = "proportions_ztest" if c.get("is_rate") else "welch_ttest"
-                    pvalue_tests.append({
-                        "step_number": step.step_number,
-                        "feature_column": f"{c.get('measure')} by {c.get('dimension')}={c.get('level')}",
-                        "test_name": test_name,
-                        "p_value": c["p_value"],
-                    })
-                self.memory.set_context("statistical_test_pvalues", pvalue_tests)
-
-            if result.status == "error":
-                self._tool_failure_counts[step.tool_name] = (
-                    self._tool_failure_counts.get(step.tool_name, 0) + 1
-                )
-                self.memory.increment_retry(step.step_number)
-
-            # Store important outputs in memory context for downstream tools
-            if step.tool_name == "train_model" and result.status == "success":
-                best = result.output.get("best_model", "")
-                mt = result.output.get("models_trained", {})
-                if best and best in mt:
-                    model_path = mt[best].get("model_path", "")
-                    if model_path:
-                        self.memory.set_context("best_model_path", model_path)
-                        self.memory.set_context("best_model_name", best)
-                trained_test_size = result.output.get("test_size")
-                if trained_test_size is not None:
-                    self.memory.set_context("train_test_size", trained_test_size)
-                # evaluate_model must recreate the exact same partition —
-                # persist the strategy train_model actually resolved to
-                # (may differ from what was requested if a column was
-                # missing) so evaluate isn't left shuffling data that was
-                # split chronologically or by group.
-                trained_split_strategy = result.output.get("split_strategy")
-                if trained_split_strategy in ("random", "time_series", "panel"):
-                    self.memory.set_context("split_strategy", trained_split_strategy)
-                    self.memory.set_context("split_time_column", result.output.get("time_column"))
-                    self.memory.set_context("split_group_column", result.output.get("group_column"))
-
-            # If cleaning produced a cleaned file, store it for downstream tools
-            if step.tool_name == "clean_data" and result.status == "success":
-                cleaned_path = result.output.get("cleaned_file_path")
-                if cleaned_path:
-                    self.memory.set_context("cleaned_file_path", cleaned_path)
-                    console.print(
-                        f"  [dim]Cleaned file stored → {cleaned_path}[/]"
-                    )
-            # Fire post-execution callback
-            if self.on_step_callback:
-                summary = result.output.get("summary", "")[:80] if result.status == "success" else result.error_message
-                self.on_step_callback(step.tool_name, result.status, f"{idx}/{total_steps} done — {summary}")
+            self._run_batch(batch, total_steps)
+            batch = []
+            self._run_batch([(idx, step)], total_steps)
+        self._run_batch(batch, total_steps)
 
     def _maybe_register_generated_tool(self, result: ToolResult) -> None:
         """

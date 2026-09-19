@@ -26,8 +26,11 @@ import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
+
+from src.core.sentinels import null_sentinels
 
 #: Extensions read_any knows how to ingest. The single source of truth —
 #: src.core.security.ALLOWED_EXTENSIONS and the Streamlit uploader's type
@@ -56,16 +59,19 @@ _SNIFF_SAMPLE_BYTES = 64 * 1024
 #: missing. "" is kept: an empty field is still NA. Derived from the pandas
 #: constant when importable (keeps this in sync with pandas' own list);
 #: hard-coded as a fallback in case that private module moves.
+#: Numeric placeholders (-999, 9999, -200...) are deliberately NOT listed: a
+#: blanket rule erases real values (an employee ID 9999). src.core.sentinels
+#: detects them from the data instead and discloses every one it nulls.
 try:
     from pandas._libs.parsers import STR_NA_VALUES as _PANDAS_STR_NA_VALUES
     NA_VALUES_KEEP_NONE_STRING: list[str] = sorted(
-        (_PANDAS_STR_NA_VALUES - {"None"}) | {"?", " ? ", "-999", "9999"}
+        (_PANDAS_STR_NA_VALUES - {"None"}) | {"?", " ? "}
     )
 except ImportError:
     NA_VALUES_KEEP_NONE_STRING = [
         "", "#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan",
         "1.#IND", "1.#QNAN", "<NA>", "N/A", "NA", "NULL", "NaN", "n/a",
-        "nan", "null", "?", " ? ", "-999", "9999",
+        "nan", "null", "?", " ? ",
     ]
 
 #: Depth at which nested JSON fields stop being flattened into dotted column
@@ -127,6 +133,7 @@ class ReadReport:
     sampled_from: int | None = None    # original row count, when sampled
     sampled_to: int | None = None      # rows kept after sampling (== get_max_rows() at read time)
     notes: list[str] = field(default_factory=list)
+    sentinels: list[dict[str, Any]] = field(default_factory=list)  # numeric placeholders nulled (src.core.sentinels)
 
 
 class DatasetReadError(Exception):
@@ -434,6 +441,8 @@ def _read_uncached(file_path: str) -> tuple[pd.DataFrame, ReadReport]:
     else:
         df, report = _read_excel(path, format_)
     df = _cap_rows(df, report)
+    df, report.sentinels = null_sentinels(df)
+    report.notes.extend(rec["note"] for rec in report.sentinels)
     return df, report
 
 

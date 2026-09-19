@@ -50,6 +50,7 @@ import pandas as pd
 
 from src.core.chart_spec import spec_to_vegalite, validate_chart_spec
 from src.core.chart_theme import axis_format, humanize_axis_title, humanize_label
+from src.core.plain_language import fallback_caption
 from src.core.profiler import ColumnProfile, DatasetProfile
 from src.core.stats_utils import aggregate_to_entity, measure_aggregation
 
@@ -61,9 +62,22 @@ MAX_POINTS = 1_000
 #: few hundred points at typical opacity, and much lighter in the artifact.
 SCATTER_MAX_POINTS = 350
 
-#: How many numeric histograms / categorical bars to show at most.
-MAX_HISTOGRAMS = 4
+#: How many numeric histograms / categorical bars to show at most — and only
+#: for columns a finding actually references (strict curation).
+MAX_HISTOGRAMS = 2
 MAX_CATEGORY_CHARTS = 3
+
+#: Correlation heatmap: fewest chartable numeric columns worth a matrix, the
+#: most it shows (n² cells), and the |r| at which a cell prints its value.
+HEATMAP_MIN_COLUMNS = 5
+HEATMAP_MAX_COLUMNS = 15
+HEATMAP_TEXT_MAX_COLUMNS = 10
+HEATMAP_TEXT_MIN_ABS_R = 0.5
+#: Title of the correlation heatmap; the generate_visualizations tool uses the
+#: same one, so the dashboard can tell it already has this view.
+CORRELATION_HEATMAP_TITLE = "Which Columns Move Together"
+#: Average-linkage cut (on 1 - |r|) that defines "a group that moves together".
+_HEATMAP_GROUP_DISTANCE = 0.5
 
 #: Categorical columns with more classes than this get truncated to top-N.
 MAX_CATEGORIES_SHOWN = 12
@@ -148,6 +162,7 @@ class ChartSpec:
     priority: float = 0.0
     layer: str = "analyst"
     caption: str | None = None
+    size: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -159,6 +174,7 @@ class ChartSpec:
             "priority": self.priority,
             "layer": self.layer,
             "caption": self.caption,
+            "size": self.size,
         }
 
 
@@ -465,20 +481,53 @@ def _class_balance_chart(
     )
 
 
+def _finding_columns(findings: list[dict[str, Any]], known: set[str]) -> set[str]:
+    """Dataset columns any non-caveat finding refers to: its measure /
+    dimension / `columns`, or any string inside its evidence that is a column
+    name (evidence key names vary by tool — measure, feature, col_a, ...)."""
+    found: set[str] = set()
+
+    def walk(value: Any, depth: int = 0) -> None:
+        if isinstance(value, str):
+            if value in known:
+                found.add(value)
+        elif depth < 3 and isinstance(value, dict):
+            for item in value.values():
+                walk(item, depth + 1)
+        elif depth < 3 and isinstance(value, (list, tuple)):
+            for item in value[:50]:
+                walk(item, depth + 1)
+
+    for finding in findings:
+        if finding.get("kind") in _CAVEAT_FINDING_KINDS:
+            continue
+        for value in (finding.get("measure"), finding.get("dimension"), finding.get("columns"), finding.get("evidence")):
+            walk(value)
+    return found
+
+
 def _histogram_charts(
-    df: pd.DataFrame, ranked_numeric: list[str], col_by_name: dict[str, ColumnProfile]
+    df: pd.DataFrame,
+    ranked_numeric: list[str],
+    col_by_name: dict[str, ColumnProfile],
+    referenced: set[str] | None = None,
+    limit: int = MAX_HISTOGRAMS,
 ) -> list[ChartSpec]:
     """P2.7: bin counts, not raw values. Skips flag/ordinal/identifier
     columns outright (a binary flag's "histogram" is just its two counts,
     reported better as a category chart; an ordinal or identifier should
-    never be binned as if it were continuous)."""
+    never be binned as if it were continuous). With `referenced`, only
+    columns a finding uses are drawn (up to `limit`); None means any."""
     charts: list[ChartSpec] = []
     eligible = [
         c for c in ranked_numeric
         if col_by_name.get(c) is not None
         and col_by_name[c].semantic_role not in _NON_CONTINUOUS_ROLES
+        and (referenced is None or c in referenced)
     ]
-    for col in eligible[:MAX_HISTOGRAMS]:
+    for col in eligible:
+        if len(charts) >= limit:
+            break
         # A severely skewed, strictly positive measure is binned and drawn on
         # a log axis — linear bins would pile almost every row into one bar.
         log_x = "severe_skew" in col_by_name[col].flags and bool((pd.to_numeric(df[col], errors="coerce").dropna() > 0).all())
@@ -533,12 +582,14 @@ def _histogram_charts(
 
 
 def _category_charts(
-    df: pd.DataFrame, profile: DatasetProfile, target: str | None
+    df: pd.DataFrame, profile: DatasetProfile, target: str | None,
+    referenced: set[str] | None = None,
 ) -> tuple[list[ChartSpec], list[ChartSpec]]:
     """Returns (charts, trivial_charts). A near-uniform category distribution
     has no story (T5) and is set aside into `trivial_charts` — the caller
     only falls back to one of those if nothing else in the whole dashboard
-    has anything to show."""
+    has anything to show. With `referenced`, `charts` holds only columns a
+    finding uses (None means any)."""
     charts: list[ChartSpec] = []
     trivial: list[ChartSpec] = []
     cat_cols = [
@@ -598,7 +649,7 @@ def _category_charts(
         if _is_near_uniform(counts):
             trivial.append(spec)
             continue
-        if len(charts) < MAX_CATEGORY_CHARTS:
+        if len(charts) < MAX_CATEGORY_CHARTS and (referenced is None or col.name in referenced):
             charts.append(spec)
     return charts, trivial
 
@@ -1272,9 +1323,119 @@ def _scree_chart(dim_output: dict[str, Any] | None) -> ChartSpec | None:
     )
 
 
-def _correlation_chart(corr_output: dict[str, Any] | None) -> ChartSpec | None:
+def correlation_heatmap(
+    corr: pd.DataFrame, max_columns: int = HEATMAP_MAX_COLUMNS,
+) -> tuple[list[dict[str, Any]], dict[str, Any], str] | None:
+    """Clustered correlation matrix -> (rows, vega_lite_spec_without_data,
+    caption); None when fewer than 3 columns have usable correlations.
+
+    Keeps the `max_columns` columns with the highest mean |r| to the rest,
+    orders them by average-linkage clustering on 1 - |r| so variables that
+    move together sit in adjacent blocks, and captions the largest such
+    group. Rows carry `col_a`/`col_b` (raw names) so a correlation finding
+    can be matched to the pair. Shared with the generate_visualizations tool."""
+    from scipy.cluster.hierarchy import fcluster, leaves_list, linkage
+    from scipy.spatial.distance import squareform
+
+    corr = corr.dropna(how="all").dropna(axis=1, how="all")
+    corr = corr.loc[corr.index.intersection(corr.columns), corr.index.intersection(corr.columns)]
+    if len(corr) < 3:
+        return None
+    strength = corr.abs().fillna(0.0).to_numpy()
+    np.fill_diagonal(strength, 0.0)
+    keep = np.argsort(-strength.sum(axis=1) / (len(corr) - 1), kind="stable")[:max_columns]
+    corr = corr.iloc[sorted(keep), sorted(keep)]
+    n = len(corr)
+    strength = corr.abs().fillna(0.0).to_numpy()
+    dist = np.clip(1.0 - strength, 0.0, 1.0)
+    dist = (dist + dist.T) / 2
+    np.fill_diagonal(dist, 0.0)
+    tree = linkage(squareform(dist, checks=False), method="average", optimal_ordering=True)
+    order = [int(i) for i in leaves_list(tree)]
+    clusters = fcluster(tree, t=_HEATMAP_GROUP_DISTANCE, criterion="distance")
+
+    names = [str(c) for c in corr.columns]
+    labels = [humanize_label(c) for c in names]
+    if len(set(labels)) != n:
+        labels = names
+    ordered = [labels[i] for i in order]
+    rows = [
+        {
+            "feature_x": labels[j], "feature_y": labels[i], "col_a": names[j], "col_b": names[i],
+            "r": round(float(corr.iloc[i, j]), 3), "abs_r": round(abs(float(corr.iloc[i, j])), 3),
+        }
+        for i in range(n) for j in range(n) if pd.notna(corr.iloc[i, j])
+    ]
+
+    groups: list[tuple[int, float, bool, list[int]]] = []
+    for cid in {int(c) for c in clusters}:
+        members = [i for i in order if int(clusters[i]) == cid]
+        if len(members) < 2:
+            continue
+        block = corr.iloc[members, members].to_numpy()
+        off = ~np.eye(len(members), dtype=bool)
+        groups.append((len(members), float(np.nanmean(np.abs(block[off]))), bool((block[off] > 0).all()), members))
+    if groups:
+        _, strength_mean, same_way, members = max(groups, key=lambda g: (g[0], g[1]))
+        shown = [labels[i] for i in members]
+        if len(shown) <= 3:
+            listed = " and ".join([", ".join(shown[:-1]), shown[-1]])
+        else:
+            listed = f"{', '.join(shown[:3])} and {len(shown) - 3} more"
+        caption = (
+            f"{listed} {'move together' if same_way else 'are closely linked'} "
+            f"(average |r| {strength_mean:.2f})."
+            + (f" {len(groups) - 1} other group{'s' if len(groups) > 2 else ''} of related columns also stand out."
+               if len(groups) > 1 else "")
+        )
+    else:
+        caption = f"No group of columns moves together strongly — every pair has |r| below {1 - _HEATMAP_GROUP_DISTANCE:.1f}."
+
+    r_field = {"field": "r", "type": "quantitative", "title": "r"}
+    x_enc: dict[str, Any] = {"field": "feature_x", "type": "nominal", "sort": ordered, "title": None,
+                             "axis": {"labelAngle": -45, "labelLimit": 220, "orient": "bottom"}}
+    y_enc: dict[str, Any] = {"field": "feature_y", "type": "nominal", "sort": ordered, "title": None,
+                             "axis": {"labelLimit": 260}}
+    layers: list[dict[str, Any]] = [{
+        "mark": {"type": "rect"},
+        "encoding": {
+            "x": x_enc, "y": y_enc,
+            "color": {**r_field, "scale": {"scheme": "blueorange", "domainMid": 0, "domain": [-1, 1]},
+                      "legend": {"format": ".1f"}},
+            "tooltip": [{"field": "feature_x", "title": "Column"}, {"field": "feature_y", "title": "Column"},
+                        {**r_field, "format": ".2f"}],
+        },
+    }]
+    if n <= HEATMAP_TEXT_MAX_COLUMNS:
+        layers.append({
+            "mark": {"type": "text", "fontSize": 10},
+            "transform": [{"filter": {"field": "abs_r", "gte": HEATMAP_TEXT_MIN_ABS_R}}],
+            "encoding": {"x": x_enc, "y": y_enc, "text": {**r_field, "format": ".2f"}},
+        })
+    return rows, {"height": max(220, min(460, 30 * n)), "layer": layers}, caption
+
+
+def _correlation_chart(
+    df: pd.DataFrame, numeric_cols: list[str], corr_output: dict[str, Any] | None,
+) -> ChartSpec | None:
+    """With >= HEATMAP_MIN_COLUMNS chartable numeric columns, a clustered
+    correlation heatmap of them; otherwise bars of the tool's top pairs
+    (colour only when both signs occur — else it carries no information)."""
     if not corr_output:
         return None
+    cols = [c for c in numeric_cols if c in df.columns]
+    if len(cols) >= HEATMAP_MIN_COLUMNS:
+        built = correlation_heatmap(df[cols].apply(pd.to_numeric, errors="coerce").corr())
+        if built is not None:
+            rows, spec, caption = built
+            return ChartSpec(
+                chart_id="top_correlations",
+                title=CORRELATION_HEATMAP_TITLE,
+                description="Pearson correlation between numeric columns, grouped so related columns sit "
+                            "side by side; orange is positive, blue negative.",
+                spec={"data": {"values": rows}, **spec},
+                caption=caption,
+            )
     top = corr_output.get("top_correlations", [])[:10]
     if not top:
         return None
@@ -1293,27 +1454,33 @@ def _correlation_chart(corr_output: dict[str, Any] | None) -> ChartSpec | None:
     ]
     if not values:
         return None
+    directions = {v["direction"] for v in values}
+    encoding: dict[str, Any] = {
+        "y": {"field": "pair", "type": "nominal", "title": None,
+              "sort": {"field": "abs_correlation", "order": "descending"},
+              "axis": {"labelLimit": 360}},
+        "x": {"field": "correlation", "type": "quantitative",
+              "scale": {"domain": [0, 1] if directions == {"positive"} else [-1, 0] if directions == {"negative"} else [-1, 1]},
+              "title": "Correlation (r)"},
+        "tooltip": [{"field": "pair", "title": "Pair"},
+                    {"field": "correlation", "title": "r", "format": ".2f"}],
+    }
+    if len(directions) > 1:
+        encoding["color"] = {
+            "field": "direction", "type": "nominal",
+            "scale": {"domain": ["positive", "negative"]},
+            "legend": {"orient": "top", "title": None},
+        }
     return ChartSpec(
         chart_id="top_correlations",
         title="Top Feature Correlations",
-        description="Strongest pairwise relationships, ranked by strength |r|; colour gives the sign.",
+        description="Strongest pairwise relationships, ranked by strength |r|"
+                    + ("; colour gives the sign." if len(directions) > 1 else f"; all are {next(iter(directions))}."),
         spec={
             "data": {"values": values},
             "mark": {"type": "bar"},
             "height": max(160, len(values) * 30),
-            "encoding": {
-                "y": {"field": "pair", "type": "nominal", "title": None,
-                      "sort": {"field": "abs_correlation", "order": "descending"}},
-                "x": {"field": "correlation", "type": "quantitative",
-                      "scale": {"domain": [-1, 1]}, "title": "Correlation (r)"},
-                "color": {
-                    "field": "direction", "type": "nominal",
-                    "scale": {"domain": ["positive", "negative"]},
-                    "legend": {"orient": "top", "title": None},
-                },
-                "tooltip": [{"field": "pair", "title": "Pair"},
-                            {"field": "correlation", "title": "r", "format": ".2f"}],
-            },
+            "encoding": encoding,
         },
     )
 
@@ -1600,7 +1767,7 @@ def _tag(chart: ChartSpec, finding: dict[str, Any]) -> ChartSpec:
     chart.finding_id = finding.get("finding_id") or f"{finding.get('kind')}::{finding.get('measure')}"
     chart.priority = float(finding.get("importance") or 0.0)
     chart.layer = finding.get("layer") or "analyst"
-    chart.caption = finding.get("headline")
+    chart.caption = fallback_caption(finding) or finding.get("headline")
     return chart
 
 
@@ -1771,14 +1938,62 @@ def _lorenz_chart(df: pd.DataFrame, finding: dict[str, Any]) -> ChartSpec | None
     )
 
 
+def _change_comparison_chart(
+    measure: str, prior: float, latest: float, unit: str, latest_label: str,
+    unit_hint: str | None, agg_word: str,
+) -> ChartSpec:
+    """Two bars from a zero baseline — previous period vs latest — with the
+    change written above the latest bar as "+x (+y%)". A waterfall of two
+    levels and one thin step says nothing; this is the honest version when
+    there is no additive segment breakdown to decompose."""
+    change = latest - prior
+    pct = f" ({change / abs(prior):+.1%})" if prior else ""
+    rows = [
+        {"period": f"Previous {unit}", "order": 0, "value": round(prior, 6),
+         "label": _fmt_value(prior, unit_hint), "note": "", "latest": False},
+        {"period": latest_label, "order": 1, "value": round(latest, 6),
+         "label": _fmt_value(latest, unit_hint), "note": f"{_signed(change, unit_hint)}{pct}", "latest": True},
+    ]
+    fmt = axis_format(unit_hint)
+    x_enc: dict[str, Any] = {"field": "period", "type": "nominal", "sort": {"field": "order"}, "title": None,
+                             "axis": {"labelAngle": 0}}
+    y_enc: dict[str, Any] = {"field": "value", "type": "quantitative", "scale": {"zero": True},
+                             "title": f"{agg_word.capitalize()} {humanize_axis_title(measure, unit_hint)}"}
+    _merge_axis_format(y_enc, fmt)
+    return ChartSpec(
+        chart_id=f"change_waterfall_{_slug(measure)}",
+        title=f"{humanize_label(measure)} — {latest_label} vs Previous {unit.capitalize()}",
+        description=f"{agg_word.capitalize()} {humanize_label(measure).lower()} in the previous {unit} and in "
+                    f"{latest_label}, both from zero, with the change between them.",
+        spec={
+            "data": {"values": rows},
+            "height": 240,
+            "layer": [
+                {"mark": {"type": "bar"}, "encoding": {
+                    "x": x_enc, "y": y_enc,
+                    "tooltip": [{"field": "period", "title": "Period"}, {"field": "label", "title": "Value"}],
+                }},
+                {"mark": {"type": "text", "dy": -7}, "encoding": {
+                    "x": x_enc, "y": {"field": "value", "type": "quantitative"}, "text": {"field": "label"},
+                }},
+                {"mark": {"type": "text", "dy": -22, "fontWeight": "bold"},
+                 "transform": [{"filter": {"field": "latest", "equal": True}}],
+                 "encoding": {"x": x_enc, "y": {"field": "value", "type": "quantitative"}, "text": {"field": "note"}}},
+            ],
+        },
+    )
+
+
 def _change_waterfall_chart(
     finding: dict[str, Any], col_by_name: dict[str, ColumnProfile],
 ) -> ChartSpec | None:
     """Waterfall from the previous period's total to the latest one, one
     step per segment's contribution (change_analysis `segment_breakdown`)
     plus an explicit "Other segments" remainder so the bars reconcile to the
-    headline change. An averaged measure's segment deltas don't add up, so
-    it shows the net change as a single step."""
+    headline change. Only an additive (summed) measure with a segment
+    breakdown gets one; an averaged measure's segment deltas don't add up,
+    and with no breakdown a waterfall is just two levels — both get a
+    two-bar previous-vs-latest comparison instead."""
     ev = finding.get("evidence") or {}
     prior, latest = _num(ev.get("prior_period_value")), _num(ev.get("latest_value"))
     if prior is None or latest is None:
@@ -1797,9 +2012,13 @@ def _change_waterfall_chart(
         delta = _num(seg.get("delta")) if isinstance(seg, dict) else None
         if delta is not None:
             steps.append((str(seg.get("level")), delta, False))
+    if len(steps) == 1:
+        return _change_comparison_chart(
+            measure, prior, latest, unit, latest_label, unit_hint, "total" if additive else "average",
+        )
     rest = (latest - prior) - sum(value for _, value, is_total in steps if not is_total)
-    if len(steps) == 1 or abs(rest) > 1e-9 * max(abs(prior), abs(latest), 1.0):
-        steps.append(("Other segments" if len(steps) > 1 else "Change", rest, False))
+    if abs(rest) > 1e-9 * max(abs(prior), abs(latest), 1.0):
+        steps.append(("Other segments", rest, False))
     steps.append((latest_label, latest, True))
 
     rows: list[dict[str, Any]] = []
@@ -1827,8 +2046,6 @@ def _change_waterfall_chart(
         + (": each lighter bar is one segment's contribution." if len(steps) > 3 else ".")
         + " Solid bars are the period totals."
     )
-    if not additive and ev.get("segment_breakdown"):
-        description += " This measure is an average, so segment moves don't add up — only the net change is shown."
     return ChartSpec(
         chart_id=f"change_waterfall_{_slug(measure)}",
         title=f"What Moved {humanize_label(measure)} — {latest_label} vs Previous {unit.capitalize()}",
@@ -2037,7 +2254,7 @@ def _attach_finding_metadata(charts: list[ChartSpec], findings: list[dict[str, A
             chart.finding_id = fid
             chart.priority = float(finding.get("importance") or 0.0)
             chart.layer = finding.get("layer") or "analyst"
-            chart.caption = finding.get("headline")
+            chart.caption = fallback_caption(finding) or finding.get("headline")
             used_finding_ids.add(fid)
             break
 
@@ -2051,17 +2268,21 @@ def _llm_chart(clean: dict[str, Any], chart_id: str, finding: dict[str, Any] | N
     headline = finding.get("headline") if finding else None
     y_label = humanize_label(clean["y"]) if clean.get("y") else "Rows"
     description = clean.get("caption") or headline or "Chart produced during the analysis."
+    if clean.get("note"):
+        description += f" {clean['note']}"
     if clean.get("truncated"):
         description += f" Only the first {len(clean['data'])} rows are plotted."
+    default_title = f"{y_label} by {humanize_label(clean['x'])}" if clean.get("x") else "Custom chart"
     return ChartSpec(
         chart_id=chart_id,
-        title=clean.get("title") or f"{y_label} by {humanize_label(clean['x'])}",
+        title=clean.get("title") or default_title,
         description=description,
         spec=spec_to_vegalite(clean),
         finding_id=finding.get("finding_id") if finding else None,
-        priority=float(finding.get("importance") or 0.0) if finding else 0.0,
+        priority=(float(finding.get("importance") or 0.0) if finding else 0.0) + clean.get("priority", 0) / 100,
         layer=(finding.get("layer") if finding else None) or "analyst",
-        caption=headline or clean.get("caption"),
+        caption=clean.get("caption") or (fallback_caption(finding) if finding else None) or headline,
+        size=clean.get("size"),
     )
 
 
@@ -2075,7 +2296,7 @@ def _llm_charts(results: list[dict[str, Any]], findings: list[dict[str, Any]]) -
     linked: set[str] = set()
 
     def signature(clean: dict[str, Any]) -> str:
-        return json.dumps({k: clean.get(k) for k in ("type", "x", "y", "color", "data")},
+        return json.dumps({k: clean.get(k) for k in ("type", "x", "y", "color", "data", "vega_lite")},
                           sort_keys=True, default=str)
 
     def add(raw: Any, chart_id: str, finding: dict[str, Any] | None) -> None:
@@ -2175,7 +2396,7 @@ def build_dashboard(
         _safe(_confusion_matrix_chart, eval_out),
         _safe(_roc_chart, eval_out),
         _safe(_cluster_chart, cluster_out),
-        _safe(_correlation_chart, corr_out),
+        _safe(_correlation_chart, df, continuous, corr_out),
         _safe(_time_series_chart, df, profile, ranked, col_by_name, target_column, ts_out),
         _safe(_geospatial_chart, geo_out),
         _safe(_scree_chart, dim_out),
@@ -2186,20 +2407,23 @@ def build_dashboard(
     charts.extend(_safe(_cohort_charts, df, cohort_out, default=[]))
     charts.extend(_safe(_workforce_charts, df, workforce_out, default=[]))
 
+    # Strict curation: distributions and category counts only for columns a
+    # finding refers to; the generic box/scatter candidates rank last.
+    referenced = _finding_columns(findings, set(df.columns.astype(str)))
+    eda: list[ChartSpec] = []
+    class_balance = _safe(_class_balance_chart, df, target_column, task_type)
+    if class_balance is not None:
+        eda.append(class_balance)
+    eda.extend(_safe(_histogram_charts, df, ranked, col_by_name, referenced, default=[]))
+    cat_charts, trivial_cat_charts = _safe(
+        _category_charts, df, profile, target_column, referenced, default=([], [])
+    )
+    eda.extend(cat_charts)
     eda_candidates: list[ChartSpec | None] = [
-        _safe(_class_balance_chart, df, target_column, task_type),
         _safe(_box_plot_chart, df, continuous, target_column, task_type, col_by_name),
         _safe(_scatter_chart, df, continuous, target_column, task_type, corr_out, col_by_name),
     ]
-    eda: list[ChartSpec] = [c for c in eda_candidates if c is not None]
-    eda.extend(_safe(_histogram_charts, df, ranked, col_by_name, default=[]))
-    cat_charts, trivial_cat_charts = _safe(
-        _category_charts, df, profile, target_column, default=([], [])
-    )
-    eda.extend(cat_charts)
-    if not charts and not eda and trivial_cat_charts:
-        # Nothing else to show beats a uniform-count bar chart with no story.
-        eda.append(trivial_cat_charts[0])
+    eda.extend(c for c in eda_candidates if c is not None)
 
     # Finding-kind panels (segment lift, concentration, change, group test)
     # for findings no LLM chart already covers; a group test on the pair the
@@ -2226,14 +2450,31 @@ def build_dashboard(
         drop.add("cohort_revenue_by_month")
     if "workforce_headcount_by_dept" in ids and workforce_out and workforce_out.get("department_column"):
         drop.add(f"cat_{workforce_out['department_column']}")
+    corr_chart = next((c for c in charts if c.chart_id == "top_correlations"), None)
+    if corr_chart is not None and corr_chart.title == CORRELATION_HEATMAP_TITLE and any(
+        c.title == CORRELATION_HEATMAP_TITLE and c is not corr_chart for c in charts
+    ):
+        drop.add("top_correlations")
     charts = [c for c in charts if c.chart_id not in drop]
     eda = [c for c in eda if c.chart_id not in drop]
+
+    if not charts and not eda:
+        # Never an empty dashboard: the single top-ranked histogram, else the
+        # most lopsided category count, else (last resort) a uniform one.
+        eda = _safe(_histogram_charts, df, ranked, col_by_name, None, 1, default=[])
+        if not eda:
+            loose, _ = _safe(_category_charts, df, profile, target_column, None, default=([], []))
+            eda = (loose or trivial_cat_charts)[:1]
 
     charts.extend(eda)
     _safe(_attach_finding_metadata, charts, findings)
 
-    # Finding-tagged panels lead (7.8) by priority, then results charts,
-    # then EDA; the stable sort keeps build order within each tier.
+    # Finding-tagged panels and LLM-declared charts lead (7.8) by priority,
+    # then results charts, then EDA; the stable sort keeps build order within
+    # each tier. An LLM chart is never outranked by a generic one under
+    # MAX_CHARTS.
     eda_ids = {id(c) for c in eda}
-    charts.sort(key=lambda c: (0 if c.finding_id else 1 if id(c) not in eda_ids else 2, -c.priority))
+    charts.sort(key=lambda c: (
+        0 if c.finding_id or c.chart_id.startswith("llm_") else 1 if id(c) not in eda_ids else 2, -c.priority,
+    ))
     return charts[:MAX_CHARTS]

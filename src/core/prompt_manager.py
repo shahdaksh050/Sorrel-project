@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ except ImportError:  # older security module without PII redaction
 def _redact(text: str) -> str:
     """Mask PII in LLM-bound free text unless REDACT_PII=false."""
     return redact_pii_text(text) if pii_redaction_enabled() else text
+
 
 #: Data archetypes the profiler recognises; the planner confirms or corrects
 #: the profiler's guess in `data_understanding.archetype`.
@@ -72,17 +74,45 @@ this data (filter rows, derive a column, reshape, then re-run a tool). \
 Pre-loaded names — do not read files, `df` is already loaded:
 - `df` — the cleaned dataset (pandas DataFrame); `SCHEMA` — {column: kind}; \
 `PRIOR_RESULTS` — {tool_name: output} from earlier steps.
-- `dsa.run(tool_name, df=frame, **params)` — run any analysis tool above on \
+- `pd`, `np`, `scipy`, `stats`, `math` — pre-imported and available directly (no import statements needed).
+- `dsa.run(tool_name, df=frame, **params)` — run one of the tools in `dsa.tools()` on \
 a frame you built; returns {"output": ..., "findings": [...]}. `dsa.tools()` lists them.
 - `dsa.compare_groups(frame, measure, by)`, `dsa.summarize(series)`, \
-`dsa.effect_size(a, b)`, `dsa.profile(frame)`.
-- `dsa.chart.bar | line | area | scatter(data, x, y, title=..., y_format="currency"|"percent"|"count"|"number")`, \
-`dsa.chart.histogram(data, x)`, `dsa.chart.heatmap(data, x, y, color=<value column>)` — each returns a chart spec. \
-Add `y_lower=..., y_upper=...` (columns holding CI bounds) to bar/line/area/scatter to show uncertainty.
+`dsa.effect_size(a, b)`, `dsa.cramers_v(frame, col1, col2)`, `dsa.crosstab_shares(frame, col1, col2)`, \
+`dsa.baseline_accuracy(frame, target_col)`, `dsa.profile(frame)`.
+- `dsa.relations(frame)` (formula-linked columns: kind/target/terms/expr/exact/r2), \
+`dsa.derive(frame, name, expr)` (new frame with a column from + - * / ** over column names, \
+`backticked` if spaced), `dsa.share_of_total(frame, col, by=None)`, \
+`dsa.contribution_to_change(frame, col, period_col, by=None)`.
+- `dsa.chart.bar | line | area | scatter | histogram | waterfall | lorenz | dot_ci(data, x, y, title=..., y_format="currency"|"percent"|"count"|"number")`, \
+`dsa.chart.dual_axis(data, x, y, y2)`, \
+`dsa.chart.heatmap(long_df, x="Month", y="Pollutant", color="value")` or, for a wide table, \
+`dsa.chart.heatmap(wide_df, x="Month", y=["CO","NOx"], scale="zscore")` (zscore = each column scaled on its own, \
+use it when columns have different units), `dsa.chart.corr_heatmap(df)` (clustered correlation matrix), \
+`dsa.chart.stacked_bar | grouped_bar(data, x, y, series)`, `dsa.chart.pareto(data, x, y)` (y additive), \
+`dsa.chart.boxplot(data, x, y)` (raw rows, 4+ per group), `dsa.chart.slope(data, x, y, group)` (x has exactly 2 values), \
+`dsa.chart.bullet(data, x, y, target)`, `dsa.chart.band(data, x, y, y_lower, y_upper)` — each returns a chart spec. \
+Add `y_lower=..., y_upper=...` (CI bound columns) to bar/line/area/scatter/dot_ci for uncertainty. \
+Optional on any chart: `caption` (one plain sentence with the takeaway, <=200 chars), \
+`annotations=[{"y": n, "label": s}]` (<=3 reference lines), `size="wide"|"half"|"tall"`, \
+`priority` 0-10, `facet=<column>` (<=12 panels). Scaling, sorting and top-N grouping are handled for you. \
+Escape hatch: `CHART = {"vega_lite": {...}}` — inline `data.values` only, no url/params/calculate/lookup; \
+every encoded field must exist in the rows.
+Pick the chart from the question, not the data shape: change over time -> line/area; ranking or \
+comparison -> sorted bar (dot_ci with intervals); parts of a whole -> stacked_bar/pareto; before vs after -> \
+slope/bullet; spread or outliers -> boxplot/histogram; two-variable relationship -> scatter; \
+patterns across two categories or time x category (month x hour, region x product) -> heatmap; many \
+variables at once -> corr_heatmap. If the user's goal names a chart type, produce exactly that \
+type. Aggregate to meaningful cells first (a heatmap needs >=2 distinct values on both axes, never \
+raw continuous floats), never mix levels and changes on one axis, and give every chart a `title` \
+and a `caption` stating the takeaway. A rejected CHART is reported back — redraw it next step.
 Assign at top level:
 - `RESULT = ...` (required) — a number, small dict, or aggregated DataFrame.
 - `FINDING = {"headline": ..., "detail": ..., "evidence": {...}}` (optional) — \
-a real discovery; put every number the headline states into `evidence`.
+a real discovery. The headline is one plain sentence with the number and unit, naming the \
+real columns and groups — no p-values or test names (those go in `evidence`); every number \
+it states goes in `evidence`. When it is about specific columns, also set `"measure"` \
+and `"dimension"` to their exact names so the question it answers is credited.
 - `CHART = dsa.chart.bar(...)` (optional) — aggregate first, at most 500 rows.
 - `DF_OUT = frame` plus parameter `"save_as": "name"` (optional) — saves a \
 derived dataset; later steps can pass its path as `file_path` to any tool.
@@ -91,7 +121,7 @@ Example (illustrative column names — use this dataset's real ones):
 {"step_number": 3, "tool_name": "execute_dynamic_code", "parameters": {"code": "g = df.groupby('region')['amount'].mean().sort_values(ascending=False).reset_index()\\nRESULT = g\\nCHART = dsa.chart.bar(g, x='region', y='amount', title='Average amount by region', y_format='currency')\\nFINDING = {'headline': f'{g.region[0]} has the highest average amount ({g.amount[0]:,.2f})', 'evidence': {'region': g.region[0], 'avg_amount': round(float(g.amount[0]), 2)}}"}, "rationale": "Check which region has the highest average amount."}
 `define_analysis_tool` registers reusable code as a named tool; use it only \
 when you will call the same computation again with different parameters.
-
+<<ML_DIRECTIVE>>
 ## Reply forms
 Form 1 — more analysis needed:
 {"status": "in_progress", "reasoning": "<2-3 sentences>", "steps": [{"step_number": 1, "tool_name": "<exact name>", "parameters": {...}, "rationale": "<one sentence>"}]}
@@ -128,8 +158,10 @@ INITIAL_ANALYSIS_PROMPT = """\
 1. Describe the data in `data_understanding` — short, factual, from the \
 profile above. Confirm or correct the profiler's archetype.
 2. Plan the first cycle: start with clean_data (it does not impute — \
-leave missing values; models impute inside cross-validation), then 2-5 of the most \
-informative analyses. Start from the suggested plan: keep steps that fit, \
+leave missing values; models impute inside cross-validation), then 3-6 \
+analyses that together give a broad baseline for this kind of data \
+(distributions, relationships, group/time/text/geo structure — whatever \
+the profile shows). Start from the suggested plan: keep steps that fit, \
 drop ones that don't, fix parameters (right columns, sum vs mean), and add \
 what it misses — execute_dynamic_code for anything no tool covers.
 
@@ -200,13 +232,24 @@ FINAL_INTERPRETATION_PROMPT = """\
 {results_summary}
 
 ## Your task
-Write the final report in Form 2. This is your last call.
-- insights: 4-8 items, most important first. Each is one sentence that \
-states the finding with its number, then what it means for someone who owns \
-this data. Build them from the Findings list; copy numbers exactly.
-- Say "associated with", not "causes", unless the analysis was an experiment.
-- Mention a caveat when a finding rests on a small sample or a data issue.
-- recommendations: 2-5 concrete actions, each tied to an insight.
+Write the final report in Form 2. This is your last call. Your reader owns \
+this data and is not a statistician.
+- reasoning: 3-5 short sentences. First the answer to the objective and what \
+to do about it. Then why: the key numbers with their units. Then how sure you \
+are and what could be wrong, in plain words.
+- insights: 4-8 items, most important first. Each is one short sentence that \
+states the finding with its number and unit, names the real columns and \
+groups involved, then says what it means. Build them from the Findings list; \
+copy numbers exactly.
+- No p-values, test names or model names in the first sentence of anything. If \
+a technical term is unavoidable, explain it in a few words right there.
+- Say "associated with", not "causes", unless the analysis was an experiment; \
+if something else could explain a link, say so.
+- State confidence in words (strong, suggestive, weak) and why. Mention a \
+caveat when a finding rests on a small sample or a data issue.
+- recommendations: 2-5 concrete actions, most valuable first, each naming the \
+column or group it applies to and tied to an insight. End with what to check \
+or collect next if a finding is uncertain.
 """
 
 
@@ -286,15 +329,20 @@ class PromptManager:
         tool_descriptions: str,
         max_iterations: int = 15,
         short_tool_descriptions: str | None = None,
+        use_ml: bool = True,
+        context_tokens: int | None = None,
     ) -> None:
         self.memory = memory
         self.tool_descriptions = tool_descriptions
         self.short_tool_descriptions = short_tool_descriptions
         self.max_iterations = max_iterations
+        self.use_ml = use_ml
+        self.context_tokens = context_tokens
         self._system_prompt: str | None = None
 
     def _budget_tokens(self) -> float:
-        return _context_tokens() * _BUDGET_SHARE
+        tokens = self.context_tokens if (self.context_tokens is not None and self.context_tokens > 0) else _context_tokens()
+        return tokens * _BUDGET_SHARE
 
     def get_system_prompt(self) -> str:
         """Built once per run (the engine holds it and providers cache it).
@@ -303,8 +351,21 @@ class PromptManager:
         if self._system_prompt is not None:
             return self._system_prompt
 
+        ml_directive = ""
+        if not self.use_ml:
+            ml_directive = (
+                "\n## MACHINE LEARNING IS DISABLED\n"
+                "ML training is turned OFF for this run. Do NOT attempt to train machine learning models "
+                "(e.g. no sklearn classifiers/regressors, RandomForest, GradientBoosting, LogisticRegression, KMeans). "
+                "Focus purely on descriptive statistics, hypothesis testing, cross-tabulations, distributions, and visual analytics.\n"
+            )
+
         def build(tools: str) -> str:
-            return SYSTEM_PROMPT_CORE.replace("<<TOOLS>>", tools).replace("<<MODULES>>", ALLOWED_MODULES_TEXT)
+            return (
+                SYSTEM_PROMPT_CORE.replace("<<TOOLS>>", tools)
+                .replace("<<MODULES>>", ALLOWED_MODULES_TEXT)
+                .replace("<<ML_DIRECTIVE>>", ml_directive)
+            )
 
         prompt = build(self.tool_descriptions)
         if self.short_tool_descriptions:
@@ -343,9 +404,9 @@ class PromptManager:
         if not objective:
             return ""
         return (
-            f"\n## User objective\n"
+            f"\n## User Objective\n"
             f'"{_sp(objective, max_len=500)}"\n'
-            f"Prioritise analyses that answer it; your final insights must address it.\n"
+            f"Prioritise analyses that answer it; your final insights MUST directly address it.\n"
         )
 
     def _archetype_line(self) -> str:
@@ -423,6 +484,8 @@ class PromptManager:
                 tail.append(f"p_adj={f.p_adjusted:.3g}")
             elif f.p_value is not None:
                 tail.append(f"p={f.p_value:.3g}")
+            if f.effect is not None and f.effect_kind:
+                tail.append(f"{f.effect_kind}={f.effect:.3g}")
             if f.caveats:
                 tail.append("caveat: " + "; ".join(_sp(c, max_len=120) for c in f.caveats[:2]))
             suffix = f" ({', '.join(tail)})" if tail else ""
@@ -436,8 +499,11 @@ class PromptManager:
                 f"F{i} [{_sp(f.kind, 40)}, {_sp(f.source_tool, 60)}] "
                 f"{_sp(_redact(headline), max_len=300)}{suffix}"
             )
+
         if len(findings) > limit:
-            lines.append(f"... {len(findings) - limit} lower-ranked finding(s) omitted.")
+            kinds = Counter(f.kind or "other" for f in findings[limit:])
+            listing = ", ".join(f"{_sp(k, 40)} x{n}" for k, n in kinds.most_common(6))
+            lines.append(f"... {len(findings) - limit} lower-ranked finding(s) omitted ({listing}).")
         return "\n".join(lines)
 
     def _open_questions_block(self) -> str:

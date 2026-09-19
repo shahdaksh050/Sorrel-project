@@ -17,6 +17,7 @@ already answers implicitly today but never states out loud.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -342,6 +343,33 @@ def _stat(column: Any) -> str:
     return "total" if getattr(column, "aggregation", None) == "sum" else "average"
 
 
+_LLM_KINDS = ("custom_analysis", "generated_tool")
+_KIND_ALIASES: dict[str, tuple[str, ...]] = {
+    "relationship": ("correlation",),
+    "segment": ("cohort", "workforce", "financial"),
+    "trend": ("financial",),
+    "concentration": ("cohort",),
+    "driver": ("model_performance",),
+}
+
+
+def _mentioned(finding: dict[str, Any], columns: list[str]) -> int:
+    """How many of `columns` a finding is about: named in its measure/dimension,
+    its evidence, or (whole-word) its headline and detail."""
+    ev = finding.get("evidence") or {}
+    text = " ".join(
+        str(x) for x in (
+            finding.get("headline"), finding.get("detail"), finding.get("measure"), finding.get("dimension"),
+            *(ev.keys() if isinstance(ev, dict) else ()),
+            *(v for v in (ev.values() if isinstance(ev, dict) else ()) if isinstance(v, str)),
+        ) if x
+    ).lower()
+    return sum(
+        1 for c in set(columns)
+        if re.search(rf"(?<!\w){re.escape(c.lower())}(?!\w)", text)
+    )
+
+
 def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Match agenda questions against what the finding bus actually produced,
@@ -359,11 +387,17 @@ def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> d
         if q.suggested_tool is None:
             unanswered.append(q)  # a declined question (e.g. modelling) is unanswered by definition
             continue
-        kind_hit = (q.kind, "segment_lift", "driver", "trend", "concentration", "change")
+        kind_hit = (q.kind, "segment_lift", "driver", "trend", "concentration", "change", *_KIND_ALIASES.get(q.kind, ()))
+        # LLM-authored findings rarely fill measure/dimension, so they are
+        # matched on the columns their text names instead.
+        llm_hit = any(
+            f.get("kind") in _LLM_KINDS and _mentioned(f, q.columns) >= min(2, len(q.columns))
+            for f in findings
+        ) if q.columns else False
         if q.kind == "distribution":
             # detect_outliers reports method_fit findings that carry no
             # measure column, so its having reported at all is the answer.
-            hit = any(f.get("source_tool") == q.suggested_tool for f in findings)
+            hit = llm_hit or any(f.get("source_tool") == q.suggested_tool for f in findings)
         elif q.columns:
             # A question that names specific columns is only answered by a
             # finding that's actually ABOUT those columns — matching on
@@ -371,7 +405,7 @@ def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> d
             # for every question that tool could ever answer (e.g. one
             # segment_comparison finding on an unrelated measure/dimension
             # pair would mark every OTHER segment question "answered" too).
-            hit = any(
+            hit = llm_hit or any(
                 f.get("kind") in kind_hit
                 and (f.get("measure") in q.columns or f.get("dimension") in q.columns)
                 for f in findings

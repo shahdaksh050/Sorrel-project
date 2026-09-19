@@ -235,7 +235,7 @@ class TestChartSelection:
         }
         charts = build_dashboard(df, profile, tool_results=[ts_result])
         ts_chart = next(c for c in charts if c.chart_id == "time_series")
-        assert "other_metric" in ts_chart.title
+        assert "Other Metric" in ts_chart.title or "other_metric" in ts_chart.title
         assert "upward" in ts_chart.description
         assert "Non-stationary" in ts_chart.description
         assert "7" in ts_chart.description

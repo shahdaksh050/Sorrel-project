@@ -29,6 +29,7 @@ import pandas as pd
 import streamlit as st
 
 from src.core.io import read_any, read_any_bytes
+from src.core.plain_language import describe_uncertainty, plainify
 from src.core.security import ALLOWED_EXTENSIONS
 
 # ── Project root on sys.path ─────────────────────────────────────────────────
@@ -833,21 +834,6 @@ def _get_vega_config() -> dict[str, Any]:
 
 VEGA_PLOT_CONFIG = _get_vega_config()
 
-# OpenRouter slugs use DOT version notation for Claude (claude-sonnet-4.6,
-# not claude-sonnet-4-6). Every entry below is verified against the live
-# /api/v1/models catalog — an invalid slug makes every call fail with 404.
-OR_MODELS = [
-    "openai/gpt-4o",
-    "openai/gpt-4.1",
-    "anthropic/claude-sonnet-4.6",
-    "anthropic/claude-opus-4.8",
-    "meta-llama/llama-3.3-70b-instruct",
-    "google/gemini-2.5-flash",
-    "mistralai/mistral-large",
-    "deepseek/deepseek-chat",
-    "cohere/command-r-plus-08-2024",
-]
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1270,10 +1256,14 @@ def _render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str]) -
     chart that visualizes it, if any (7.18) — no anchor-scroll mechanism,
     just an honest pointer to the Charts tab.
     """
-    headline = html.escape(str(finding.get("headline", "")))
+    headline = html.escape(plainify(str(finding.get("headline", ""))))
     detail = finding.get("detail")
     caveats = finding.get("caveats") or []
-    sub_text = str(detail) if detail else (str(caveats[0]) if caveats else "")
+    sub_text = (
+        plainify(str(detail)) if detail
+        else plainify(str(caveats[0])) if caveats
+        else describe_uncertainty(finding) or ""
+    )
     sub_html = (
         f'<div style="font-size:13px;color:var(--graphite);margin-top:4px;">{html.escape(sub_text)}</div>'
         if sub_text else ""
@@ -1822,6 +1812,36 @@ def _load_teamwork_preview() -> None:
     st.session_state["analysis_done"] = True
 
 
+@st.cache_resource(show_spinner=False)
+def _cuda_available() -> bool:
+    from src.tools.ml_pipeline import _detect_cuda_gpu
+
+    return _detect_cuda_gpu()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _get_dynamic_models(
+    provider: str,
+    api_key: str = "",
+    base_url: str | None = None,
+) -> list[dict[str, Any]]:
+    """Dynamically fetch available models and capability telemetry from provider."""
+    from src.core.model_telemetry import fetch_available_models
+    profiles = fetch_available_models(provider, api_key=api_key, base_url=base_url)
+    return [
+        {
+            "model": p.model,
+            "label": p.format_dropdown_label(),
+            "context_window": p.context_window,
+            "rpm_limit": p.rpm_limit,
+            "tpm_limit": p.tpm_limit,
+            "speed_tag": p.speed_tag,
+            "is_free": p.is_free,
+        }
+        for p in profiles
+    ]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1926,64 +1946,9 @@ with st.sidebar:
     st.markdown('<div class="side-head">LLM Provider</div>', unsafe_allow_html=True)
     provider = st.selectbox(
         "Provider",
-        ["openai", "anthropic", "gemini", "openrouter", "nvidia", "local"],
+        ["openai", "anthropic", "gemini", "groq", "openrouter", "nvidia", "local"],
         format_func=lambda p: "Local / offline" if p == "local" else p,
     )
-
-    NVIDIA_MODELS = [
-        "openai/gpt-oss-120b",
-        "meta/llama-3.1-70b-instruct",
-        "meta/llama-3.3-70b-instruct",
-        "mistralai/mistral-large-2-instruct",
-        "microsoft/phi-3-medium-128k-instruct",
-        "google/gemma-2-27b-it",
-        "deepseek-ai/deepseek-r1",
-    ]
-    GEMINI_MODELS = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-flash-latest",
-        "gemini-pro-latest",
-    ]
-    LOCAL_MODELS = ["llama3.1", "llama3.2", "mistral", "qwen2.5", "deepseek-r1", "phi4"]
-
-    if provider == "openai":
-        model_list = ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"]
-        key_ph     = "sk-..."
-    elif provider == "anthropic":
-        model_list = ["claude-sonnet-4-6", "claude-opus-4-8",
-                      "claude-haiku-4-5-20251001"]
-        key_ph     = "sk-ant-..."
-    elif provider == "gemini":
-        model_list = GEMINI_MODELS
-        key_ph     = "from aistudio.google.com/apikey"
-    elif provider == "nvidia":
-        model_list = NVIDIA_MODELS
-        key_ph     = "nvapi-..."
-    elif provider == "local":
-        model_list = LOCAL_MODELS
-        key_ph     = "usually not required"
-    else:
-        model_list = OR_MODELS
-        key_ph     = "sk-or-..."
-
-    model_sel = st.selectbox("Model", model_list)
-    if provider in ("openrouter", "nvidia", "local", "gemini"):
-        custom_m = st.text_input(
-            "Custom model string (overrides above)",
-            placeholder={
-                "gemini": "e.g. gemini-2.0-flash, gemini-1.5-flash, gemini-2.0-flash-exp",
-                "openrouter": "e.g. cohere/command-r-plus",
-                "nvidia": "e.g. nvidia/llama-3.1-nemotron-70b-instruct",
-                "local": "e.g. the exact tag your server has pulled/loaded",
-            }[provider],
-        )
-        final_model = custom_m.strip() if custom_m.strip() else model_sel
-    else:
-        final_model = model_sel
 
     local_base_url = ""
     if provider == "local":
@@ -1999,15 +1964,110 @@ with st.sidebar:
         "openai": "OpenAI",
         "anthropic": "Anthropic",
         "gemini": "Gemini",
+        "groq": "Groq",
         "openrouter": "OpenRouter",
         "nvidia": "NVIDIA",
         "local": "Local server",
     }.get(provider, provider)
+
+    key_ph = {
+        "openai": "sk-...",
+        "anthropic": "sk-ant-...",
+        "gemini": "from aistudio.google.com/apikey",
+        "groq": "gsk_...",
+        "nvidia": "nvapi-...",
+        "openrouter": "sk-or-...",
+        "local": "usually not required",
+    }.get(provider, "sk-...")
+
     api_key = st.text_input(
         f"{_key_label} API Key" + (" (optional)" if provider == "local" else ""),
         type="password",
         placeholder=key_ph,
     )
+
+    _env_key = os.getenv(f"{provider.upper()}_API_KEY", "")
+    _effective_key = api_key.strip() or _env_key
+    _dyn_models = _get_dynamic_models(
+        provider,
+        api_key=_effective_key,
+        base_url=local_base_url if provider == "local" else None,
+    )
+
+    free_models = [m for m in _dyn_models if m.get("is_free")]
+    paid_models = [m for m in _dyn_models if not m.get("is_free")]
+
+    # Show Free and Paid models separately when both are present
+    if free_models and paid_models:
+        tier_choice = st.radio(
+            "Pricing Tier",
+            [f"🆓 Free Models ({len(free_models)})", f"💳 Paid Models ({len(paid_models)})", f"All ({len(_dyn_models)})"],
+            horizontal=True,
+            index=0,
+            key=f"tier_filter_{provider}",
+        )
+        if "Free" in tier_choice:
+            active_dyn_models = free_models
+        elif "Paid" in tier_choice:
+            active_dyn_models = paid_models
+        else:
+            active_dyn_models = sorted(
+                _dyn_models,
+                key=lambda m: (not m.get("is_free", False), m["model"]),
+            )
+    elif free_models and not paid_models:
+        st.caption("🟢 All models listed below are Free Tier eligible.")
+        active_dyn_models = free_models
+    else:
+        st.caption("💳 Paid API billing applies per token.")
+        active_dyn_models = paid_models
+
+    model_options = [m["model"] for m in active_dyn_models]
+    model_labels = {m["model"]: m["label"] for m in active_dyn_models}
+
+    if not model_options:
+        model_options = ["default"]
+        model_labels = {"default": "default"}
+
+    model_sel = st.selectbox(
+        "Model",
+        model_options,
+        format_func=lambda m: model_labels.get(m, m),
+    )
+
+    if provider in ("openrouter", "nvidia", "local", "gemini", "groq"):
+        custom_m = st.text_input(
+            "Custom model string (overrides above)",
+            placeholder={
+                "gemini": "e.g. gemini-2.5-flash, gemini-flash-latest",
+                "groq": "e.g. llama-3.3-70b-versatile, llama-3.1-8b-instant",
+                "openrouter": "e.g. cohere/command-r-plus",
+                "nvidia": "e.g. nvidia/llama-3.1-nemotron-70b-instruct",
+                "local": "e.g. the exact tag your server has pulled/loaded",
+            }[provider],
+        )
+        final_model = custom_m.strip() if custom_m.strip() else model_sel
+    else:
+        final_model = model_sel
+
+    # ── Reasoning Mode ────────────────────────────────────────────────────────
+    reasoning_mode = st.selectbox(
+        "Reasoning Mode",
+        ["Adaptive (Recommended)", "Fast (Low Reasoning)", "Deep (High Reasoning)"],
+        index=0,
+        help=(
+            "Adaptive: dynamically scales reasoning effort — low during routine exploratory steps, "
+            "higher when anomalies or statistical conflicts occur, and thorough for final synthesis.\n"
+            "Fast: forces minimal reasoning effort across all cycles for maximum execution speed.\n"
+            "Deep: uses full reasoning depth across all cycles."
+        ),
+    )
+    if "Adaptive" in reasoning_mode:
+        os.environ["LLM_REASONING_EFFORT"] = "adaptive"
+    elif "Fast" in reasoning_mode:
+        os.environ["LLM_REASONING_EFFORT"] = "low"
+    elif "Deep" in reasoning_mode:
+        os.environ["LLM_REASONING_EFFORT"] = "high"
 
     # ── Engine ────────────────────────────────────────────────────────────────
     # The two capability switches. Both default on; either can be turned off
@@ -2062,6 +2122,12 @@ with st.sidebar:
             ),
         )
         tune_hyperparameters = thorough
+
+        if _cuda_available():
+            st.caption("🚀 **GPU Acceleration**: CUDA detected! XGBoost models will train on GPU (`device='cuda'`).")
+        else:
+            st.caption("💻 **Compute**: CPU mode (multi-core parallel training).")
+
         with st.expander("Advanced model settings"):
             max_depth = st.slider("Max tree depth (Random Forest / XGBoost)", 2, 15, 6)
             test_pct = st.slider("Test split %", 10, 40, 20, step=5)
@@ -2228,6 +2294,14 @@ if run_clicked:
     # Set env vars before importing src
     os.environ["LLM_PROVIDER"]          = provider
     os.environ["LLM_MODEL"]             = final_model
+    _picked = next((m for m in _dyn_models if m["model"] == final_model), None)
+    if _picked:
+        from src.core.model_telemetry import get_limiter
+
+        _profile = get_limiter().get_profile(provider, final_model)
+        _profile.context_window = _picked["context_window"]
+        _profile.rpm_limit = _picked["rpm_limit"] or _profile.rpm_limit
+        _profile.tpm_limit = _picked["tpm_limit"] or _profile.tpm_limit
     os.environ["MIN_ITERATIONS"]        = str(min_iter)
     os.environ["MAX_ITERATIONS"]        = str(max_iter)
     os.environ["ENABLE_RLM_INFERENCE"]  = "true" if enable_rlm else "false"
@@ -2245,6 +2319,7 @@ if run_clicked:
         "openai":     lambda: os.environ.__setitem__("OPENAI_API_KEY",     api_key.strip()),
         "anthropic":  lambda: os.environ.__setitem__("ANTHROPIC_API_KEY",  api_key.strip()),
         "gemini":     lambda: os.environ.__setitem__("GEMINI_API_KEY",     api_key.strip()),
+        "groq":       lambda: os.environ.__setitem__("GROQ_API_KEY",       api_key.strip()),
         "openrouter": lambda: os.environ.__setitem__("OPENROUTER_API_KEY", api_key.strip()),
         "nvidia":     lambda: os.environ.__setitem__("NVIDIA_API_KEY",     api_key.strip()),
         "local":      lambda: (
@@ -2523,7 +2598,7 @@ if st.session_state.get("analysis_done"):
                 f'<div class="exec-directive" style="border-left: 4px solid var(--pen); padding-left: 1rem; margin-bottom: 2rem; background: var(--sheet); border-radius: var(--radius); padding: 1.5rem; box-shadow: var(--lift-sm);">'
                 f'<h2 style="font-size: 1.2rem; color: var(--graphite); text-transform: uppercase; letter-spacing: 1px; margin: 0 0 0.5rem 0;">Case Brief</h2>'
                 f'<div style="font-size: 1.4rem; font-weight:700; margin-bottom:1rem; color:var(--ink);">Objective: {html.escape(_user_obj)}</div>'
-                f'<div class="dir-content" style="font-size: 1.1rem; line-height: 1.6; color: var(--ink);">{html.escape(report["reasoning"])}</div>'
+                f'<div class="dir-content" style="font-size: 1.1rem; line-height: 1.6; color: var(--ink);">{html.escape(plainify(str(report["reasoning"])))}</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -2531,7 +2606,7 @@ if st.session_state.get("analysis_done"):
             st.markdown(
                 f'<div class="exec-directive" style="border-left: 4px solid var(--pen); padding-left: 1rem; margin-bottom: 2rem; background: var(--sheet); border-radius: var(--radius); padding: 1.5rem; box-shadow: var(--lift-sm);">'
                 f'<h2 style="font-size: 1.2rem; color: var(--graphite); text-transform: uppercase; letter-spacing: 1px; margin: 0 0 0.5rem 0;">Case Brief</h2>'
-                f'<div class="dir-content" style="font-size: 1.1rem; line-height: 1.6; color: var(--ink);">{html.escape(report["reasoning"])}</div>'
+                f'<div class="dir-content" style="font-size: 1.1rem; line-height: 1.6; color: var(--ink);">{html.escape(plainify(str(report["reasoning"])))}</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -2604,7 +2679,7 @@ if st.session_state.get("analysis_done"):
             _ins_list = report.get("insights", [])
             if _ins_list:
                 for _i, _ins in enumerate(_ins_list, start=1):
-                    st.markdown(f'<div class="ic"><span class="mk">{_i:02d}</span>{html.escape(str(_ins))}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="ic"><span class="mk">{_i:02d}</span>{html.escape(plainify(str(_ins)))}</div>', unsafe_allow_html=True)
             else:
                 st.caption("No explicit statistical discoveries recorded.")
 
@@ -2612,7 +2687,7 @@ if st.session_state.get("analysis_done"):
         _rec_list = report.get("recommendations", [])
         if _rec_list:
             for _rec in _rec_list:
-                st.markdown(f'<div class="rc"><span class="mk">Do</span>{html.escape(str(_rec))}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="rc"><span class="mk">Do</span>{html.escape(plainify(str(_rec)))}</div>', unsafe_allow_html=True)
         else:
             st.caption("No operational recommendations generated.")
 
@@ -2663,7 +2738,7 @@ if st.session_state.get("analysis_done"):
             _matches = _search_findings(_ask_q, _all_findings)
             if _matches:
                 for _m in _matches:
-                    st.success(f"Based on what was found: {_m.get('headline', '')}")
+                    st.success(f"Based on what was found: {plainify(str(_m.get('headline', '')))}")
             else:
                 st.info("Nothing in this analysis directly answers that — try rephrasing, "
                         "or check the Details tab for full coverage.")
@@ -2750,9 +2825,9 @@ if st.session_state.get("analysis_done"):
             _grid_charts: list[dict[str, Any]] = []
 
             for _ch in dashboard:
-                _is_full_width = (
-                    _ch.get("layer") == "exec"
-                    or _ch.get("chart_id") in _top_priority_ids
+                _is_full_width = _ch.get("size") == "wide" or (
+                    _ch.get("size") != "half"
+                    and (_ch.get("layer") == "exec" or _ch.get("chart_id") in _top_priority_ids)
                 )
                 if _is_full_width:
                     _render_dashboard_chart(_ch, vega_cfg)

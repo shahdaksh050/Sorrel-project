@@ -1,8 +1,6 @@
 """Unit tests for Visualization Tools — Stage 3 chart generation."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -35,7 +33,7 @@ class TestGenerateVisualizationsTool:
             file_path=numeric_csv, chart_type="correlation_heatmap", output_dir=out
         )
         assert result.status == "success"
-        assert all(Path(p).exists() for p in result.output["saved_paths"])
+        assert "charts" in result.output and len(result.output["charts"]) >= 1
 
     def test_distributions_save_one_png_per_numeric_col(
         self, numeric_csv: str, tmp_path: pytest.TempPathFactory
@@ -45,7 +43,7 @@ class TestGenerateVisualizationsTool:
             file_path=numeric_csv, chart_type="distributions", output_dir=out
         )
         assert result.status == "success"
-        assert len(result.output["saved_paths"]) == 4  # f1, f2, f3, label
+        assert "charts" in result.output and len(result.output["charts"]) == 4  # f1, f2, f3, label
 
     def test_unknown_chart_type_errors(self, numeric_csv: str) -> None:
         result = GenerateVisualizationsTool().run(
@@ -83,7 +81,7 @@ class TestGenerateVisualizationsTool:
             output_dir=out,
         )
         assert result.status == "success"
-        assert Path(result.output["saved_paths"][0]).exists()
+        assert "charts" in result.output and len(result.output["charts"]) >= 1
 
     def test_roc_curve_rejects_non_binary_target(
         self, tmp_path: pytest.TempPathFactory

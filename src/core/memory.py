@@ -367,7 +367,41 @@ class MemorySystem:
         """Return compact metadata string for LLM context injection."""
         if not self.dataset_metadata:
             raise ValueError("No dataset metadata. Call store_dataset_metadata() first.")
-        return self.dataset_metadata.to_prompt_string(compact=compact)
+        prompt = self.dataset_metadata.to_prompt_string(compact=compact)
+        relations = self._relations_block()
+        return f"{prompt}\n{relations}" if relations else prompt
+
+    def _relations_block(self, max_lines: int = 4) -> str:
+        """Compact "Relations" block from the profiler's formula discovery
+        (stored with the profile in context) — appended here, after the
+        compact/full split, so it reaches the planner in both modes. Column
+        names and fit quality only, never values; relations touching a
+        redacted PII column are dropped."""
+        from src.core.security import pii_redaction_enabled
+        from src.core.security import sanitize_for_prompt as _sp
+
+        profile = self.get_context("data_profile")
+        found = profile.get("relations") if isinstance(profile, dict) else None
+        if not found:
+            return ""
+        hidden = (
+            {c.get("name") for c in profile.get("columns", []) if c.get("pii")}
+            if pii_redaction_enabled() else set()
+        )
+        lines: list[str] = []
+        for rel in found:
+            if hidden & {rel.get("target"), *rel.get("terms", [])}:
+                continue
+            fit = "exact" if rel.get("exact") else f"near, max rel. error {rel.get('max_rel_err', 0):.1%}"
+            lines.append(f"- {_sp(rel.get('expr', ''), max_len=120)} ({fit})")
+        if not lines:
+            return ""
+        more = f" (+{len(lines) - max_lines} more)" if len(lines) > max_lines else ""
+        return (
+            "Relations (columns computed from each other — confirm with the data; use them for derived "
+            "metrics; do not rank a formula column and its inputs as independent drivers; exclude the "
+            f"inputs from ML features when the target is one of them){more}:\n" + "\n".join(lines[:max_lines])
+        )
 
     # ------------------------------------------------------------------
     # Stage 2 — Analysis plan (LLM-generated)

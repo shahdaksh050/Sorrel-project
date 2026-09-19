@@ -79,7 +79,8 @@ def generate_transactional(
     customer_id = [f"CUST-{i:05d}" for i in customer_idx]
 
     order_id = [f"ORD-{i:06d}" for i in range(n)]
-    region = rng.choice(["North", "South", "East", "West"], size=n)
+    customer_regions = rng.choice(["North", "South", "East", "West"], size=n_customers)
+    region = customer_regions[customer_idx]
     product_category = rng.choice(
         ["Electronics", "Apparel", "Home", "Grocery", "Toys"], size=n
     )

@@ -23,6 +23,7 @@ from typing import Any
 import pandas as pd
 
 from src.core.profiler import has_identifier_name_hint
+from src.core.sentinels import format_value, null_sentinels
 
 #: Fraction of non-null values that must match a rule before a column is coerced.
 COERCE_MATCH_THRESHOLD = 0.95
@@ -49,6 +50,7 @@ class Coercion:
     n_failed: int
     failed_examples: list[str] = field(default_factory=list)
     is_sentinel_only: bool = False
+    detail: str = ""        # human-readable disclosure (rule "sentinel")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,6 +62,7 @@ class Coercion:
             "n_failed": self.n_failed,
             "failed_examples": self.failed_examples,
             "is_sentinel_only": self.is_sentinel_only,
+            "detail": self.detail,
         }
 
 
@@ -343,5 +346,22 @@ def coerce_types(df: pd.DataFrame, delimiter: str | None = None) -> tuple[pd.Dat
                             )
                         )
                         break
+
+    # Numeric placeholders (-200, -999...) — including columns just repaired
+    # from strings above, which read_any could not yet see as numeric.
+    out, sentinel_records = null_sentinels(out)
+    for rec in sentinel_records:
+        coercions.append(
+            Coercion(
+                column=rec["column"],
+                from_kind="numeric",
+                to_kind="numeric",
+                rule="sentinel",
+                n_converted=0,
+                n_failed=rec["count"],
+                failed_examples=[format_value(rec["value"])],
+                detail=rec["note"],
+            )
+        )
 
     return out, coercions

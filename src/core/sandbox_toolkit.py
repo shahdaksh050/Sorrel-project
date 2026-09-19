@@ -13,12 +13,14 @@ stack up front would tax every sandboxed call, most of which never use `dsa`.
 """
 from __future__ import annotations
 
+import ast
 import datetime
 import difflib
 import importlib
 import inspect
 import json
 import math
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -37,6 +39,9 @@ _TOOL_CLASSES: dict[str, tuple[str, str]] = {
     "segment_comparison": ("src.tools.segment_comparison", "SegmentComparisonTool"),
     "concentration_analysis": ("src.tools.concentration_analysis", "ConcentrationAnalysisTool"),
     "change_analysis": ("src.tools.change_analysis", "ChangeAnalysisTool"),
+    "regression_analysis": ("src.tools.regression", "RegressionAnalysisTool"),
+    "experiment_analysis": ("src.tools.experiment_analysis", "ExperimentAnalysisTool"),
+    "anomaly_analysis": ("src.tools.anomaly", "AnomalyAnalysisTool"),
     "time_series_analysis": ("src.tools.time_series", "TimeSeriesAnalysisTool"),
     "cohort_analysis": ("src.tools.cohort_analysis", "CohortAnalysisTool"),
     "correlation_analysis": ("src.tools.data_processing", "CorrelationAnalysisTool"),
@@ -51,6 +56,13 @@ _TOOL_CLASSES: dict[str, tuple[str, str]] = {
 
 #: compare_groups tests at most this many levels (the most frequent ones).
 _MAX_GROUP_LEVELS = 30
+
+#: cramers_v refuses column pairs whose contingency table would exceed this
+#: many cells (an ID-like column would otherwise build a huge dense table).
+_MAX_CONTINGENCY_CELLS = 250_000
+
+#: baseline_accuracy is for classification targets, not continuous columns.
+_MAX_CLASSES = 50
 
 
 def frame_for_disk(frame: pd.DataFrame) -> pd.DataFrame:
@@ -128,13 +140,65 @@ def _cohens_d(a: pd.Series, b: pd.Series) -> float | None:
     return (float(a.mean()) - float(b.mean())) / pooled
 
 
+# ---- dsa.derive: restricted arithmetic over columns --------------------------
+
+_MAX_EXPR_CHARS = 500
+#: A larger literal exponent on a Series is a way to hang the worker.
+_MAX_EXPONENT = 10.0
+_BACKTICKED = re.compile(r"`([^`]+)`")
+
+
+def _literal_number(node: ast.AST) -> float | None:
+    """The value of a numeric literal (optionally signed), else None."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        inner = _literal_number(node.operand)
+        return None if inner is None else (-inner if isinstance(node.op, ast.USub) else inner)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return float(node.value)
+    return None
+
+
+def _eval_arith(node: ast.AST, env: dict[str, pd.Series]) -> Any:
+    """Evaluate a whitelisted arithmetic AST: numeric literals, column names,
+    unary +/-, and + - * / ** (literal exponent, |n| <= 10). Nothing else
+    parses to a value — no calls, attributes, subscripts or comparisons."""
+    if isinstance(node, ast.Expression):
+        return _eval_arith(node.body, env)
+    literal = _literal_number(node)
+    if literal is not None:
+        return literal
+    if isinstance(node, ast.Name):
+        return env[node.id]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        value = _eval_arith(node.operand, env)
+        return -value if isinstance(node.op, ast.USub) else value
+    if isinstance(node, ast.BinOp):
+        if isinstance(node.op, ast.Pow):
+            exponent = _literal_number(node.right)
+            if exponent is None or abs(exponent) > _MAX_EXPONENT:
+                raise ValueError(f"Exponents must be numeric literals with |n| <= {_MAX_EXPONENT:g}.")
+            return _eval_arith(node.left, env) ** exponent
+        left, right = _eval_arith(node.left, env), _eval_arith(node.right, env)
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if isinstance(node.op, ast.Div):
+            return left / right
+    raise ValueError(
+        "Only column names, numeric literals, + - * / ** and parentheses are allowed in a derive expression."
+    )
+
+
 # ---- chart builders (dsa.chart.*) ------------------------------------------
 
-def _records(data: Any, x: str) -> list[Any]:
+def _records(data: Any, x: str | None) -> list[Any]:
     if isinstance(data, pd.Series):
         data = data.reset_index()
     if isinstance(data, pd.DataFrame):
-        if x not in data.columns:
+        if x is not None and x not in data.columns:
             data = data.reset_index()
         # One row past the cap so validate_chart_spec still flags truncation.
         records: list[Any] = json.loads(
@@ -157,7 +221,8 @@ def _chart(chart_type: str, data: Any, x: str, y: str | None, opts: dict[str, An
 
 
 def bar(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
-    """Bar chart spec. opts: color, title, x_title, y_title, y_format, sort, log_y, caption."""
+    """Bar chart spec. opts (every helper): color, title, x_title, y_title, y_format, sort,
+    log_y, caption, annotations, size, priority, facet."""
     return _chart("bar", data, x, y, opts)
 
 
@@ -181,18 +246,201 @@ def histogram(data: Any, x: str, **opts: Any) -> dict[str, Any]:
     return _chart("histogram", data, x, None, opts)
 
 
-def heatmap(data: Any, x: str, y: str, color: str, **opts: Any) -> dict[str, Any]:
-    """Heatmap spec: `x` and `y` are the two categorical axes and `color` is
-    the QUANTITATIVE value field that fills each cell (chart_spec has no
-    separate value key — for heatmaps `color` carries the value)."""
+def _zscore(values: pd.Series) -> pd.Series:
+    std = values.std()
+    if not std or pd.isna(std):
+        return values * 0.0
+    return (values - values.mean()) / std
+
+
+def _wide_to_long(data: Any, x: str, columns: list[str], scale: str | None) -> pd.DataFrame:
+    if isinstance(data, pd.Series):
+        data = data.reset_index()
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError("A wide heatmap (y=[columns]) needs a DataFrame.")
+    if x not in data.columns:
+        data = data.reset_index()
+    missing = [c for c in [x, *columns] if c not in data.columns]
+    if missing:
+        raise ValueError(f"heatmap columns not found: {missing}. Available: {list(data.columns)}.")
+    if "Measure" in (x, *columns):
+        raise ValueError("heatmap cannot melt a column named 'Measure'; rename it first.")
+    wide = data[[x, *columns]].copy()
+    wide[columns] = wide[columns].apply(pd.to_numeric, errors="coerce")
+    if scale == "zscore":
+        wide[columns] = wide[columns].apply(_zscore)
+    value = "zscore" if scale == "zscore" else "value"
+    long = wide.melt(id_vars=x, value_vars=columns, var_name="Measure", value_name=value)
+    return long.dropna(subset=[value])
+
+
+def heatmap(data: Any, x: str, y: str | list[str], color: str | None = None, **opts: Any) -> dict[str, Any]:
+    """Heatmap spec. LONG: heatmap(long_df, x, y, color=<value col>) — `x`/`y` are the two
+    categorical axes, `color` the QUANTITATIVE value filling each cell. WIDE:
+    heatmap(wide_df, x, y=[col, col, ...]) — melts the value columns into rows (y axis =
+    "Measure", color = value). scale="zscore" standardises each series independently
+    (mixed units become comparable). Time-of-day/month axes: aggregate to one row per x first."""
+    scale = opts.pop("scale", None)
+    if scale not in (None, "zscore"):
+        raise ValueError("heatmap scale must be 'zscore' or omitted.")
+    if isinstance(y, (list, tuple)):
+        columns = list(y)
+        if len(columns) < 2:
+            raise ValueError("A wide heatmap needs y=[at least two value columns].")
+        long = _wide_to_long(data, x, columns, scale)
+        opts.setdefault("y_title", "Measure")
+        if scale:
+            opts["scale"] = scale
+        return _chart("heatmap", long, x, "Measure", {**opts, "color": "zscore" if scale else "value"})
+    if color is None:
+        raise ValueError("heatmap(data, x, y, color=<value column>) needs `color` (or pass y=[value columns]).")
+    if scale:
+        if isinstance(data, pd.Series):
+            data = data.reset_index()
+        if not isinstance(data, pd.DataFrame):
+            raise ValueError("heatmap scale='zscore' needs a DataFrame.")
+        if x not in data.columns:
+            data = data.reset_index()
+        data = data.copy()
+        data[color] = pd.to_numeric(data[color], errors="coerce")
+        data[color] = data.groupby(y, sort=False)[color].transform(_zscore)
+        opts["scale"] = scale
     return _chart("heatmap", data, x, y, {**opts, "color": color})
+
+
+#: corr_heatmap shows at most this many variables (highest mean |r| kept).
+_MAX_CORR_COLUMNS = 20
+
+
+def corr_heatmap(
+    data: Any, columns: list[str] | None = None, method: str = "pearson", **opts: Any
+) -> dict[str, Any]:
+    """Correlation-matrix heatmap of numeric columns (default: all; constant columns dropped,
+    capped at 20 by highest mean |r|), ordered by hierarchical clustering so related
+    variables sit together. method: pearson | spearman | kendall."""
+    if not isinstance(data, pd.DataFrame):
+        raise ValueError("corr_heatmap needs a DataFrame.")
+    if method not in ("pearson", "spearman", "kendall"):
+        raise ValueError("corr_heatmap method must be pearson, spearman or kendall.")
+    frame = data.select_dtypes("number") if columns is None else data[list(columns)]
+    frame = frame.apply(pd.to_numeric, errors="coerce")
+    frame = frame.loc[:, frame.nunique(dropna=True) > 1]
+    if frame.shape[1] < 2:
+        raise ValueError("corr_heatmap needs at least two non-constant numeric columns.")
+    corr = frame.corr(method=method)
+    if corr.shape[0] > _MAX_CORR_COLUMNS:
+        strength = corr.abs().fillna(0).where(~np.eye(len(corr), dtype=bool), 0).mean()
+        keep = strength.nlargest(_MAX_CORR_COLUMNS).index
+        corr = corr.loc[keep, keep]
+    dist = (1 - corr.abs().fillna(0)).to_numpy()
+    dist = np.clip((dist + dist.T) / 2, 0, 1)
+    np.fill_diagonal(dist, 0)
+    from scipy.cluster.hierarchy import leaves_list, linkage
+    from scipy.spatial.distance import squareform
+
+    order = [str(corr.columns[i]) for i in leaves_list(linkage(squareform(dist, checks=False), "average"))]
+    long = corr.rename(columns=str, index=str).stack().rename("r").rename_axis(["x", "y"]).reset_index()
+    long["r"] = long["r"].round(3)
+    opts.setdefault("title", f"Correlation ({method})")
+    return _chart("heatmap", long, "x", "y", {**opts, "color": "r", "order": order})
+
+
+def waterfall(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
+    """Waterfall chart spec showing sequential positive and negative contributions."""
+    return _chart("waterfall", data, x, y, opts)
+
+
+def lorenz(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
+    """Lorenz curve spec showing cumulative distribution vs equality diagonal."""
+    return _chart("lorenz", data, x, y, opts)
+
+
+def dot_ci(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
+    """Dot plot with intervals. opts: y_lower and y_upper (both, or neither), color."""
+    return _chart("dot_ci", data, x, y, opts)
+
+
+def dual_axis(data: Any, x: str, y: str, y2: str | None = None, **opts: Any) -> dict[str, Any]:
+    """Dual-axis line spec: `y` on the left axis and `y2` (required) on an
+    independent right axis, over a shared `x`. opts also take y2_title, y2_format."""
+    if y2 is None:
+        raise ValueError("dual_axis needs y2=<the second value column> (plotted on the right axis).")
+    return _chart("dual_axis", data, x, y, {**opts, "y2": y2})
+
+
+def boxplot(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
+    """Box plot of the RAW numeric values `y` per group `x` (quartiles are
+    computed for you; needs >= 4 rows per group, not pre-aggregated numbers)."""
+    if isinstance(data, pd.DataFrame) and len(data) > MAX_CHART_ROWS:
+        data = data.sample(MAX_CHART_ROWS, random_state=42)
+    return _chart("boxplot", data, x, y, opts)
+
+
+def stacked_bar(data: Any, x: str, y: str, series: str, **opts: Any) -> dict[str, Any]:
+    """Stacked bar spec: segments of `y` per `x`, split by the `series` field."""
+    return _chart("stacked_bar", data, x, y, {**opts, "color": series})
+
+
+def grouped_bar(data: Any, x: str, y: str, series: str, **opts: Any) -> dict[str, Any]:
+    """Grouped (side-by-side) bar spec: one bar per `series` value within each `x`."""
+    return _chart("grouped_bar", data, x, y, {**opts, "color": series})
+
+
+def pareto(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
+    """Pareto spec: additive `y` per category as sorted bars plus a cumulative-share line."""
+    return _chart("pareto", data, x, y, opts)
+
+
+def slope(data: Any, x: str, y: str, group: str, **opts: Any) -> dict[str, Any]:
+    """Slope chart spec: `x` has exactly 2 values (e.g. before/after); one line per `group`."""
+    return _chart("slope", data, x, y, {**opts, "color": group})
+
+
+def bullet(data: Any, x: str, y: str, target: str, **opts: Any) -> dict[str, Any]:
+    """Bullet spec: actual `y` (bar) against the `target` column (tick), per category `x`."""
+    return _chart("bullet", data, x, y, {**opts, "target": target})
+
+
+def band(data: Any, x: str, y: str, y_lower: str, y_upper: str, **opts: Any) -> dict[str, Any]:
+    """Line with a shaded band between the `y_lower` and `y_upper` columns."""
+    return _chart("band", data, x, y, {**opts, "y_lower": y_lower, "y_upper": y_upper})
+
+
+def vega_lite(spec: dict[str, Any], data: Any = None, **opts: Any) -> dict[str, Any]:
+    """Escape hatch: a raw Vega-Lite spec, sanitised (inline rows only, no
+    config/params/expressions; every field must exist in the rows). Pass rows
+    as `data=<DataFrame|list>` or inline as spec["data"]["values"]. opts: title, caption, size, priority."""
+    if data is not None:
+        spec = {**spec, "data": {"values": _records(data, None)}}
+    clean, error = validate_chart_spec({**opts, "vega_lite": spec})
+    if clean is None:
+        raise ValueError(error)
+    return clean
 
 
 class Toolkit:
     """The object bound to `dsa` inside the sandbox."""
 
     chart = SimpleNamespace(
-        bar=bar, line=line, area=area, scatter=scatter, histogram=histogram, heatmap=heatmap
+        bar=bar,
+        line=line,
+        area=area,
+        scatter=scatter,
+        histogram=histogram,
+        heatmap=heatmap,
+        corr_heatmap=corr_heatmap,
+        waterfall=waterfall,
+        lorenz=lorenz,
+        dot_ci=dot_ci,
+        dual_axis=dual_axis,
+        boxplot=boxplot,
+        stacked_bar=stacked_bar,
+        grouped_bar=grouped_bar,
+        pareto=pareto,
+        slope=slope,
+        bullet=bullet,
+        band=band,
+        vega_lite=vega_lite,
     )
 
     def __init__(self, df: pd.DataFrame, scratch_dir: str | Path) -> None:
@@ -299,6 +547,17 @@ class Toolkit:
         safe: dict[str, dict[str, Any]] = _json_safe(out)
         return safe
 
+    def relations(self, df: pd.DataFrame | None = None) -> list[dict[str, Any]]:
+        """Formula relations between numeric columns (the ones in the prompt's
+        "Relations" block), best first: kind (product/ratio/sum/difference/
+        part_of_total/cumulative), target, terms, expr, exact, r2, max_rel_err,
+        confidence. Empty list when no column is a formula of others."""
+        frame = self._df if df is None else df
+        if not isinstance(frame, pd.DataFrame):
+            raise ValueError(f"dsa.relations df must be a pandas DataFrame, got {type(frame).__name__}.")
+        found: list[dict[str, Any]] = _json_safe(profile_dataframe(frame).relations)
+        return found
+
     @staticmethod
     def summarize(series: Any) -> dict[str, Any]:
         """n, missing, mean, median, std, min, max, q1, q3, iqr, skew, zero_share."""
@@ -399,3 +658,163 @@ class Toolkit:
             row.setdefault("p_adjusted", None)
             row.pop("significant_after_correction", None)
         return pd.DataFrame(rows)
+
+    @staticmethod
+    def cramers_v(df: pd.DataFrame, col1: str, col2: str) -> dict[str, Any]:
+        """Bias-corrected Cramér's V (0-1) between two categorical columns,
+        with the chi-square statistic, p_value, dof and n."""
+        from scipy import stats
+
+        _require_columns(df, col1, col2)
+        sub = df[[col1, col2]].dropna()
+        n = len(sub)
+        if n == 0:
+            raise ValueError(f"No non-null rows for '{col1}' and '{col2}'.")
+        r, k = int(sub[col1].nunique()), int(sub[col2].nunique())
+        if r * k > _MAX_CONTINGENCY_CELLS:
+            raise ValueError(
+                f"'{col1}' x '{col2}' has {r} x {k} levels; Cramér's V needs categorical "
+                "columns. Bucket or drop the high-cardinality one first."
+            )
+        if r < 2 or k < 2:
+            return {"cramers_v": 0.0, "chi2": 0.0, "p_value": 1.0, "dof": 0, "n": n}
+        chi2, p_value, dof, _ = stats.chi2_contingency(pd.crosstab(sub[col1], sub[col2]), correction=False)
+        # Bergsma bias correction: raw V overstates association on small samples.
+        phi2 = max(0.0, float(chi2) / n - (r - 1) * (k - 1) / (n - 1)) if n > 1 else 0.0
+        r_eff = r - (r - 1) ** 2 / (n - 1) if n > 1 else r
+        k_eff = k - (k - 1) ** 2 / (n - 1) if n > 1 else k
+        denom = min(r_eff - 1, k_eff - 1)
+        v = math.sqrt(phi2 / denom) if phi2 > 0 and denom > 0 else 0.0
+        return {
+            "cramers_v": round(v, 4),
+            "chi2": round(float(chi2), 4),
+            "p_value": float(p_value),
+            "dof": int(dof),
+            "n": n,
+        }
+
+    @staticmethod
+    def crosstab_shares(
+        df: pd.DataFrame, index_col: str, columns_col: str, normalize: str = "index"
+    ) -> pd.DataFrame:
+        """Cross-tab of two columns as percentages: one row per `index_col`
+        level (kept as a column, so RESULT keeps its labels) and one column per
+        `columns_col` level. normalize: "index" (row %), "columns" or "all"."""
+        _require_columns(df, index_col, columns_col)
+        if normalize not in ("index", "columns", "all"):
+            raise ValueError("normalize must be 'index', 'columns' or 'all'.")
+        sub = df[[index_col, columns_col]].dropna()
+        shares = pd.crosstab(sub[index_col], sub[columns_col], normalize=normalize) * 100.0
+        shares.columns = [str(c) for c in shares.columns]
+        return shares.round(2).reset_index()
+
+    @staticmethod
+    def baseline_accuracy(df: pd.DataFrame, target_col: str) -> dict[str, Any]:
+        """Accuracy of always predicting the most frequent class of a categorical
+        `target_col` — the bar any classifier must beat."""
+        _require_columns(df, target_col)
+        target = df[target_col].dropna()
+        if target.empty:
+            raise ValueError(f"Target column '{target_col}' has no non-null values.")
+        counts = target.value_counts()
+        if len(counts) > _MAX_CLASSES:
+            raise ValueError(
+                f"'{target_col}' has {len(counts)} distinct values; baseline_accuracy is "
+                "for a categorical target (use a mean/median baseline for a numeric one)."
+            )
+        return {
+            "target": target_col,
+            "majority_class": str(counts.index[0]),
+            "majority_baseline_accuracy": round(float(counts.iloc[0]) / len(target), 4),
+            "n_classes": len(counts),
+            "n": len(target),
+        }
+
+    @staticmethod
+    def derive(df: pd.DataFrame, name: str, expr: str) -> pd.DataFrame:
+        """New DataFrame = `df` plus column `name` computed from `expr`: column
+        names (`backtick` ones with spaces), numeric literals, + - * / ** with a
+        literal exponent, and parentheses — e.g. "revenue - cost". Division by
+        zero gives NaN. No calls or attribute access; `name` must be new."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("derive needs a non-empty column name.")
+        if name in df.columns:
+            raise ValueError(f"Column '{name}' already exists; choose a new name.")
+        if not isinstance(expr, str) or not expr.strip() or len(expr) > _MAX_EXPR_CHARS:
+            raise ValueError(f"expr must be a non-empty string of at most {_MAX_EXPR_CHARS} characters.")
+        aliases: dict[str, str] = {}
+
+        def alias(match: re.Match[str]) -> str:
+            aliases[f"__dsa_col_{len(aliases)}__"] = match.group(1)
+            return f"__dsa_col_{len(aliases) - 1}__"
+
+        try:
+            tree = ast.parse(_BACKTICKED.sub(alias, expr.strip()), mode="eval")
+        except SyntaxError as exc:
+            raise ValueError(f"expr is not a valid arithmetic expression: {exc.msg}.") from None
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        _require_columns(df, *(aliases.get(u, u) for u in used))
+        env: dict[str, pd.Series] = {}
+        for ident in used:
+            col = aliases.get(ident, ident)
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                raise ValueError(f"Column '{col}' is not numeric.")
+            env[ident] = df[col].astype("float64")
+        try:
+            value = _eval_arith(tree, env)
+        except RecursionError:
+            raise ValueError("expr is nested too deeply.") from None
+        out = df.copy()
+        out[name] = pd.Series(value, index=df.index, dtype="float64").replace([np.inf, -np.inf], np.nan)
+        return out
+
+    @staticmethod
+    def share_of_total(df: pd.DataFrame, col: str, by: str | None = None) -> pd.DataFrame:
+        """Each row's (by=None) or each `by` level's share of the `col` total,
+        as `share_pct`. by=None returns `df` plus `<col>_share_pct`; with `by`,
+        one row per level (largest first): by, col (sum), share_pct."""
+        _require_columns(df, col, *([by] if by else []))
+        values = pd.to_numeric(df[col], errors="coerce")
+        total = float(values.sum())
+        if total == 0 or not math.isfinite(total):
+            raise ValueError(f"'{col}' sums to {total:g}; shares of it are undefined.")
+        if by is None:
+            out = df.copy()
+            out[f"{col}_share_pct"] = (values / total * 100.0).round(2)
+            return out
+        grouped = values.groupby(df[by], dropna=False, observed=True).sum().sort_values(ascending=False)
+        result = grouped.rename(col).reset_index()
+        result["share_pct"] = (result[col] / total * 100.0).round(2)
+        return result
+
+    @staticmethod
+    def contribution_to_change(
+        df: pd.DataFrame, col: str, period_col: str, by: str | None = None
+    ) -> pd.DataFrame:
+        """Period-over-period change in the `col` total (sorted by `period_col`).
+        Without `by`: period, value, change, pct_change. With `by`: one row per
+        period (after the first) and level: change, share_of_change_pct (of the
+        total change) and contribution_pp (points of the previous total's growth)."""
+        _require_columns(df, col, period_col, *([by] if by else []))
+        work = pd.DataFrame({period_col: df[period_col], col: pd.to_numeric(df[col], errors="coerce")})
+        if by is None:
+            totals = work.groupby(period_col, observed=True)[col].sum().sort_index()
+            return pd.DataFrame({
+                period_col: totals.index,
+                "value": totals.to_numpy(),
+                "change": totals.diff().to_numpy(),
+                "pct_change": (totals.pct_change() * 100.0).round(2).to_numpy(),
+            })
+        work[by] = df[by]
+        pivot = work.groupby([period_col, by], observed=True)[col].sum().unstack(fill_value=0).sort_index()
+        total = pivot.sum(axis=1)
+        delta = pivot.diff().iloc[1:]
+        rows = delta.reset_index().melt(id_vars=period_col, var_name=by, value_name="change")
+        total_change = rows[period_col].map(total.diff())
+        prev_total = rows[period_col].map(total.shift())
+        with np.errstate(all="ignore"):
+            rows["share_of_change_pct"] = (rows["change"] / total_change.replace(0, np.nan) * 100.0).round(2)
+            rows["contribution_pp"] = (rows["change"] / prev_total.replace(0, np.nan) * 100.0).round(2)
+        rows["_order"] = rows["change"].abs()
+        rows = rows.sort_values([period_col, "_order"], ascending=[True, False]).drop(columns="_order")
+        return rows.reset_index(drop=True)

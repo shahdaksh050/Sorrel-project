@@ -32,6 +32,7 @@ class ToolRegistry:
         self._register_builtin_tools()
 
     def _register_builtin_tools(self) -> None:
+        from src.tools.anomaly import AnomalyAnalysisTool
         from src.tools.change_analysis import ChangeAnalysisTool
         from src.tools.clustering import ClusterDataTool
         from src.tools.cohort_analysis import CohortAnalysisTool
@@ -45,9 +46,11 @@ class ToolRegistry:
         from src.tools.define_analysis_tool import DefineAnalysisToolTool
         from src.tools.dimensionality import DimensionalityAnalysisTool
         from src.tools.dynamic_code import DynamicCodeExecutionTool
+        from src.tools.experiment_analysis import ExperimentAnalysisTool
         from src.tools.financial_analysis import FinancialAnalysisTool
         from src.tools.geospatial import GeospatialAnalysisTool
         from src.tools.ml_pipeline import EvaluateModelTool, TrainModelTool
+        from src.tools.regression import RegressionAnalysisTool
         from src.tools.report_generator import GenerateReportTool
         from src.tools.segment_comparison import SegmentComparisonTool
         from src.tools.statistical_analysis import SelectStatisticalTestTool
@@ -87,6 +90,11 @@ class ToolRegistry:
             SegmentComparisonTool(),
             ConcentrationAnalysisTool(),
             ChangeAnalysisTool(),
+            # Drivers (adjusted regression), experiments (A/B lift, power,
+            # SRM) and anomalies (spikes, level shifts, unusual segments).
+            RegressionAnalysisTool(),
+            ExperimentAnalysisTool(),
+            AnomalyAnalysisTool(),
         ):
             self.register(tool)
 

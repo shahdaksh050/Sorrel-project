@@ -22,6 +22,7 @@ import pandas as pd
 
 from src.core.chart_spec import validate_chart_spec
 from src.core.chart_theme import humanize_label
+from src.core.dashboard import CORRELATION_HEATMAP_TITLE, correlation_heatmap
 from src.core.io import DatasetReadError, read_any
 from src.tools.base import BaseTool, ToolExecutionError
 
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from src.core.profiler import DatasetProfile
 
 #: Columns in a correlation heatmap (n² cells must stay under the spec's row cap).
-MAX_HEATMAP_COLUMNS = 20
+MAX_HEATMAP_COLUMNS = 15
 #: Numeric columns given a distribution chart.
 MAX_DISTRIBUTIONS = 6
 #: Features shown in an importance chart.
@@ -150,20 +151,18 @@ class GenerateVisualizationsTool(BaseTool):
                 f"correlation_heatmap needs at least 2 numeric columns; this "
                 f"dataset has {num_df.shape[1]}. Use 'distributions' instead."
             )
-        # Keep the most variable columns when there are too many to show.
-        if num_df.shape[1] > MAX_HEATMAP_COLUMNS:
-            scaled_var = (num_df / num_df.abs().max().replace(0, 1)).var()
-            num_df = num_df[scaled_var.nlargest(MAX_HEATMAP_COLUMNS).index]
-        corr = num_df.corr()
-        rows = [
-            {"feature_x": humanize_label(str(a)), "feature_y": humanize_label(str(b)), "r": round(float(v), 3)}
-            for a in corr.columns for b in corr.index
-            if pd.notna(v := corr.loc[b, a])
-        ]
+        # Clustered so related columns sit together; the columns most related
+        # to the rest are kept when there are too many to show.
+        built = correlation_heatmap(num_df.corr(), MAX_HEATMAP_COLUMNS)
+        if built is None:
+            raise ToolExecutionError(
+                "correlation_heatmap found no column pair with a usable correlation. "
+                "Use 'distributions' instead."
+            )
+        rows, layout, caption = built
         return [_validated({
-            "type": "heatmap", "data": rows, "x": "feature_x", "y": "feature_y", "color": "r",
-            "title": "Feature Correlation Heatmap", "x_title": "Column", "y_title": "Column",
-            "caption": "Pearson correlation between every pair of numeric columns (−1 to +1).",
+            "type": "vega_lite", "data": rows, "vega_lite": layout,
+            "title": CORRELATION_HEATMAP_TITLE, "caption": caption,
         })]
 
     def _feature_importance(

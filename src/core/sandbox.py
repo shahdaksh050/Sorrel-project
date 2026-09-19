@@ -18,7 +18,7 @@ Security model — layered, each layer covering the previous one's gaps:
      network or pickle APIs (`read_*`, `to_parquet`, `np.load`, `fetch_*`);
      no format strings that walk attributes. Fast, and every rejection
      carries a hint the LLM can act on.
-  2. Runtime policy (`_sandbox_worker._install_runtime_policy`): a
+  2. Runtime policy (`_sandbox_worker._policy_enforcement`): a
      `sys.addaudithook` hook installed immediately before exec — it cannot
      be removed — that blocks process creation, sockets, raw memory access
      (`ctypes.cdata`), environment mutation, and any file access outside
@@ -47,6 +47,7 @@ happens in a subprocess running _sandbox_worker.py.
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import os
 import re
@@ -55,6 +56,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -154,7 +156,10 @@ STDOUT_CAP_CHARS: int = 8_000
 #: own execution namespace. Checked here (before the subprocess spawns) and
 #: again, defensively, inside _sandbox_worker._build_restricted_globals.
 RESERVED_GLOBAL_NAMES: frozenset[str] = frozenset(
-    {"df", "SCHEMA", "RESULT", "FINDING", "PRIOR_RESULTS", "CHART", "DF_OUT", "dsa", "__builtins__"}
+    {
+        "df", "SCHEMA", "RESULT", "FINDING", "PRIOR_RESULTS", "CHART", "DF_OUT",
+        "dsa", "__builtins__", "pd", "np", "scipy", "stats", "math",
+    }
 )
 
 #: Scratch-dir filename the worker writes DF_OUT to, before the parent
@@ -730,8 +735,9 @@ class DockerSandbox(SandboxBackend):
                 encoding="utf-8",
             )
 
+            container_name = f"dsa-sandbox-{uuid.uuid4().hex[:12]}"
             cmd = [
-                "docker", "run", "--rm",
+                "docker", "run", "--rm", "--name", container_name,
                 "--network", "none",
                 "--read-only",
                 "--cap-drop", "ALL",
@@ -756,6 +762,12 @@ class DockerSandbox(SandboxBackend):
                     text=True,
                 )
             except subprocess.TimeoutExpired:
+                # Killing the `docker run` client leaves the container running.
+                with contextlib.suppress(Exception):
+                    subprocess.run(
+                        ["docker", "kill", container_name],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                    )
                 return SandboxResult(
                     status="error", result=None, finding=None, stdout="",
                     error_type="timeout",

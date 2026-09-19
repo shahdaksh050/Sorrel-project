@@ -8,16 +8,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
+import time
 from typing import Any, cast
 
 from src.core.governance import LOCAL_PROVIDERS, local_only, record_llm_call
+from src.core.model_telemetry import get_limiter
 
 #: Fallback model per provider, used only when LLM_MODEL is unset.
 _DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-4o",
     "anthropic": "claude-sonnet-4-6",
     "gemini": "gemini-flash-latest",
+    "groq": "llama-3.3-70b-versatile",
     "openrouter": "openai/gpt-4o",
     "nvidia": "openai/gpt-oss-120b",
     "local": "llama3.1",
@@ -86,22 +90,33 @@ class LLMClient:
         on any failure — so callers can fail fast with the real reason
         instead of running a whole analysis on the deterministic fallback.
         """
-        saved = self.max_tokens
         # Reasoning/"thinking" models (Gemini 3.x, NVIDIA gpt-oss, o-series-
         # style models) spend part of the budget on hidden reasoning tokens
         # before any visible output — 16 was enough for plain chat models
         # but silently starved thinking models into empty content. 200 is
         # still a negligible cost for a connectivity check.
-        self.max_tokens = 200
+        self._usage_local.max_tokens = 200
+        self._usage_local.effort = None
         try:
             self._dispatch("You are a connectivity check. Reply with OK.", "Reply with OK.")
             return True, ""
         except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
         finally:
-            self.max_tokens = saved
+            self._usage_local.max_tokens = None
 
-    def call(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+    def _call_max_tokens(self) -> int:
+        """This thread's max_tokens for the current call (per-call override or the default)."""
+        return getattr(self._usage_local, "max_tokens", None) or self.max_tokens
+
+    def call(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        reasoning_effort: str | None = None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
         """
         Call the configured LLM and return the parsed JSON response.
 
@@ -110,11 +125,17 @@ class LLMClient:
         """
         self._usage_local.value = None
         self._usage_local.truncated = False
+        # Per-call overrides live in thread-local state: this instance is shared
+        # across RLM worker threads, so instance attributes would race.
+        self._usage_local.effort = reasoning_effort
+        self._usage_local.max_tokens = max_tokens
         try:
             raw = self._dispatch(system_prompt, user_prompt)
         except Exception as exc:
             self._audit(system_prompt, user_prompt, None, f"{type(exc).__name__}: {exc}")
             raise
+        finally:
+            self._usage_local.max_tokens = None
         self._audit(system_prompt, user_prompt, raw, None)
         try:
             parsed = self._parse_json(raw)
@@ -124,7 +145,7 @@ class LLMClient:
             # fix (raise LLM_MAX_TOKENS / lower reasoning effort) is obvious.
             if getattr(self._usage_local, "truncated", False):
                 raise ValueError(
-                    f"LLM reply was truncated at max_tokens={self.max_tokens} "
+                    f"LLM reply was truncated at max_tokens={self._call_max_tokens()} "
                     f"(finish_reason=length) and could not be repaired: {exc}"
                 ) from exc
             raise
@@ -181,6 +202,12 @@ class LLMClient:
             api_key = os.getenv("GEMINI_API_KEY", "")
             base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
             extra_headers = {}
+        elif self.provider == "groq":
+            # Groq Cloud's ultra-fast OpenAI-compatible endpoint
+            # https://console.groq.com/docs/openai
+            api_key = os.getenv("GROQ_API_KEY", "")
+            base_url = "https://api.groq.com/openai/v1"
+            extra_headers = {}
         elif self.provider in ("local", "ollama"):
             # Offline / self-hosted OpenAI-compatible server: Ollama, LM
             # Studio, vLLM, llama.cpp server, text-generation-webui, etc.
@@ -198,6 +225,7 @@ class LLMClient:
                 "openrouter": "OPENROUTER_API_KEY",
                 "nvidia": "NVIDIA_API_KEY",
                 "gemini": "GEMINI_API_KEY",
+                "groq": "GROQ_API_KEY",
             }
             raise ValueError(
                 f"No API key set for provider '{self.provider}'. "
@@ -215,10 +243,13 @@ class LLMClient:
         if self._client is None:
             self._client = OpenAI(**client_kwargs)
         client = self._client
+        estimated_tokens = (len(system_prompt) + len(user_prompt)) // 4 + self._call_max_tokens()
+        get_limiter().acquire(self.provider, self.model, estimated_tokens=estimated_tokens)
+
         create_kwargs: dict[str, Any] = {
             "model": self.model,
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": self._call_max_tokens(),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -234,26 +265,57 @@ class LLMClient:
                 # Ollama's grammar-constrained JSON (`format`), stronger than
                 # JSON mode for small offline models.
                 create_kwargs["extra_body"] = {"format": "json"}
-        if self.provider == "gemini":
+        # Reasoning effort: per-call override > LLM_REASONING_EFFORT >
+        # provider-specific env > adaptive (deeper for planning/synthesis).
+        provider_env = {"gemini": "GEMINI_REASONING_EFFORT", "openrouter": "OPENROUTER_REASONING_EFFORT"}.get(
+            self.provider, ""
+        )
+        resolved_effort = (
+            getattr(self._usage_local, "effort", None)
+            or os.getenv("LLM_REASONING_EFFORT")
+            or (os.getenv(provider_env) if provider_env else None)
+            or "adaptive"
+        ).strip().lower()
+        if resolved_effort in ("off", "0"):
+            resolved_effort = "none"
+        if resolved_effort == "adaptive":
+            stage_str = (self.stage or "").lower()
+            heavy = any(k in stage_str for k in ("stage2", "stage7", "initial", "synthesis", "report"))
+            resolved_effort = "medium" if heavy else "low"
+
+        model_l = self.model.lower()
+        if self.provider == "gemini" and any(k in model_l for k in ("thinking", "2.5", "3.")):
             # Gemini 2.5+/3.x "thinking" models spend a large, variable, and
             # otherwise invisible share of max_tokens on hidden reasoning
             # before writing any visible answer. Left uncapped, a normal
             # max_tokens budget can be entirely consumed by thinking, so the
             # JSON answer gets truncated or never starts at all.
-            effort = os.getenv("GEMINI_REASONING_EFFORT", "").strip().lower()
-            if not effort and any(k in self.model.lower() for k in ("thinking", "2.5", "3.")):
-                effort = "low"
-            if effort and effort not in ("none", "off"):
+            effort = resolved_effort
+            if effort == "none" and not ("2.5" in model_l and "flash" in model_l):
+                effort = "low"  # only 2.5 Flash can switch thinking off entirely
+            if effort in ("none", "low", "medium", "high"):
                 create_kwargs["reasoning_effort"] = effort
         if self.provider == "openrouter":
             # Same failure mode as Gemini above, on OpenRouter's many
             # reasoning-capable (often free) models: hidden reasoning tokens
             # count against max_tokens, so a long Form 1 plan gets truncated
             # or never starts. OpenRouter's unified `reasoning` parameter caps
-            # that; models without reasoning ignore it. "none"/"off" omits it.
-            effort = os.getenv("OPENROUTER_REASONING_EFFORT", "low").strip().lower()
-            if effort not in ("", "none", "off"):
-                create_kwargs.setdefault("extra_body", {})["reasoning"] = {"effort": effort}
+            # that; models without reasoning ignore it. "none" asks for the
+            # least reasoning ("minimal").
+            effort = "minimal" if resolved_effort == "none" else resolved_effort
+            if effort not in ("max", "xhigh", "high", "medium", "low", "minimal"):
+                effort = "low"
+            create_kwargs.setdefault("extra_body", {})["reasoning"] = {"effort": effort}
+        if self.provider == "openai" and re.match(r"(o\d|gpt-5)", model_l):
+            # o-series / GPT-5: reasoning models reject `temperature` and
+            # `max_tokens` (they take max_completion_tokens) and cannot go below "low"/"minimal".
+            create_kwargs.pop("temperature", None)
+            create_kwargs["max_completion_tokens"] = create_kwargs.pop("max_tokens")
+            effort = resolved_effort or "medium"
+            if effort == "none":
+                effort = "minimal" if model_l.startswith("gpt-5") else "low"
+            if effort in ("minimal", "low", "medium", "high"):
+                create_kwargs["reasoning_effort"] = effort
         if self.provider == "nvidia":
             # NVIDIA NIM requires streaming; gpt-oss-120b also emits
             # reasoning_content chunks (chain-of-thought) before the answer.
@@ -315,7 +377,7 @@ class LLMClient:
             if finish_reason == "length":
                 raise ValueError(
                     f"{self.provider} model '{self.model}' used the whole "
-                    f"max_tokens={self.max_tokens} budget without producing an answer "
+                    f"max_tokens={self._call_max_tokens()} budget without producing an answer "
                     "(likely hidden reasoning) — raise LLM_MAX_TOKENS or lower "
                     "OPENROUTER_REASONING_EFFORT."
                 )
@@ -333,16 +395,42 @@ class LLMClient:
             }
         return str(content)
 
+    @staticmethod
+    def _is_rate_limit(status: Any, msg: str) -> bool:
+        return status == 429 or (status is None and "rate limit" in msg)
+
     def _create(self, client: Any, create_kwargs: dict[str, Any]) -> Any:
         """chat.completions.create, retried without an optional parameter
         the endpoint rejects (reasoning_effort, JSON mode) rather than
-        failing the call. Each retry removes a key, so this terminates."""
+        failing the call. Also handles 429 rate limit backoff adaptively.
+        Each retry removes a key or sleeps backoff, so this terminates."""
         dropped_json = False
+        max_429_retries = 3
+        attempt_429 = 0
+        is_stream = bool(create_kwargs.get("stream", False))
+
         while True:
             try:
-                resp = client.chat.completions.create(**create_kwargs)
+                if hasattr(client.chat.completions, "with_raw_response") and not is_stream:
+                    raw_resp = client.chat.completions.with_raw_response.create(**create_kwargs)
+                    resp = raw_resp.parse()
+                    headers = getattr(raw_resp, "headers", None)
+                    if headers:
+                        get_limiter().update_from_headers(self.provider, self.model, headers)
+                else:
+                    resp = client.chat.completions.create(**create_kwargs)
             except Exception as exc:
+                status = getattr(exc, "status_code", None)
                 msg = str(exc).lower()
+
+                if self._is_rate_limit(status, msg) and attempt_429 < max_429_retries:
+                    attempt_429 += 1
+                    backoff = get_limiter().handle_429(self.provider, self.model, exc)
+                    if backoff is None:
+                        raise
+                    time.sleep(backoff)
+                    continue
+
                 # Google (or any endpoint) rejecting reasoning_effort for this model.
                 if "reasoning_effort" in create_kwargs and "reasoning_effort" in msg:
                     create_kwargs.pop("reasoning_effort")
@@ -375,15 +463,43 @@ class LLMClient:
         if self._client is None:
             self._client = anthropic.Anthropic(api_key=api_key, timeout=self.timeout, max_retries=2)
         client = self._client
+
+        estimated_tokens = (len(system_prompt) + len(user_prompt)) // 4 + self._call_max_tokens()
+        get_limiter().acquire(self.provider, self.model, estimated_tokens=estimated_tokens)
+
         # P1.6(b) — the tool-description/system block is byte-identical
         # across all ~15 calls in a run; mark it for prompt caching so it's
         # billed once instead of on every iteration.
-        msg = client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_prompt}],
-        )
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self._call_max_tokens(),
+            "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": user_prompt}],
+        }
+
+        max_429_retries = 3
+        attempt_429 = 0
+        while True:
+            try:
+                if hasattr(client.messages, "with_raw_response"):
+                    raw_resp = client.messages.with_raw_response.create(**create_kwargs)
+                    msg = raw_resp.parse()
+                    headers = getattr(raw_resp, "headers", None)
+                    if headers:
+                        get_limiter().update_from_headers(self.provider, self.model, headers)
+                else:
+                    msg = client.messages.create(**create_kwargs)
+                break
+            except Exception as exc:
+                if self._is_rate_limit(getattr(exc, "status_code", None), str(exc).lower()) and attempt_429 < max_429_retries:
+                    attempt_429 += 1
+                    backoff = get_limiter().handle_429(self.provider, self.model, exc)
+                    if backoff is None:
+                        raise
+                    time.sleep(backoff)
+                    continue
+                raise
+
         usage = getattr(msg, "usage", None)
         if usage is not None:
             # Thread-local (see __init__) — this dispatch may be running on
@@ -397,6 +513,13 @@ class LLMClient:
             if isinstance(block, TextBlock):
                 return block.text
         raise ValueError("Anthropic response contained no text block.")
+
+    def get_context_window(self) -> int:
+        """Context window for the active model; LLM_CONTEXT_TOKENS, when set, wins."""
+        raw = os.getenv("LLM_CONTEXT_TOKENS", "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            return int(raw)
+        return get_limiter().get_profile(self.provider, self.model).context_window
 
     @staticmethod
     def _loads_lenient(text: str) -> dict[str, Any]:

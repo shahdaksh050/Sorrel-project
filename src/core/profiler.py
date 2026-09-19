@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from src.core.relations import find_relations
 from src.core.security import CARD_RE, EMAIL_RE, IPV4_RE, PHONE_RE, SSN_RE, luhn_valid
 
 if TYPE_CHECKING:
@@ -570,6 +571,10 @@ class DatasetProfile:
     #: short facts that decided it.
     archetype: str | None = None
     archetype_evidence: list[str] = field(default_factory=list)
+    #: Exact / near-exact formulas between measure columns (revenue = price *
+    #: qty, total = sum of parts, running totals) — see src/core/relations.py.
+    #: Column names and fit statistics only, no values.
+    relations: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -596,6 +601,7 @@ class DatasetProfile:
             "time_frequency": self.time_frequency,
             "archetype": self.archetype,
             "archetype_evidence": self.archetype_evidence,
+            "relations": self.relations,
         }
 
     def columns_of_kind(self, *kinds: str) -> list[ColumnProfile]:
@@ -1354,6 +1360,21 @@ def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = No
             "from LLM prompts unless REDACT_PII=false."
         )
 
+    # Formula relations between measures. Non-fatal (like domain inference):
+    # a failure here must never cost the profile.
+    relations: list[dict[str, Any]] = []
+    if is_sufficient:
+        try:
+            relations = find_relations(
+                df,
+                exclude={
+                    c.name for c in columns
+                    if c.semantic_role not in (SEMANTIC_MEASURE, SEMANTIC_ORDINAL) or c.pii
+                },
+            )
+        except Exception:
+            relations = []
+
     return DatasetProfile(
         row_count=row_count,
         column_count=len(df.columns),
@@ -1377,4 +1398,5 @@ def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = No
         time_frequency=time_frequency,
         archetype=archetype,
         archetype_evidence=archetype_evidence,
+        relations=relations,
     )

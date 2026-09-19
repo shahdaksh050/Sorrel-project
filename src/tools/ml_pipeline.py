@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import os
 import pickle
+import subprocess
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -65,6 +67,54 @@ _ORDINAL_NAME_HINTS = (
 )
 _ORDINAL_CARD_MIN = 3
 _ORDINAL_CARD_MAX = 10
+
+
+@lru_cache(maxsize=1)
+def _detect_cuda_gpu() -> bool:
+    """Whether an NVIDIA GPU answers `nvidia-smi` (probed once per process;
+    importing torch just to ask would cost seconds and gigabytes)."""
+    try:
+        res = subprocess.run(
+            ["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 0
+
+
+#: Hyperparameter search never sees more than this many training rows.
+_TUNE_SAMPLE_ROWS = 5_000
+
+
+def _tuning_sample(
+    X: pd.DataFrame,
+    y: pd.Series,
+    groups: pd.Series[Any] | None,
+    split_strategy: str,
+    task_type: str,
+) -> tuple[pd.DataFrame, pd.Series, pd.Series[Any] | None]:
+    """Subsample the training rows the tuning search runs on, keeping what the
+    splitter needs: the most recent rows (in order) for a time series —
+    shuffled rows would let TimeSeriesSplit train on the future — and a
+    class-stratified draw for classification."""
+    if len(X) <= _TUNE_SAMPLE_ROWS:
+        return X, y, groups
+    if split_strategy == "time_series":
+        keep = np.arange(len(X) - _TUNE_SAMPLE_ROWS, len(X))
+    else:
+        keep = np.random.default_rng(42).choice(len(X), _TUNE_SAMPLE_ROWS, replace=False)
+        if task_type == "classification" and y.nunique() > 1:
+            from sklearn.model_selection import train_test_split
+
+            try:
+                keep = train_test_split(
+                    np.arange(len(X)), train_size=_TUNE_SAMPLE_ROWS, stratify=y, random_state=42
+                )[0]
+            except ValueError:  # a class with a single member cannot be stratified
+                pass
+        keep = np.sort(keep)
+    return X.iloc[keep], y.iloc[keep], (groups.iloc[keep] if groups is not None else None)
 
 
 def _is_flag_or_ordinal(name: str, clean: pd.Series[Any]) -> bool:
@@ -493,6 +543,32 @@ def _detect_target_leakage(
     return warnings
 
 
+def _detect_formula_leakage(df: pd.DataFrame, target: str, features: list[str]) -> list[str]:
+    """Features that are inputs of an exact/near formula involving the target
+    (`revenue = price * qty` with `revenue` as the target): a model learns the
+    formula, not a relationship. Relation discovery is a diagnostic — any
+    failure returns no warnings."""
+    from src.core.relations import find_relations
+
+    try:
+        relations = find_relations(df)
+    except Exception:
+        return []
+    warnings: list[str] = []
+    for rel in relations:
+        members = {rel["target"], *rel["terms"]}
+        if target not in members:
+            continue
+        leaked = [f for f in features if f in members and f != target]
+        if leaked:
+            names = ", ".join(f"'{f}'" for f in leaked)
+            warnings.append(
+                f"{names} and the target are linked by a formula ({rel['expr']}) — the model "
+                "would restate it rather than learn a relationship. Drop them and re-train."
+            )
+    return warnings
+
+
 def _encode_target(y: pd.Series[Any]) -> tuple[pd.Series[Any], list[str]]:
     """
     Deterministically encode non-numeric classification targets to integers.
@@ -568,14 +644,15 @@ class TrainModelTool(BaseTool):
         params = super().prepare_params(params, memory, output_root)
         if not params.get("split_strategy"):
             profile = memory.get_context("data_profile") or {}
-            nunique = {c.get("name"): c.get("nunique", 0) for c in profile.get("columns") or []}
+            columns = profile.get("columns") or []
+            nunique = {c.get("name"): c.get("nunique", 0) for c in columns}
             # Only a genuine time axis orders the rows: enough distinct
             # timestamps to form a sequence, and not a per-person attribute
             # like a birth date that carries no "past vs future" meaning.
             time_axis = next(
                 (
                     c for c in profile.get("datetime_cols") or []
-                    if nunique.get(c, 0) >= _MIN_TIME_AXIS_VALUES
+                    if (not columns or nunique.get(c, 0) >= _MIN_TIME_AXIS_VALUES)
                     and not any(h in c.lower() for h in ("birth", "dob"))
                 ),
                 None,
@@ -583,8 +660,9 @@ class TrainModelTool(BaseTool):
             # Grouped splitting is about the same entity repeating across
             # rows (customer_id, patient_id) — never a low-cardinality
             # dimension like gender, which would hold out a whole category.
-            entity_col = profile.get("entity_col")
-            rows_per_entity = profile.get("rows_per_entity") or 0.0
+            panel_cols = profile.get("panel_group_cols") or []
+            entity_col = profile.get("entity_col") or (panel_cols[0] if panel_cols else None)
+            rows_per_entity = profile.get("rows_per_entity") or (2.0 if panel_cols else 0.0)
             if profile.get("is_time_series") and time_axis:
                 params["split_strategy"] = "time_series"
                 params.setdefault("time_column", time_axis)
@@ -746,6 +824,7 @@ class TrainModelTool(BaseTool):
                 task_type = "regression"
 
         leakage_warnings = _detect_target_leakage(X, y, task_type)
+        leakage_warnings += _detect_formula_leakage(df, target_column, list(X.columns))
 
         # Encode non-numeric classification targets (XGBoost requires
         # numeric labels; roc_auc_score requires {0,1} for binary tasks)
@@ -767,8 +846,7 @@ class TrainModelTool(BaseTool):
                         f"of rows (threshold {IMBALANCE_THRESHOLD:.0%})."
                     )
 
-        # Tuning is skipped on large data to keep runtime bounded
-        do_tune = tune_hyperparameters and len(X) <= 20_000
+        do_tune = bool(tune_hyperparameters)
 
         if models is None:
             models = (
@@ -858,11 +936,34 @@ class TrainModelTool(BaseTool):
                     cv_mean: float | None = None
                     cv_std: float | None = None
                     if do_tune:
-                        model, best_params, cv_mean, cv_std = self._tune(
-                            model, model_name, X_train, y_train, cv, scoring, max_depth,
-                            groups=groups_train,
+                        X_tune, y_tune, groups_tune = _tuning_sample(
+                            X_train, y_train, groups_train, split_strategy, task_type
                         )
-                    model.fit(X_train, y_train)
+                        model, best_params, tune_cv_mean, tune_cv_std = self._tune(
+                            model, model_name, X_tune, y_tune, cv, scoring, max_depth,
+                            groups=groups_tune,
+                        )
+                        # The search's own CV score is only the model's score when
+                        # it saw every training row; otherwise cross_val_score below
+                        # measures the tuned model on the full training set.
+                        if len(X_tune) == len(X_train):
+                            cv_mean, cv_std = tune_cv_mean, tune_cv_std
+
+                    try:
+                        model.fit(X_train, y_train)
+                    except Exception as fit_exc:
+                        if any(k in str(fit_exc).lower() for k in ("cuda", "gpu", "out of memory", "device")):
+                            treatments.append(f"{model_name}: GPU fit failed ({fit_exc}); refit on CPU.")
+                            estimator = self._build_model(
+                                model_name, task_type, max_depth, balanced=balanced,
+                                scale_pos_weight=scale_pos_weight, force_cpu=True,
+                            )
+                            model = Pipeline([("prep", preprocessor), ("model", estimator)])
+                            model.set_params(**{f"model__{k}": v for k, v in best_params.items()})
+                            model.fit(X_train, y_train)
+                        else:
+                            raise
+
                     train_metrics = self._evaluate(model, X_train, y_train, task_type)
                     test_metrics = self._evaluate(model, X_test, y_test, task_type)
 
@@ -1047,6 +1148,7 @@ class TrainModelTool(BaseTool):
         max_depth: int,
         balanced: bool = False,
         scale_pos_weight: float = 1.0,
+        force_cpu: bool = False,
     ) -> Any:
         from sklearn.cluster import DBSCAN, KMeans
         from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -1076,26 +1178,26 @@ class TrainModelTool(BaseTool):
 
         try:
             from xgboost import XGBClassifier, XGBRegressor
+            xgb_kwargs: dict[str, Any] = {
+                "n_estimators": 200,
+                "max_depth": max_depth,
+                "learning_rate": 0.05,
+                "subsample": 0.8,
+                "colsample_bytree": 0.8,
+                "random_state": 42,
+                "verbosity": 0,
+                "n_jobs": -1,
+                "tree_method": "hist",
+            }
+            if not force_cpu and _detect_cuda_gpu():
+                xgb_kwargs["device"] = "cuda"
+
             model_map["xgboost_classification"] = XGBClassifier(
-                n_estimators=200,
-                max_depth=max_depth,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                random_state=42,
+                **xgb_kwargs,
                 eval_metric="logloss",
-                verbosity=0,
                 scale_pos_weight=scale_pos_weight if balanced else 1.0,
             )
-            model_map["xgboost_regression"] = XGBRegressor(
-                n_estimators=200,
-                max_depth=max_depth,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                random_state=42,
-                verbosity=0,
-            )
+            model_map["xgboost_regression"] = XGBRegressor(**xgb_kwargs)
         except ImportError:
             pass  # XGBoost not installed; xgboost model names will resolve to None
 

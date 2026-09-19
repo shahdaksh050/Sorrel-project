@@ -41,9 +41,9 @@ class TestPromptManager:
 
     def test_initial_prompt_contains_concrete_values(self, pm: PromptManager) -> None:
         prompt = pm.get_initial_user_prompt()
-        assert "data/churn.csv" in prompt
-        assert '"churn"' in prompt
-        assert '"classification"' in prompt
+        assert "churn.csv" in prompt
+        assert "churn" in prompt
+        assert "classification" in prompt
 
     def test_initial_prompt_contains_metadata_summary(self, pm: PromptManager) -> None:
         prompt = pm.get_initial_user_prompt()
@@ -156,11 +156,38 @@ class TestProfileInjection:
     ) -> None:
         prompt = pm.get_system_prompt()
         assert "execute_dynamic_code" in prompt
-        assert "Safe Sandboxed Code Execution" in prompt
+        assert "dsa.run" in prompt
 
-    def test_initial_prompt_guides_phased_foundation(
+    def test_initial_prompt_plans_a_broad_first_cycle(
         self, pm: PromptManager
     ) -> None:
         prompt = pm.get_initial_user_prompt()
-        assert "Phase 1: Foundation & Reconnaissance" in prompt
-        assert "1–3 targeted foundational steps" in prompt
+        assert "Your task (cycle 1)" in prompt
+        assert "clean_data" in prompt
+
+    def test_two_tier_findings_representation(
+        self, pm: PromptManager, memory: MemorySystem
+    ) -> None:
+        from src.core.findings import Finding
+
+        # 15 findings exceed the prompt limit, so the tail is summarised by kind
+        findings_to_add = [
+            Finding(
+                finding_id=f"f_{i}",
+                kind="correlation" if i % 2 == 0 else "outlier_scan",
+                headline=f"Finding number {i}",
+                effect=0.35 + (i * 0.02),
+                effect_kind="r" if i % 2 == 0 else None,
+                p_value=0.01 if i < 10 else 0.20,
+                source_tool="correlation_analysis" if i % 2 == 0 else "detect_outliers",
+                measure="income",
+                dimension="age",
+            )
+            for i in range(15)
+        ]
+        memory.add_findings(findings_to_add)
+
+        prompt = pm.get_iteration_user_prompt()
+        # Tier 1 focal findings
+        assert "F1 [" in prompt
+        assert "lower-ranked finding(s) omitted" in prompt

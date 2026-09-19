@@ -22,6 +22,9 @@ Spec shape (keys not listed here are dropped):
     sort      "desc" | "asc"  (bar only; default "desc" for a categorical x)
     log_y     bool — log scale on y (positive values only)
     caption   one-sentence takeaway shown under the chart
+    y_lower / y_upper   optional numeric fields in `data` bounding each y
+              value (a confidence interval, ±std) — drawn as error bars on
+              bar/scatter and as a band on line/area. Both or neither.
 """
 from __future__ import annotations
 
@@ -85,8 +88,19 @@ def validate_chart_spec(spec: Any) -> tuple[dict[str, Any] | None, str | None]:
         return None, f"CHART['y'] must name a field in data (available: {sorted(fields)[:12]})."
     if color is not None and (not isinstance(color, str) or color not in fields):
         return None, "CHART['color'] must be null or a field in data."
+    bounds = (spec.get("y_lower"), spec.get("y_upper"))
+    has_bounds = any(b is not None for b in bounds)
+    if has_bounds and (
+        chart_type in ("histogram", "heatmap")
+        or not all(isinstance(b, str) and b in fields for b in bounds)
+    ):
+        return None, (
+            "CHART['y_lower'] and CHART['y_upper'] must both name fields in data "
+            "(bar/line/area/scatter only), or both be omitted."
+        )
 
     keep = {x} | ({y} if isinstance(y, str) else set()) | ({color} if color else set())
+    keep |= {b for b in bounds if isinstance(b, str)}
     rows = [{k: _clean_value(r.get(k)) for k in keep} for r in data[:MAX_CHART_ROWS]]
 
     clean: dict[str, Any] = {"type": chart_type, "data": rows, "x": x}
@@ -94,6 +108,8 @@ def validate_chart_spec(spec: Any) -> tuple[dict[str, Any] | None, str | None]:
         clean["y"] = y
     if color:
         clean["color"] = color
+    if has_bounds:
+        clean["y_lower"], clean["y_upper"] = bounds
     for key in _STR_KEYS:
         if isinstance(spec.get(key), str) and spec[key].strip():
             clean[key] = spec[key].strip()[:_MAX_TEXT]
@@ -241,6 +257,21 @@ def spec_to_vegalite(spec: dict[str, Any]) -> dict[str, Any]:
         if log:
             y_enc["scale"] = dict(log)
     y_tip = _tip(y, y_enc["type"], y_title, y_fmt)
+    # Uncertainty bounds only mean something on a quantitative value axis.
+    lower, upper = str(spec.get("y_lower") or ""), str(spec.get("y_upper") or "")
+    bounded = bool(lower and upper) and y_enc["type"] == "quantitative"
+    bound_tips = (
+        [_tip(lower, "quantitative", "Lower bound", y_fmt), _tip(upper, "quantitative", "Upper bound", y_fmt)]
+        if bounded else []
+    )
+
+    def bound_layer(mark: dict[str, Any], base: dict[str, Any], val_ch: str = "y") -> dict[str, Any]:
+        """Error-bar/band layer sharing `base`'s non-value channels."""
+        enc = {k: v for k, v in base.items() if k not in (val_ch, "tooltip")}
+        enc[val_ch] = {"field": lower, "type": "quantitative",
+                       **({"scale": base[val_ch]["scale"]} if "scale" in base[val_ch] else {})}
+        enc[f"{val_ch}2"] = {"field": upper}
+        return {"mark": mark, "encoding": enc}
 
     if kind == "bar":
         # Dates keep chronological order; categories sort by value.
@@ -251,18 +282,27 @@ def spec_to_vegalite(spec: dict[str, Any]) -> dict[str, Any]:
         cat_enc: dict[str, Any] = {"field": x, "type": cat_type, "title": x_title}
         sort = spec.get("sort") or ("desc" if cat_type == "nominal" else None)
         if sort:
-            cat_enc["sort"] = f"-{val_ch}" if sort == "desc" else val_ch
+            # A layered chart needs one sort both layers agree on, so sort by
+            # the value field itself rather than by a channel.
+            cat_enc["sort"] = (
+                {"field": y, "op": "sum", "order": "descending" if sort == "desc" else "ascending"}
+                if bounded else f"-{val_ch}" if sort == "desc" else val_ch
+            )
         encoding = {cat_ch: cat_enc, val_ch: y_enc,
-                    "tooltip": [_tip(x, cat_type, x_title), y_tip, *color_tip]}
+                    "tooltip": [_tip(x, cat_type, x_title), y_tip, *bound_tips, *color_tip]}
         if color_enc:
             encoding["color"] = color_enc
             encoding[f"{cat_ch}Offset"] = {"field": color}
-        return {
+        bar_spec: dict[str, Any] = {
             "data": {"values": rows},
-            "mark": {"type": "bar"},
             "height": max(160, 24 * n_levels) if horizontal else 260,
-            "encoding": encoding,
         }
+        bars = {"mark": {"type": "bar"}, "encoding": encoding}
+        if bounded:
+            bar_spec["layer"] = [bars, bound_layer({"type": "rule"}, encoding, val_ch)]
+        else:
+            bar_spec.update(bars)
+        return bar_spec
 
     if kind in ("line", "area"):
         # A non-date, non-numeric x keeps the producer's row order.
@@ -273,12 +313,16 @@ def spec_to_vegalite(spec: dict[str, Any]) -> dict[str, Any]:
         if kind == "line" and y_enc["type"] == "quantitative":
             y_enc["scale"] = {**y_enc.get("scale", {}), "zero": False}
         encoding = {"x": x_enc, "y": y_enc,
-                    "tooltip": [_tip(x, line_x_type, x_title), y_tip, *color_tip]}
+                    "tooltip": [_tip(x, line_x_type, x_title), y_tip, *bound_tips, *color_tip]}
         if color_enc:
             encoding["color"] = color_enc
         mark: dict[str, Any] = (
             {"type": "line", "point": len(rows) <= 60} if kind == "line" else {"type": "area", "line": True}
         )
+        if bounded:
+            band = bound_layer({"type": "area", "opacity": 0.2}, encoding)
+            return {"data": {"values": rows}, "height": 260,
+                    "layer": [band, {"mark": mark, "encoding": encoding}]}
         return {"data": {"values": rows}, "mark": mark, "height": 260, "encoding": encoding}
 
     # scatter
@@ -288,15 +332,19 @@ def spec_to_vegalite(spec: dict[str, Any]) -> dict[str, Any]:
         if y_enc["type"] == "quantitative":
             y_enc["scale"] = {**y_enc.get("scale", {}), "zero": False}
     encoding = {"x": x_enc, "y": y_enc,
-                "tooltip": [_tip(x, x_enc["type"], x_title), y_tip, *color_tip]}
+                "tooltip": [_tip(x, x_enc["type"], x_title), y_tip, *bound_tips, *color_tip]}
     if color_enc:
         encoding["color"] = color_enc
     points = {"mark": {"type": "circle", "opacity": 0.6, "size": 40}, "encoding": encoding}
+    layers: list[dict[str, Any]] = [points]
+    if bounded:
+        layers.append(bound_layer({"type": "rule"}, encoding))
     if x_enc["type"] == y_enc["type"] == "quantitative" and len(rows) >= _TREND_MIN_POINTS:
-        trend = {
+        layers.append({
             "mark": {"type": "line", "strokeDash": [4, 3]},
             "transform": [{"regression": y, "on": x}],
             "encoding": {"x": {"field": x, "type": "quantitative"}, "y": {"field": y, "type": "quantitative"}},
-        }
-        return {"data": {"values": rows}, "height": 280, "layer": [points, trend]}
+        })
+    if len(layers) > 1:
+        return {"data": {"values": rows}, "height": 280, "layer": layers}
     return {"data": {"values": rows}, "height": 280, **points}

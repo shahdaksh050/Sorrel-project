@@ -4,16 +4,20 @@ Change Analysis Tool — Execution Layer (IMPROVEMENTS.md item 7.2 #3).
 Period-over-period movement on the correct grain: which period changed, by
 how much, and (optionally) which segment drove it. This is the "what
 happened" question IMPROVEMENTS.md flags as one no current tool answers
-directly — `time_series_analysis` diagnoses trend/seasonality over raw rows,
-which is the wrong grain for a transaction log (Run B: a planted Q4 lift was
-missed because 4,000 raw rows were fed straight into a trend model instead
-of being resampled to a period sum first).
+directly — `time_series_analysis` diagnoses trend/seasonality, not which
+period moved (Run B: a planted Q4 lift was missed because 4,000 raw rows
+were fed straight into a trend model instead of being resampled to a period
+sum first).
 
 Grain selection is a simple local heuristic (monthly once the date range
 spans a year or more, weekly for a multi-week range, daily otherwise) —
-deliberately not imported from `src/tools/time_series.py`, which solves a
-different problem (trend/seasonality diagnostics, not period-over-period
-movement).
+deliberately separate from `time_series_analysis`'s grain choice, which
+solves a different problem (trend/seasonality diagnostics, not
+period-over-period movement).
+
+Periods are calendar-aligned: a period with no rows is missing, not zero,
+so "latest vs prior" always compares adjacent calendar periods and a gap
+is reported rather than read as a 100% drop or an infinite rise.
 """
 from __future__ import annotations
 
@@ -24,9 +28,9 @@ import pandas as pd
 
 from src.core.findings import Finding
 from src.core.profiler import profile_dataframe
+from src.core.stats_utils import is_partial_final_period, measure_aggregation
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
-from src.tools.time_series import is_partial_final_period, measure_aggregation
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
@@ -192,7 +196,11 @@ class ChangeAnalysisTool(BaseTool):
             dates = grouped.index.get_level_values(1)
             latest_by_seg = grouped[dates == latest_period].droplevel(1)
             prior_by_seg = grouped[dates == prior_period].droplevel(1)
-            combined = pd.DataFrame({"latest": latest_by_seg, "prior": prior_by_seg}).fillna(0.0)
+            combined = pd.DataFrame({"latest": latest_by_seg, "prior": prior_by_seg})
+            # Both periods have data overall, so a segment absent from one of
+            # them contributed nothing to a sum there; a mean over no rows has
+            # no value at all, so such a segment is left out of the breakdown.
+            combined = combined.fillna(0.0) if agg_func == "sum" else combined.dropna()
             if combined.empty:
                 return None
             combined["delta"] = combined["latest"] - combined["prior"]
@@ -266,16 +274,17 @@ class ChangeAnalysisTool(BaseTool):
         cp = next((c for c in profile.columns if c.name == measure_column), None)
         agg_func = measure_aggregation(cp)
 
-        series = (
-            work.set_index(date_column)[measure_column]
-            .resample(freq, label="left", closed="left")
-            .agg(agg_func)
-            .dropna()
+        # Calendar-aligned: resample emits every period between the first and
+        # last observed one, and a period with no rows stays NaN (min_count=1)
+        # instead of becoming a zero that a later period is compared against.
+        resampler = work.set_index(date_column)[measure_column].resample(
+            freq, label="left", closed="left"
         )
-        if len(series) < 2:
+        series = resampler.sum(min_count=1) if agg_func == "sum" else resampler.mean()
+        if int(series.notna().sum()) < 2:
             raise ToolExecutionError(
-                f"Only {len(series)} distinct {grain_label} period(s) after resampling — "
-                "need at least 2 to measure change."
+                f"Only {int(series.notna().sum())} distinct {grain_label} period(s) after "
+                "resampling — need at least 2 to measure change."
             )
 
         # A dataset extract very often stops mid-period (e.g. the file ends
@@ -296,26 +305,38 @@ class ChangeAnalysisTool(BaseTool):
                 series = series.iloc[:-1]
             else:
                 latest_period_partial = True
+        missing_periods = [_period_label(ts, grain_label) for ts in series.index[series.isna()]]
         latest_period = series.index[-1]
         prior_period = series.index[-2]
         latest_value = float(series.iloc[-1])
         prior_value = float(series.iloc[-2])
+        # Either side of the comparison having no rows makes the change
+        # unknown, not a move to or from zero.
+        comparison_missing = bool(np.isnan(latest_value) or np.isnan(prior_value))
         pct_change = (
-            (latest_value - prior_value) / prior_value if prior_value != 0 else None
+            (latest_value - prior_value) / prior_value
+            if not comparison_missing and prior_value != 0
+            else None
         )
 
         trailing = series.iloc[:-1]
         # The series' own noise floor: the median absolute period-over-period
-        # move before the latest period.
-        prior_moves = trailing.pct_change().abs().replace([np.inf, -np.inf], np.nan).dropna()
+        # move before the latest period, between adjacent observed periods
+        # only (a move across a gap is NaN and dropped).
+        prior_moves = (
+            trailing.pct_change(fill_method=None)
+            .abs()
+            .replace([np.inf, -np.inf], np.nan)
+            .dropna()
+        )
         typical_volatility = float(prior_moves.median()) if len(prior_moves) else None
         change_threshold = max(
             _MIN_CHANGE_FOR_FINDING, _VOLATILITY_MULTIPLE * (typical_volatility or 0.0)
         )
-        trailing_avg = float(trailing.mean()) if len(trailing) else None
+        trailing_avg = float(trailing.mean()) if trailing.notna().any() else None
         pct_change_vs_trailing = (
             (latest_value - trailing_avg) / trailing_avg
-            if trailing_avg is not None and trailing_avg != 0
+            if trailing_avg is not None and trailing_avg != 0 and not np.isnan(latest_value)
             else None
         )
 
@@ -323,7 +344,7 @@ class ChangeAnalysisTool(BaseTool):
             dimension_column = _pick_dimension_column(profile)
 
         breakdown = None
-        if dimension_column and dimension_column in df.columns:
+        if dimension_column and dimension_column in df.columns and not comparison_missing:
             breakdown = self._segment_breakdown(
                 df, date_column, measure_column, dimension_column,
                 agg_func, freq, latest_period, prior_period,
@@ -332,7 +353,14 @@ class ChangeAnalysisTool(BaseTool):
 
         latest_label = _period_label(latest_period, grain_label)
         measure_label = f"{'total' if agg_func == 'sum' else 'average'} {measure_column}"
-        if pct_change is None:
+        if comparison_missing:
+            empty_side = "latest" if np.isnan(latest_value) else "prior"
+            summary = (
+                f"{measure_label}: the {empty_side} {grain_label} period in the comparison "
+                f"({latest_label} vs the one before) has no data, so the change is unknown "
+                "(an empty period is treated as missing, not zero)."
+            )
+        elif pct_change is None:
             summary = (
                 f"{measure_label} moved from 0 to {latest_value:,.2f} in {latest_label} "
                 "vs the prior period (prior period was zero — percent change undefined)."
@@ -362,6 +390,11 @@ class ChangeAnalysisTool(BaseTool):
                 )
         if dropped_partial_period:
             summary += f" The incomplete final period ({dropped_partial_period}) was excluded."
+        if missing_periods and not comparison_missing:
+            summary += (
+                f" {len(missing_periods)} {grain_label} period(s) have no data and are "
+                "treated as missing, not zero."
+            )
 
         return {
             "summary": summary,
@@ -371,8 +404,11 @@ class ChangeAnalysisTool(BaseTool):
             "period_grain": grain_label,
             "aggregation": agg_func,
             "latest_period": latest_label,
-            "latest_value": round(latest_value, 4),
-            "prior_period_value": round(prior_value, 4),
+            "latest_value": None if np.isnan(latest_value) else round(latest_value, 4),
+            "prior_period_value": None if np.isnan(prior_value) else round(prior_value, 4),
+            "comparison_period_missing": comparison_missing,
+            "missing_periods": missing_periods,
+            "missing_period_count": len(missing_periods),
             "pct_change": round(pct_change, 6) if pct_change is not None else None,
             "trailing_avg": round(trailing_avg, 4) if trailing_avg is not None else None,
             "latest_period_partial": latest_period_partial,
@@ -418,7 +454,9 @@ class ChangeAnalysisTool(BaseTool):
         )
         breakdown = output.get("segment_breakdown")
         if breakdown:
-            total_change = output.get("latest_value", 0.0) - output.get("prior_period_value", 0.0)
+            total_change = (output.get("latest_value") or 0.0) - (
+                output.get("prior_period_value") or 0.0
+            )
             mover = _pick_mover(breakdown, total_change)
             if mover:
                 contributor_word = "rise" if pct_change > 0 else "drop"
@@ -432,7 +470,9 @@ class ChangeAnalysisTool(BaseTool):
             kind="change",
             headline=headline,
             detail=detail,
-            evidence=output,
+            # The per-period gap list can be long on a daily grain; the count
+            # stays in evidence.
+            evidence={k: v for k, v in output.items() if k != "missing_periods"},
             source_tool=self.name,
             measure=measure,
             dimension=output.get("dimension_column"),

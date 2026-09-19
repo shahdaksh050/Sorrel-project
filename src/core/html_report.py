@@ -268,6 +268,83 @@ def _sort_bh_tests(bh: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+# ---------------------------------------------------------------------------
+# "How the agent read the data" and "Governance" — shared with
+# src.tools.report_generator so both reports show the same rows. Plain
+# (label, value) text; each report escapes/formats it its own way.
+# ---------------------------------------------------------------------------
+
+def data_understanding_rows(
+    llm_insights: dict[str, Any], profile: dict[str, Any] | None,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """(rows, caveats) from the planner's `data_understanding` block, with
+    the profiler's archetype when the block doesn't carry one."""
+    du = llm_insights.get("data_understanding")
+    du = du if isinstance(du, dict) else {}
+    profile = profile or {}
+    rows: list[tuple[str, str]] = []
+    for key, label in (("subject", "What the data is about"), ("domain", "Domain")):
+        if du.get(key):
+            rows.append((label, str(du[key])))
+    archetype = du.get("archetype") or profile.get("archetype")
+    if archetype:
+        evidence = profile.get("archetype_evidence") if not du.get("archetype") else None
+        rows.append((
+            "Kind of table",
+            str(archetype)
+            + (f" ({'; '.join(str(e) for e in evidence[:3])})" if isinstance(evidence, list) and evidence else ""),
+        ))
+    if du.get("time_column"):
+        rows.append(("Time column", str(du["time_column"])))
+    for key, label in (("key_measures", "Key measures"), ("key_dimensions", "Key dimensions")):
+        if isinstance(du.get(key), list) and du[key]:
+            rows.append((label, ", ".join(str(v) for v in du[key])))
+    caveats = [str(c) for c in du.get("caveats") or [] if str(c).strip()] if isinstance(du.get("caveats"), list) else []
+    return rows, caveats
+
+
+def governance_rows(llm_insights: dict[str, Any]) -> list[tuple[str, str]]:
+    """Code-execution and LLM-usage accounting for the run, from
+    `llm_insights["governance"]` (src.core.governance) plus `llm_usage`
+    when the caller carried it."""
+    gov = llm_insights.get("governance")
+    gov = gov if isinstance(gov, dict) else {}
+    usage = llm_insights.get("llm_usage")
+    usage = usage if isinstance(usage, dict) else {}
+    rows: list[tuple[str, str]] = []
+    if "code_execution_enabled" in gov:
+        rows.append(("Code execution", "enabled" if gov["code_execution_enabled"] else "disabled"))
+    if gov.get("code_executions") is not None:
+        budget = gov.get("execution_budget")
+        rows.append(("Code runs", f"{gov['code_executions']}" + (f" of {budget} allowed" if budget is not None else "")))
+    for keys, label in ((("code_failures", "failures"), "Failed runs"), (("code_refusals", "refusals"), "Refused runs")):
+        value = next((gov[k] for k in keys if gov.get(k) is not None), None)
+        if value is not None:
+            rows.append((label, str(value)))
+    if gov.get("sandbox_backends"):
+        rows.append(("Sandbox", ", ".join(str(b) for b in gov["sandbox_backends"])))
+    if gov.get("audit_log"):
+        rows.append(("Audit log", str(gov["audit_log"])))
+    if "local_only" in gov:
+        rows.append(("Local-only mode", "on — no data sent to an external LLM" if gov["local_only"] else "off"))
+    calls = gov.get("llm_calls", usage.get("call_count"))
+    tokens = gov.get("llm_tokens", usage.get("total_tokens"))
+    if calls is not None:
+        rows.append(("LLM calls", str(calls)))
+    if tokens is not None:
+        cap = gov.get("llm_token_cap")
+        rows.append((
+            "LLM tokens",
+            (f"{tokens:,}" if isinstance(tokens, int) else str(tokens)) + (f" of {cap:,} allowed" if isinstance(cap, int) and cap else ""),
+        ))
+    if gov.get("llm_audit_log"):
+        rows.append(("LLM audit log", str(gov["llm_audit_log"])))
+    cost = gov.get("estimated_cost_usd", usage.get("estimated_cost_usd"))
+    if isinstance(cost, (int, float)) and cost > 0:
+        rows.append(("Estimated LLM cost", f"${cost:,.4f} (approximate)"))
+    return rows
+
+
 def build_html_report(
     dataset_name: str,
     llm_insights: dict[str, Any],
@@ -460,6 +537,17 @@ def build_html_report(
     # ---- methodology (item 6) — why each step ran, from the planner, plus
     # (7.9) the T2 "why we did or didn't model X" transparency when the
     # controller recorded an analysis_decision. ----
+    understanding, understanding_caveats = data_understanding_rows(llm_insights, profile)
+    if understanding or understanding_caveats:
+        section = "<h2>How the agent read the data</h2>"
+        if understanding:
+            section += "<table>" + "".join(
+                f"<tr><td>{_esc(label)}</td><td>{_esc(value)}</td></tr>" for label, value in understanding
+            ) + "</table>"
+        if understanding_caveats:
+            section += "<p>What it flagged to watch out for:</p>" + _cards(understanding_caveats, "treat")
+        sections.append(section)
+
     methodology_html = ""
     if plan_rationales:
         rows = "".join(
@@ -533,6 +621,14 @@ def build_html_report(
                 "<th>BH-adjusted p</th><th>Significant after correction</th></tr>"
                 + rows + "</table>" + trailer
             )
+
+    governance = governance_rows(llm_insights)
+    if governance:
+        sections.append(
+            "<h2>Governance</h2><p>What the agent was allowed to run, and what it used.</p><table>"
+            + "".join(f"<tr><td>{_esc(label)}</td><td>{_esc(value)}</td></tr>" for label, value in governance)
+            + "</table>"
+        )
 
     sections.append(
         '<div class="footer">Made for you by your data assistant.</div>'

@@ -129,8 +129,17 @@ Operator controls (environment):
 | `SANDBOX_BACKEND` | `subprocess` | `docker` adds a kernel boundary (image: `Dockerfile`; rebuild after changing `src/`). |
 | `SANDBOX_REQUIRE_ISOLATION` | `false` | `true` runs code only in Docker — never falls back to the subprocess backend. Set it whenever datasets or objectives come from untrusted users. |
 | `SANDBOX_TIMEOUT_S` / `SANDBOX_MEMORY_MB` | `45` / `1024` | Per-execution wall-clock and process-tree RSS limits. |
+| `SANDBOX_SECCOMP` | `true` | Docker backend applies `docker/seccomp-sandbox.json`; `false` falls back to Docker's default profile. |
+| `REDACT_PII` | `true` | Values of detected personal-data columns (email, phone, names, IDs, cards, IPs) never enter LLM prompts; free text sent to the LLM is masked. |
+| `LOCAL_ONLY` | `false` | Refuse every non-local LLM provider; the run degrades to deterministic mode instead. |
+| `MAX_LLM_TOKENS_PER_RUN` | `0` (off) | Token cap per analysis; when reached the run stops calling the LLM and synthesises deterministically. |
+| `AUDIT_LLM_FULL_TEXT` | `false` | LLM calls are audited as hashes + sizes in `audit/llm_calls.jsonl`; `true` also stores full prompt/response text. |
+| `LLM_JSON_FORMAT` / `LLM_CONTEXT_TOKENS` | `true` / `16000` | Provider JSON mode; prompt budget the planner prompts are compacted to fit. |
+| `ENABLE_TOOL_LIBRARY` / `GENERATED_TOOL_LIBRARY` | `false` / `output/tool_library` | Reuse validated generated tools across runs on schema-compatible data. |
 
-Every execution and refusal is appended to `<output_dir>/audit/code_executions.jsonl` (full code, SHA-256, outcome, backend); a run summary is in `final_result["governance"]`.
+Every execution and refusal is appended to `<output_dir>/audit/code_executions.jsonl` (full code, SHA-256, outcome, backend), every LLM call to `<output_dir>/audit/llm_calls.jsonl`; a run summary is in `final_result["governance"]` and shown in the app's Details tab.
+
+Core module map after the controller split: `controller.py` (AgentController — planning loop, execution, report stages), `llm_client.py` (provider calls, JSON repair, local-only), `tool_registry.py`, `step_validation.py` (pre-execution plan checks), `claim_verification.py` (verbatim-number guard), `governance.py`, `stats_utils.py` (shared statistics: entity aggregation, Mann-Kendall, aggregation choice), `multiple_testing.py` (run-level BH). Moved names stay importable from `src.core.controller`.
 
 ---
 

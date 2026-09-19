@@ -28,6 +28,7 @@ import pandas as pd
 
 from src.core.chart_spec import MAX_CHART_ROWS, validate_chart_spec
 from src.core.profiler import profile_dataframe
+from src.core.security import pii_redaction_enabled
 
 #: Analysis tools `dsa.run` may call — pure analyses only (no ingest/clean,
 #: model training, reporting, plotting, or the code-execution tools).
@@ -286,7 +287,13 @@ class Toolkit:
             stats = {k: col.stats[k] for k in ("mean", "std", "min", "median", "max", "skew") if k in col.stats}
             if stats:
                 entry["stats"] = stats
-            if col.top_values:
+            # A personal-data column's values would ride RESULT into the next
+            # LLM prompt; say what kind of column it is, not what's in it.
+            pii = getattr(col, "pii", None)
+            if pii and pii_redaction_enabled():
+                entry["pii"] = pii
+                entry.pop("stats", None)
+            elif col.top_values:
                 entry["top_values"] = dict(list(col.top_values.items())[:5])
             out[col.name] = entry
         safe: dict[str, dict[str, Any]] = _json_safe(out)

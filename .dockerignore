@@ -1,0 +1,17 @@
+# The image needs only src/ and docker/ — keep secrets, data and bulk out of the build context.
+.git
+.venv
+.env
+.env.*
+output
+data
+tests
+frontend-landing
+3d-ui-skill
+*.zip
+*.log
+final_report.json
+**/__pycache__
+**/*.pyc
+**/*.md
+!docker/README.md

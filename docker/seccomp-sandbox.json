@@ -1,0 +1,112 @@
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "defaultErrnoRet": 38,
+  "archMap": [
+    {
+      "architecture": "SCMP_ARCH_X86_64",
+      "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+    },
+    {
+      "architecture": "SCMP_ARCH_AARCH64",
+      "subArchitectures": ["SCMP_ARCH_ARM"]
+    }
+  ],
+  "syscalls": [
+    {
+      "comment": "File and directory I/O (scratch dir, /tmp, interpreter libraries)",
+      "names": [
+        "read", "readv", "pread64", "preadv", "preadv2",
+        "write", "writev", "pwrite64", "pwritev", "pwritev2",
+        "open", "openat", "openat2", "close", "close_range", "creat",
+        "lseek", "_llseek",
+        "stat", "stat64", "fstat", "fstat64", "lstat", "lstat64",
+        "newfstatat", "fstatat64", "statx",
+        "statfs", "statfs64", "fstatfs", "fstatfs64",
+        "access", "faccessat", "faccessat2",
+        "readlink", "readlinkat",
+        "getdents", "getdents64", "getcwd", "chdir", "fchdir",
+        "mkdir", "mkdirat", "rmdir", "unlink", "unlinkat",
+        "rename", "renameat", "renameat2",
+        "fcntl", "fcntl64", "dup", "dup2", "dup3", "pipe", "pipe2",
+        "ftruncate", "ftruncate64", "truncate", "truncate64",
+        "fsync", "fdatasync", "flock", "fadvise64", "fadvise64_64", "fallocate",
+        "umask", "chmod", "fchmod", "fchmodat", "utimensat",
+        "sendfile", "sendfile64", "copy_file_range",
+        "ioctl",
+        "poll", "ppoll", "select", "_newselect", "pselect6",
+        "epoll_create", "epoll_create1", "epoll_ctl", "epoll_wait", "epoll_pwait", "epoll_pwait2",
+        "eventfd", "eventfd2"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Memory management (CPython allocator, numpy/OpenBLAS buffers)",
+      "names": [
+        "mmap", "mmap2", "munmap", "mprotect", "mremap", "brk", "madvise",
+        "membarrier", "mincore", "get_mempolicy"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Threads, signals and process identity (threading, OpenBLAS worker pools)",
+      "names": [
+        "futex", "futex_time64", "futex_waitv",
+        "set_robust_list", "get_robust_list", "set_tid_address", "rseq",
+        "arch_prctl", "prctl",
+        "exit", "exit_group", "wait4", "waitid",
+        "execve", "execveat",
+        "kill", "tkill", "tgkill",
+        "rt_sigaction", "rt_sigprocmask", "rt_sigreturn", "sigreturn", "sigaltstack",
+        "rt_sigsuspend", "rt_sigtimedwait", "rt_sigtimedwait_time64", "rt_sigpending",
+        "restart_syscall", "pause",
+        "gettid", "getpid", "getppid", "getpgrp", "getpgid", "getsid",
+        "getuid", "getuid32", "geteuid", "geteuid32", "getgid", "getgid32",
+        "getegid", "getegid32", "getgroups", "getgroups32",
+        "getresuid", "getresuid32", "getresgid", "getresgid32",
+        "setuid", "setuid32", "setgid", "setgid32", "setgroups", "setgroups32",
+        "setresuid", "setresuid32", "setresgid", "setresgid32",
+        "setfsuid", "setfsuid32", "setfsgid", "setfsgid32",
+        "capget", "capset",
+        "sched_yield", "sched_getaffinity", "sched_setaffinity",
+        "sched_getparam", "sched_getscheduler",
+        "sched_get_priority_max", "sched_get_priority_min",
+        "getpriority", "getcpu"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Time, limits and system info (timeouts, psutil, getrandom for hash seeds)",
+      "names": [
+        "clock_gettime", "clock_gettime64", "clock_getres", "clock_getres_time64",
+        "clock_nanosleep", "clock_nanosleep_time64", "nanosleep",
+        "gettimeofday", "time", "times",
+        "alarm", "getitimer", "setitimer",
+        "getrlimit", "ugetrlimit", "setrlimit", "prlimit64", "getrusage",
+        "uname", "sysinfo", "getrandom"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    },
+    {
+      "comment": "Threads only: clone without namespace flags (CLONE_NEWNS|NEWCGROUP|NEWUTS|NEWIPC|NEWUSER|NEWPID|NEWNET), as in Docker's default profile",
+      "names": ["clone"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {"index": 0, "value": 2114060288, "valueTwo": 0, "op": "SCMP_CMP_MASKED_EQ"}
+      ]
+    },
+    {
+      "comment": "clone3 takes its flags in a struct seccomp cannot inspect; ENOSYS makes glibc fall back to the filtered clone above",
+      "names": ["clone3"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38
+    },
+    {
+      "comment": "AF_UNIX only; every other address family (AF_INET, AF_INET6, AF_NETLINK, AF_PACKET...) is denied",
+      "names": ["socket", "socketpair"],
+      "action": "SCMP_ACT_ALLOW",
+      "args": [
+        {"index": 0, "value": 1, "valueTwo": 0, "op": "SCMP_CMP_EQ"}
+      ]
+    }
+  ]
+}

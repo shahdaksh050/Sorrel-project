@@ -21,6 +21,8 @@ analysis from a blank page.
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,24 @@ from src.core.agenda import Question, coverage_report
 from src.core.memory import MemorySystem
 from src.core.sandbox import ALLOWED_MODULES_TEXT
 from src.core.security import sanitize_for_prompt as _sp
+
+try:
+    from src.core.security import pii_redaction_enabled, redact_pii_text
+except ImportError:  # older security module without PII redaction
+    def pii_redaction_enabled() -> bool:
+        return False
+
+    def redact_pii_text(text: str) -> str:
+        return text
+
+
+def _redact(text: str) -> str:
+    """Mask PII in LLM-bound free text unless REDACT_PII=false."""
+    return redact_pii_text(text) if pii_redaction_enabled() else text
+
+#: Data archetypes the profiler recognises; the planner confirms or corrects
+#: the profiler's guess in `data_understanding.archetype`.
+ARCHETYPES = ("event_log", "panel", "sensor_timeseries", "survey", "experiment", "cross_section")
 
 # ---------------------------------------------------------------------------
 # System prompt — injected once per session. Placeholders are substituted
@@ -57,7 +77,8 @@ a frame you built; returns {"output": ..., "findings": [...]}. `dsa.tools()` lis
 - `dsa.compare_groups(frame, measure, by)`, `dsa.summarize(series)`, \
 `dsa.effect_size(a, b)`, `dsa.profile(frame)`.
 - `dsa.chart.bar | line | area | scatter(data, x, y, title=..., y_format="currency"|"percent"|"count"|"number")`, \
-`dsa.chart.histogram(data, x)`, `dsa.chart.heatmap(data, x, y, color=<value column>)` — each returns a chart spec.
+`dsa.chart.histogram(data, x)`, `dsa.chart.heatmap(data, x, y, color=<value column>)` — each returns a chart spec. \
+Add `y_lower=..., y_upper=...` (columns holding CI bounds) to bar/line/area/scatter to show uncertainty.
 Assign at top level:
 - `RESULT = ...` (required) — a number, small dict, or aggregated DataFrame.
 - `FINDING = {"headline": ..., "detail": ..., "evidence": {...}}` (optional) — \
@@ -104,8 +125,10 @@ INITIAL_ANALYSIS_PROMPT = """\
 {dataset_metadata}
 {profile}{objective}{draft_plan}
 ## Your task (cycle 1)
-1. Describe the data in `data_understanding` — short, factual, from the profile above.
-2. Plan the first cycle: start with clean_data, then 2-5 of the most \
+1. Describe the data in `data_understanding` — short, factual, from the \
+profile above. Confirm or correct the profiler's archetype.
+2. Plan the first cycle: start with clean_data (it does not impute — \
+leave missing values; models impute inside cross-validation), then 2-5 of the most \
 informative analyses. Start from the suggested plan: keep steps that fit, \
 drop ones that don't, fix parameters (right columns, sum vs mean), and add \
 what it misses — execute_dynamic_code for anything no tool covers.
@@ -115,6 +138,7 @@ Reply with exactly this shape:
  "data_understanding": {{
    "subject": "<what one row represents, max 15 words>",
    "domain": "<field, e.g. retail orders / clinical trial / sensor telemetry / survey>",
+   "archetype": "<one of: {archetypes}>",
    "key_measures": ["<column>"],
    "key_dimensions": ["<column>"],
    "time_column": "<column or null>",
@@ -122,7 +146,7 @@ Reply with exactly this shape:
    "questions": ["<question worth answering, max 20 words>"]
  }},
  "reasoning": "<2-3 sentences>",
- "steps": [{{"step_number": 1, "tool_name": "clean_data", "parameters": {{"strategy": "median"}}, "rationale": "..."}}]}}
+ "steps": [{{"step_number": 1, "tool_name": "clean_data", "parameters": {{}}, "rationale": "..."}}]}}
 """
 
 
@@ -225,6 +249,29 @@ nothing about these features, return an empty insights list — do not invent fi
 _MAX_PROMPT_FINDINGS = 12
 _MAX_OPEN_QUESTIONS = 8
 
+# ---------------------------------------------------------------------------
+# Context budgeting — keep system + user prompt under ~75% of the model's
+# context window (LLM_CONTEXT_TOKENS), leaving the rest for the reply.
+# Compaction levels, each cumulative: 1 halves the findings, 2 shrinks the
+# per-result digests, 3 drops the RLM block, 4 cuts the profile to its head.
+# ---------------------------------------------------------------------------
+
+_CHARS_PER_TOKEN = 3.5
+_BUDGET_SHARE = 0.75
+_MAX_COMPACTION_LEVEL = 4
+_COMPACT_PROFILE_LINES = 25
+
+
+def _estimate_tokens(text: str) -> float:
+    return len(text) / _CHARS_PER_TOKEN
+
+
+def _context_tokens() -> int:
+    try:
+        return max(1000, int(os.getenv("LLM_CONTEXT_TOKENS", "16000")))
+    except ValueError:
+        return 16000
+
 
 # ---------------------------------------------------------------------------
 # PromptManager
@@ -234,18 +281,52 @@ class PromptManager:
     """Assembles structured LLM prompts from memory state and tool descriptions."""
 
     def __init__(
-        self, memory: MemorySystem, tool_descriptions: str, max_iterations: int = 15
+        self,
+        memory: MemorySystem,
+        tool_descriptions: str,
+        max_iterations: int = 15,
+        short_tool_descriptions: str | None = None,
     ) -> None:
         self.memory = memory
         self.tool_descriptions = tool_descriptions
+        self.short_tool_descriptions = short_tool_descriptions
         self.max_iterations = max_iterations
+        self._system_prompt: str | None = None
+
+    def _budget_tokens(self) -> float:
+        return _context_tokens() * _BUDGET_SHARE
 
     def get_system_prompt(self) -> str:
-        return (
-            SYSTEM_PROMPT_CORE
-            .replace("<<TOOLS>>", self.tool_descriptions)
-            .replace("<<MODULES>>", ALLOWED_MODULES_TEXT)
-        )
+        """Built once per run (the engine holds it and providers cache it).
+        The short per-tool form replaces the full one when the full system
+        prompt plus the cycle-1 prompt would not fit the context budget."""
+        if self._system_prompt is not None:
+            return self._system_prompt
+
+        def build(tools: str) -> str:
+            return SYSTEM_PROMPT_CORE.replace("<<TOOLS>>", tools).replace("<<MODULES>>", ALLOWED_MODULES_TEXT)
+
+        prompt = build(self.tool_descriptions)
+        if self.short_tool_descriptions:
+            try:
+                first_user = self._render_initial(0)
+            except ValueError:  # no dataset loaded yet
+                first_user = ""
+            if _estimate_tokens(prompt + first_user) > self._budget_tokens():
+                prompt = build(self.short_tool_descriptions)
+        self._system_prompt = prompt
+        return prompt
+
+    def _fit(self, render: Callable[[int], str]) -> str:
+        """Render at compaction level 0, then escalate until system + user
+        prompt fit the budget (or the last level is reached)."""
+        budget = self._budget_tokens() - _estimate_tokens(self.get_system_prompt())
+        prompt = render(0)
+        level = 0
+        while _estimate_tokens(prompt) > budget and level < _MAX_COMPACTION_LEVEL:
+            level += 1
+            prompt = render(level)
+        return prompt
 
     # ---- blocks --------------------------------------------------------
 
@@ -267,12 +348,36 @@ class PromptManager:
             f"Prioritise analyses that answer it; your final insights must address it.\n"
         )
 
-    def _profile_block(self) -> str:
-        """Compact data-profile summary produced at ingestion, when available."""
+    def _archetype_line(self) -> str:
+        """The profiler's archetype guess and its evidence, one line."""
+        info = self.memory.get_context("data_archetype")
+        if not isinstance(info, dict) or not info.get("archetype"):
+            return ""
+        evidence = info.get("evidence")
+        if isinstance(evidence, dict):
+            evidence_text = ", ".join(f"{k}={v}" for k, v in evidence.items())
+        elif isinstance(evidence, (list, tuple)):
+            evidence_text = "; ".join(str(e) for e in evidence)
+        else:
+            evidence_text = str(evidence or "")
+        line = f"Archetype (profiler guess): {_sp(info['archetype'], 40)}"
+        if evidence_text:
+            line += f" — evidence: {_sp(evidence_text, max_len=200)}"
+        return line
+
+    def _profile_block(self, max_lines: int | None = None) -> str:
+        """Compact data-profile summary produced at ingestion, when available.
+        `max_lines` keeps only its head (context budgeting)."""
         summary = self.memory.get_context("data_profile_summary")
         if not summary:
             return ""
-        return f"\n## Data Profile\n{summary}\n"
+        lines = str(summary).splitlines()
+        if max_lines is not None and len(lines) > max_lines:
+            lines = [*lines[:max_lines], f"... {len(lines) - max_lines} more profile line(s) omitted."]
+        archetype = self._archetype_line()
+        if archetype and not any("archetype" in line.lower() for line in lines):
+            lines.append(archetype)
+        return "\n## Data Profile\n" + "\n".join(lines) + "\n"
 
     def _understanding_block(self) -> str:
         """The planner's own cycle-1 read of the data, carried forward so
@@ -281,9 +386,11 @@ class PromptManager:
         if not isinstance(u, dict) or not u:
             return ""
         lines = ["\n## Data understanding (your cycle-1 notes)"]
-        for key in ("subject", "domain", "time_column"):
+        for key in ("subject", "domain", "archetype", "time_column"):
             if u.get(key):
                 lines.append(f"- {key}: {_sp(u[key], max_len=160)}")
+        if not u.get("archetype") and self._archetype_line():
+            lines.append(f"- {self._archetype_line()}")
         for key in ("key_measures", "key_dimensions", "caveats"):
             if u.get(key):
                 lines.append(f"- {key}: {'; '.join(_sp(v, max_len=160) for v in u[key])}")
@@ -308,6 +415,7 @@ class PromptManager:
         findings = self.memory.ranked_findings()
         if not findings:
             return "None yet."
+        pii_columns = set(self.memory.get_context("pii_columns") or []) if pii_redaction_enabled() else set()
         lines: list[str] = []
         for i, f in enumerate(findings[:limit], 1):
             tail = []
@@ -320,9 +428,13 @@ class PromptManager:
             suffix = f" ({', '.join(tail)})" if tail else ""
             # Headlines embed category values from the data (and, for
             # sandbox findings, LLM-authored text) — sanitise like any
-            # dataset-derived string.
+            # dataset-derived string, and keep a PII column's values out.
+            headline = f.headline
+            if f.dimension in pii_columns and f.level:
+                headline = headline.replace(str(f.level), "[redacted]")
             lines.append(
-                f"F{i} [{_sp(f.kind, 40)}, {_sp(f.source_tool, 60)}] {_sp(f.headline, max_len=300)}{suffix}"
+                f"F{i} [{_sp(f.kind, 40)}, {_sp(f.source_tool, 60)}] "
+                f"{_sp(_redact(headline), max_len=300)}{suffix}"
             )
         if len(findings) > limit:
             lines.append(f"... {len(findings) - limit} lower-ranked finding(s) omitted.")
@@ -340,13 +452,13 @@ class PromptManager:
                 if not q.get("suggested_tool"):
                     continue  # a declined question, not an open one
                 cols = ", ".join(_sp(c) for c in q.get("columns") or [])
-                lines.append(f"- {_sp(q['text'], max_len=240)} → {q['suggested_tool']} (columns: {cols})")
+                lines.append(f"- {_sp(_redact(q['text']), max_len=240)} → {q['suggested_tool']} (columns: {cols})")
         except Exception:
             pass
         u = self.memory.get_context("data_understanding")
         if isinstance(u, dict):
             for question in (u.get("questions") or [])[:5]:
-                lines.append(f"- (your question) {_sp(question, max_len=200)}")
+                lines.append(f"- (your question) {_sp(_redact(str(question)), max_len=200)}")
         if not lines:
             return "None — every agenda question has a finding."
         return "\n".join(lines[:_MAX_OPEN_QUESTIONS])
@@ -382,7 +494,11 @@ class PromptManager:
             desc = spec.get("description", "")
             params = spec.get("params_schema", {}) or {}
             param_names = ", ".join(params.keys()) if isinstance(params, dict) else ""
-            lines.append(f"- `{_sp(name)}` (params: {_sp(param_names, max_len=200) or 'none'}) — {_sp(desc, max_len=240)}")
+            origin = " (from library)" if spec.get("source") == "library" else ""
+            lines.append(
+                f"- `{_sp(name)}`{origin} (params: {_sp(param_names, max_len=200) or 'none'}) "
+                f"— {_sp(desc, max_len=240)}"
+            )
         return "\n".join(lines) + "\n"
 
     def _rlm_block(self) -> str:
@@ -413,13 +529,13 @@ class PromptManager:
         failed = self.memory.get_failed_steps()
         lines = [
             f"Step {s.step_number}: {s.tool_name} → "
-            f"{_sp(s.result.error_message if s.result else 'unknown error', max_len=900)} "
+            f"{_sp(_redact((s.result.error_message if s.result else None) or 'unknown error'), max_len=900)} "
             f"(retries: {s.retry_count})"
             for s in failed
         ]
         if not lines:
             lines = [
-                f"{r.tool_name} (cycle {r.iteration}) → {_sp(r.error_message or 'unknown error', max_len=900)}"
+                f"{r.tool_name} (cycle {r.iteration}) → {_sp(_redact(r.error_message or 'unknown error'), max_len=900)}"
                 for r in self.memory.tool_results
                 if r.status == "error" and r.iteration >= self.memory.iteration_count - 1
             ]
@@ -427,49 +543,71 @@ class PromptManager:
 
     # ---- prompts -------------------------------------------------------
 
-    def get_initial_user_prompt(self) -> str:
+    def _results(self, current_iteration: int, level: int) -> str:
+        """Results digest at a compaction level. Tool output carries
+        stdout and dataset values, so it passes through PII redaction."""
+        full, digest = (1200, 250) if level < 2 else (600, 120)
+        return _redact(self.memory.get_results_summary_digest(
+            current_iteration, max_chars_per_result=full, digest_chars_per_result=digest
+        ))
+
+    @staticmethod
+    def _profile_lines(level: int) -> int | None:
+        return None if level < 4 else _COMPACT_PROFILE_LINES
+
+    def _render_initial(self, level: int) -> str:
         return INITIAL_ANALYSIS_PROMPT.format(
             dataset_metadata=self._metadata(),
-            profile=self._profile_block(),
+            profile=self._profile_block(self._profile_lines(level)),
             objective=self._objective_block(),
             draft_plan=self._draft_plan_block(),
+            archetypes=" | ".join(ARCHETYPES),
         )
+
+    def get_initial_user_prompt(self) -> str:
+        return self._fit(self._render_initial)
 
     def get_iteration_user_prompt(self) -> str:
-        extras = self._derived_block() + self._generated_tools_block() + self._rlm_block()
-        return ITERATION_PROMPT.format(
-            dataset_metadata=self._metadata(),
-            understanding=self._understanding_block() or self._profile_block(),
-            objective=self._objective_block(),
-            findings=self._findings_block(),
-            open_questions=self._open_questions_block(),
-            # P1.6 — full detail for the results the LLM hasn't reacted to
-            # yet, a digest for everything earlier. Results are tagged with
-            # the iteration that PRODUCED them, and memory.iteration_count
-            # was already bumped to the current cycle before this call, so
-            # the results the LLM is seeing for the first time are the
-            # PREVIOUS cycle's — hence "- 1".
-            results_summary=self.memory.get_results_summary_digest(self.memory.iteration_count - 1),
-            failed_steps=self._failed_steps(),
-            extras=extras,
-            iteration=self.memory.iteration_count,
-            max_iterations=self.max_iterations,
-        )
+        def render(level: int) -> str:
+            extras = self._derived_block() + self._generated_tools_block()
+            if level < 3:
+                extras += self._rlm_block()
+            return ITERATION_PROMPT.format(
+                dataset_metadata=self._metadata(),
+                understanding=self._understanding_block() or self._profile_block(self._profile_lines(level)),
+                objective=self._objective_block(),
+                findings=self._findings_block(_MAX_PROMPT_FINDINGS if level < 1 else _MAX_PROMPT_FINDINGS // 2),
+                open_questions=self._open_questions_block(),
+                # P1.6 — full detail for the results the LLM hasn't reacted to
+                # yet, a digest for everything earlier. Results are tagged with
+                # the iteration that PRODUCED them, and memory.iteration_count
+                # was already bumped to the current cycle before this call, so
+                # the results the LLM is seeing for the first time are the
+                # PREVIOUS cycle's — hence "- 1".
+                results_summary=self._results(self.memory.iteration_count - 1, level),
+                failed_steps=self._failed_steps(),
+                extras=extras,
+                iteration=self.memory.iteration_count,
+                max_iterations=self.max_iterations,
+            )
+
+        return self._fit(render)
 
     def get_final_interpretation_prompt(self) -> str:
-        return (
-            FINAL_INTERPRETATION_PROMPT.format(
+        def render(level: int) -> str:
+            prompt = FINAL_INTERPRETATION_PROMPT.format(
                 dataset_metadata=self._metadata(),
                 understanding=self._understanding_block(),
                 objective=self._objective_block(),
-                findings=self._findings_block(limit=20),
+                findings=self._findings_block(limit=20 if level < 1 else 10),
                 # Every result as a digest: the findings carry the headline
                 # numbers, so the full per-result payloads would only spend a
                 # small model's context window on repetition.
-                results_summary=self.memory.get_results_summary_digest(current_iteration=-1),
+                results_summary=self._results(-1, level),
             )
-            + self._rlm_block()
-        )
+            return prompt + self._rlm_block() if level < 3 else prompt
+
+        return self._fit(render)
 
     def get_rlm_subtask_prompt(
         self,
@@ -482,7 +620,7 @@ class PromptManager:
             description=description,
             context_summary=context_summary,
             dataset_metadata=self._metadata(),
-            results_summary=self.memory.get_results_summary_digest(current_iteration=-1),
+            results_summary=self._results(-1, 0),
         )
 
 

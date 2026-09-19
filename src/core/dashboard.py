@@ -6,7 +6,11 @@ Finding bus (src.core.findings), this agent decides *which* charts are worth
 showing (the way a data scientist would) and emits self-contained Vega-Lite
 specs:
 
-  - finding-driven panels  built from the top-ranked discoveries first
+  - finding-driven panels  built from the top-ranked discoveries first:
+                           segment lift (bars + CI), concentration (Lorenz),
+                           change (waterfall by segment), group test
+                           (mean ± CI), plus the drivers dot plot and trend
+                           line (Sen's slope) tagged with their findings
   - class balance          when a classification target exists
   - histograms             for the most informative numeric features
   - category counts        for low-cardinality categoricals
@@ -15,8 +19,10 @@ specs:
   - time series            when a datetime column is present
   - model comparison       when training results exist
   - model drivers          when evaluation reports permutation importances
+  - confusion matrix / ROC when evaluate_model reports them (held-out rows)
   - LLM-declared charts    validated src.core.chart_spec specs (tool output
-                           "chart" or a finding's full-spec chart_hint)
+                           "chart" / "charts" or a finding's full-spec
+                           chart_hint)
   - correlation bars       when correlation results exist
   - cohort / financial / workforce panels, when those tools ran
 
@@ -35,6 +41,7 @@ Rules:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,6 +51,7 @@ import pandas as pd
 from src.core.chart_spec import spec_to_vegalite, validate_chart_spec
 from src.core.chart_theme import axis_format, humanize_axis_title, humanize_label
 from src.core.profiler import ColumnProfile, DatasetProfile
+from src.core.stats_utils import aggregate_to_entity, measure_aggregation
 
 #: Hard cap on inline rows per chart (keeps specs lightweight).
 MAX_POINTS = 1_000
@@ -85,6 +93,16 @@ _UNIFORM_RATIO_THRESHOLD = 1.15
 #: Most won't produce one (no obvious chart, or the underlying tool didn't
 #: run) — this just bounds the work, it isn't a promise of that many panels.
 MAX_FINDING_PANELS = 12
+
+#: At most this many segment-lift / group-test panels (each is one
+#: measure x dimension pairing; more would crowd out every other kind).
+MAX_PANELS_PER_KIND = 2
+
+#: Segments drawn individually in a change waterfall; the rest are one bar.
+WATERFALL_MAX_SEGMENTS = 8
+
+#: Points kept on a Lorenz curve (evenly spaced over the ranked entities).
+LORENZ_MAX_POINTS = 100
 
 #: Findings of these kinds are caveats, not discoveries (src.core.findings.
 #: is_trivial never suppresses them for exactly that reason) — they must
@@ -296,6 +314,31 @@ def _fmt_value(value: float, unit_hint: str | None = None) -> str:
     else:
         text = f"{value:.2g}"
     return f"${text}" if unit_hint == "currency" else text
+
+
+def _signed(value: float, unit_hint: str | None = None) -> str:
+    """`_fmt_value` with an explicit sign: "+$1,200" / "−$300"."""
+    return ("+" if value >= 0 else "−") + _fmt_value(abs(value), unit_hint)
+
+
+def _num(value: Any) -> float | None:
+    """A finite real number as float, else None (bools and strings excluded)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        return None
+    number = float(value)
+    return number if np.isfinite(number) else None
+
+
+def _slug(text: Any) -> str:
+    return re.sub(r"\W+", "_", str(text)).strip("_").lower() or "x"
+
+
+def _tool_outputs(tool_results: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
+    """Every successful output dict of a tool, most recent first."""
+    return [
+        r["output"] for r in reversed(tool_results)
+        if r.get("tool_name") == name and r.get("status") == "success" and isinstance(r.get("output"), dict)
+    ]
 
 
 def _eligible_numeric(ranked: list[str], col_by_name: dict[str, ColumnProfile]) -> list[str]:
@@ -791,13 +834,13 @@ def _time_series_chart(
     freq = grain_freq.get(tool_grain, "MS")
     profiled_agg = col_by_name[value_col].aggregation if col_by_name.get(value_col) else None
     agg = tool_agg or profiled_agg or ("sum" if unit_hint in ("currency", "count") else "mean")
-    resampled = (
-        frame.set_index(time_col)[value_col]
-        .resample(freq)
-        .agg(agg)
-        .dropna()
-        .reset_index()
-    )
+    # Empty calendar periods are missing, not zero (a plain resample sum
+    # would draw them as 0) — matching time_series_analysis. `position`
+    # keeps each period's calendar index for the Sen's-slope line below.
+    bucketed = frame.set_index(time_col)[value_col].resample(freq)
+    resampled = (bucketed.sum(min_count=1) if agg == "sum" else bucketed.agg(agg)).reset_index()
+    resampled["position"] = np.arange(len(resampled))
+    resampled = resampled.dropna(subset=[value_col]).reset_index(drop=True)
     grain_label = tool_grain if tool_grain in grain_freq else "monthly"
     # A final bucket the data doesn't fully cover (e.g. a month with 9 days
     # of data) shows a fake drop on a sum; drop it. Only when the data is
@@ -845,24 +888,58 @@ def _time_series_chart(
         "field": "value", "type": "quantitative", "title": value_title, "scale": {"zero": False},
     }
     _merge_axis_format(y_encoding, value_fmt)
+    x_encoding = {"field": "period", "type": "temporal", "title": None}
+    series_layer: dict[str, Any] = {
+        "mark": {"type": "line", "point": True},
+        "encoding": {
+            "x": x_encoding,
+            "y": y_encoding,
+            "tooltip": [
+                {"field": "period", "type": "temporal"},
+                {"field": "value", "title": value_title, **value_fmt},
+            ],
+        },
+    }
+    spec: dict[str, Any] = {"usermeta": {"value_column": value_col}, "data": {"values": values}, "height": 240}
+    # Robust trend annotation: Sen's slope (median pairwise slope per
+    # period) through the median-residual intercept, drawn dashed, when
+    # time_series_analysis ran the Mann-Kendall test on this series.
+    # Only when the chart plots the tool's own series (its columns and
+    # grain) — otherwise the slope belongs to a different series.
+    same_series = ts_output is not None and tool_grain in grain_freq and (time_col, value_col) == (
+        ts_output.get("date_column"), ts_output.get("value_column"))
+    sen_slope = _num(ts_output.get("sen_slope")) if ts_output and same_series else None
+    if ts_output and sen_slope is not None:
+        # The slope is per calendar period, or per observed period when the
+        # tool tested a gappy series on its observed points only.
+        if ts_output.get("sen_slope_unit") == "observed period":
+            x_pos = np.arange(len(values), dtype=float)
+        else:
+            x_pos = resampled["position"].to_numpy(dtype=float)
+        series_y = np.array([v["value"] for v in values], dtype=float)
+        intercept = float(np.median(series_y - sen_slope * x_pos))
+        for row, pos in zip(values, x_pos, strict=True):
+            row["sen_fit"] = round(intercept + sen_slope * float(pos), 4)
+        spec["layer"] = [series_layer, {
+            "mark": {"type": "line", "strokeDash": [4, 3]},
+            "encoding": {"x": x_encoding, "y": {"field": "sen_fit", "type": "quantitative"}},
+        }]
+        unit = ts_output.get("sen_slope_unit") or "period"
+        mk_p = _num(ts_output.get("mk_p_value"))
+        description += (
+            f" Dashed line: Sen's slope {'+' if sen_slope >= 0 else '−'}{_fmt_value(abs(sen_slope), unit_hint)}"
+            f" per {unit}"
+            + (f" (Mann-Kendall p={mk_p:.3g}{', ' + str(ts_output['mk_trend']) if ts_output.get('mk_trend') else ''})"
+               if mk_p is not None else "")
+            + "."
+        )
+    else:
+        spec.update(series_layer)
     return ChartSpec(
         chart_id="time_series",
         title=f"Trend — {humanize_label(value_col)} ({grain_label} {verb})",
         description=description,
-        spec={
-            "usermeta": {"value_column": value_col},
-            "data": {"values": values},
-            "mark": {"type": "line", "point": True},
-            "height": 240,
-            "encoding": {
-                "x": {"field": "period", "type": "temporal", "title": None},
-                "y": y_encoding,
-                "tooltip": [
-                    {"field": "period", "type": "temporal"},
-                    {"field": "value", "title": value_title, **value_fmt},
-                ],
-            },
-        },
+        spec=spec,
     )
 
 
@@ -917,41 +994,155 @@ def _model_comparison_chart(train_output: dict[str, Any] | None) -> ChartSpec | 
     )
 
 
+def _importance_bounds(driver: dict[str, Any], importance: float) -> tuple[float, float] | None:
+    """(low, high) around a driver's importance: its own CI when reported,
+    else ±1 std across the permutation repeats, else None."""
+    low = _num(driver.get("importance_ci_lower", driver.get("ci_lower")))
+    high = _num(driver.get("importance_ci_upper", driver.get("ci_upper")))
+    if low is not None and high is not None:
+        return low, high
+    std = _num(driver.get("importance_std", driver.get("std")))
+    return (importance - std, importance + std) if std is not None else None
+
+
 def _drivers_chart(model_output: dict[str, Any] | None) -> ChartSpec | None:
     """Permutation-importance drivers (evaluate_model's `top_drivers`) — the
-    one chart that says *what moves the outcome* after a modelling run."""
+    one chart that says *what moves the outcome* after a modelling run. A
+    dot plot, with the importance's spread across shuffles as error bars
+    whenever the tool reported it."""
     if not model_output:
         return None
-    drivers = [
-        d for d in model_output.get("top_drivers") or []
-        if isinstance(d, dict) and d.get("feature") is not None and isinstance(d.get("importance"), (int, float))
-    ]
-    if not drivers:
-        return None
-    values = [
-        {
+    values: list[dict[str, Any]] = []
+    for d in model_output.get("top_drivers") or []:
+        importance = _num(d.get("importance")) if isinstance(d, dict) else None
+        if importance is None or d.get("feature") is None:
+            continue
+        bounds = _importance_bounds(d, importance)
+        values.append({
             "feature": humanize_label(str(d["feature"])),
-            "importance": round(float(d["importance"]), 4),
+            "importance": round(importance, 4),
+            "low": round(bounds[0], 4) if bounds else None,
+            "high": round(bounds[1], 4) if bounds else None,
             "effect": str(d.get("headline") or d.get("direction") or ""),
-        }
-        for d in drivers
-    ]
+        })
+    if not values:
+        return None
+    y_enc = {"field": "feature", "type": "nominal", "sort": {"field": "importance", "order": "descending"},
+             "title": None}
+    x_title = "Permutation importance"
+    layers: list[dict[str, Any]] = []
+    has_bounds = any(v["low"] is not None for v in values)
+    if has_bounds:
+        layers.append({"mark": {"type": "rule"}, "encoding": {
+            "y": y_enc,
+            "x": {"field": "low", "type": "quantitative", "title": x_title},
+            "x2": {"field": "high"},
+        }})
+    layers.append({"mark": {"type": "circle", "size": 90, "opacity": 1}, "encoding": {
+        "y": y_enc,
+        "x": {"field": "importance", "type": "quantitative", "title": x_title},
+        "tooltip": [{"field": "feature", "title": "Feature"},
+                    {"field": "importance", "title": "Importance", "format": ".3~f"},
+                    *([{"field": "low", "title": "Low", "format": ".3~f"},
+                       {"field": "high", "title": "High", "format": ".3~f"}] if has_bounds else []),
+                    {"field": "effect", "title": "Effect"}],
+    }})
     return ChartSpec(
         chart_id="model_drivers",
         title="What Drives the Outcome — Top Model Drivers",
         description="Permutation importance on held-out data: how much the model's score drops "
-                    "when each feature is shuffled. Longer bar = the model leans on it more.",
+                    "when each feature is shuffled. Further right = the model leans on it more."
+                    + (" Whiskers show how much that drop varied across repeated shuffles."
+                       if has_bounds else ""),
         spec={
             "data": {"values": values},
-            "mark": {"type": "bar"},
             "height": max(140, 30 * len(values)),
-            "encoding": {
-                "y": {"field": "feature", "type": "nominal", "sort": "-x", "title": None},
-                "x": {"field": "importance", "type": "quantitative", "title": "Permutation importance"},
-                "tooltip": [{"field": "feature", "title": "Feature"},
-                            {"field": "importance", "title": "Importance", "format": ".3~f"},
-                            {"field": "effect", "title": "Effect"}],
-            },
+            "layer": layers,
+        },
+    )
+
+
+def _confusion_matrix_chart(eval_output: dict[str, Any] | None) -> ChartSpec | None:
+    """Held-out confusion matrix, when evaluate_model reports one (a list of
+    rows, actual x predicted, aligned with `class_labels`)."""
+    matrix = (eval_output or {}).get("confusion_matrix")
+    if not isinstance(matrix, list) or len(matrix) < 2 or not all(isinstance(r, list) for r in matrix):
+        return None
+    labels = (eval_output or {}).get("class_labels") or []
+    if len(labels) != len(matrix):
+        labels = [str(i) for i in range(len(matrix))]
+    values = [
+        {"actual": str(labels[i]), "predicted": str(labels[j]), "count": int(c)}
+        for i, row in enumerate(matrix) for j, c in enumerate(row)
+        if j < len(labels) and _num(c) is not None
+    ]
+    if not values:
+        return None
+    order = [str(label) for label in labels]
+    x_enc = {"field": "predicted", "type": "nominal", "sort": order, "title": "Predicted",
+             "axis": {"labelAngle": 0}}
+    y_enc = {"field": "actual", "type": "nominal", "sort": order, "title": "Actual"}
+    return ChartSpec(
+        chart_id="model_confusion_matrix",
+        title="Where the Model Gets It Wrong — Confusion Matrix",
+        description="Held-out rows only: each cell counts rows of the actual class (row) "
+                    "predicted as the column's class. The diagonal is correct predictions.",
+        spec={
+            "data": {"values": values},
+            "height": max(160, 40 * len(labels)),
+            "layer": [
+                {"mark": {"type": "rect"}, "encoding": {
+                    "x": x_enc, "y": y_enc,
+                    "color": {"field": "count", "type": "quantitative", "title": "Rows",
+                              "scale": {"scheme": "oranges"}},
+                    "tooltip": [{"field": "actual", "title": "Actual"},
+                                {"field": "predicted", "title": "Predicted"},
+                                {"field": "count", "title": "Rows", "format": ",d"}],
+                }},
+                {"mark": {"type": "text"}, "encoding": {
+                    "x": x_enc, "y": y_enc, "text": {"field": "count", "format": ",d"},
+                }},
+            ],
+        },
+    )
+
+
+def _roc_chart(eval_output: dict[str, Any] | None) -> ChartSpec | None:
+    """Held-out ROC curve, when evaluate_model reports its points — either
+    {"fpr": [...], "tpr": [...]} or a list of {"fpr", "tpr"} records."""
+    roc = (eval_output or {}).get("roc_curve")
+    pairs: list[tuple[Any, Any]] = []
+    if isinstance(roc, dict) and isinstance(roc.get("fpr"), list) and isinstance(roc.get("tpr"), list):
+        pairs = list(zip(roc["fpr"], roc["tpr"], strict=False))
+    elif isinstance(roc, list):
+        pairs = [(p.get("fpr"), p.get("tpr")) for p in roc if isinstance(p, dict)]
+    points = [(f, t) for f, t in ((_num(a), _num(b)) for a, b in pairs) if f is not None and t is not None]
+    if len(points) < 2:
+        return None
+    if len(points) > MAX_POINTS:
+        points = points[:: -(-len(points) // MAX_POINTS)]
+    values = [{"fpr": round(f, 4), "tpr": round(t, 4)} for f, t in points]
+    auc = _num((eval_output or {}).get("roc_auc", roc.get("auc") if isinstance(roc, dict) else None))
+    axis = {"scale": {"domain": [0, 1]}}
+    return ChartSpec(
+        chart_id="model_roc",
+        title="How Well the Model Ranks Cases — ROC Curve" + (f" (AUC {auc:.2f})" if auc is not None else ""),
+        description="Held-out rows only: true-positive rate against false-positive rate across every "
+                    "decision threshold. The dashed diagonal is a coin flip; the closer the curve hugs "
+                    "the top-left corner, the better.",
+        spec={
+            "height": 260,
+            "layer": [
+                {"data": {"values": values}, "mark": {"type": "line"}, "encoding": {
+                    "x": {"field": "fpr", "type": "quantitative", "title": "False-positive rate", **axis},
+                    "y": {"field": "tpr", "type": "quantitative", "title": "True-positive rate", **axis},
+                    "tooltip": [{"field": "fpr", "title": "FPR"}, {"field": "tpr", "title": "TPR"}],
+                }},
+                {"data": {"values": [{"fpr": 0, "tpr": 0}, {"fpr": 1, "tpr": 1}]},
+                 "mark": {"type": "line", "strokeDash": [4, 3]},
+                 "encoding": {"x": {"field": "fpr", "type": "quantitative"},
+                              "y": {"field": "tpr", "type": "quantitative"}}},
+            ],
         },
     )
 
@@ -1395,6 +1586,408 @@ def _workforce_charts(df: pd.DataFrame, workforce_output: dict[str, Any] | None)
 
 
 # ---------------------------------------------------------------------------
+# Phase 3 — a panel for each top finding kind that has none of its own,
+# built from the finding's evidence plus the tool output it came from and
+# pre-tagged with that finding so it leads the dashboard. Uncertainty is
+# drawn wherever the tool reported it or it follows exactly from the data;
+# nothing is drawn where it doesn't.
+# ---------------------------------------------------------------------------
+
+_GRAIN_UNIT = {"monthly": "month", "weekly": "week", "daily": "day"}
+
+
+def _tag(chart: ChartSpec, finding: dict[str, Any]) -> ChartSpec:
+    chart.finding_id = finding.get("finding_id") or f"{finding.get('kind')}::{finding.get('measure')}"
+    chart.priority = float(finding.get("importance") or 0.0)
+    chart.layer = finding.get("layer") or "analyst"
+    chart.caption = finding.get("headline")
+    return chart
+
+
+def _segment_lift_chart(
+    finding: dict[str, Any], results: list[dict[str, Any]], col_by_name: dict[str, ColumnProfile],
+) -> ChartSpec | None:
+    """Every level of the finding's dimension (segment_comparison's own
+    comparisons) with its 95% CI as an error bar and the overall average as
+    a dashed reference; the finding's own level is drawn solid. Falls back
+    to that level vs everyone else when no sibling levels were reported."""
+    ev = finding.get("evidence") or {}
+    measure, dimension, level = ev.get("measure"), ev.get("dimension"), str(ev.get("level"))
+    baseline = _num(ev.get("baseline_value"))
+    if not measure or not dimension or baseline is None or _num(ev.get("level_value")) is None:
+        return None
+    siblings: list[dict[str, Any]] = []
+    for out in _tool_outputs(results, "segment_comparison"):
+        siblings = [
+            c for c in out.get("comparisons") or []
+            if isinstance(c, dict) and c.get("measure") == measure and c.get("dimension") == dimension
+            and _num(c.get("level_value")) is not None
+        ]
+        if len(siblings) >= 2:
+            break
+    else:
+        siblings = []
+
+    values: list[dict[str, Any]] = [
+        {
+            "segment": str(c.get("level")),
+            "value": _num(c.get("level_value")),
+            "ci_lower": _num(c.get("ci_lower")),
+            "ci_upper": _num(c.get("ci_upper")),
+            "n": _to_primitive(c.get("n")),
+            "focus": str(c.get("level")) == level,
+        }
+        for c in (siblings or [ev])
+    ]
+    values.sort(key=lambda r: r["value"], reverse=True)
+    if len(values) > MAX_CATEGORIES_SHOWN:
+        head = values[:MAX_CATEGORIES_SHOWN - 1]
+        values = head + [r for r in values[MAX_CATEGORIES_SHOWN - 1:] if r["focus"]]
+    if not siblings:
+        values.append({"segment": "Everyone else", "value": baseline, "ci_lower": None, "ci_upper": None,
+                       "n": _to_primitive(ev.get("n_rest")), "focus": False})
+
+    is_rate = bool(ev.get("is_rate"))
+    col = col_by_name.get(str(measure))
+    unit_hint = "percent" if is_rate else (ev.get("unit_hint") or (col.unit_hint if col else None))
+    fmt = axis_format(unit_hint)
+    value_title = f"{humanize_label(measure)} rate" if is_rate else humanize_axis_title(measure, unit_hint)
+    dim_title = humanize_label(dimension)
+
+    horizontal = len(values) >= 9
+    cat_ch, val_ch = ("y", "x") if horizontal else ("x", "y")
+    sort = {"field": "value", "order": "descending"}
+    cat_enc: dict[str, Any] = {"field": "segment", "type": "nominal", "sort": sort, "title": dim_title}
+    if not horizontal:
+        cat_enc["axis"] = {"labelAngle": 0}
+    val_enc: dict[str, Any] = {"field": "value", "type": "quantitative", "title": value_title}
+    _merge_axis_format(val_enc, fmt)
+    layers: list[dict[str, Any]] = [{"mark": {"type": "bar"}, "encoding": {
+        cat_ch: cat_enc,
+        val_ch: val_enc,
+        "opacity": {"condition": {"test": "datum.focus", "value": 1}, "value": 0.45},
+        "tooltip": [
+            {"field": "segment", "title": dim_title},
+            {"field": "value", "title": value_title, **fmt},
+            {"field": "ci_lower", "title": "95% CI from", **fmt},
+            {"field": "ci_upper", "title": "95% CI to", **fmt},
+            {"field": "n", "title": "Sample size"},
+        ],
+    }}]
+    has_ci = any(r["ci_lower"] is not None and r["ci_upper"] is not None for r in values)
+    if has_ci:
+        layers.append({"mark": {"type": "rule"}, "encoding": {
+            cat_ch: {"field": "segment", "type": "nominal", "sort": sort},
+            val_ch: {"field": "ci_lower", "type": "quantitative", "title": value_title},
+            f"{val_ch}2": {"field": "ci_upper"},
+        }})
+    overall = _num(ev.get("overall_mean")) if siblings else None
+    if overall is not None:
+        layers.append({
+            "data": {"values": [{"overall": overall}]},
+            "mark": {"type": "rule", "strokeDash": [4, 3]},
+            "encoding": {val_ch: {"field": "overall", "type": "quantitative", "title": value_title}},
+        })
+
+    noun = "rate" if is_rate else "average"
+    description = (
+        f"{humanize_label(measure)} {noun} for each {dim_title} level" if siblings
+        else f"{humanize_label(measure)} {noun} for {level} vs everyone else"
+    ) + "; the solid bar is the segment this finding is about."
+    if has_ci:
+        description += " Error bars: 95% confidence interval of each segment's own value."
+    if overall is not None:
+        description += f" Dashed line: overall {noun} ({_fmt_value(overall, unit_hint)})."
+    return ChartSpec(
+        chart_id=f"segment_{_slug(measure)}_{_slug(dimension)}",
+        title=f"{humanize_label(measure)} by {dim_title}",
+        description=description,
+        spec={
+            "data": {"values": values},
+            "height": max(160, 24 * len(values)) if horizontal else 260,
+            "layer": layers,
+        },
+    )
+
+
+def _lorenz_chart(df: pd.DataFrame, finding: dict[str, Any]) -> ChartSpec | None:
+    """Lorenz curve of a concentration finding: entities ranked smallest to
+    largest against their cumulative share of the measure, with the
+    equality diagonal. Recomputed from the data when its columns are
+    present, else drawn through the tool's own top-10/20/50% checkpoints."""
+    ev = finding.get("evidence") or {}
+    measure, entity = ev.get("measure_column"), ev.get("entity_column")
+    if not measure or not entity:
+        return None
+    points: list[tuple[float, float]] = []
+    if measure in df.columns and entity in df.columns:
+        # Same rows the tool summed: both an entity and a numeric measure.
+        pair = pd.DataFrame({"entity": df[entity], "value": pd.to_numeric(df[measure], errors="coerce")}).dropna()
+        per_entity = pair.groupby("entity")["value"].sum()
+        total = float(per_entity.sum())
+        if len(per_entity) >= 2 and total > 0 and bool((per_entity >= 0).all()):
+            cumulative = per_entity.sort_values().cumsum().to_numpy(dtype=float) / total
+            n = len(cumulative)
+            idx = np.unique(np.linspace(0, n - 1, min(n, LORENZ_MAX_POINTS)).astype(int))
+            points = [(0.0, 0.0)] + [((i + 1) / n, float(cumulative[i])) for i in idx]
+    if not points:
+        # The bottom (100 - p)% of entities hold 1 - (top p% share).
+        shares = [(p, _num(ev.get(f"top_{p}_pct_share"))) for p in (50, 20, 10)]
+        if any(s is None for _, s in shares):
+            return None
+        points = [(0.0, 0.0), *((1 - p / 100, 1 - (s or 0.0)) for p, s in shares), (1.0, 1.0)]
+
+    values = [{"entity_share": round(x * 100, 2), "measure_share": round(y * 100, 2)} for x, y in points]
+    entity_label, measure_label = humanize_label(entity).lower(), humanize_label(measure).lower()
+    domain = {"scale": {"domain": [0, 100]}}
+    gini = _num(ev.get("gini_coefficient"))
+    return ChartSpec(
+        chart_id=f"lorenz_{_slug(measure)}_{_slug(entity)}",
+        title=f"Concentration — {humanize_label(measure)} across {humanize_label(entity)}",
+        description=(
+            f"Lorenz curve: {entity_label} ranked from smallest to largest {measure_label}, against "
+            f"their cumulative share of the total. The dashed diagonal is a perfectly even split; the "
+            f"further the curve sags below it, the more the total rests on a few {entity_label}."
+            + (f" Gini = {gini:.2f}." if gini is not None else "")
+        ),
+        spec={
+            "height": 260,
+            "layer": [
+                {"data": {"values": values}, "mark": {"type": "area", "line": True}, "encoding": {
+                    "x": {"field": "entity_share", "type": "quantitative",
+                          "title": f"Cumulative % of {entity_label} (smallest first)", **domain},
+                    "y": {"field": "measure_share", "type": "quantitative",
+                          "title": f"Cumulative % of {measure_label}", **domain},
+                    "tooltip": [{"field": "entity_share", "title": f"% of {entity_label}"},
+                                {"field": "measure_share", "title": f"% of {measure_label}"}],
+                }},
+                {"data": {"values": [{"entity_share": 0, "measure_share": 0},
+                                     {"entity_share": 100, "measure_share": 100}]},
+                 "mark": {"type": "line", "strokeDash": [4, 3]},
+                 "encoding": {"x": {"field": "entity_share", "type": "quantitative"},
+                              "y": {"field": "measure_share", "type": "quantitative"}}},
+            ],
+        },
+    )
+
+
+def _change_waterfall_chart(
+    finding: dict[str, Any], col_by_name: dict[str, ColumnProfile],
+) -> ChartSpec | None:
+    """Waterfall from the previous period's total to the latest one, one
+    step per segment's contribution (change_analysis `segment_breakdown`)
+    plus an explicit "Other segments" remainder so the bars reconcile to the
+    headline change. An averaged measure's segment deltas don't add up, so
+    it shows the net change as a single step."""
+    ev = finding.get("evidence") or {}
+    prior, latest = _num(ev.get("prior_period_value")), _num(ev.get("latest_value"))
+    if prior is None or latest is None:
+        return None
+    measure = str(ev.get("measure_column") or finding.get("measure") or "value")
+    col = col_by_name.get(measure)
+    unit_hint = col.unit_hint if col else None
+    unit = _GRAIN_UNIT.get(str(ev.get("period_grain")), "period")
+    latest_label = str(ev.get("latest_period") or f"Latest {unit}")
+    additive = ev.get("aggregation") == "sum"
+    raw_breakdown = ev.get("segment_breakdown")
+    breakdown: list[Any] = raw_breakdown if additive and isinstance(raw_breakdown, list) else []
+
+    steps: list[tuple[str, float, bool]] = [(f"Previous {unit}", prior, True)]
+    for seg in breakdown[:WATERFALL_MAX_SEGMENTS]:
+        delta = _num(seg.get("delta")) if isinstance(seg, dict) else None
+        if delta is not None:
+            steps.append((str(seg.get("level")), delta, False))
+    rest = (latest - prior) - sum(value for _, value, is_total in steps if not is_total)
+    if len(steps) == 1 or abs(rest) > 1e-9 * max(abs(prior), abs(latest), 1.0):
+        steps.append(("Other segments" if len(steps) > 1 else "Change", rest, False))
+    steps.append((latest_label, latest, True))
+
+    rows: list[dict[str, Any]] = []
+    running = 0.0
+    for order, (label, value, is_total) in enumerate(steps):
+        start, end = (0.0, value) if is_total else (running, running + value)
+        running = end
+        rows.append({
+            "step": label, "order": order,
+            "start": round(start, 6), "end": round(end, 6), "top": round(max(start, end), 6),
+            "total": is_total,
+            "label": _fmt_value(value, unit_hint) if is_total else _signed(value, unit_hint),
+        })
+
+    agg_word = "total" if additive else "average"
+    fmt = axis_format(unit_hint)
+    x_enc: dict[str, Any] = {"field": "step", "type": "nominal", "sort": {"field": "order"}, "title": None}
+    if len(rows) <= 6:
+        x_enc["axis"] = {"labelAngle": 0}
+    y_enc: dict[str, Any] = {"field": "start", "type": "quantitative",
+                             "title": f"{agg_word.capitalize()} {humanize_axis_title(measure, unit_hint)}"}
+    _merge_axis_format(y_enc, fmt)
+    description = (
+        f"How {agg_word} {humanize_label(measure).lower()} moved from the previous {unit} to {latest_label}"
+        + (": each lighter bar is one segment's contribution." if len(steps) > 3 else ".")
+        + " Solid bars are the period totals."
+    )
+    if not additive and ev.get("segment_breakdown"):
+        description += " This measure is an average, so segment moves don't add up — only the net change is shown."
+    return ChartSpec(
+        chart_id=f"change_waterfall_{_slug(measure)}",
+        title=f"What Moved {humanize_label(measure)} — {latest_label} vs Previous {unit.capitalize()}",
+        description=description,
+        spec={
+            "data": {"values": rows},
+            "height": 260,
+            "layer": [
+                {"mark": {"type": "bar"}, "encoding": {
+                    "x": x_enc, "y": y_enc, "y2": {"field": "end"},
+                    "opacity": {"condition": {"test": "datum.total", "value": 1}, "value": 0.55},
+                    "tooltip": [{"field": "step", "title": "Step"}, {"field": "label", "title": "Amount"}],
+                }},
+                {"mark": {"type": "text", "dy": -7}, "encoding": {
+                    "x": x_enc, "y": {"field": "top", "type": "quantitative"}, "text": {"field": "label"},
+                }},
+            ],
+        },
+    )
+
+
+def _group_ci_chart(
+    df: pd.DataFrame, finding: dict[str, Any], col_by_name: dict[str, ColumnProfile],
+) -> ChartSpec | None:
+    """Mean ± 95% CI of a test finding's measure in every group of its
+    dimension, on the test's own unit of analysis (one value per entity when
+    it aggregated repeated rows), the leading post-hoc pair highlighted."""
+    from scipy import stats
+
+    ev = finding.get("evidence") or {}
+    measure, dimension = str(finding.get("measure")), str(finding.get("dimension"))
+    if (
+        measure not in df.columns or dimension not in df.columns
+        or not pd.api.types.is_numeric_dtype(df[measure])
+        # The test quartile-binned a float grouping; regrouping it here
+        # differently would show groups the test never compared.
+        or pd.api.types.is_float_dtype(df[dimension])
+    ):
+        return None
+    unit = ev.get("unit_of_analysis")
+    entity = unit if isinstance(unit, str) and unit != "row" and unit in df.columns else None
+    frame = df[[measure, dimension] + ([entity] if entity else [])].dropna()
+    col = col_by_name.get(measure)
+    if entity:
+        agg = measure_aggregation(col) if col is not None and col.semantic_role == "measure" else "mean"
+        frame = aggregate_to_entity(frame, entity, measure, agg, by=dimension)
+    grouped = frame.groupby(frame[dimension].astype(str))[measure].agg(["mean", "std", "count"])
+    grouped = grouped[grouped["count"] >= 2].nlargest(MAX_CATEGORIES_SHOWN, "count")
+    if len(grouped) < 2:
+        return None
+    half = stats.t.ppf(0.975, grouped["count"] - 1) * grouped["std"].fillna(0.0) / np.sqrt(grouped["count"])
+
+    post_hoc = ev.get("post_hoc")
+    pair = post_hoc[0] if isinstance(post_hoc, list) and post_hoc and isinstance(post_hoc[0], dict) else None
+    focus = {str(pair.get("group_a")), str(pair.get("group_b"))} if pair else set()
+    values = [
+        {
+            "group": str(g),
+            "mean": round(float(row["mean"]), 6),
+            "ci_lower": round(float(row["mean"] - h), 6),
+            "ci_upper": round(float(row["mean"] + h), 6),
+            "n": int(row["count"]),
+            "focus": not focus or str(g) in focus,
+        }
+        for (g, row), h in zip(grouped.iterrows(), half, strict=True)
+    ]
+    unit_hint = col.unit_hint if col else None
+    fmt = axis_format(unit_hint)
+    value_title = f"Average {humanize_axis_title(measure, unit_hint)}"
+    dim_title = humanize_label(dimension)
+    horizontal = len(values) >= 9
+    cat_ch, val_ch = ("y", "x") if horizontal else ("x", "y")
+    cat_enc: dict[str, Any] = {"field": "group", "type": "nominal",
+                               "sort": {"field": "mean", "order": "descending"}, "title": dim_title}
+    if not horizontal:
+        cat_enc["axis"] = {"labelAngle": 0}
+    val_enc: dict[str, Any] = {"field": "ci_lower", "type": "quantitative", "title": value_title,
+                               "scale": {"zero": False}}
+    _merge_axis_format(val_enc, fmt)
+    opacity = {"condition": {"test": "datum.focus", "value": 1}, "value": 0.4}
+
+    description = (
+        f"Average {humanize_label(measure).lower()} in each {dim_title} group; whiskers are the "
+        "95% confidence interval of each group's mean."
+    )
+    if pair:
+        p_adj = _num(pair.get("p_adjusted"))
+        description += (
+            f" Largest follow-up gap: {pair.get('group_a')} vs {pair.get('group_b')}"
+            + (f" (adjusted p={p_adj:.3g})" if p_adj is not None else "") + ", highlighted."
+        )
+    return ChartSpec(
+        chart_id=f"groups_{_slug(measure)}_{_slug(dimension)}",
+        title=f"{humanize_label(measure)} across {dim_title}",
+        description=description,
+        spec={
+            "data": {"values": values},
+            "height": max(160, 24 * len(values)) if horizontal else 240,
+            "layer": [
+                {"mark": {"type": "rule"}, "encoding": {
+                    cat_ch: cat_enc, val_ch: val_enc, f"{val_ch}2": {"field": "ci_upper"}, "opacity": opacity,
+                }},
+                {"mark": {"type": "circle", "size": 90, "opacity": 1}, "encoding": {
+                    cat_ch: cat_enc,
+                    val_ch: {"field": "mean", "type": "quantitative", "title": value_title},
+                    "opacity": opacity,
+                    "tooltip": [
+                        {"field": "group", "title": dim_title},
+                        {"field": "mean", "title": value_title, **fmt},
+                        {"field": "ci_lower", "title": "95% CI from", **fmt},
+                        {"field": "ci_upper", "title": "95% CI to", **fmt},
+                        {"field": "n", "title": "Sample size"},
+                    ],
+                }},
+            ],
+        },
+    )
+
+
+def _finding_charts(
+    df: pd.DataFrame,
+    results: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    col_by_name: dict[str, ColumnProfile],
+    claimed: set[str],
+    skip_pairs: set[tuple[str, str]],
+) -> list[ChartSpec]:
+    """One panel per top-ranked finding whose kind has a chart form and no
+    panel yet: `claimed` holds finding ids already charted (an LLM spec);
+    `skip_pairs` holds (measure, dimension) pairs another panel already
+    shows. Findings are visited in the caller's importance order."""
+    charts: list[ChartSpec] = []
+    per_kind: dict[str, int] = {}
+    considered = [f for f in findings if f.get("kind") not in _CAVEAT_FINDING_KINDS][:MAX_FINDING_PANELS]
+    for finding in considered:
+        kind = str(finding.get("kind"))
+        if finding.get("finding_id") in claimed or per_kind.get(kind, 0) >= MAX_PANELS_PER_KIND:
+            continue
+        chart: ChartSpec | None = None
+        source = finding.get("source_tool")
+        if source == "segment_comparison" and kind == "segment_lift":
+            chart = _safe(_segment_lift_chart, finding, results, col_by_name)
+        elif source == "concentration_analysis" and kind == "concentration":
+            chart = _safe(_lorenz_chart, df, finding)
+        elif source == "change_analysis" and kind == "change":
+            chart = _safe(_change_waterfall_chart, finding, col_by_name)
+        elif (
+            source == "select_statistical_test" and kind == "test"
+            and (finding.get("measure"), finding.get("dimension")) not in skip_pairs
+        ):
+            chart = _safe(_group_ci_chart, df, finding, col_by_name)
+        if chart is None or any(c.chart_id == chart.chart_id for c in charts):
+            continue
+        per_kind[kind] = per_kind.get(kind, 0) + 1
+        charts.append(_tag(chart, finding))
+    return charts
+
+
+# ---------------------------------------------------------------------------
 # 7.8 — story layer: tag existing panels with the top-ranked finding that
 # explains them, so the dashboard's most important chart is visually first
 # rather than always being whatever built first in code order.
@@ -1507,19 +2100,21 @@ def _llm_charts(results: list[dict[str, Any]], findings: list[dict[str, Any]]) -
     for r in ok:
         runs[str(r.get("tool_name"))] = runs.get(str(r.get("tool_name")), 0) + 1
     for i, r in enumerate(ok):
-        raw = r["output"].get("chart")
-        if raw is None:
-            continue
+        # A single declared "chart", or a "charts" list (generate_visualizations).
+        raw_charts = r["output"].get("charts")
+        declared = [r["output"].get("chart"), *(raw_charts if isinstance(raw_charts, list) else [])]
         tool = str(r.get("tool_name"))
-        finding: dict[str, Any] | None = None
-        if runs[tool] == 1:
-            finding = next(
-                (f for f in findings
-                 if f.get("source_tool") == tool and f.get("finding_id") not in linked
-                 and f.get("kind") not in _CAVEAT_FINDING_KINDS),
-                None,
-            )
-        add(raw, f"llm_{finding['finding_id'] if finding else f'{tool}_{i}'}", finding)
+        for j, raw in enumerate(c for c in declared if c is not None):
+            finding: dict[str, Any] | None = None
+            if runs[tool] == 1:
+                finding = next(
+                    (f for f in findings
+                     if f.get("source_tool") == tool and f.get("finding_id") not in linked
+                     and f.get("kind") not in _CAVEAT_FINDING_KINDS),
+                    None,
+                )
+            suffix = "" if j == 0 else f"_{j}"
+            add(raw, f"llm_{finding['finding_id'] if finding else f'{tool}_{i}'}{suffix}", finding)
     return charts
 
 
@@ -1571,11 +2166,14 @@ def build_dashboard(
     cohort_out = _find_tool_output(results, "cohort_analysis")
     financial_out = _find_tool_output(results, "financial_analysis")
     workforce_out = _find_tool_output(results, "workforce_analysis")
-    model_out = _find_tool_output(results, "evaluate_model") or train_out
+    eval_out = _find_tool_output(results, "evaluate_model")
+    model_out = eval_out or train_out
 
     candidates: list[ChartSpec | None] = [
         _safe(_drivers_chart, model_out),
         _safe(_model_comparison_chart, train_out),
+        _safe(_confusion_matrix_chart, eval_out),
+        _safe(_roc_chart, eval_out),
         _safe(_cluster_chart, cluster_out),
         _safe(_correlation_chart, corr_out),
         _safe(_time_series_chart, df, profile, ranked, col_by_name, target_column, ts_out),
@@ -1603,11 +2201,23 @@ def build_dashboard(
         # Nothing else to show beats a uniform-count bar chart with no story.
         eda.append(trivial_cat_charts[0])
 
+    # Finding-kind panels (segment lift, concentration, change, group test)
+    # for findings no LLM chart already covers; a group test on the pair the
+    # class box plot already shows is left to that box plot.
+    box_pairs = {(c.chart_id.removeprefix("box_"), str(target_column)) for c in eda if c.chart_id.startswith("box_")}
+    claimed = {c.finding_id for c in charts if c.finding_id}
+    charts.extend(_safe(_finding_charts, df, results, findings, col_by_name, claimed, box_pairs, default=[]))
+
     # Same data twice: the cohort revenue line duplicates the time-series
     # panel of the same measure; the department count bar duplicates the
-    # workforce headcount panel.
+    # workforce headcount panel; the cohort spend Pareto duplicates a Lorenz
+    # curve of the same measure over the same customers.
     ids = {c.chart_id for c in charts}
     drop: set[str] = set()
+    if cohort_out and (
+        f"lorenz_{_slug(cohort_out.get('amount_column'))}_{_slug(cohort_out.get('customer_column'))}" in ids
+    ):
+        drop.add("cohort_pareto")
     ts_chart = next((c for c in charts if c.chart_id == "time_series"), None)
     if (
         ts_chart is not None and cohort_out

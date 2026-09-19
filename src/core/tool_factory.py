@@ -16,7 +16,9 @@ Round 8 item 8.2. This module is pure plumbing around three concerns:
 """
 from __future__ import annotations
 
+import ast
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -237,6 +239,22 @@ def _persist_spec_to_disk(spec: GeneratedToolSpec, output_root: str) -> None:
     spec_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _load_valid_spec(spec_path: Path) -> tuple[dict[str, Any], GeneratedToolSpec] | None:
+    """(payload, spec) for a spec file that parses and still passes the
+    sandbox static check, else None. A spec file on disk is editable by
+    anyone with filesystem access and may predate the current sandbox
+    policy — validation gates every entry into the registry, not just the
+    moment the code was authored."""
+    try:
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec = GeneratedToolSpec.from_dict(payload)
+    except (json.JSONDecodeError, OSError, KeyError, TypeError, AttributeError):
+        return None
+    if not isinstance(spec.code, str) or _static_check(spec.code) is not None:
+        return None
+    return payload, spec
+
+
 def load_persisted_tools(output_root: str, dataset_fingerprint: str) -> list[GeneratedToolSpec]:
     """
     Opt-in reload for a matching dataset fingerprint only — never auto-runs
@@ -250,23 +268,116 @@ def load_persisted_tools(output_root: str, dataset_fingerprint: str) -> list[Gen
 
     specs: list[GeneratedToolSpec] = []
     for spec_path in sorted(generated_dir.glob("*.json")):
-        try:
-            payload = json.loads(spec_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if payload.get("dataset_fingerprint") != dataset_fingerprint:
-            continue
-        try:
-            spec = GeneratedToolSpec.from_dict(payload)
-        except KeyError:
-            continue
-        # A spec file on disk is editable by anyone with filesystem access and
-        # may predate the current sandbox policy — validation gates every
-        # entry into the registry, not just the moment the code was authored.
-        if not isinstance(spec.code, str) or _static_check(spec.code) is not None:
-            continue
-        specs.append(spec)
+        loaded = _load_valid_spec(spec_path)
+        if loaded is not None and loaded[0].get("dataset_fingerprint") == dataset_fingerprint:
+            specs.append(loaded[1])
     return specs
+
+
+# ---------------------------------------------------------------------------
+# Cross-run library (Phase 2) — generated tools reused on any dataset whose
+# column schema fits, not only on the exact file they were written for.
+# ---------------------------------------------------------------------------
+
+#: Library uses (runs that registered the tool) after which it is flagged
+#: for human review and promotion to a built-in.
+PROMOTION_USE_COUNT = 3
+
+
+def tool_library_enabled() -> bool:
+    return os.getenv("ENABLE_TOOL_LIBRARY", "false").strip().lower() in ("1", "true", "yes")
+
+
+def tool_library_dir() -> str:
+    return os.getenv("GENERATED_TOOL_LIBRARY", "output/tool_library")
+
+
+def required_columns(code: str) -> list[str]:
+    """String literals the code uses as `df[...]` keys — `df['a']` and
+    `df[['a', 'b']]` — i.e. the columns the tool cannot run without."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id == "df"):
+            continue
+        keys = node.slice.elts if isinstance(node.slice, (ast.List, ast.Tuple)) else [node.slice]
+        for key in keys:
+            if isinstance(key, ast.Constant) and isinstance(key.value, str) and key.value not in found:
+                found.append(key.value)
+    return found
+
+
+def _library_path(library_dir: str | Path, name: str, version: int) -> Path:
+    return Path(library_dir) / f"{name}__v{version}.json"
+
+
+def save_to_library(
+    spec: GeneratedToolSpec, library_dir: str | Path, column_kinds: dict[str, str]
+) -> Path | None:
+    """Persist `spec` keyed by name+version with its column signature
+    ({required column: kind}). A re-save keeps the existing use_count."""
+    path = _library_path(library_dir, spec.name, spec.version)
+    use_count = 0
+    if path.exists():
+        try:
+            use_count = int(json.loads(path.read_text(encoding="utf-8")).get("use_count", 0))
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            use_count = 0
+    payload = spec.to_dict()
+    payload["required_columns"] = {c: column_kinds.get(c, "") for c in required_columns(spec.code)}
+    payload["use_count"] = use_count
+    payload["promotion_candidate"] = use_count >= PROMOTION_USE_COUNT
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
+def load_compatible_tools(
+    library_dir: str | Path, column_kinds: dict[str, str]
+) -> list[GeneratedToolSpec]:
+    """Library specs whose required columns all exist in `column_kinds` with
+    the same kind (a blank recorded kind only needs the column to exist).
+    Highest compatible version per name; every spec is re-validated."""
+    root = Path(library_dir)
+    if not root.is_dir():
+        return []
+    best: dict[str, GeneratedToolSpec] = {}
+    for spec_path in sorted(root.glob("*.json")):
+        loaded = _load_valid_spec(spec_path)
+        if loaded is None:
+            continue
+        payload, spec = loaded
+        required = payload.get("required_columns")
+        if not isinstance(required, dict):
+            continue
+        if not all(
+            col in column_kinds and (not kind or column_kinds[col] == kind)
+            for col, kind in required.items()
+        ):
+            continue
+        if spec.name not in best or spec.version > best[spec.name].version:
+            spec.source = "library"
+            best[spec.name] = spec
+    return list(best.values())
+
+
+def record_library_use(library_dir: str | Path, spec: GeneratedToolSpec) -> None:
+    """Count one use (the controller calls this once per run that registers
+    the tool) and flag it as a promotion candidate at PROMOTION_USE_COUNT."""
+    path = _library_path(library_dir, spec.name, spec.version)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["use_count"] = int(payload.get("use_count", 0)) + 1
+        payload["promotion_candidate"] = payload["use_count"] >= PROMOTION_USE_COUNT
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except (json.JSONDecodeError, OSError, ValueError, TypeError):
+        pass
 
 
 def next_version(existing_generated: dict[str, GeneratedToolSpec], name: str) -> int:

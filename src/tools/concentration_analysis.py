@@ -24,9 +24,9 @@ import pandas as pd
 
 from src.core.findings import Finding
 from src.core.profiler import _ENTITY_REPEAT_THRESHOLD, profile_dataframe
+from src.core.stats_utils import measure_aggregation
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
-from src.tools.time_series import measure_aggregation
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata

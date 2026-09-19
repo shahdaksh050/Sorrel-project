@@ -141,10 +141,15 @@ def _resolve_status(series: pd.Series) -> pd.Series | None:
     Polarity comes from the column name: on a departure-named column
     (Attrition, Left, Churn, ...) yes/true/1 means departed; on a
     status/active-named column yes/true/1 means still employed.
+
+    Returned as a nullable ``boolean`` series: a row whose status is missing
+    stays ``<NA>`` (unknown) rather than being read as active, so it drops
+    out of every attrition numerator and denominator.
     """
     departure = _is_departure_named(series.name)
+    missing = series.isna()
     if pd.api.types.is_bool_dtype(series):
-        flags = series.astype(bool)
+        flags = series.astype("boolean")
         return flags if departure else ~flags
     tokens = series.dropna().astype(str).str.strip().str.lower()
     if tokens.empty:
@@ -154,8 +159,8 @@ def _resolve_status(series: pd.Series) -> pd.Series | None:
         normalised = series.astype(str).str.strip().str.lower()
         if departure:
             inactive = (_INACTIVE_TOKENS - {"no", "false", "0"}) | _AFFIRMATIVE_TOKENS
-            return normalised.isin(inactive)
-        return normalised.isin(_INACTIVE_TOKENS)
+            return normalised.isin(inactive).astype("boolean").mask(missing)
+        return normalised.isin(_INACTIVE_TOKENS).astype("boolean").mask(missing)
     return None
 
 
@@ -249,12 +254,20 @@ class WorkforceAnalysisTool(BaseTool):
             result["exit_date_column"] = exit_date_column
 
         if departed is not None:
+            # Rows with a missing status are unknown, not active: they are
+            # excluded from both the leaver count and the denominator.
+            status_known = int(departed.notna().sum())
+            if status_known == 0:
+                departed = None
+        if departed is not None:
             leavers = int(departed.sum())
             result["departed_count"] = leavers
-            result["active_count"] = headcount - leavers
-            result["attrition_rate_pct"] = round(leavers / headcount * 100, 2)
+            result["active_count"] = status_known - leavers
+            result["status_known_count"] = status_known
+            result["attrition_rate_pct"] = round(leavers / status_known * 100, 2)
             result["attrition_basis"] = (
-                "Share of all records marked as departed — a cumulative rate over "
+                "Share of records with a known status that are marked as departed "
+                f"({status_known:,} of {headcount:,} records) — a cumulative rate over "
                 "the whole file, not an annualised turnover rate."
             )
 
@@ -272,7 +285,12 @@ class WorkforceAnalysisTool(BaseTool):
                     [d for d in (hired.max(), end.max()) if pd.notna(d)],
                     default=pd.Timestamp.now(),
                 )
-                end = end.fillna(reference)
+                # A known leaver with a missing exit date has an unknown end,
+                # not one at the reference date — leave it NaT (excluded).
+                unknown_end = pd.Series(False, index=work.index)
+                if departed is not None and exit_date_column and exit_date_column in work.columns:
+                    unknown_end = end.isna() & departed.fillna(False).astype(bool)
+                end = end.fillna(reference).mask(unknown_end)
                 tenure_years = (end - hired).dt.total_seconds() / (365.25 * 86400)
                 tenure_years = tenure_years[tenure_years.notna() & (tenure_years >= 0)]
                 if not tenure_years.empty:
@@ -298,6 +316,9 @@ class WorkforceAnalysisTool(BaseTool):
             result["department_column"] = department_column
             by_dept = work.groupby(department_column)[salary_column]
             rows: list[dict[str, Any]] = []
+            # Per-department count of rows with a known status — the
+            # attrition denominator, used for the comparison-size floor.
+            status_known_by_dept: dict[str, int] = {}
             for name, group in by_dept:
                 entry: dict[str, Any] = {
                     "department": str(name),
@@ -308,14 +329,21 @@ class WorkforceAnalysisTool(BaseTool):
                     entry["median_pay"] = round(float(group.median()), 2)
                 if departed is not None:
                     mask = work[department_column] == name
-                    entry["attrition_rate_pct"] = round(
-                        float(departed[mask].mean()) * 100, 2
-                    )
+                    dept_status = departed[mask].dropna()
+                    status_known_by_dept[str(name)] = int(dept_status.size)
+                    if not dept_status.empty:
+                        entry["attrition_rate_pct"] = round(
+                            float(dept_status.astype(float).mean()) * 100, 2
+                        )
                 rows.append(entry)
             rows.sort(key=lambda r: r["headcount"], reverse=True)
             result["by_department"] = rows[:_TOP_N]
             if departed is not None:
-                eligible = [r for r in rows if r["headcount"] >= _MIN_GROUP_FOR_COMPARISON]
+                eligible = [
+                    r for r in rows
+                    if "attrition_rate_pct" in r
+                    and status_known_by_dept.get(r["department"], 0) >= _MIN_GROUP_FOR_COMPARISON
+                ]
                 if eligible:
                     worst = max(eligible, key=lambda r: r["attrition_rate_pct"])
                     result["highest_attrition_department"] = {

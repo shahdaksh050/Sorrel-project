@@ -16,9 +16,12 @@ auditable rather than buried, and a calendar-aware seasonality read
 (month-of-year, and day-of-week when the grain is fine enough) supplements
 the lag-autocorrelation check, which only ever sees the row-order structure.
 
-Kept to statistics that generalise across irregular/coarse-grained data
-rather than a full seasonal decomposition, which needs a reliable
-inferred frequency that real-world timestamps rarely provide cleanly.
+The resampled series is calendar-aligned: a period with no rows stays in
+the series as missing (NaN), never silently dropped or zero-filled, so
+lags mean "N calendar periods". Trend significance is Mann-Kendall with
+Sen's slope (the linear fit is kept for reference), and a seasonal
+decomposition (STL) runs only once two full cycles are available.
+Entity x time panels also get a per-entity trend read.
 """
 from __future__ import annotations
 
@@ -29,13 +32,20 @@ import pandas as pd
 from scipy import stats
 
 from src.core.findings import Finding
+from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.profiler import profile_dataframe
+from src.core.stats_utils import (
+    is_partial_final_period,
+    mann_kendall,
+    measure_aggregation,
+    repeated_entity,
+)
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
-    from src.core.profiler import ColumnProfile, DatasetProfile
+    from src.core.profiler import DatasetProfile
 
 #: Candidate seasonal lags checked via autocorrelation (weekly/monthly/yearly-ish).
 #: Lag sets are grain-relative (a lag is "N periods", not "N days") — a lag
@@ -54,10 +64,28 @@ _SEASONALITY_THRESHOLD = 0.3
 #: Two-sided ADF p-value at/below this rejects the unit-root (non-stationary) null.
 _ADF_ALPHA = 0.05
 
-#: R² a fitted trend line must reach before its direction is worth naming.
-#: Below this the line explains almost none of the variation, so calling the
-#: series "increasing" reports the sign of noise as a finding.
-_TREND_MIN_R_SQUARED = 0.05
+#: Mann-Kendall p-value below which a monotonic trend is reported. R² alone
+#: is not a significance test — a short noisy series can clear any R² bar.
+_TREND_ALPHA = 0.05
+
+#: Above this share of missing calendar periods, gaps are too large to
+#: interpolate: autocorrelation and decomposition are skipped, and trend
+#: tests run on the observed periods only.
+_MAX_MISSING_SHARE = 0.2
+
+#: Seasonal cycle length (in periods) decomposed at each grain.
+_SEASONAL_PERIOD = {"daily": 7, "weekly": 52, "monthly": 12}
+
+#: Month-of-year tests are BH-corrected at this level before any month
+#: becomes a finding.
+_MONTH_ALPHA = 0.05
+
+#: Entity x time panels: per-entity trends for the entities with the most
+#: rows; a direction held by more than half of them is a majority trend,
+#: and at least this share moving each way is divergence.
+_PANEL_MAX_ENTITIES = 20
+_PANEL_DIVERGENCE_SHARE = 0.25
+_PANEL_TOP_MOVERS = 3
 
 # ---------------------------------------------------------------------------
 # 7.7 — grain selection. Chosen from the observed date span: a multi-year
@@ -72,6 +100,7 @@ _MIN_PERIODS_FOR_GRAIN = 6
 
 _GRAIN_FREQ = {"daily": "D", "weekly": "W", "monthly": "MS"}
 _GRAIN_LABEL = {"daily": "Daily", "weekly": "Weekly", "monthly": "Monthly"}
+_PERIOD_UNIT = {"daily": "day", "weekly": "week", "monthly": "month"}
 
 #: A calendar month running at/above this fraction away from the yearly
 #: average is reported as a seasonal Finding (T5 triviality suppression
@@ -104,47 +133,6 @@ _MONTH_NAMES = {
     1: "January", 2: "February", 3: "March", 4: "April", 5: "May", 6: "June",
     7: "July", 8: "August", 9: "September", 10: "October", 11: "November", 12: "December",
 }
-
-
-#: A trailing period is "partial" when the data covers less than this share
-#: of its calendar span AND it holds fewer rows than this share of a typical
-#: period — the row-count half keeps one-row-per-month data (dated on the 1st)
-#: from being mistaken for an incomplete month.
-_PARTIAL_PERIOD_COVERAGE = 0.9
-
-
-def measure_aggregation(col: ColumnProfile | None) -> str:
-    """How a measure combines across rows within a period: "sum" when it is
-    additive (revenue, counts), "mean" when it is not (temperature, a rate,
-    a score). Reads the profile's `aggregation` when present and falls back
-    to the unit hint (percent -> mean) otherwise."""
-    agg = getattr(col, "aggregation", None)
-    if agg in ("sum", "mean"):
-        return str(agg)
-    return "mean" if col is not None and col.unit_hint == "percent" else "sum"
-
-
-def is_partial_final_period(counts: pd.Series, last_timestamp: pd.Timestamp, freq: str) -> bool:
-    """True when the final bucket of a left-labelled resample (`counts` =
-    rows per bucket) covers materially less time and fewer rows than a full
-    period — the usual shape of an extract that stops mid-month, which
-    otherwise reads as a sudden drop in the last period."""
-    if len(counts) < 2:
-        return False
-    start = counts.index[-1]
-    end = pd.date_range(start=start, periods=2, freq=freq)[-1]
-    # Date-only timestamps (midnight) stand for the whole day they name.
-    observed_end = (
-        last_timestamp + pd.Timedelta(days=1)
-        if last_timestamp == last_timestamp.normalize()
-        else last_timestamp
-    )
-    coverage = (observed_end - start) / (end - start) if end > start else 1.0
-    typical_rows = float(counts.iloc[:-1].median())
-    return bool(
-        coverage < _PARTIAL_PERIOD_COVERAGE
-        and counts.iloc[-1] < _PARTIAL_PERIOD_COVERAGE * typical_rows
-    )
 
 
 def _autodetect_datetime_column(df: pd.DataFrame) -> str | None:
@@ -221,16 +209,16 @@ def _choose_grain_candidates(dates: pd.Series) -> list[str]:
 
 
 def _resample(working: pd.DataFrame, grain: str, aggregation: str) -> pd.DataFrame:
-    """One row per observed calendar period: sum (additive measures) or mean
-    (rates). Periods with no underlying rows are dropped rather than
-    fabricated as zero — the tool aggregates observed data, it doesn't
-    assume unobserved periods were genuinely zero."""
+    """One row per calendar period from the first observed period to the
+    last: sum (additive measures) or mean (rates). A period with no rows is
+    kept as NaN — missing, not zero. Only an event log (one row per event)
+    makes an empty period a genuine zero, and nothing here can confirm the
+    data is one, so absence is not fabricated into a value."""
     indexed = working.set_index("_date")["_value"]
     # Left-labelled so every period is named by its start (weeks included),
     # which is what is_partial_final_period measures coverage from.
     resampled = indexed.resample(_GRAIN_FREQ[grain], label="left", closed="left")
     agg = resampled.sum(min_count=1) if aggregation == "sum" else resampled.mean()
-    agg = agg.dropna()
     return pd.DataFrame({"_period": agg.index, "_value": agg.to_numpy(dtype=float)})
 
 
@@ -238,13 +226,129 @@ def _resample_series(
     working: pd.DataFrame, aggregation: str, candidates: list[str]
 ) -> tuple[pd.DataFrame | None, str]:
     """Try grains coarsest-first; step down to the next finer grain if the
-    resampled series is too thin to diagnose. Always falls back to the
-    finest candidate's result if none clear the minimum-periods bar."""
+    resampled series has too few observed periods to diagnose. Always falls
+    back to the finest candidate's result if none clear the bar."""
     for candidate in candidates:
         resampled = _resample(working, candidate, aggregation)
-        if len(resampled) >= _MIN_PERIODS_FOR_GRAIN or candidate == candidates[-1]:
+        observed = int(resampled["_value"].notna().sum())
+        if observed >= _MIN_PERIODS_FOR_GRAIN or candidate == candidates[-1]:
             return resampled, candidate
     return None, candidates[-1]
+
+
+def _fill_small_gaps(aligned: pd.Series) -> tuple[pd.Series, bool]:
+    """(series, gap_free): a calendar-aligned series with its missing
+    periods linearly interpolated when they are at most _MAX_MISSING_SHARE
+    of it — lags and Sen's slope then count calendar periods. Larger gaps
+    are left as NaN (gap_free=False) rather than invented."""
+    if not aligned.isna().any():
+        return aligned, True
+    if float(aligned.isna().mean()) > _MAX_MISSING_SHARE:
+        return aligned, False
+    return aligned.interpolate(limit_direction="both"), True
+
+
+def _seasonal_decomposition(filled: pd.Series, grain: str) -> dict[str, Any] | None:
+    """Seasonal strength (1 - var(resid) / var(seasonal + resid), 0..1) and
+    the peak/trough season from an STL decomposition, falling back to a
+    classical seasonal_decompose. None when fewer than two full cycles are
+    available or statsmodels cannot decompose the series."""
+    period = _SEASONAL_PERIOD[grain]
+    if len(filled) < 2 * period:
+        return None
+    try:
+        from statsmodels.tsa.seasonal import STL
+
+        result: Any = STL(filled, period=period, robust=True).fit()
+        method = "STL"
+    except Exception:
+        try:
+            from statsmodels.tsa.seasonal import seasonal_decompose
+
+            result = seasonal_decompose(
+                filled, model="additive", period=period, extrapolate_trend="freq"
+            )
+            method = "seasonal_decompose"
+        except Exception:
+            return None
+    seasonal = pd.Series(np.asarray(result.seasonal, dtype=float), index=filled.index)
+    resid = np.asarray(result.resid, dtype=float)
+    mask = ~(np.isnan(seasonal.to_numpy()) | np.isnan(resid))
+    denom = float(np.var(seasonal.to_numpy()[mask] + resid[mask]))
+    strength = max(0.0, 1.0 - float(np.var(resid[mask])) / denom) if denom > 0 else 0.0
+    index = pd.DatetimeIndex(filled.index)
+    if grain == "monthly":
+        labels = pd.Index([_MONTH_NAMES[m] for m in index.month])
+    elif grain == "weekly":
+        labels = pd.Index([f"week {w}" for w in index.isocalendar().week])
+    else:
+        labels = pd.Index(index.day_name())
+    by_season = seasonal.groupby(labels.to_numpy()).mean()
+    return {
+        "method": method,
+        "period": period,
+        "strength": round(strength, 4),
+        "peak_season": str(by_season.idxmax()),
+        "trough_season": str(by_season.idxmin()),
+    }
+
+
+def _panel_trends(
+    df: pd.DataFrame,
+    date_column: str,
+    value_column: str,
+    entity: str,
+    grain: str,
+    aggregation: str,
+    periods: pd.DatetimeIndex,
+) -> dict[str, Any] | None:
+    """Mann-Kendall per entity for the _PANEL_MAX_ENTITIES entities with the
+    most rows, each resampled on the aggregate's grain and calendar range so
+    their trends are comparable. Shares are of entities with a computable
+    test (>= 4 observed periods)."""
+    frame = pd.DataFrame({
+        "_entity": df[entity],
+        "_date": pd.to_datetime(df[date_column], errors="coerce", format="mixed"),
+        "_value": pd.to_numeric(df[value_column], errors="coerce"),
+    }).dropna()
+    top = frame["_entity"].value_counts().head(_PANEL_MAX_ENTITIES).index
+    rows: list[dict[str, Any]] = []
+    for level, sub in frame[frame["_entity"].isin(top)].groupby("_entity", observed=True):
+        aligned = (
+            _resample(sub, grain, aggregation).set_index("_period")["_value"].reindex(periods)
+        )
+        filled, gap_free = _fill_small_gaps(aligned)
+        mk = mann_kendall(filled if gap_free else aligned.dropna())
+        if mk["p_value"] is None:
+            continue
+        rows.append({
+            "entity": str(level),
+            "periods_observed": int(aligned.notna().sum()),
+            "mk_tau": mk["tau"],
+            "mk_p_value": round(mk["p_value"], 6),
+            "sen_slope": round(mk["sen_slope"], 6),
+            "trend": mk["trend"],
+        })
+    if not rows:
+        return None
+    n = len(rows)
+    up = [r for r in rows if r["trend"] == "increasing"]
+    down = [r for r in rows if r["trend"] == "decreasing"]
+    return {
+        "entity_column": entity,
+        "entities_analysed": n,
+        "entities_increasing": len(up),
+        "entities_decreasing": len(down),
+        "share_increasing": round(len(up) / n, 4),
+        "share_decreasing": round(len(down) / n, 4),
+        "strongest_risers": [
+            r["entity"] for r in sorted(up, key=lambda r: -r["mk_tau"])[:_PANEL_TOP_MOVERS]
+        ],
+        "strongest_fallers": [
+            r["entity"] for r in sorted(down, key=lambda r: r["mk_tau"])[:_PANEL_TOP_MOVERS]
+        ],
+        "entity_trends": rows,
+    }
 
 
 def _month_of_year_factors(
@@ -300,7 +404,7 @@ def _day_of_week_factors(working: pd.DataFrame, aggregation: str) -> dict[str, f
     """Weekday effect from a *daily* aggregation of the raw rows, independent
     of the macro grain — weekday patterns only exist at day resolution, so a
     weekly-grain analysis still checks them against the underlying days."""
-    daily = _resample(working, "daily", aggregation)
+    daily = _resample(working, "daily", aggregation).dropna()
     if len(daily) < 7:
         return {}
     s = pd.Series(daily["_value"].to_numpy(dtype=float), index=pd.DatetimeIndex(daily["_period"]))
@@ -346,7 +450,7 @@ class TimeSeriesAnalysisTool(BaseTool):
             )
 
         requested_value_column = value_column or target_column
-        value_column, inferred_aggregation, _profile = _choose_value_column_and_aggregation(
+        value_column, inferred_aggregation, profile = _choose_value_column_and_aggregation(
             df, date_column, requested_value_column
         )
         if value_column is None or value_column not in df.columns:
@@ -370,8 +474,8 @@ class TimeSeriesAnalysisTool(BaseTool):
         # ---- Resample to a natural grain before diagnosing anything (7.7) ----
         grain_candidates = _choose_grain_candidates(working["_date"])
         resampled, grain = _resample_series(working, aggregation, grain_candidates)
-        if resampled is None or len(resampled) < 3:
-            n = 0 if resampled is None else len(resampled)
+        if resampled is None or int(resampled["_value"].notna().sum()) < 3:
+            n = 0 if resampled is None else int(resampled["_value"].notna().sum())
             raise ToolExecutionError(
                 f"Only {n} usable periods after resampling to {grain} — need at least 3 "
                 f"for time-series diagnostics."
@@ -392,31 +496,42 @@ class TimeSeriesAnalysisTool(BaseTool):
             dropped_partial_period = str(pd.Timestamp(resampled["_period"].iloc[-1]).date())
             resampled = resampled.iloc[:-1]
 
-        values = resampled["_value"].to_numpy(dtype=float)
-        period_dates = pd.to_datetime(resampled["_period"])
-        t = np.arange(len(values), dtype=float)
+        # ---- Calendar gaps: missing periods stay in the series as NaN ----
+        aligned = pd.Series(
+            resampled["_value"].to_numpy(dtype=float),
+            index=pd.DatetimeIndex(resampled["_period"]),
+        )
+        observed_mask = aligned.notna().to_numpy()
+        missing_periods = [str(ts.date()) for ts in aligned.index[~observed_mask]]
+        filled, gap_free = _fill_small_gaps(aligned)
+        # What trend/stationarity tests see: the gap-filled calendar series
+        # when gaps are small, otherwise the observed periods only.
+        test_values = (filled if gap_free else aligned.dropna()).to_numpy(dtype=float)
+        values = aligned.dropna().to_numpy(dtype=float)
+        period_dates = pd.Series(aligned.index[observed_mask])
+        t = np.arange(len(aligned), dtype=float)[observed_mask]
 
-        # ---- Trend: linear fit over the resampled series (one point per period) ----
+        # ---- Trend: linear fit (reference) + Mann-Kendall significance ----
         slope, intercept = np.polyfit(t, values, 1)
         fitted = slope * t + intercept
         ss_res = float(np.sum((values - fitted) ** 2))
         ss_tot = float(np.sum((values - values.mean()) ** 2))
         r_squared = round(1 - ss_res / ss_tot, 4) if ss_tot > 0 else 0.0
-        # The sign of a fitted slope is never zero on real data, so reporting
-        # "increasing" off the sign alone calls pure noise a trend. R² is what
-        # says whether the line describes the series at all: below the
-        # threshold the honest answer is that there is no trend, and the
-        # direction is not worth naming.
-        if r_squared < _TREND_MIN_R_SQUARED:
-            direction = "no clear trend"
+        # The sign of a fitted slope is never zero on real data, and R² is
+        # not a significance test, so the direction is only named when the
+        # Mann-Kendall test rejects "no monotonic trend".
+        mk = mann_kendall(test_values)
+        mk_p_value = mk["p_value"]
+        if mk_p_value is not None and mk_p_value < _TREND_ALPHA and mk["trend"] != "no trend":
+            direction = str(mk["trend"])
         else:
-            direction = "increasing" if slope > 0 else "decreasing" if slope < 0 else "flat"
+            direction = "no clear trend"
 
         # ---- Stationarity (Augmented Dickey-Fuller) ----
         try:
             from statsmodels.tsa.stattools import adfuller
 
-            _adf_stat, adf_p, *_rest = adfuller(values, autolag="AIC")
+            _adf_stat, adf_p, *_rest = adfuller(test_values, autolag="AIC")
             is_stationary = bool(adf_p <= _ADF_ALPHA)
             adf_p_value: float | None = round(float(adf_p), 4)
         except Exception:
@@ -425,24 +540,50 @@ class TimeSeriesAnalysisTool(BaseTool):
             adf_p_value = None
             is_stationary = bool(abs(slope) < 1e-9)
 
-        # ---- Autocorrelation (over the resampled series, not raw rows) ----
-        series = pd.Series(values)
-        lag1_autocorr = round(float(series.autocorr(lag=1)), 4) if len(series) > 1 else 0.0
-
+        # ---- Autocorrelation (calendar-aligned, so lag N = N periods) ----
         seasonality: dict[str, float] = {}
-        for lag in _SEASONAL_LAGS_BY_GRAIN[grain]:
-            if len(series) > lag * 2:
-                corr = series.autocorr(lag=lag)
-                if corr is not None and not np.isnan(corr):
-                    seasonality[str(lag)] = round(float(corr), 4)
+        lag1_autocorr: float | None = None
+        acf_skipped_reason: str | None = None
+        seasonal_decomposition: dict[str, Any] | None = None
+        if gap_free:
+            series = filled.reset_index(drop=True)
+            lag1 = series.autocorr(lag=1) if len(series) > 1 else np.nan
+            lag1_autocorr = 0.0 if np.isnan(lag1) else round(float(lag1), 4)
+            for lag in _SEASONAL_LAGS_BY_GRAIN[grain]:
+                if len(series) > lag * 2:
+                    corr = series.autocorr(lag=lag)
+                    if corr is not None and not np.isnan(corr):
+                        seasonality[str(lag)] = round(float(corr), 4)
+            seasonal_decomposition = _seasonal_decomposition(filled, grain)
+        else:
+            acf_skipped_reason = (
+                f"{len(missing_periods)} of {len(aligned)} {grain} periods have no data "
+                f"(over {_MAX_MISSING_SHARE:.0%}), too many to interpolate for lag analysis."
+            )
         seasonal_lags_detected = [
             lag for lag, corr in seasonality.items() if abs(corr) >= _SEASONALITY_THRESHOLD
         ]
 
-        # ---- Calendar-aware seasonality (7.7) ----
+        # ---- Calendar-aware seasonality (7.7), BH-corrected across months ----
         month_factors, month_counts, month_years, month_p_values = _month_of_year_factors(
             period_dates, values
         )
+        month_p_adjusted: dict[str, float] = {
+            r["month"]: r["p_adjusted"]
+            for r in apply_benjamini_hochberg(
+                [{"month": m, "p_value": p} for m, p in month_p_values.items() if p is not None],
+                alpha=_MONTH_ALPHA,
+            )
+        }
+
+        # ---- Entity x time panel: per-entity trends alongside the aggregate ----
+        panel: dict[str, Any] | None = None
+        entity = repeated_entity(profile, df)
+        if entity and profile is not None and entity in profile.panel_group_cols:
+            panel = _panel_trends(
+                df, date_column, value_column, entity, grain, aggregation,
+                pd.DatetimeIndex(aligned.index),
+            )
         day_of_week_factors: dict[str, float] = {}
         if grain in ("daily", "weekly"):
             day_of_week_factors = _day_of_week_factors(working, aggregation)
@@ -466,15 +607,37 @@ class TimeSeriesAnalysisTool(BaseTool):
                 tag = "" if replicated else " [single-year, unreplicated]"
                 parts.append(f"{name} {lift * 100:+.0f}%{tag}")
             seasonal_note = f" Calendar seasonality: {', '.join(parts)} vs. the yearly average."
+        if seasonal_decomposition is not None:
+            seasonal_note += (
+                f" {seasonal_decomposition['method']} seasonal strength "
+                f"{seasonal_decomposition['strength']:.2f} (period {seasonal_decomposition['period']}; "
+                f"peak {seasonal_decomposition['peak_season']}, "
+                f"trough {seasonal_decomposition['trough_season']})."
+            )
+
+        sen_slope = mk["sen_slope"]
+        slope_unit = _PERIOD_UNIT[grain] if gap_free else "observed period"
+        gap_note = ""
+        if missing_periods:
+            gap_note = (
+                f" {len(missing_periods)} of {len(aligned)} {grain} periods have no data and "
+                "are treated as missing, not zero"
+                + (
+                    " (interpolated for lag and trend tests)."
+                    if gap_free
+                    else "; lag analysis skipped and trend tested on observed periods only."
+                )
+            )
 
         return {
             "summary": (
-                f"{series_label} ({grain}, {len(resampled)} periods): "
+                f"{series_label} ({grain}, {len(values)} periods): "
                 + (
-                    f"no clear trend (R²={r_squared} — a fitted line explains "
-                    f"almost none of the variation). "
+                    "no significant monotonic trend "
+                    + (f"(Mann-Kendall p={mk_p_value:.3g}). " if mk_p_value is not None else "(too few periods to test). ")
                     if direction == "no clear trend"
-                    else f"trend is {direction} (slope={slope:.4g}, R²={r_squared}). "
+                    else f"trend is {direction} (Sen's slope {sen_slope:+.4g} per {slope_unit}, "
+                    f"Mann-Kendall p={mk_p_value:.3g}; linear R²={r_squared}). "
                 )
                 + (
                     f"Series is {'stationary' if is_stationary else 'non-stationary'} "
@@ -489,9 +652,17 @@ class TimeSeriesAnalysisTool(BaseTool):
                     else ""
                 )
                 + seasonal_note
+                + gap_note
                 + (
                     f" Final period starting {dropped_partial_period} excluded as incomplete."
                     if dropped_partial_period
+                    else ""
+                )
+                + (
+                    f" Per-{panel['entity_column']} trends ({panel['entities_analysed']} entities): "
+                    f"{panel['share_increasing']:.0%} increasing, "
+                    f"{panel['share_decreasing']:.0%} decreasing."
+                    if panel
                     else ""
                 )
             ),
@@ -503,21 +674,37 @@ class TimeSeriesAnalysisTool(BaseTool):
             "series_label": series_label,
             "chart_title": series_label,
             "rows_used": len(working),
-            "periods_used": len(resampled),
+            "periods_used": len(values),
+            "calendar_periods": len(aligned),
+            "missing_periods": missing_periods,
+            "missing_period_count": len(missing_periods),
+            "missing_period_handling": (
+                "Periods with no rows are treated as missing (NaN), not zero"
+                + (", interpolated for lag/trend tests." if gap_free else "; lag analysis skipped.")
+            ),
             "trend_direction": direction,
             "trend_slope": round(float(slope), 6),
             "trend_r_squared": r_squared,
+            "mk_tau": mk["tau"],
+            "mk_p_value": round(mk_p_value, 6) if mk_p_value is not None else None,
+            "sen_slope": round(sen_slope, 6) if sen_slope is not None else None,
+            "sen_slope_unit": slope_unit,
+            "mk_trend": mk["trend"],
             "is_stationary": is_stationary,
             "adf_p_value": adf_p_value,
             "autocorrelation_lag1": lag1_autocorr,
             "seasonality_by_lag": seasonality,
             "seasonal_lags_detected": seasonal_lags_detected,
+            "acf_skipped_reason": acf_skipped_reason,
+            "seasonal_decomposition": seasonal_decomposition,
             "month_of_year_factors": month_factors,
             "month_of_year_counts": month_counts,
             "month_of_year_years": month_years,
             "month_of_year_p_values": month_p_values,
+            "month_of_year_p_adjusted": month_p_adjusted,
             "notable_months": notable_months,
             "day_of_week_factors": day_of_week_factors,
+            "panel_trends": panel,
         }
 
     def findings(
@@ -532,25 +719,36 @@ class TimeSeriesAnalysisTool(BaseTool):
         r_squared = output.get("trend_r_squared")
         direction = output.get("trend_direction")
         slope = output.get("trend_slope")
+        mk_p_value = output.get("mk_p_value")
+        mk_tau = output.get("mk_tau")
+        sen_slope = output.get("sen_slope")
         agg_word = "Total" if output.get("aggregation") == "sum" else "Average"
         measure_label = f"{agg_word} {value_column}"
 
+        # A trend is a finding only when Mann-Kendall rejects "no monotonic
+        # trend" — R² alone is not a significance test.
+        has_real_trend = False
         if (
-            r_squared is not None
-            and r_squared >= _TREND_MIN_R_SQUARED
-            and direction not in (None, "no clear trend", "flat")
+            mk_p_value is not None
+            and mk_p_value < _TREND_ALPHA
+            and mk_tau is not None
+            and sen_slope is not None
+            and direction in ("increasing", "decreasing")
         ):
-            signed_effect = round(min(1.0, r_squared), 4) * (1 if (slope or 0) >= 0 else -1)
+            has_real_trend = True
+            slope_unit = output.get("sen_slope_unit") or "period"
             results.append(Finding(
                 finding_id="",
                 kind="trend",
                 headline=(
                     f"{measure_label} is {direction} across {output.get('periods_used')} "
-                    f"{grain} periods (slope={slope}, R²={r_squared})."
+                    f"{grain} periods (Sen's slope {sen_slope:+.4g} per {slope_unit}, "
+                    f"Mann-Kendall p={mk_p_value:.3g})."
                 ),
                 detail=(
-                    f"Linear trend fit on the {grain}-resampled series: slope={slope} "
-                    f"per period, R²={r_squared}. "
+                    f"Mann-Kendall test on the {grain}-resampled series: tau={mk_tau}, "
+                    f"p={mk_p_value:.3g}; Sen's slope {sen_slope:+.4g} per {slope_unit}. "
+                    f"Linear fit for reference: slope={slope} per period, R²={r_squared}. "
                     + (
                         f"ADF p-value={output.get('adf_p_value')} "
                         f"({'stationary' if output.get('is_stationary') else 'non-stationary'})."
@@ -564,42 +762,52 @@ class TimeSeriesAnalysisTool(BaseTool):
                     "trend_slope": slope,
                     "trend_r_squared": r_squared,
                     "periods_used": output.get("periods_used"),
+                    "mk_tau": mk_tau,
+                    "mk_p_value": mk_p_value,
+                    "sen_slope": sen_slope,
+                    "sen_slope_unit": slope_unit,
+                    "missing_period_count": output.get("missing_period_count"),
                 },
                 source_tool=self.name,
                 measure=value_column,
-                effect=signed_effect,
-                effect_kind="eta_sq",
-                confidence=round(min(1.0, 0.4 + r_squared), 3),
+                effect=mk_tau,
+                effect_kind="r",
+                p_value=mk_p_value,
+                confidence=round(min(0.95, 0.5 + abs(mk_tau) / 2), 3),
                 chart_hint={"kind": "line", "data": {"series_label": output.get("series_label")}},
                 layer="analyst",
             ))
 
-        # A real linear trend confounds a month-of-year read when there isn't
+        panel = output.get("panel_trends")
+        if panel:
+            results.extend(self._panel_findings(panel, output, measure_label))
+
+        # A real trend confounds a month-of-year read when there isn't
         # enough history to separate "later in the calendar" from "later in
         # time" — flag it on every month finding rather than silently
         # reporting a trend artifact as a repeating season.
-        has_real_trend = (
-            r_squared is not None
-            and r_squared >= _TREND_MIN_R_SQUARED
-            and direction not in (None, "no clear trend", "flat")
-        )
-        periods_used = output.get("periods_used") or 0
+        calendar_periods = output.get("calendar_periods") or output.get("periods_used") or 0
         two_year_floor = _PERIODS_FOR_TWO_YEARS.get(str(grain), 24)
-        trend_confounded = has_real_trend and periods_used < two_year_floor
+        trend_confounded = has_real_trend and calendar_periods < two_year_floor
 
         notable_months = output.get("notable_months") or {}
         month_counts = output.get("month_of_year_counts") or {}
         month_years = output.get("month_of_year_years") or {}
         month_p_values = output.get("month_of_year_p_values") or {}
+        month_p_adjusted = output.get("month_of_year_p_adjusted") or {}
 
         # Only publish a month as a Finding once it's replicated across >= 2
         # distinct calendar years — a single-year series produces a "month
         # factor" for every month from one observation each, which the
         # summary text already flags but which should never have competed
         # for a top-12 findings slot as if it were a proven repeating season.
+        # Twelve month tests are also twelve chances of a false positive, so
+        # a month must stay significant after Benjamini-Hochberg correction.
         replicated_months = {
             name: lift for name, lift in notable_months.items()
             if month_years.get(name, 0) >= _MIN_YEARS_FOR_MONTH_FINDING
+            and month_p_adjusted.get(name) is not None
+            and month_p_adjusted[name] < _MONTH_ALPHA
         }
         # Cap to the strongest few by |lift| — publishing all 12 months
         # (even replicated ones) crowds out every other tool's findings.
@@ -636,7 +844,8 @@ class TimeSeriesAnalysisTool(BaseTool):
                     f"{month_years.get(month_name, '?')} years in {month_name}): "
                     f"{lift * 100:+.1f}% vs. the overall mean."
                     + (
-                        f" Welch t-test vs. the rest of the year: p={p_value:.4g}."
+                        f" Welch t-test vs. the rest of the year: p={p_value:.4g} "
+                        f"(BH-adjusted across months: {month_p_adjusted[month_name]:.4g})."
                         if p_value is not None else ""
                     )
                 ),
@@ -647,6 +856,7 @@ class TimeSeriesAnalysisTool(BaseTool):
                     "lift": lift,
                     "periods_in_month": month_counts.get(month_name),
                     "years_observed": month_years.get(month_name),
+                    "p_adjusted_across_months": month_p_adjusted[month_name],
                 },
                 source_tool=self.name,
                 measure=value_column,
@@ -661,6 +871,68 @@ class TimeSeriesAnalysisTool(BaseTool):
                 layer="analyst",
             ))
         return results
+
+    def _panel_findings(
+        self, panel: dict[str, Any], output: dict[str, Any], measure_label: str
+    ) -> list[Finding]:
+        """One finding for an entity x time panel: a direction shared by
+        most entities, or entities moving materially in both directions."""
+        n = panel.get("entities_analysed") or 0
+        share_up = panel.get("share_increasing") or 0.0
+        share_down = panel.get("share_decreasing") or 0.0
+        entity = panel.get("entity_column")
+        grain = output.get("grain")
+        if n < 4:
+            return []
+        risers = ", ".join(panel.get("strongest_risers") or []) or "none"
+        fallers = ", ".join(panel.get("strongest_fallers") or []) or "none"
+        if max(share_up, share_down) > 0.5:
+            rising = share_up > share_down
+            share = share_up if rising else share_down
+            headline = (
+                f"{share:.0%} of {entity} values show a significant "
+                f"{'increasing' if rising else 'decreasing'} {grain} trend in "
+                f"{measure_label.lower()} ({n} {entity} values tested)"
+            )
+            effect = share if rising else -share
+        elif min(share_up, share_down) >= _PANEL_DIVERGENCE_SHARE:
+            headline = (
+                f"{entity} values diverge on {measure_label.lower()}: {share_up:.0%} trend up "
+                f"and {share_down:.0%} trend down ({n} tested)"
+            )
+            effect = share_up - share_down
+        else:
+            return []
+        return [Finding(
+            finding_id="",
+            kind="trend",
+            headline=headline,
+            detail=(
+                f"Mann-Kendall test per {entity} on the {grain} series (top {n} by rows, "
+                f"same calendar range as the aggregate). Strongest risers: {risers}; "
+                f"strongest fallers: {fallers}. Aggregate trend: {output.get('trend_direction')}."
+            ),
+            evidence={
+                "value_column": output.get("value_column"),
+                "grain": grain,
+                "entity_column": entity,
+                "entities_analysed": n,
+                "entities_increasing": panel.get("entities_increasing"),
+                "entities_decreasing": panel.get("entities_decreasing"),
+                "share_increasing": share_up,
+                "share_decreasing": share_down,
+                "strongest_risers": panel.get("strongest_risers"),
+                "strongest_fallers": panel.get("strongest_fallers"),
+            },
+            source_tool=self.name,
+            measure=output.get("value_column"),
+            dimension=entity,
+            effect=round(effect, 4),
+            effect_kind="pct",
+            confidence=round(min(0.9, 0.4 + n / 50), 3),
+            chart_hint={"kind": "line", "data": {"series_label": output.get("series_label")}},
+            layer="analyst",
+        )]
 
     def get_schema(self) -> dict[str, Any]:
         return {

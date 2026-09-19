@@ -436,7 +436,10 @@ class MemorySystem:
         return "\n".join(lines)
 
     def get_results_summary_digest(
-        self, current_iteration: int, max_chars_per_result: int = 1200
+        self,
+        current_iteration: int,
+        max_chars_per_result: int = 1200,
+        digest_chars_per_result: int = 250,
     ) -> str:
         """
         P1.6 — the iteration prompt re-sent every accumulated result in full
@@ -465,7 +468,7 @@ class MemorySystem:
             for r in earlier:
                 if r.status == "success":
                     slim = {k: v for k, v in r.output.items() if k not in {"raw_data", "dataframe"}}
-                    shrunk = _shrink_to_fit(slim, 250)
+                    shrunk = _shrink_to_fit(slim, digest_chars_per_result)
                     serialised = json.dumps(shrunk, default=str)
                     lines.append(f"  [iter {r.iteration}] {r.tool_name} → success → {serialised}")
                 elif r.status == "skipped":

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from src.core.profiler import DatasetProfile
+    from src.core.profiler import ColumnProfile, DatasetProfile
 
 
 @dataclass
@@ -29,7 +29,7 @@ class Question:
     """One analysis question the agenda thinks is worth asking."""
 
     text: str
-    kind: str                  # segment | concentration | trend | driver | relationship | distribution | model
+    kind: str                  # segment | test | concentration | trend | driver | relationship | distribution | model
     columns: list[str] = field(default_factory=list)
     expected_value: float = 0.5    # rough prior on how likely this is to matter, in [0, 1]
     suggested_tool: str | None = None
@@ -60,7 +60,7 @@ def build_agenda(
     if profile is None:
         return []
 
-    from src.core.profiler import SEMANTIC_ORDINAL
+    from src.core.profiler import ARCHETYPE_EXPERIMENT, SEMANTIC_ORDINAL, find_experiment_arm
 
     questions: list[Question] = []
     objective_l = objective.lower()
@@ -69,12 +69,18 @@ def build_agenda(
     # Ordinal scales (satisfaction 1-5) are compared by their mean across
     # segments just like a measure, but never summed or trended as totals.
     segment_measures = [*measures[:3], *profile.columns_of_role(SEMANTIC_ORDINAL)[:2]]
+    # An experiment's arm is compared by a significance test (see
+    # _archetype_questions), not by a descriptive segment question.
+    arm = (
+        find_experiment_arm(profile.columns, profile.row_count)
+        if profile.archetype == ARCHETYPE_EXPERIMENT else None
+    )
 
     # "Which segments differ most?" — one per (measure, dimension) pair,
     # capped so a wide dataset doesn't produce a combinatorial agenda.
     for measure in segment_measures:
         for dim in dimensions[:4]:
-            if dim.nunique < 2 or dim.nunique > 20:
+            if dim.nunique < 2 or dim.nunique > 20 or (arm is not None and dim.name == arm.name):
                 continue
             value = 0.7 if measure.unit_hint == "currency" else 0.5
             questions.append(Question(
@@ -129,6 +135,15 @@ def build_agenda(
             expected_value=0.4,
             suggested_tool="correlation_analysis",
         ))
+
+    # Archetype-specific questions (experiment, survey, panel/event log,
+    # sensor series), skipping any the generic passes above already asked.
+    seen = {(q.kind, q.suggested_tool, tuple(sorted(q.columns))) for q in questions}
+    for q in _archetype_questions(profile, arm):
+        key = (q.kind, q.suggested_tool, tuple(sorted(q.columns)))
+        if key not in seen:
+            seen.add(key)
+            questions.append(q)
 
     # Fallback so a dataset with no dimension, entity or time axis (a sensor
     # dump, a lab table) still gets an agenda: ask about each top measure's
@@ -188,6 +203,136 @@ def build_agenda(
                 q.expected_value = min(1.0, q.expected_value + 0.15)
 
     questions.sort(key=lambda q: q.expected_value, reverse=True)
+    return questions
+
+
+def _archetype_questions(profile: DatasetProfile, arm: ColumnProfile | None) -> list[Question]:
+    """Questions a given data archetype (profile.archetype) calls for, on
+    top of the generic segment/trend/relationship passes."""
+    from src.core.profiler import (
+        ARCHETYPE_EVENT_LOG,
+        ARCHETYPE_PANEL,
+        ARCHETYPE_SENSOR,
+        ARCHETYPE_SURVEY,
+        SEMANTIC_FLAG,
+        SEMANTIC_ORDINAL,
+        ordinal_scale_columns,
+    )
+
+    archetype = profile.archetype
+    measures = profile.measures()
+    time_cols = profile.datetime_cols[:1]
+    questions: list[Question] = []
+
+    if arm is not None:
+        outcomes = [
+            c for c in (*profile.columns_of_role(SEMANTIC_FLAG), *measures, *profile.columns_of_role(SEMANTIC_ORDINAL))
+            if c.name != arm.name
+        ][:2]
+        for outcome in outcomes:
+            questions.append(Question(
+                text=(
+                    f"Does '{outcome.name}' differ between '{arm.name}' levels, "
+                    "and is the difference statistically significant?"
+                ),
+                kind="test",
+                columns=[outcome.name, arm.name],
+                expected_value=0.9,
+                suggested_tool="select_statistical_test",
+            ))
+        outcome_names = {c.name for c in outcomes}
+        for covariate in [m for m in measures if m.name not in outcome_names][:2]:
+            questions.append(Question(
+                text=(
+                    f"Are the '{arm.name}' groups balanced on '{covariate.name}'? "
+                    "An imbalance would confound the treatment effect."
+                ),
+                kind="segment",
+                columns=[covariate.name, arm.name],
+                expected_value=0.6,
+                suggested_tool="segment_comparison",
+            ))
+
+    elif archetype == ARCHETYPE_SURVEY:
+        items = ordinal_scale_columns(profile.columns)
+        if items:
+            questions.append(Question(
+                text=(
+                    "How are responses to the rating items distributed — which score highest "
+                    "and lowest, and are there floor/ceiling effects?"
+                ),
+                kind="distribution",
+                columns=[c.name for c in items[:6]],
+                expected_value=0.6,
+                suggested_tool="detect_outliers",
+            ))
+        item_names = {c.name for c in items}
+        segments = [
+            d for d in profile.dimensions()
+            if d.name not in item_names and 2 <= d.nunique <= 20
+        ][:2]
+        for item in items[:3]:
+            for dim in segments:
+                questions.append(Question(
+                    text=f"Do responses to '{item.name}' differ by '{dim.name}'?",
+                    kind="segment",
+                    columns=[item.name, dim.name],
+                    expected_value=0.6,
+                    suggested_tool="segment_comparison",
+                ))
+        if len(items) >= 2:
+            questions.append(Question(
+                text="Which rating items move together (a shared underlying attitude)?",
+                kind="relationship",
+                columns=[c.name for c in items[:8]],
+                expected_value=0.55,
+                suggested_tool="correlation_analysis",
+            ))
+
+    elif archetype in (ARCHETYPE_PANEL, ARCHETYPE_EVENT_LOG):
+        entity = profile.entity_col or (profile.panel_group_cols[0] if profile.panel_group_cols else None)
+        if entity:
+            for measure in measures[:2]:
+                questions.append(Question(
+                    text=f"Do '{entity}' entities follow different trends in {_stat(measure)} '{measure.name}' over time?",
+                    kind="trend",
+                    columns=[measure.name, entity, *time_cols],
+                    expected_value=0.65,
+                    suggested_tool="time_series_analysis",
+                ))
+                questions.append(Question(
+                    text=f"Is '{measure.name}' concentrated among a few '{entity}' entities?",
+                    kind="concentration",
+                    columns=[measure.name, entity],
+                    expected_value=0.65,
+                    suggested_tool="concentration_analysis",
+                ))
+            if archetype == ARCHETYPE_EVENT_LOG:
+                questions.append(Question(
+                    text=f"Do a few '{entity}' entities generate most of the events?",
+                    kind="concentration",
+                    columns=[entity],
+                    expected_value=0.6,
+                    suggested_tool="concentration_analysis",
+                ))
+
+    elif archetype == ARCHETYPE_SENSOR:
+        for measure in measures[:3]:
+            questions.append(Question(
+                text=f"Is {_stat(measure)} '{measure.name}' trending or seasonal over time, and what changed most recently?",
+                kind="trend",
+                columns=[measure.name, *time_cols],
+                expected_value=0.75,
+                suggested_tool="time_series_analysis",
+            ))
+            questions.append(Question(
+                text=f"Are there anomalous readings or sudden level shifts in '{measure.name}'?",
+                kind="distribution",
+                columns=[measure.name],
+                expected_value=0.6,
+                suggested_tool="detect_outliers",
+            ))
+
     return questions
 
 

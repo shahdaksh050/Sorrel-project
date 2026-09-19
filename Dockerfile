@@ -1,13 +1,17 @@
 # =============================================================================
 # Hardened, Network-Isolated Sandbox Image for DSA Agent
 # =============================================================================
-# Build:
+# Build (from the repo root; rebuild after changing src/):
 #   docker build -t dsa-sandbox:latest .
 #
-# Containment Flags used by DockerSandbox:
+# Containment flags used by DockerSandbox (src/core/sandbox.py), plus the
+# seccomp profile documented in docker/README.md:
 #   docker run --rm \
 #     --network none \
 #     --read-only \
+#     --cap-drop ALL \
+#     --security-opt no-new-privileges \
+#     --security-opt seccomp=<abs path>/docker/seccomp-sandbox.json \
 #     --tmpfs /tmp:rw,size=100m \
 #     -v /path/to/scratch:/scratch:rw \
 #     --memory 512m \
@@ -16,28 +20,35 @@
 #     dsa-sandbox:latest /scratch/input.json /scratch/result.json
 # =============================================================================
 
-FROM python:3.11-slim
+# Same Python minor as the host venv, so sandboxed pandas/numpy match the
+# subprocess backend. To pin reproducibly, resolve the digest and append it:
+#   docker buildx imagetools inspect python:3.13-slim
+#   FROM python:3.13-slim@sha256:<digest>
+FROM python:3.13-slim
 
-# Security: Create non-root user
+ENV PYTHONPATH=/app \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Non-root user with no login shell. No apt packages are installed.
 RUN groupadd -g 1000 sandbox && \
-    useradd -u 1000 -g sandbox -s /bin/sh -m sandbox
+    useradd -u 1000 -g sandbox -s /usr/sbin/nologin -M sandbox
 
 WORKDIR /app
 
-# Install standard analytical packages
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Worker dependencies only (not the UI/LLM/reporting stack), then remove pip
+# so nothing in the image can install packages at runtime.
+COPY docker/requirements-sandbox.txt /tmp/requirements-sandbox.txt
+RUN pip install -r /tmp/requirements-sandbox.txt && \
+    rm /tmp/requirements-sandbox.txt && \
+    pip uninstall -y pip
 
-# Copy application source code into the container image
-COPY src/ /app/src/
+COPY --chown=root:root src/ /app/src/
 
-# Environment configuration
-ENV PYTHONPATH=/app \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
-# Run as non-privileged sandbox user
+# Next step, if the shell must go too: move to a distroless Python base on
+# the same minor version; the exec-form ENTRYPOINT below never uses a shell.
 USER sandbox
 
-# Worker entrypoint
 ENTRYPOINT ["python", "-m", "src.core._sandbox_worker"]

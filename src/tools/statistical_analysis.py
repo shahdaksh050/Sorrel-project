@@ -28,6 +28,7 @@ from src.core.findings import Finding
 from src.core.io import DatasetReadError, read_any
 from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.profiler import is_identifier_like, profile_dataframe
+from src.core.stats_utils import aggregate_to_entity, measure_aggregation, repeated_entity
 from src.tools.base import BaseTool, ToolExecutionError
 
 if TYPE_CHECKING:
@@ -94,6 +95,9 @@ _EFFECT_KIND_LARGE: dict[str, float] = {
 #: Findings below this p_adjusted are candidates for the finding bus (7.6
 #: item 4) — matches the tool's own default alpha.
 _FINDING_P_THRESHOLD = 0.05
+
+#: Post-hoc pairs reported after a significant k>2 test (k=20 has 190).
+_MAX_POST_HOC_PAIRS = 10
 
 
 def _read_df(file_path: str) -> pd.DataFrame:
@@ -186,6 +190,44 @@ def _cramers_v(chi2: float, n: int, n_rows: int, n_cols: int) -> float:
     if denom <= 0:
         return 0.0
     return float((chi2 / denom) ** 0.5)
+
+
+def _post_hoc(
+    labels: list[str], group_arrays: list[np.ndarray], parametric: bool, alpha: float
+) -> list[dict[str, Any]]:
+    """Pairwise follow-up to a significant k>2 omnibus test: Tukey HSD after
+    ANOVA, Holm-corrected pairwise Mann-Whitney after Kruskal-Wallis. Pairs
+    ranked significant-first, then by |mean difference|; capped at
+    _MAX_POST_HOC_PAIRS."""
+    from statsmodels.stats.multitest import multipletests
+
+    pairs = [(i, j) for i in range(len(group_arrays)) for j in range(i + 1, len(group_arrays))]
+    if parametric:
+        tukey = stats.tukey_hsd(*group_arrays)
+        raw_p = [float(tukey.pvalue[i, j]) for i, j in pairs]
+        adjusted = raw_p  # Tukey HSD already controls the family-wise error rate
+        method = "tukey_hsd"
+    else:
+        raw_p = [
+            float(stats.mannwhitneyu(group_arrays[i], group_arrays[j], alternative="two-sided")[1])
+            for i, j in pairs
+        ]
+        adjusted = [float(p) for p in multipletests(raw_p, method="holm")[1]]
+        method = "mann_whitney_holm"
+    rows: list[dict[str, Any]] = [
+        {
+            "group_a": labels[i],
+            "group_b": labels[j],
+            "mean_diff": round(float(np.mean(group_arrays[i]) - np.mean(group_arrays[j])), 6),
+            "p_value": round(p, 6),
+            "p_adjusted": round(p_adj, 6),
+            "significant": p_adj < alpha,
+            "method": method,
+        }
+        for (i, j), p, p_adj in zip(pairs, raw_p, adjusted, strict=True)
+    ]
+    rows.sort(key=lambda r: (not r["significant"], -abs(r["mean_diff"])))
+    return rows[:_MAX_POST_HOC_PAIRS]
 
 
 def _sample_size_note(
@@ -306,6 +348,7 @@ class SelectStatisticalTestTool(BaseTool):
         group_column: str | None = None,
         alpha: float = 0.05,
         test_family: bool = False,
+        bin_numeric_group: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
         df = _read_df(file_path)
@@ -355,11 +398,14 @@ class SelectStatisticalTestTool(BaseTool):
         if not family_mode:
             if group_column is None or group_column not in df.columns:
                 raise ToolExecutionError(f"Group column '{group_column}' not found.")
-            result, _n = self._run_single_test(df, feature_column, group_column, alpha)
+            result, _n = self._run_single_test(
+                df, feature_column, group_column, alpha, profile, bin_numeric_group
+            )
             return result
 
         return self._execute_family(
-            df, profile, feature_column, group_column if group_supplied else None, alpha
+            df, profile, feature_column, group_column if group_supplied else None, alpha,
+            bin_numeric_group,
         )
 
     def _pick_measure_column(self, df: pd.DataFrame, profile: DatasetProfile | None) -> str | None:
@@ -430,6 +476,7 @@ class SelectStatisticalTestTool(BaseTool):
         feature_column: str,
         explicit_group_column: str | None,
         alpha: float,
+        bin_numeric_group: bool = False,
     ) -> dict[str, Any]:
         """Test `feature_column` against every eligible dimension column,
         rank by effect size, and BH-correct p-values within the family
@@ -445,7 +492,7 @@ class SelectStatisticalTestTool(BaseTool):
         totals: dict[str, int] = {}
         for dim in candidate_dims:
             try:
-                r, n = self._run_single_test(df, feature_column, dim, alpha)
+                r, n = self._run_single_test(df, feature_column, dim, alpha, profile, bin_numeric_group)
             except ToolExecutionError:
                 continue
             raw_results[dim] = r
@@ -472,6 +519,8 @@ class SelectStatisticalTestTool(BaseTool):
                 "p_value": r["p_value"],
                 "n": totals[dim],
                 "interpretation": r.get("interpretation", ""),
+                "unit_of_analysis": r.get("unit_of_analysis", "row"),
+                "post_hoc": r.get("post_hoc"),
             }
             for dim, r in raw_results.items()
         ]
@@ -506,7 +555,13 @@ class SelectStatisticalTestTool(BaseTool):
         return result
 
     def _run_single_test(
-        self, df: pd.DataFrame, feature_column: str, group_column: str, alpha: float
+        self,
+        df: pd.DataFrame,
+        feature_column: str,
+        group_column: str,
+        alpha: float,
+        profile: DatasetProfile | None = None,
+        bin_numeric_group: bool = False,
     ) -> tuple[dict[str, Any], int]:
         """Run the one auto-selected test for this (feature, group) pair.
 
@@ -518,15 +573,47 @@ class SelectStatisticalTestTool(BaseTool):
         if group_column not in df.columns:
             raise ToolExecutionError(f"Group column '{group_column}' not found.")
 
-        df_clean = df[[feature_column, group_column]].dropna()
-        # For continuous group columns, bin into quartiles automatically
-        if str(df_clean[group_column].dtype).startswith("float"):
+        entity_col = repeated_entity(profile, df)
+        keep = [feature_column, group_column]
+        if entity_col and entity_col not in keep:
+            keep.append(entity_col)
+        df_clean = df[keep].dropna(subset=[feature_column, group_column])
+        # A continuous group column is not a set of groups. Quartile-binning
+        # it silently invents cut points the caller never chose, so it only
+        # happens on request; a low-cardinality float (0.0/1.0) is kept as-is.
+        group_series = df_clean[group_column]
+        if (
+            pd.api.types.is_float_dtype(group_series)
+            and group_series.nunique() > MAX_DIMENSION_CARDINALITY
+        ):
+            if not bin_numeric_group:
+                raise ToolExecutionError(
+                    f"Group column '{group_column}' is continuous "
+                    f"({group_series.nunique()} distinct values), not a set of groups. "
+                    "Use correlation_analysis for two numeric columns, pick a categorical "
+                    "group_column, or pass bin_numeric_group=True to compare its quartiles."
+                )
             df_clean = df_clean.copy()
-            df_clean[group_column] = pd.qcut(df_clean[group_column], q=4,
-                                              labels=["Q1","Q2","Q3","Q4"],
-                                              duplicates="drop")
+            df_clean[group_column] = pd.qcut(
+                group_series, q=4, labels=["Q1", "Q2", "Q3", "Q4"], duplicates="drop"
+            )
 
-        groups = df_clean.groupby(group_column)[feature_column].apply(list)
+        # Repeated rows of one entity are not independent observations:
+        # test one value per entity per group (a flag or score becomes the
+        # entity's average, a summable measure its total). Categorical
+        # features keep the row-level chi-square.
+        unit_of_analysis = "row"
+        if (
+            entity_col
+            and entity_col not in (feature_column, group_column)
+            and pd.api.types.is_numeric_dtype(df_clean[feature_column])
+        ):
+            cp = next((c for c in profile.columns if c.name == feature_column), None) if profile else None
+            agg = measure_aggregation(cp) if cp is not None and cp.semantic_role == "measure" else "mean"
+            df_clean = aggregate_to_entity(df_clean, entity_col, feature_column, agg, by=group_column)
+            unit_of_analysis = entity_col
+
+        groups = df_clean.groupby(group_column, observed=True)[feature_column].apply(list)
         group_arrays_raw = [pd.array(g) for g in groups]
         group_sizes = [len(g) for g in group_arrays_raw]
         n_groups = len(group_arrays_raw)
@@ -594,6 +681,12 @@ class SelectStatisticalTestTool(BaseTool):
             threshold = PRACTICAL_THRESHOLD_ETA2
 
         significant = bool(p_val < alpha)
+        post_hoc: list[dict[str, Any]] | None = None
+        if n_groups > 2 and significant:
+            try:
+                post_hoc = _post_hoc([str(k) for k in groups.index], group_arrays, is_normal, alpha)
+            except ValueError:
+                post_hoc = None  # degenerate groups; the omnibus result stands
         practical = abs(effect_value) >= threshold
         interpretation = _lead_with_effect(
             effect_label=effect_metric, effect_value=effect_value, threshold=threshold,
@@ -617,7 +710,15 @@ class SelectStatisticalTestTool(BaseTool):
             "effect_size_metric": effect_metric,
             "practical_significance": practical,
             "practical_threshold": threshold,
+            "unit_of_analysis": unit_of_analysis,
         }
+        if post_hoc:
+            result["post_hoc"] = post_hoc
+            top = post_hoc[0]
+            result["summary"] += (
+                f" Most different pair: {top['group_a']} vs {top['group_b']} "
+                f"(mean diff {top['mean_diff']:+.4g}, p_adj={top['p_adjusted']:.4g})."
+            )
         if mean_diff_ci is not None:
             result["mean_diff_ci_95"] = [round(mean_diff_ci[0], 6), round(mean_diff_ci[1], 6)]
         if sample_size_note:
@@ -714,6 +815,15 @@ class SelectStatisticalTestTool(BaseTool):
                 ),
                 "required": False,
             },
+            "bin_numeric_group": {
+                "type": "boolean",
+                "description": (
+                    "Allow a continuous numeric group_column to be split into quartile "
+                    "groups (Q1-Q4). Default: False — a continuous group_column is an "
+                    "error; use correlation_analysis for two numeric columns."
+                ),
+                "required": False,
+            },
         }
 
     def findings(
@@ -751,6 +861,8 @@ class SelectStatisticalTestTool(BaseTool):
                     "p_adjusted": p.get("p_adjusted"),
                     "n": p.get("n"),
                     "interpretation": p.get("interpretation", ""),
+                    "post_hoc": p.get("post_hoc"),
+                    "unit_of_analysis": p.get("unit_of_analysis", "row"),
                 }
                 for p in family
             ]
@@ -770,6 +882,8 @@ class SelectStatisticalTestTool(BaseTool):
                 "p_adjusted": output.get("p_value"),
                 "n": None,
                 "interpretation": output.get("interpretation", ""),
+                "post_hoc": output.get("post_hoc"),
+                "unit_of_analysis": output.get("unit_of_analysis", "row"),
             }]
 
         results: list[Finding] = []
@@ -787,6 +901,12 @@ class SelectStatisticalTestTool(BaseTool):
                 f"'{measure}' differs meaningfully across '{dimension}' "
                 f"({c['test_name']}, {effect_kind}={effect:.3f}, p_adj={p_adj:.4f})."
             )
+            top_pair = (c.get("post_hoc") or [None])[0]
+            if top_pair and top_pair["significant"]:
+                headline += (
+                    f" Most different: '{top_pair['group_a']}' vs '{top_pair['group_b']}' "
+                    f"(mean diff {top_pair['mean_diff']:+.4g})."
+                )
             results.append(Finding(
                 finding_id=f"{self.name}:{measure}:{dimension}",
                 kind="test",
@@ -797,6 +917,8 @@ class SelectStatisticalTestTool(BaseTool):
                     "p_value": c["p_value"],
                     "p_adjusted": p_adj,
                     "n": c["n"],
+                    "unit_of_analysis": c["unit_of_analysis"],
+                    "post_hoc": c["post_hoc"],
                 },
                 source_tool=self.name,
                 measure=measure,

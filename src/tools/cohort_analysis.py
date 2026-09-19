@@ -200,7 +200,11 @@ class CohortAnalysisTool(BaseTool):
             result["order_count"] = int(order_totals.size)
             result["average_order_value"] = round(float(order_totals.mean()), 2)
             result["median_order_value"] = round(float(order_totals.median()), 2)
-            result["mean_lines_per_order"] = round(len(work) / order_totals.size, 3)
+            # Lines with a missing order id belong to no order (groupby drops
+            # them), so they must not inflate the lines-per-order numerator.
+            result["mean_lines_per_order"] = round(
+                int(work[order_column].notna().sum()) / order_totals.size, 3
+            ) if order_totals.size else 0.0
             result["order_column"] = order_column
 
         # ---- Revenue by month ----
@@ -242,10 +246,19 @@ class CohortAnalysisTool(BaseTool):
         if customer_column and customer_column in work.columns:
             result["customer_column"] = customer_column
             grouped = work.groupby(customer_column)
+            # Without an order id, a purchase is a distinct calendar day per
+            # customer: counting rows would make one multi-line basket look
+            # like a repeat customer.
+            has_orders = bool(order_column and order_column in work.columns)
             order_grain = (
-                grouped[order_column].nunique()
-                if order_column and order_column in work.columns
-                else grouped.size()
+                # Every customer here has at least one purchase row; one whose
+                # order ids are all missing would otherwise count 0 orders.
+                grouped[order_column].nunique().clip(lower=1)
+                if has_orders
+                else work[date_column].dt.normalize().groupby(work[customer_column]).nunique()
+            )
+            result["frequency_basis"] = (
+                f"distinct {order_column}" if has_orders else f"distinct days in {date_column}"
             )
             rfm = pd.DataFrame(
                 {
@@ -267,14 +280,20 @@ class CohortAnalysisTool(BaseTool):
             result["mean_orders_per_customer"] = round(float(rfm["frequency"].mean()), 3)
 
             # Revenue concentration — how much of the business rests on the
-            # best customers (the practical read on Pareto).
+            # best customers (the practical read on Pareto). Shares are of
+            # customer-attributed revenue: rows with a missing customer id
+            # belong to no customer and must not dilute the denominator.
+            customer_revenue = float(rfm["monetary"].sum())
+            result["customer_attributed_transaction_count"] = int(
+                work[customer_column].notna().sum()
+            )
             ranked_revenue = rfm["monetary"].sort_values(ascending=False)
             for share in (10, 20):
                 cutoff = max(1, int(np.ceil(customer_count * share / 100)))
                 top_sum = float(ranked_revenue.head(cutoff).sum())
                 result[f"revenue_share_of_top_{share}pct_customers"] = round(
-                    top_sum / total_revenue * 100, 2
-                ) if total_revenue else 0.0
+                    top_sum / customer_revenue * 100, 2
+                ) if customer_revenue else 0.0
 
             if customer_count >= _MIN_CUSTOMERS_FOR_RFM:
                 rfm["r_score"] = _score_quantiles(rfm["recency_days"], ascending=False)
@@ -305,8 +324,8 @@ class CohortAnalysisTool(BaseTool):
                         ),
                         "revenue": round(float(row["revenue"]), 2),
                         "revenue_share_pct": round(
-                            float(row["revenue"]) / total_revenue * 100, 2
-                        ) if total_revenue else 0.0,
+                            float(row["revenue"]) / customer_revenue * 100, 2
+                        ) if customer_revenue else 0.0,
                         "mean_recency_days": round(float(row["mean_recency_days"]), 1),
                         "mean_frequency": round(float(row["mean_frequency"]), 2),
                     }
@@ -418,11 +437,12 @@ class CohortAnalysisTool(BaseTool):
                     detail=(
                         f"{output.get('repeat_customer_count', 0):,} of "
                         f"{output.get('customer_count', 0):,} customers placed more than "
-                        "one order."
+                        f"one order (orders counted as {output.get('frequency_basis', 'rows')})."
                     ),
                     evidence={
                         "repeat_customer_count": output.get("repeat_customer_count"),
                         "customer_count": output.get("customer_count"),
+                        "frequency_basis": output.get("frequency_basis"),
                     },
                     measure="repeat_purchase_rate",
                     dimension="customer",

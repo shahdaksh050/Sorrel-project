@@ -10,6 +10,32 @@ by what unblocks the rest.
 Recommended sequence: **Phase 0 → Phase 2's evaluation harness → Phase 1
 (guided by harness results) → Phases 3–4.**
 
+### Progress (2026-09-19)
+Coded (static gates only — ruff + mypy clean on 51 files; nothing executed,
+by the user's "code only, no testing" instruction):
+- **Phase 1** — all items: entity-level inference, Simpson stratification
+  (`segment_comparison.stratify_by`), post-hoc tests, no silent float binning,
+  clean_data no longer imputes by default, relative leakage threshold,
+  definitional-pair detection + target correlations, per-entity clustering,
+  Mann-Kendall/Sen trend, STL seasonality, calendar-aligned gaps, panel
+  trends, archetypes (+ per-archetype agenda).
+- **Phase 2** — plan validator, JSON mode, context budgeting, generated-tool
+  library. **Not done: the evaluation harness** (it is a testing artefact —
+  build it when testing resumes).
+- **Phase 3** — finding charts per kind, uncertainty bars (incl. LLM
+  `y_lower`/`y_upper`), report sections, visualization.py → chart specs,
+  held-out confusion matrix/ROC/importance std from evaluate_model.
+  **Not done: vl-convert spec validation** (a test).
+- **Phase 4** — PII detection/redaction, LOCAL_ONLY, LLM-call audit, token
+  cap, Docker/seccomp hardening, UI audit viewer + run options.
+  **Not done: review mode** (human approval of code steps).
+- **Maintenance** — controller split, shared stats module.
+
+Still open: **all of Phase 0**, the harness, vl-convert, review mode. Known
+test updates needed: `test_sandbox.py`, `test_sandbox_worker.py`,
+dynamic-code/generated-tool tests, `test_visualization.py` (now returns
+specs, no files), clean_data tests expecting median imputation by default.
+
 ---
 
 ## Phase 0 — Verify & stabilise (before any new features)

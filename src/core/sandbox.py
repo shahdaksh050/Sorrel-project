@@ -610,6 +610,20 @@ class SubprocessSandbox(SandboxBackend):
             return _result_from_payload(payload, duration_ms, scratch_derived, derived_dest)
 
 
+_SECCOMP_PROFILE = _REPO_ROOT / "docker" / "seccomp-sandbox.json"
+
+
+def _seccomp_args() -> list[str]:
+    """The sandbox's syscall allowlist (docker/seccomp-sandbox.json), when
+    present. SANDBOX_SECCOMP=false falls back to Docker's default profile —
+    an escape hatch if the allowlist misses a syscall a library needs."""
+    if os.environ.get("SANDBOX_SECCOMP", "true").strip().lower() in ("0", "false", "no"):
+        return []
+    if not _SECCOMP_PROFILE.is_file():
+        return []
+    return ["--security-opt", f"seccomp={_SECCOMP_PROFILE.resolve()}"]
+
+
 class DockerSandbox(SandboxBackend):
     """
     Hardened container sandbox backend using Docker.
@@ -722,6 +736,7 @@ class DockerSandbox(SandboxBackend):
                 "--read-only",
                 "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges",
+                *_seccomp_args(),
                 "--env", "TMPDIR=/tmp",
                 "--tmpfs", "/tmp:rw,size=100m",
                 "-v", f"{scratch_path.resolve()}:/scratch:rw",

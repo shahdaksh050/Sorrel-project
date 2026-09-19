@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from src.core.security import CARD_RE, EMAIL_RE, IPV4_RE, PHONE_RE, SSN_RE, luhn_valid
+
 if TYPE_CHECKING:
     from src.core.domains import DomainMatch
 
@@ -191,6 +193,74 @@ _PANEL_PROBE_ROWS = 20_000
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
+# ---------------------------------------------------------------------------
+# Data archetypes — what kind of study/table this is (ImpPlan Phase 1). Unlike
+# src.core.domains (what the data is *about*), an archetype is decided from
+# structure: time axis, entity repetition, scale columns, an assignment arm.
+# ---------------------------------------------------------------------------
+
+ARCHETYPE_EVENT_LOG = "event_log"
+ARCHETYPE_PANEL = "panel"
+ARCHETYPE_SENSOR = "sensor_timeseries"
+ARCHETYPE_SURVEY = "survey"
+ARCHETYPE_EXPERIMENT = "experiment"
+ARCHETYPE_CROSS_SECTION = "cross_section"
+
+_REGULAR_FREQUENCIES = ("hourly", "daily", "weekly", "monthly", "quarterly", "yearly")
+
+#: Whole tokens that name an experiment assignment column. The column's
+#: tokens must ALL come from this set, so "group"/"test_group"/"ab_variant"
+#: qualify but "age_group"/"product_group" (plain dimensions) do not.
+_ARM_NAME_TOKENS = ("group", "variant", "arm", "treatment", "control", "cohort")
+_ARM_QUALIFIER_TOKENS = (
+    "test", "ab", "experiment", "exp", "assigned", "assignment", "condition", "bucket",
+)
+_ARM_MAX_LEVELS = 5
+#: Smallest arm's share of rows — below it the column is a rare category,
+#: not an assignment.
+_ARM_MIN_LEVEL_SHARE = 0.05
+
+#: Ordinal columns needed to call a table a survey, and the low-cardinality
+#: categorical count/share that does so alongside a respondent key.
+_SURVEY_MIN_ORDINALS = 3
+_SURVEY_MIN_CATEGORICALS = 6
+_SURVEY_MIN_CATEGORICAL_SHARE = 0.6
+_SURVEY_MAX_LEVELS = 10
+#: Top of a rating scale (1-5, 0-10, 1-7 ...) for unnamed Likert items.
+_LIKERT_SCALE_MAX = (4, 5, 6, 7, 9, 10, 11)
+
+# ---------------------------------------------------------------------------
+# PII detection (ImpPlan Phase 4, data egress) — flags columns whose values
+# identify a person so to_prompt_string can withhold them from the LLM.
+# ---------------------------------------------------------------------------
+
+PII_EMAIL = "email"
+PII_PHONE = "phone"
+PII_PERSON_NAME = "person_name"
+PII_ADDRESS = "address"
+PII_GOV_ID = "gov_id"
+PII_CARD = "card_number"
+PII_IP = "ip_address"
+
+#: Values sampled per column for the pattern probe, and the share that must
+#: match for a column to be flagged.
+_PII_SAMPLE_ROWS = 200
+_PII_MATCH_SHARE = 0.8
+
+_PERSON_NAME_RE = re.compile(r"[A-Z][A-Za-z'-]+(?: [A-Z][A-Za-z'.-]+){1,2}")
+
+_PHONE_NAME_TOKENS = ("phone", "mobile", "telephone", "tel", "fax", "cellphone")
+_GOV_ID_NAME_TOKENS = ("ssn", "passport", "aadhaar", "nino")
+_ADDRESS_NAME_TOKENS = ("address", "street", "addr")
+_NAME_QUALIFIER_TOKENS = ("first", "last", "full", "given", "middle", "family", "sur")
+_NAME_WORD_TOKENS = ("firstname", "lastname", "fullname", "surname", "forename")
+#: Entities whose "<entity>_name" column holds a person's name ("product_name"
+#: and "store_name" do not).
+_PERSON_ENTITY_TOKENS = (
+    "customer", "client", "user", "patient", "member", "employee", "subscriber",
+    "participant", "respondent", "person", "contact", "owner", "author", "student",
+)
+
 
 def _name_tokens(name: str) -> list[str]:
     """Column name -> lowercase tokens, split on camelCase and any
@@ -335,6 +405,72 @@ def _infer_aggregation(
     return "mean"
 
 
+#: Tokens that make a PII-named column a quantity about it ("email_count",
+#: "address_length"), not the personal data itself.
+_PII_QUANTITY_TOKENS = ("count", "total", "amount", "avg", "mean", "qty", "size", "length", "verified")
+
+
+def _pii_name_hint(tokens: list[str]) -> str | None:
+    """PII kind a column *name* announces (whole tokens), or None. A bare
+    "name" column returns None here — it needs value evidence (it may hold
+    product names)."""
+    if "email" in tokens or ("e" in tokens and "mail" in tokens):
+        return PII_EMAIL
+    if any(t in ("ip", "ipv4", "ipv6") for t in tokens):
+        return PII_IP
+    if _has_token(tokens, _PHONE_NAME_TOKENS):
+        return PII_PHONE
+    if (
+        any(t in _GOV_ID_NAME_TOKENS for t in tokens)
+        or (any(t in ("national", "social", "tax") for t in tokens) and any(t in ("id", "number", "no") for t in tokens))
+        or (any(t in ("driver", "driving") for t in tokens) and any(t in ("license", "licence") for t in tokens))
+    ):
+        return PII_GOV_ID
+    if "card" in tokens and any(t in ("number", "no", "num") for t in tokens):
+        return PII_CARD
+    if _has_token(tokens, _ADDRESS_NAME_TOKENS):
+        return PII_ADDRESS
+    if any(t in _NAME_WORD_TOKENS for t in tokens) or (
+        "name" in tokens
+        and any(t in _NAME_QUALIFIER_TOKENS or t in _PERSON_ENTITY_TOKENS for t in tokens)
+    ):
+        return PII_PERSON_NAME
+    return None
+
+
+def _detect_pii(name: str, series: pd.Series, kind: str, semantic_role: str) -> str | None:
+    """PII kind held by a column, from its name (whole tokens) or, failing
+    that, from value patterns on a head sample of string-like columns
+    (email, IPv4, SSN-style id, Luhn-valid card, separated phone number).
+    Flags, constants and quantities about PII ("email_count") are never PII."""
+    if kind in ("constant", "boolean") or semantic_role == SEMANTIC_FLAG:
+        return None
+    tokens = _name_tokens(name)
+    if any(t in _PII_QUANTITY_TOKENS for t in tokens):
+        return None
+    hint = _pii_name_hint(tokens)
+    if hint:
+        return hint
+    if kind not in ("categorical", "identifier", "text"):
+        return None
+    sample = series.dropna().astype(str).str.strip().head(_PII_SAMPLE_ROWS)
+    if sample.empty:
+        return None
+    probes: list[tuple[str, Any]] = [
+        (PII_EMAIL, EMAIL_RE.fullmatch),
+        (PII_IP, IPV4_RE.fullmatch),
+        (PII_GOV_ID, SSN_RE.fullmatch),
+        (PII_CARD, lambda v: CARD_RE.fullmatch(v) is not None and luhn_valid(v)),
+        (PII_PHONE, PHONE_RE.fullmatch),
+    ]
+    if tokens == ["name"]:
+        probes.append((PII_PERSON_NAME, _PERSON_NAME_RE.fullmatch))
+    for label, probe in probes:
+        if float(sample.map(lambda v, p=probe: bool(p(v))).mean()) >= _PII_MATCH_SHARE:
+            return label
+    return None
+
+
 @dataclass
 class ColumnProfile:
     """Profile of a single column."""
@@ -353,6 +489,7 @@ class ColumnProfile:
     semantic_role: str = SEMANTIC_DIMENSION   # measure | dimension | flag | ordinal | identifier | time | text | constant
     unit_hint: str | None = None              # currency | percent | count | None
     aggregation: str | None = None            # sum | mean for measures (is a total meaningful?); None otherwise
+    pii: str | None = None                    # email | phone | person_name | address | gov_id | card_number | ip_address
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -368,6 +505,7 @@ class ColumnProfile:
             "semantic_role": self.semantic_role,
             "unit_hint": self.unit_hint,
             "aggregation": self.aggregation,
+            "pii": self.pii,
         }
 
     def is_measure(self) -> bool:
@@ -427,6 +565,11 @@ class DatasetProfile:
     #: Sampling frequency of the first datetime column (hourly | daily |
     #: weekly | monthly | quarterly | yearly | irregular), None without one.
     time_frequency: str | None = None
+    #: Structural archetype (event_log | panel | sensor_timeseries | survey |
+    #: experiment | cross_section; None when data is insufficient) and the
+    #: short facts that decided it.
+    archetype: str | None = None
+    archetype_evidence: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -451,6 +594,8 @@ class DatasetProfile:
             "entity_col": self.entity_col,
             "rows_per_entity": self.rows_per_entity,
             "time_frequency": self.time_frequency,
+            "archetype": self.archetype,
+            "archetype_evidence": self.archetype_evidence,
         }
 
     def columns_of_kind(self, *kinds: str) -> list[ColumnProfile]:
@@ -478,8 +623,10 @@ class DatasetProfile:
         are sanitised before they reach a prompt. Warnings embed column
         names too, so they pass through the same sanitiser.
         """
+        from src.core.security import pii_redaction_enabled
         from src.core.security import sanitize_for_prompt as _sp
 
+        redact = pii_redaction_enabled()
         lines = [
             f"Data profile: {self.row_count:,} rows x {self.column_count} columns; "
             f"quality score {self.quality_score}/100; {self.duplicate_rows} duplicate rows.",
@@ -504,6 +651,9 @@ class DatasetProfile:
             nature.append(f"row grain: {', '.join(_sp(c) for c in self.grain)}")
         if nature:
             lines.append("Data nature: " + "; ".join(nature) + ".")
+        if self.archetype:
+            evidence = "; ".join(_sp(e, max_len=80) for e in self.archetype_evidence[:3])
+            lines.append(f"Data archetype: {self.archetype}" + (f" ({evidence})" if evidence else "") + ".")
         for match in self.domains:
             roles = ", ".join(f"{r}={_sp(c)}" for r, c in sorted(match.roles.items()))
             lines.append(
@@ -519,7 +669,7 @@ class DatasetProfile:
             head = c.semantic_role + (f"/{c.unit_hint}" if c.unit_hint else "")
             if c.aggregation:
                 head += f", agg={c.aggregation}"
-            facts = self._column_facts(c, _sp)
+            facts = self._column_facts(c, _sp, redact)
             lines.append(f"- {_sp(c.name)}: {head}" + (f" — {facts}" if facts else ""))
         rest = self.columns[max_columns:]
         if rest:
@@ -534,12 +684,16 @@ class DatasetProfile:
             )
         return "\n".join(lines)
 
-    def _column_facts(self, c: ColumnProfile, _sp: Any) -> str:
-        """Key facts for one column's prompt line, chosen by semantic role."""
+    def _column_facts(self, c: ColumnProfile, _sp: Any, redact: bool = True) -> str:
+        """Key facts for one column's prompt line, chosen by semantic role.
+        A PII column's values (top levels, ranges, dates) are withheld when
+        `redact` is on — only its name, kind of PII and missingness remain."""
         s = c.stats
         facts: list[str] = []
         role = c.semantic_role
-        if role == SEMANTIC_TIME:
+        if c.pii and redact:
+            facts.append(f"[redacted: {c.pii}]")
+        elif role == SEMANTIC_TIME:
             if "start" in s:
                 span = f"{_short_ts(s['start'])}..{_short_ts(s['end'])}"
                 facts.append(span + (f", {s['frequency']}" if s.get("frequency") else ""))
@@ -761,6 +915,7 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
     semantic_role = _infer_semantic_role(name, series, kind, nunique, flags)
     unit_hint = _infer_unit_hint(name, semantic_role, stats)
     aggregation = _infer_aggregation(name, semantic_role, unit_hint, stats)
+    pii = _detect_pii(name, series, kind, semantic_role)
 
     return ColumnProfile(
         name=name,
@@ -775,6 +930,7 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
         semantic_role=semantic_role,
         unit_hint=unit_hint,
         aggregation=aggregation,
+        pii=pii,
     )
 
 
@@ -908,6 +1064,132 @@ def _panel_group_cols(
         if float(coverage.median()) >= 0.5:
             result.append(col.name)
     return result
+
+
+def ordinal_scale_columns(columns: list[ColumnProfile]) -> list[ColumnProfile]:
+    """Rating-scale items: ordinal-role columns plus unnamed Likert-shaped
+    ones (a "q7" holding integers 1..5 is profiled as a measure). Likert
+    shape = integer range starting at 0/1 and topping out at a common scale
+    maximum, with no more levels than the range allows — and, since a lone
+    0..5 column may just be a small count, at least _SURVEY_MIN_ORDINALS
+    columns must share that exact scale."""
+    named = [c for c in columns if c.semantic_role == SEMANTIC_ORDINAL]
+    by_scale: dict[tuple[float, float], list[ColumnProfile]] = {}
+    for c in columns:
+        lo, hi = c.stats.get("min"), c.stats.get("max")
+        if (
+            c.semantic_role == SEMANTIC_MEASURE
+            and c.unit_hint is None
+            and lo in (0, 1)
+            and hi in _LIKERT_SCALE_MAX
+            and _ORDINAL_CARD_MIN <= c.nunique <= hi - lo + 1
+        ):
+            by_scale.setdefault((lo, hi), []).append(c)
+    shaped = [c for group in by_scale.values() if len(group) >= _SURVEY_MIN_ORDINALS for c in group]
+    return named + shaped
+
+
+def find_experiment_arm(columns: list[ColumnProfile], row_count: int) -> ColumnProfile | None:
+    """The experiment assignment column, if any: a dimension/flag whose name
+    tokens are all arm words (group, variant, arm, treatment, control,
+    cohort — plus qualifiers like test/ab), with 2-5 levels and no level
+    under 5% of rows. Shared by archetype detection and the agenda."""
+    triggers = (*_ARM_NAME_TOKENS, "ab", "experiment")
+    allowed = (*_ARM_NAME_TOKENS, *_ARM_QUALIFIER_TOKENS)
+    for c in columns:
+        tokens = _name_tokens(c.name)
+        if (
+            c.semantic_role not in (SEMANTIC_DIMENSION, SEMANTIC_FLAG)
+            or not 2 <= c.nunique <= _ARM_MAX_LEVELS
+            or not any(t in triggers for t in tokens)
+            or not all(t in allowed for t in tokens)
+        ):
+            continue
+        present = row_count - c.missing_count
+        if c.top_values and present > 0 and min(c.top_values.values()) / present < _ARM_MIN_LEVEL_SHARE:
+            continue
+        return c
+    return None
+
+
+def _infer_archetype(
+    columns: list[ColumnProfile],
+    row_count: int,
+    datetime_cols: list[str],
+    time_frequency: str | None,
+    entity_col: str | None,
+    rows_per_entity: float | None,
+    panel_group_cols: list[str],
+) -> tuple[str, list[str]]:
+    """Structural archetype plus the facts that decided it. Checked most
+    specific first: experiment, survey (scales), panel, event log, sensor
+    series, survey (categorical questionnaire), else cross-section."""
+    arm = find_experiment_arm(columns, row_count)
+    if arm is not None:
+        outcomes = [
+            c for c in columns
+            if c.name != arm.name and c.semantic_role in (SEMANTIC_MEASURE, SEMANTIC_FLAG, SEMANTIC_ORDINAL)
+        ]
+        if outcomes:
+            return ARCHETYPE_EXPERIMENT, [
+                f"assignment column '{arm.name}' with {arm.nunique} levels",
+                f"{len(outcomes)} outcome candidates (e.g. '{outcomes[0].name}')",
+            ]
+
+    scales = ordinal_scale_columns(columns)
+    if len(scales) >= _SURVEY_MIN_ORDINALS:
+        return ARCHETYPE_SURVEY, [
+            f"{len(scales)} ordinal/rating-scale columns",
+            f"e.g. {', '.join(repr(c.name) for c in scales[:3])}",
+        ]
+
+    time_col = datetime_cols[0] if datetime_cols else None
+    regular = time_frequency in _REGULAR_FREQUENCIES
+    if time_col and panel_group_cols and regular:
+        return ARCHETYPE_PANEL, [
+            f"'{panel_group_cols[0]}' observed at most '{time_col}' timestamps",
+            f"{time_frequency} frequency",
+        ]
+
+    if time_col and entity_col and rows_per_entity and rows_per_entity > _ENTITY_REPEAT_THRESHOLD:
+        return ARCHETYPE_EVENT_LOG, [
+            f"{rows_per_entity:.1f} rows per {entity_col}",
+            f"'{time_col}' timestamps {time_frequency or 'sparse'}, not a shared grid across entities",
+        ]
+
+    dims = [c for c in columns if c.semantic_role == SEMANTIC_DIMENSION and c.kind == "categorical"]
+    measures = [c for c in columns if c.semantic_role == SEMANTIC_MEASURE]
+    time_profile = next((c for c in columns if c.name == time_col), None)
+    unique_instants = time_profile is not None and time_profile.nunique >= 0.95 * row_count
+    if (
+        time_col
+        and row_count >= MIN_TIME_SERIES_ROWS
+        and entity_col is None
+        and (regular or (unique_instants and not dims))
+        and len(dims) <= 2
+        and len(measures) >= max(1, (len(columns) - 1) // 2)
+    ):
+        return ARCHETYPE_SENSOR, [
+            f"'{time_col}' {time_frequency or 'timestamped'} axis",
+            f"{len(measures)} numeric measures, {len(dims)} categorical columns",
+        ]
+
+    low_card = [c for c in dims if 2 <= c.nunique <= _SURVEY_MAX_LEVELS]
+    respondent = next((c for c in columns if c.kind == "identifier"), None)
+    if (
+        respondent is not None
+        and len(low_card) >= _SURVEY_MIN_CATEGORICALS
+        and len(low_card) >= _SURVEY_MIN_CATEGORICAL_SHARE * len(columns)
+    ):
+        return ARCHETYPE_SURVEY, [
+            f"{len(low_card)} of {len(columns)} columns are low-cardinality categoricals",
+            f"respondent key '{respondent.name}'",
+        ]
+
+    key = next((c.name for c in columns if c.kind == "identifier" and c.nunique == row_count), None)
+    evidence = [f"one row per '{key}'"] if key else []
+    evidence.append("no dominant time axis" if not time_col else f"'{time_col}' is not a regular series axis")
+    return ARCHETYPE_CROSS_SECTION, evidence
 
 
 def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = None) -> DatasetProfile:
@@ -1055,6 +1337,23 @@ def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = No
         (c.stats.get("frequency") for c in columns if c.kind == "datetime"), None
     )
 
+    archetype: str | None = None
+    archetype_evidence: list[str] = []
+    if is_sufficient:
+        archetype, archetype_evidence = _infer_archetype(
+            columns, row_count, datetime_cols, time_frequency,
+            entity_col, rows_per_entity, panel_group_cols,
+        )
+
+    pii_cols = [c for c in columns if c.pii]
+    if pii_cols:
+        listed = ", ".join(f"'{c.name}' ({c.pii})" for c in pii_cols[:6])
+        more = f" and {len(pii_cols) - 6} more" if len(pii_cols) > 6 else ""
+        warnings.append(
+            f"Possible personal data (PII) in {listed}{more} — values are withheld "
+            "from LLM prompts unless REDACT_PII=false."
+        )
+
     return DatasetProfile(
         row_count=row_count,
         column_count=len(df.columns),
@@ -1076,4 +1375,6 @@ def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = No
         entity_col=entity_col,
         rows_per_entity=rows_per_entity,
         time_frequency=time_frequency,
+        archetype=archetype,
+        archetype_evidence=archetype_evidence,
     )

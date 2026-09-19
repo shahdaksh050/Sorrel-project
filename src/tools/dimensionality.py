@@ -17,7 +17,7 @@ import numpy as np
 from src.core.findings import Finding
 from src.core.profiler import profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
-from src.tools.clustering import _select_cluster_features
+from src.tools.clustering import _per_entity_features, _select_cluster_features
 from src.tools.data_processing import _read_df
 
 if TYPE_CHECKING:
@@ -57,7 +57,10 @@ class DimensionalityAnalysisTool(BaseTool):
         df = _read_df(file_path)
         if target_column and target_column in df.columns:
             df = df.drop(columns=[target_column])
-        features = _select_cluster_features(df, profile_dataframe(df), None)
+        profile = profile_dataframe(df)
+        features, unit_of_analysis = _per_entity_features(
+            _select_cluster_features(df, profile, None), df, profile
+        )
 
         if features.shape[1] < 2:
             raise ToolExecutionError(
@@ -68,7 +71,9 @@ class DimensionalityAnalysisTool(BaseTool):
         filled = features.fillna(features.median(numeric_only=True))
 
         # ---- Multicollinearity screen ----
-        corr = filled.corr(method="pearson")
+        # Pairwise-complete on the raw values: median-filled rows would
+        # dilute every correlation toward zero.
+        corr = features.corr(method="pearson")
         cols = corr.columns.tolist()
         high_corr_pairs: list[dict[str, Any]] = []
         for i, ca in enumerate(cols):
@@ -104,6 +109,7 @@ class DimensionalityAnalysisTool(BaseTool):
             "variance_threshold": variance_threshold,
             "high_correlation_pairs": high_corr_pairs,
             "multicollinearity_risk": bool(high_corr_pairs),
+            "unit_of_analysis": unit_of_analysis,
         }
 
     def findings(

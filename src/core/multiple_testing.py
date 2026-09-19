@@ -12,7 +12,11 @@ it so the two reports agree.
 """
 from __future__ import annotations
 
-from typing import Any
+import math
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.core.findings import Finding
 
 #: Default significance level — matches SelectStatisticalTestTool's default
 #: alpha; a run using a different per-call alpha still gets one consistent
@@ -35,3 +39,35 @@ def apply_benjamini_hochberg(
         {**t, "p_adjusted": round(float(adj), 6), "significant_after_correction": bool(rej)}
         for t, adj, rej in zip(pvalue_tests, p_adjusted, reject, strict=True)
     ]
+
+
+def adjust_findings_run_level(findings: list[Finding], alpha: float = DEFAULT_ALPHA) -> int:
+    """
+    One BH family per run: every finding carrying a p-value, whichever tool
+    produced it. The tool's own (within-tool) correction is kept once in
+    evidence["p_adjusted_within_tool"] before the first overwrite; the
+    finding's `p_adjusted` becomes the stricter of the run-level and
+    within-tool values (a correction never makes a finding look more
+    significant than its own tool judged it), which ranking reads.
+    Returns the family size.
+    """
+    family = [
+        f for f in findings
+        if isinstance(f.p_value, (int, float)) and not isinstance(f.p_value, bool)
+        and math.isfinite(f.p_value) and 0.0 <= f.p_value <= 1.0
+    ]
+    if not family:
+        return 0
+    adjusted = apply_benjamini_hochberg([{"p_value": f.p_value} for f in family], alpha=alpha)
+    for f, row in zip(family, adjusted, strict=True):
+        if not isinstance(f.evidence, dict):
+            f.evidence = {}
+        if "p_adjusted_within_tool" not in f.evidence:
+            f.evidence["p_adjusted_within_tool"] = f.p_adjusted
+        within = f.evidence["p_adjusted_within_tool"]
+        f.p_adjusted = (
+            max(row["p_adjusted"], float(within))
+            if isinstance(within, (int, float)) and not isinstance(within, bool)
+            else row["p_adjusted"]
+        )
+    return len(family)

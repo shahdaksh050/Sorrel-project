@@ -49,9 +49,9 @@ from statsmodels.stats.proportion import proportion_confint, proportions_ztest
 from src.core.findings import Finding
 from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.profiler import profile_dataframe
+from src.core.stats_utils import aggregate_to_entity, measure_aggregation, repeated_entity
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
-from src.tools.time_series import measure_aggregation
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
@@ -84,6 +84,13 @@ _ALPHA = 0.05
 _MIN_LIFT_FOR_FINDING = 0.05
 #: The same floor for difference-scale comparisons: a "small" Cohen's d.
 _MIN_D_FOR_FINDING = 0.2
+_EFFECT_FLOORS = {"cohens_d": _MIN_D_FOR_FINDING, "lift": _MIN_LIFT_FOR_FINDING}
+
+#: Simpson's-paradox check: a stratum counts only when both the level and
+#: the rest have at least this many units in it, and an auto-picked
+#: stratifier must be a small dimension (2-8 levels).
+_MIN_STRATUM_N = 20
+_MAX_STRATIFIER_CARD = 8
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
@@ -144,6 +151,55 @@ def _is_rate_measure(df: pd.DataFrame, measure_column: str, profile: DatasetProf
         return False
     rounded = {round(float(v), 6) for v in vals}
     return rounded <= {0.0, 1.0}
+
+
+def _column(profile: DatasetProfile, name: str) -> ColumnProfile | None:
+    return next((c for c in profile.columns if c.name == name), None)
+
+
+def _entity_agg(is_rate: bool, cp: ColumnProfile | None) -> str:
+    """How rows combine into one value per entity: a flag becomes the
+    entity's rate and a score its average; only a true measure may sum."""
+    if is_rate or cp is None or cp.semantic_role != "measure":
+        return "mean"
+    return measure_aggregation(cp)
+
+
+def _level_and_rest(
+    work: pd.DataFrame, measure: str, dimension: str, level: Any, entity_col: str | None, agg: str
+) -> tuple[pd.Series, pd.Series]:
+    """Measure values inside `level` and in the rest of the data — one value
+    per entity on each side when rows repeat per entity. An entity present
+    on both sides contributes to both, so the two samples are then only
+    approximately independent."""
+    mask = work[dimension] == level
+    if entity_col is None:
+        return work.loc[mask, measure], work.loc[~mask, measure]
+    return (
+        aggregate_to_entity(work[mask], entity_col, measure, agg)[measure],
+        aggregate_to_entity(work[~mask], entity_col, measure, agg)[measure],
+    )
+
+
+def _effect(level_vals: pd.Series, rest_vals: pd.Series, by_difference: bool) -> float | None:
+    """Cohen's d (difference scale) or lift (ratio scale) of level vs rest;
+    None when undefined (no variance, or a zero baseline)."""
+    level_mean, rest_mean = float(level_vals.mean()), float(rest_vals.mean())
+    if by_difference:
+        n, n_rest = len(level_vals), len(rest_vals)
+        pooled_var = (
+            (n - 1) * float(level_vals.var(ddof=1)) + (n_rest - 1) * float(rest_vals.var(ddof=1))
+        ) / (n + n_rest - 2)
+        return (level_mean - rest_mean) / pooled_var ** 0.5 if pooled_var > 0 else None
+    return level_mean / rest_mean - 1.0 if rest_mean != 0 else None
+
+
+def _cramers_v(df: pd.DataFrame, a: str, b: str) -> float:
+    table = pd.crosstab(df[a], df[b])
+    if min(table.shape) < 2:
+        return 0.0
+    chi2 = float(stats.chi2_contingency(table)[0])
+    return float((chi2 / (table.to_numpy().sum() * (min(table.shape) - 1))) ** 0.5)
 
 
 def _format_value(value: float, is_rate: bool, unit_hint: str | None) -> str:
@@ -232,15 +288,25 @@ class SegmentComparisonTool(BaseTool):
         return pairs[:_MAX_PAIRS]
 
     def _compare_one(
-        self, df: pd.DataFrame, measure_column: str, dimension_column: str, profile: DatasetProfile
+        self,
+        df: pd.DataFrame,
+        measure_column: str,
+        dimension_column: str,
+        profile: DatasetProfile,
+        entity_col: str | None = None,
     ) -> list[dict[str, Any]]:
         is_rate = _is_rate_measure(df, measure_column, profile)
-        cp = next((c for c in profile.columns if c.name == measure_column), None)
+        cp = _column(profile, measure_column)
         unit_hint = cp.unit_hint if cp else None
+        # Repeated rows per entity are not independent evidence: test one
+        # value per entity instead (a flag becomes the entity's rate). Not
+        # when the dimension IS the entity — each level is then one unit.
+        entity = entity_col if entity_col not in (measure_column, dimension_column) else None
+        agg = _entity_agg(is_rate, cp)
 
-        work = df[[dimension_column, measure_column]].copy()
+        work = df[[dimension_column, measure_column] + ([entity] if entity else [])].copy()
         work[measure_column] = pd.to_numeric(work[measure_column], errors="coerce")
-        work = work.dropna(subset=[dimension_column, measure_column])
+        work = work.dropna()
         if work.empty:
             return []
 
@@ -256,45 +322,46 @@ class SegmentComparisonTool(BaseTool):
         # REST of the data (`rest_vals` below), not this overall figure.
         # Using the overall mean as the divisor mixes the segment into its
         # own baseline and drifts from what the p-value actually tests.
-        overall_mean = float(work[measure_column].mean())
+        overall_mean = float(
+            aggregate_to_entity(work, entity, measure_column, agg)[measure_column].mean()
+            if entity
+            else work[measure_column].mean()
+        )
 
         counts = work[dimension_column].value_counts()
         levels = counts.head(_MAX_LEVELS_TESTED).index.tolist()
 
         out: list[dict[str, Any]] = []
         for level in levels:
-            mask = work[dimension_column] == level
-            level_vals = work.loc[mask, measure_column]
-            rest_vals = work.loc[~mask, measure_column]
+            level_vals, rest_vals = _level_and_rest(
+                work, measure_column, dimension_column, level, entity, agg
+            )
             n, n_rest = len(level_vals), len(rest_vals)
             if n < _MIN_LEVEL_N or n_rest < _MIN_LEVEL_N:
                 continue
 
             baseline_mean = float(rest_vals.mean())
             level_mean = float(level_vals.mean())
+            # None: no variance (difference scale) or a zero rest-of-data
+            # baseline (ratio/lift undefined).
+            maybe_effect = _effect(level_vals, rest_vals, by_difference)
+            if maybe_effect is None:
+                continue
+            effect = maybe_effect
             ratio: float | None
             lift: float | None
             if by_difference:
-                pooled_var = (
-                    (n - 1) * float(level_vals.var(ddof=1)) + (n_rest - 1) * float(rest_vals.var(ddof=1))
-                ) / (n + n_rest - 2)
-                if not pooled_var > 0:
-                    continue
-                ratio, lift = None, None
-                effect = (level_mean - baseline_mean) / pooled_var ** 0.5
-                effect_kind = "cohens_d"
+                ratio, lift, effect_kind = None, None, "cohens_d"
             else:
-                if baseline_mean == 0:
-                    continue  # ratio/lift undefined vs a zero rest-of-data baseline
-                ratio = level_mean / baseline_mean
-                lift = ratio - 1.0
-                effect, effect_kind = lift, "lift"
+                ratio, lift, effect_kind = level_mean / baseline_mean, effect, "lift"
 
             p_value: float | None
             ci_lo: float | None
             ci_hi: float | None
 
-            if is_rate:
+            # Per-entity rates are fractions, not 0/1 outcomes, so they take
+            # the t-test/t-interval path below rather than the proportion test.
+            if is_rate and entity is None:
                 succ_level = int(level_vals.sum())
                 succ_rest = int(rest_vals.sum())
                 try:
@@ -345,19 +412,96 @@ class SegmentComparisonTool(BaseTool):
                 "p_value": p_value,
                 "ci_lower": round(ci_lo, 6) if ci_lo is not None else None,
                 "ci_upper": round(ci_hi, 6) if ci_hi is not None else None,
+                "unit_of_analysis": entity or "row",
             })
         return out
+
+    def _pick_stratifier(
+        self, df: pd.DataFrame, profile: DatasetProfile, c: dict[str, Any], entity_col: str | None
+    ) -> str | None:
+        """The small dimension most associated with the compared dimension
+        (Cramér's V) — the likeliest confounder of a level-vs-rest effect."""
+        excluded = {c["measure"], c["dimension"], entity_col}
+        candidates = [
+            col.name for col in _pick_dimension_columns(profile)
+            if col.name not in excluded and col.nunique <= _MAX_STRATIFIER_CARD
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda s: _cramers_v(df, c["dimension"], s))
+
+    def _stratify(
+        self,
+        df: pd.DataFrame,
+        c: dict[str, Any],
+        stratify_by: str,
+        profile: DatasetProfile,
+        entity_col: str | None,
+    ) -> dict[str, Any] | None:
+        """Simpson's-paradox check: the same level-vs-rest effect computed
+        within each stratum of `stratify_by`. None when fewer than two
+        strata have enough data on both sides to judge."""
+        measure, dimension = c["measure"], c["dimension"]
+        if stratify_by in (measure, dimension):
+            return None
+        entity = entity_col if entity_col not in (measure, dimension, stratify_by) else None
+        agg = _entity_agg(c["is_rate"], _column(profile, measure))
+        work = df[[dimension, measure, stratify_by] + ([entity] if entity else [])].copy()
+        work[measure] = pd.to_numeric(work[measure], errors="coerce")
+        work = work.dropna()
+        # Comparison rows carry the level as a string.
+        work[dimension] = work[dimension].astype(str)
+        by_difference = c["effect_kind"] == "cohens_d"
+
+        per_stratum: list[dict[str, Any]] = []
+        for stratum, cell in work.groupby(stratify_by, observed=True):
+            level_vals, rest_vals = _level_and_rest(cell, measure, dimension, c["level"], entity, agg)
+            n, n_rest = len(level_vals), len(rest_vals)
+            if n < _MIN_STRATUM_N or n_rest < _MIN_STRATUM_N:
+                continue
+            effect = _effect(level_vals, rest_vals, by_difference)
+            if effect is not None:
+                per_stratum.append(
+                    {"stratum": str(stratum), "effect": round(effect, 4), "n": n, "n_rest": n_rest}
+                )
+        if len(per_stratum) < 2:
+            return None
+
+        # Weighted by effective sample size n*n_rest/(n+n_rest): a stratum
+        # with a tiny level or a tiny rest carries little information.
+        weights = [s["n"] * s["n_rest"] / (s["n"] + s["n_rest"]) for s in per_stratum]
+        pooled = sum(w * s["effect"] for w, s in zip(weights, per_stratum, strict=True)) / sum(weights)
+        consistent = all((s["effect"] > 0) == (c["effect"] > 0) for s in per_stratum)
+        vanishes = abs(pooled) < _EFFECT_FLOORS[c["effect_kind"]]
+        result: dict[str, Any] = {
+            "stratify_by": stratify_by,
+            "per_stratum": per_stratum,
+            "consistent": consistent,
+            "pooled_effect": round(pooled, 4),
+        }
+        if not consistent or vanishes:
+            result["caveat"] = (
+                f"Effect does not hold within {stratify_by} strata "
+                f"({'direction reverses' if not consistent else 'it shrinks to negligible'}) "
+                "— possible confounding."
+            )
+        return result
 
     def execute(  # type: ignore[override]
         self,
         file_path: str,
         measure_column: str | None = None,
         dimension_column: str | None = None,
+        stratify_by: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         df = _read_df(file_path)
         if df.empty:
             raise ToolExecutionError("Dataset has no rows.")
+        if stratify_by and (stratify_by not in df.columns or df[stratify_by].nunique(dropna=True) < 2):
+            raise ToolExecutionError(
+                f"stratify_by '{stratify_by}' must be a column with at least 2 distinct values."
+            )
 
         if measure_column and measure_column not in df.columns:
             raise ToolExecutionError(f"Column '{measure_column}' not found in dataset.")
@@ -384,9 +528,10 @@ class SegmentComparisonTool(BaseTool):
                 "and/or dimension_column explicitly."
             )
 
+        entity_col = repeated_entity(profile, df)
         comparisons: list[dict[str, Any]] = []
         for measure, dimension in pairs:
-            comparisons.extend(self._compare_one(df, measure, dimension, profile))
+            comparisons.extend(self._compare_one(df, measure, dimension, profile, entity_col))
 
         if not comparisons:
             raise ToolExecutionError(
@@ -404,14 +549,38 @@ class SegmentComparisonTool(BaseTool):
         all_rows = corrected + untestable
         # Lift and Cohen's d are on different scales; rank each as a multiple
         # of its own triviality floor so neither kind wins by units alone.
-        floors = {"cohens_d": _MIN_D_FOR_FINDING, "lift": _MIN_LIFT_FOR_FINDING}
         all_rows.sort(
-            key=lambda c: abs(c["effect"]) / floors[c["effect_kind"]] * c["n"], reverse=True
+            key=lambda c: abs(c["effect"]) / _EFFECT_FLOORS[c["effect_kind"]] * c["n"], reverse=True
         )
 
-        row_noun = _row_noun(df)
+        # Simpson's-paradox check on the comparisons that can become
+        # findings: all of them when the caller names a stratifier,
+        # otherwise the top one against the small dimension most associated
+        # with its segmenting dimension.
+        reportable = [
+            c for c in all_rows
+            if c["significant_after_correction"]
+            and abs(c["effect"]) >= _EFFECT_FLOORS[c["effect_kind"]]
+        ]
+        if stratify_by:
+            to_stratify = [(c, stratify_by) for c in reportable]
+        else:
+            top = reportable[0] if reportable else None
+            auto = self._pick_stratifier(df, profile, top, entity_col) if top else None
+            to_stratify = [(top, auto)] if top and auto else []
+        for c, stratum_col in to_stratify:
+            stratified = self._stratify(df, c, stratum_col, profile, entity_col)
+            if stratified:
+                c["stratified"] = stratified
+
+        # n counts entities when rows were aggregated per entity.
+        row_noun = _row_noun(df[[entity_col]] if entity_col else df)
+        if entity_col and row_noun == "rows":
+            row_noun = "entities"
         best = all_rows[0]
         summary = self._headline(best, row_noun)
+        if best.get("stratified", {}).get("caveat"):
+            summary += f" {best['stratified']['caveat']}"
 
         return {
             "summary": summary,
@@ -420,6 +589,8 @@ class SegmentComparisonTool(BaseTool):
             "alpha": _ALPHA,
             "comparisons": all_rows,
             "row_noun": row_noun,
+            "unit_of_analysis": entity_col or "row",
+            "stratify_by": stratify_by or (to_stratify[0][1] if to_stratify else None),
         }
 
     @staticmethod
@@ -463,6 +634,7 @@ class SegmentComparisonTool(BaseTool):
             if effect is None or abs(effect) < floor:
                 continue
             headline = self._headline({**c, "unit_hint": c.get("unit_hint")}, row_noun)
+            stratum_caveat = (c.get("stratified") or {}).get("caveat")
             results.append(Finding(
                 finding_id=f"segment_lift_{i}_{_slug(c['measure'])}_{_slug(c['dimension'])}_{_slug(c['level'])}",
                 kind="segment_lift",
@@ -485,6 +657,7 @@ class SegmentComparisonTool(BaseTool):
                 p_adjusted=c["p_adjusted"],
                 confidence=min(1.0, c["n"] / 200.0),
                 surprise=min(1.0, abs(effect)),
+                caveats=[stratum_caveat] if stratum_caveat else [],
             ))
         return results
 
@@ -509,6 +682,16 @@ class SegmentComparisonTool(BaseTool):
                 "description": (
                     "Categorical/flag column to segment by (2-20 levels). "
                     "Auto-selected when omitted."
+                ),
+                "required": False,
+            },
+            "stratify_by": {
+                "type": "string",
+                "description": (
+                    "Optional dimension to check each level-vs-rest effect within "
+                    "(Simpson's-paradox / confounding check). Reported per comparison "
+                    "as 'stratified'. When omitted, the top significant comparison is "
+                    "checked against the most related 2-8 level dimension automatically."
                 ),
                 "required": False,
             },

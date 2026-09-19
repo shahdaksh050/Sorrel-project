@@ -144,8 +144,9 @@ def _prepare_features(
             features[f"{col}_dayofweek"] = dt.dt.dayofweek.fillna(-1).astype(int)
             features[f"{col}_hour"] = dt.dt.hour.fillna(-1).astype(int)
             features[f"{col}_is_weekend"] = dt.dt.dayofweek.isin([5, 6]).astype(int)
-            fill_days = days_since_min.median()
-            features[f"{col}_days_since_min"] = days_since_min.fillna(fill_days).astype(float)
+            # Left NaN: the Pipeline's SimpleImputer fills it from the
+            # training fold only (a whole-frame median would leak the test fold).
+            features[f"{col}_days_since_min"] = days_since_min.astype(float)
             features = features.drop(columns=[col])
             treatments.append(
                 f"Expanded datetime column '{col}' into year/month/day/dayofweek/"
@@ -409,7 +410,10 @@ def _split_train_test(
 
 #: A feature explaining at least this much of the target is reported as
 #: leakage rather than as a finding. Set just below 1.0 because the cases
-#: that matter are near-deterministic, not merely strong.
+#: that matter are near-deterministic, not merely strong. For classification
+#: the bar also rises with the majority-class rate (see
+#: _detect_target_leakage): on a 99.5%-one-class target every feature is
+#: already >= 99% "pure".
 _LEAKAGE_PURITY = 0.99
 
 #: Cross-validated score at or above which the result is reported as a data
@@ -445,6 +449,10 @@ def _detect_target_leakage(
     warnings: list[str] = []
     if len(X) == 0 or y.nunique(dropna=True) < 2:
         return warnings
+    # Purity a feature gets for free by predicting the majority class; a
+    # leak must close at least half the remaining gap to 1.0.
+    majority_rate = float(y.value_counts(normalize=True).iloc[0])
+    purity_bar = max(_LEAKAGE_PURITY, majority_rate + 0.5 * (1.0 - majority_rate))
 
     for column in X.columns:
         feature = X[column]
@@ -463,7 +471,7 @@ def _detect_target_leakage(
                     .transform(lambda g: g.value_counts().iloc[0] / len(g))
                     .mean()
                 )
-                if float(purity) >= _LEAKAGE_PURITY:
+                if float(purity) >= purity_bar:
                     warnings.append(
                         f"'{column}' determines the target in "
                         f"{float(purity) * 100:.1f}% of rows — the model is "
@@ -1483,6 +1491,7 @@ class EvaluateModelTool(BaseTool):
                 "class_labels": class_labels,
                 "top_drivers": drivers,
                 "driver_narrative": driver_narrative,
+                **self._held_out_curves(model, X_test, y_test, y_pred_test, class_labels),
             }
         else:
             from sklearn.metrics import mean_squared_error, r2_score
@@ -1504,6 +1513,45 @@ class EvaluateModelTool(BaseTool):
                 "top_drivers": drivers,
                 "driver_narrative": driver_narrative,
             }
+
+    #: ROC points kept for the dashboard — enough for a smooth curve, small
+    #: enough to inline into dashboard.json and the HTML report.
+    _MAX_ROC_POINTS = 100
+
+    @classmethod
+    def _held_out_curves(
+        cls,
+        model: Any,
+        X_test: pd.DataFrame,
+        y_test: pd.Series,
+        y_pred_test: Any,
+        class_labels: list[str],
+    ) -> dict[str, Any]:
+        """Confusion matrix (rows = actual, columns = predicted, ordered like
+        `class_labels`) and, for a binary target, ROC points + AUC — all on the
+        held-out split. Never fails evaluation."""
+        from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve
+
+        out: dict[str, Any] = {}
+        try:
+            labels = list(range(len(class_labels))) if class_labels else sorted(pd.Series(y_test).unique())
+            out["confusion_matrix"] = confusion_matrix(y_test, y_pred_test, labels=labels).tolist()
+        except Exception:
+            pass
+        try:
+            if hasattr(model, "predict_proba") and pd.Series(y_test).nunique() == 2:
+                proba = model.predict_proba(X_test)[:, 1]
+                positive = sorted(pd.Series(y_test).unique())[-1]
+                fpr, tpr, _ = roc_curve(y_test, proba, pos_label=positive)
+                if len(fpr) > cls._MAX_ROC_POINTS:
+                    keep = np.linspace(0, len(fpr) - 1, cls._MAX_ROC_POINTS).astype(int)
+                    fpr, tpr = fpr[keep], tpr[keep]
+                out["roc_curve"] = {"fpr": [round(float(v), 4) for v in fpr],
+                                    "tpr": [round(float(v), 4) for v in tpr]}
+                out["roc_auc"] = round(float(roc_auc_score(y_test == positive, proba)), 4)
+        except Exception:
+            pass
+        return out
 
     @staticmethod
     def _explain_drivers(
@@ -1580,6 +1628,7 @@ class EvaluateModelTool(BaseTool):
                     entry: dict[str, Any] = {
                         "feature": feature,
                         "importance": round(importance, 4),
+                        "importance_std": round(float(perm.importances_std[idx]), 4),
                         "kind": "numeric",
                         "direction": direction,
                         "correlation": round(corr, 4),
@@ -1628,6 +1677,7 @@ class EvaluateModelTool(BaseTool):
                 entry = {
                     "feature": feature,
                     "importance": round(importance, 4),
+                    "importance_std": round(float(perm.importances_std[idx]), 4),
                     "kind": "categorical",
                     "direction": None,
                     "level_effect": level_effect,

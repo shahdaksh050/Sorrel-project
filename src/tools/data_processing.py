@@ -46,6 +46,22 @@ _CORR_FINDING_THRESHOLD = 0.3
 #: Cap on how many top correlation pairs become Findings per run.
 _CORR_TOP_N = 3
 
+#: |r| floor for promoting a feature<->target correlation to a Finding
+#: (eta-squared targets use its square, the same share of variance).
+_TARGET_CORR_FINDING_THRESHOLD = 0.2
+
+#: Definitional relationships (correlation_analysis): |r| at/above this is
+#: the same quantity recorded twice; a column matching a product/sum/ratio
+#: of two others within _RELATION_RTOL on _RELATION_MATCH_SHARE of sampled
+#: complete rows is a formula (total = qty x price), not a finding. The
+#: three-column search is O(k^3), so it only runs up to _MAX_RELATION_COLS.
+_IDENTITY_R = 0.995
+_RELATION_RTOL = 0.01
+_RELATION_MATCH_SHARE = 0.99
+_RELATION_SAMPLE = 2_000
+_MIN_RELATION_ROWS = 10
+_MAX_RELATION_COLS = 15
+
 
 def _resolve_write_path(out_dir: Path, filename: str) -> Path:
     """Join filename under out_dir via resolve_output_path (P2.3) so a
@@ -215,27 +231,34 @@ class IngestDatasetTool(BaseTool):
 
 class CleanDataTool(BaseTool):
     """
-    Handle missing values and basic data cleaning.
+    Basic data cleaning (type repair via _read_df) with missing values left
+    as NaN unless an imputation strategy is explicitly requested.
 
-    Writes a cleaned copy to disk and returns the new file path —
+    Every downstream tool reads this file. Imputed values are not data: a
+    median fill piles fake rows onto one value, shrinks variance and makes
+    every test that follows over-confident, so analysis tools handle NaN
+    themselves (complete-case per analysis; ML imputes inside its CV
+    pipeline). Writes a cleaned copy to disk and returns the new file path —
     downstream tools should use `cleaned_file_path` as their input.
     """
 
     name = "clean_data"
     description = (
-        "Clean a dataset by handling missing values using a specified strategy. "
-        "Strategies: 'mean', 'median', 'mode', 'drop_rows', 'forward_fill'. "
+        "Clean a dataset (type repair) and report missing values, duplicate rows "
+        "and constant columns. Missing values are left as NaN by default "
+        "(strategy 'none'); pass 'mean', 'median', 'mode', 'drop'/'drop_rows' or "
+        "'forward_fill' only when imputation is explicitly wanted. "
         "Returns cleaned_file_path for use by subsequent tools."
     )
     uses_cleaned_file = False  # this IS the tool that produces cleaned_file_path
     output_subdir = "data"
 
-    STRATEGIES = frozenset({"mean", "median", "mode", "drop_rows", "forward_fill"})
+    STRATEGIES = frozenset({"none", "mean", "median", "mode", "drop", "drop_rows", "forward_fill"})
 
     def execute(  # type: ignore[override]
         self,
         file_path: str,
-        strategy: str = "median",
+        strategy: str = "none",
         target_column: str | None = None,
         output_dir: str | None = None,
         **_: Any,
@@ -249,8 +272,13 @@ class CleanDataTool(BaseTool):
         df = _read_df(file_path)
         if df.empty:
             raise ToolExecutionError("Dataset has no rows — nothing to clean.")
+        if strategy == "drop":
+            strategy = "drop_rows"
         original_shape = df.shape
         missing_before = int(df.isnull().sum().sum())
+        missing_by_column = {str(c): int(n) for c, n in df.isnull().sum().items() if n > 0}
+        duplicate_rows = int(df.duplicated().sum())
+        constant_columns = [str(c) for c in df.columns if df[c].nunique(dropna=True) <= 1]
 
         # Exclude target column from imputation
         cols_to_clean = [c for c in df.columns if c != target_column]
@@ -269,8 +297,8 @@ class CleanDataTool(BaseTool):
             if df.empty:
                 raise ToolExecutionError(
                     "drop_rows removed every row (every row has at least one "
-                    "missing value). Re-run clean_data with strategy 'median' "
-                    "or 'mode' instead."
+                    "missing value). Re-run clean_data with strategy 'none' — "
+                    "analysis tools handle missing values per analysis."
                 )
         elif strategy == "forward_fill":
             subset = subset.ffill()
@@ -293,9 +321,13 @@ class CleanDataTool(BaseTool):
 
         return {
             "summary": (
-                f"Cleaned {missing_before - missing_after} missing values "
-                f"using '{strategy}'. Shape: {original_shape} → {df.shape}. "
-                f"Saved to '{out_path}'."
+                (
+                    f"Left {missing_before} missing values as NaN (no imputation). "
+                    if strategy == "none"
+                    else f"Cleaned {missing_before - missing_after} missing values using '{strategy}'. "
+                )
+                + f"{duplicate_rows} duplicate row(s), {len(constant_columns)} constant column(s). "
+                f"Shape: {original_shape} → {df.shape}. Saved to '{out_path}'."
             ),
             "cleaned_file_path": str(out_path),
             "rows_before": original_shape[0],
@@ -303,6 +335,9 @@ class CleanDataTool(BaseTool):
             "missing_before": missing_before,
             "missing_after": missing_after,
             "strategy_used": strategy,
+            "missing_by_column": missing_by_column,
+            "duplicate_rows": duplicate_rows,
+            "constant_columns": constant_columns,
         }
 
     def get_schema(self) -> dict[str, Any]:
@@ -310,7 +345,10 @@ class CleanDataTool(BaseTool):
             "file_path": {"type": "string", "description": "Path to the dataset file.", "required": True},
             "strategy": {
                 "type": "string",
-                "description": "Imputation strategy: mean | median | mode | drop_rows | forward_fill.",
+                "description": (
+                    "Missing-value handling: none (default — leave NaN; analysis tools "
+                    "use complete cases) | mean | median | mode | drop | forward_fill."
+                ),
                 "required": False,
             },
             "target_column": {
@@ -506,7 +544,10 @@ class DetectOutliersTool(BaseTool):
             mask = pd.Series(False, index=df.index)
             mask.loc[clean.index[preds == -1]] = True
             total_iso = int((preds == -1).sum())
-            pct_iso = round(total_iso / max(row_count, 1) * 100, 2)
+            # Complete rows only (missing values are no longer imputed
+            # upstream), so rates are over the rows actually scored.
+            report["n_rows_scored"] = len(clean)
+            pct_iso = round(total_iso / max(len(clean), 1) * 100, 2)
             # Isolation Forest is multivariate — it flags rows, not columns —
             # so there is no per-feature decomposition of the count. Every
             # included column reports the same (global) figure, tagged so
@@ -527,7 +568,9 @@ class DetectOutliersTool(BaseTool):
 
         total = report.get("total_outliers", 0)
         report["row_count"] = row_count
-        report["outlier_percentage"] = round(total / max(row_count, 1) * 100, 2)
+        report["outlier_percentage"] = round(
+            total / max(report.get("n_rows_scored", row_count), 1) * 100, 2
+        )
         report["per_column_outliers"] = per_column_outliers
         report["per_column_detail"] = per_column_detail
         report["method_unsuitable_columns"] = [
@@ -634,6 +677,57 @@ class DetectOutliersTool(BaseTool):
         }
 
 
+def _definitional_pairs(num_df: pd.DataFrame, corr: pd.DataFrame) -> dict[frozenset[str], str]:
+    """Column pairs whose correlation is true by construction, mapped to
+    the reason: identity-like (|r| >= _IDENTITY_R), or one column being the
+    product/sum/ratio of two others (both operands pair with the result)."""
+    from itertools import combinations
+
+    cols = [str(c) for c in corr.columns]
+    found: dict[frozenset[str], str] = {}
+    for i, a in enumerate(cols):
+        for b in cols[i + 1:]:
+            r = float(corr.loc[a, b])
+            if not np.isnan(r) and abs(r) >= _IDENTITY_R:
+                found[frozenset((a, b))] = f"|r| >= {_IDENTITY_R}: the same quantity recorded twice"
+    if not 3 <= len(cols) <= _MAX_RELATION_COLS:
+        return found
+    sample = num_df[cols].dropna()
+    if len(sample) < _MIN_RELATION_ROWS:
+        return found
+    if len(sample) > _RELATION_SAMPLE:
+        sample = sample.sample(n=_RELATION_SAMPLE, random_state=42)
+    values = {c: sample[c].to_numpy(dtype=float) for c in cols}
+
+    for c in cols:
+        target = values[c]
+        if float(np.std(target)) == 0:
+            continue
+        tol = 1e-9 + _RELATION_RTOL * np.abs(target)
+
+        def matches(fitted: np.ndarray, target: np.ndarray = target, tol: np.ndarray = tol) -> bool:
+            return float(np.mean(np.abs(target - fitted) <= tol)) >= _RELATION_MATCH_SHARE
+
+        for x, y in combinations([o for o in cols if o != c], 2):
+            a_, b_ = values[x], values[y]
+            # An operand that alone equals the column (qty == 1 almost
+            # everywhere) makes any formula "match" — that is identity, above.
+            if matches(a_) or matches(b_):
+                continue
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                formulas = {
+                    f"{c} = {x} * {y}": a_ * b_,
+                    f"{c} = {x} + {y}": a_ + b_,
+                    f"{c} = {x} / {y}": a_ / b_,
+                    f"{c} = {y} / {x}": b_ / a_,
+                }
+            label = next((lbl for lbl, fitted in formulas.items() if matches(fitted)), None)
+            if label:
+                found.setdefault(frozenset((c, x)), label)
+                found.setdefault(frozenset((c, y)), label)
+    return found
+
+
 # ============================================================
 # Tool 4: Correlation Analysis — Stage 3 EDA
 # ============================================================
@@ -722,6 +816,14 @@ class CorrelationAnalysisTool(BaseTool):
                 if not np.isnan(val):
                     pairs.append({"col_a": ca, "col_b": cb, "correlation": round(val, 4)})
         pairs.sort(key=lambda x: abs(x["correlation"]), reverse=True)
+        # Correlations true by construction (total = qty * price) are
+        # reported, tagged, and never promoted to findings.
+        definitional = _definitional_pairs(num_df, corr)
+        for pair in pairs:
+            reason = definitional.get(frozenset((str(pair["col_a"]), str(pair["col_b"]))))
+            if reason:
+                pair["definitional"] = True
+                pair["definitional_reason"] = reason
         top_pairs = pairs[:top_n]
         tests = {"pearson": stats.pearsonr, "spearman": stats.spearmanr, "kendall": stats.kendalltau}
         for pair in top_pairs:
@@ -739,6 +841,9 @@ class CorrelationAnalysisTool(BaseTool):
         target_corrs: dict[str, float] = {}
         target_encoded = False
         target_corr_method = method
+        target_values: pd.Series | None = None
+        if target_column and target_column in corr.columns:
+            target_values = num_df[target_column]
         if target_column and target_column in corr.columns:
             target_corrs = {
                 c: round(float(corr.loc[c, target_column]), 4)
@@ -760,6 +865,7 @@ class CorrelationAnalysisTool(BaseTool):
                 pd.factorize(raw_target)[0], index=df.index, dtype="float64"
             ).where(raw_target.notna())
             aligned = encoded.loc[num_df.index]
+            target_values = aligned
             target_encoded = True
             target_corr_method = "point-biserial"
             for c in num_df.columns:
@@ -804,13 +910,32 @@ class CorrelationAnalysisTool(BaseTool):
             target_encoded = True
             target_corr_method = "eta-squared"
 
+        # n and p-value for the strongest feature<->target correlations
+        # (eta-squared has no single-coefficient test here).
+        target_stats: dict[str, dict[str, Any]] = {}
+        if target_values is not None and target_column:
+            for c in list(target_corrs)[:_CORR_TOP_N]:
+                both = pd.concat([num_df[c], target_values], axis=1).dropna()
+                t_method = "pearson" if target_encoded else _pair_method(c, target_column)
+                try:
+                    p_val = float(tests[t_method](both.iloc[:, 0], both.iloc[:, 1])[1])
+                except (ValueError, KeyError):
+                    p_val = float("nan")
+                target_stats[c] = {
+                    "n": len(both),
+                    "p_value": None if np.isnan(p_val) else round(p_val, 6),
+                    "method": t_method,
+                }
+
+        lead = next((p for p in top_pairs if not p.get("definitional")), None)
         top_summary = (
-            f"Top pair: {top_pairs[0]['col_a']} ↔ {top_pairs[0]['col_b']} "
-            f"(r={top_pairs[0]['correlation']}, {top_pairs[0]['method']}, "
-            f"p={top_pairs[0]['p_value']})"
-            if top_pairs
-            else "No pairs"
+            f"Top pair: {lead['col_a']} ↔ {lead['col_b']} "
+            f"(r={lead['correlation']}, {lead['method']}, p={lead['p_value']})"
+            if lead
+            else "No non-definitional pairs"
         )
+        if definitional:
+            top_summary += f". {len(definitional)} definitional pair(s) excluded from findings"
 
         return {
             "summary": (
@@ -822,6 +947,12 @@ class CorrelationAnalysisTool(BaseTool):
             "target_correlations": target_corrs,
             "target_correlation_method": target_corr_method,
             "target_encoded_binary": target_encoded,
+            "target_column": target_column,
+            "target_correlation_stats": target_stats,
+            "definitional_pairs": [
+                {"col_a": a, "col_b": b, "reason": reason}
+                for (a, b), reason in ((sorted(k), v) for k, v in definitional.items())
+            ],
             "features_analyzed": cols,
             "n_features": len(cols),
             "n_samples": int(num_df.dropna(how="all").shape[0]),
@@ -843,10 +974,12 @@ class CorrelationAnalysisTool(BaseTool):
         what's actually interesting here). `confidence` scales with sample
         size when it's available: a correlation computed on a few dozen rows
         deserves less trust than the same r on thousands.
+
+        Definitional pairs (a formula or the same quantity twice) are never
+        findings. The strongest feature<->target correlations are promoted
+        too, since the target is what the analysis is about.
         """
-        top_pairs = output.get("top_correlations") or []
-        if not top_pairs:
-            return []
+        top_pairs = [p for p in output.get("top_correlations") or [] if not p.get("definitional")]
 
         n_samples = output.get("n_samples")
         if isinstance(n_samples, int) and n_samples > 0:
@@ -858,6 +991,7 @@ class CorrelationAnalysisTool(BaseTool):
         method = output.get("method", "pearson")
 
         results: list[Finding] = []
+        covered: set[frozenset[str]] = set()
         for i, pair in enumerate(top_pairs[:_CORR_TOP_N]):
             r = pair.get("correlation")
             col_a, col_b = pair.get("col_a"), pair.get("col_b")
@@ -867,6 +1001,7 @@ class CorrelationAnalysisTool(BaseTool):
             pair_method = pair.get("method", method)
             p_value = pair.get("p_value")
             pair_n = pair.get("n", n_samples)
+            covered.add(frozenset((str(col_a), str(col_b))))
             results.append(Finding(
                 finding_id=f"{self.name}_{i}_{col_a}_{col_b}",
                 kind="correlation",
@@ -886,6 +1021,63 @@ class CorrelationAnalysisTool(BaseTool):
                 dimension=None if both_measures else col_b,
                 effect=r,
                 effect_kind="r",
+                p_value=p_value,
+                confidence=confidence,
+                layer="analyst",
+            ))
+        results.extend(self._target_findings(output, covered, confidence))
+        return results
+
+    def _target_findings(
+        self, output: dict[str, Any], covered: set[frozenset[str]], confidence: float
+    ) -> list[Finding]:
+        """Top feature<->target correlations (|r| >= 0.2, or eta-squared >=
+        0.04 for a multi-class target), skipping definitional pairs and pairs
+        already reported above."""
+        target = output.get("target_column")
+        if not target:
+            return []
+        is_eta = output.get("target_correlation_method") == "eta-squared"
+        floor = _TARGET_CORR_FINDING_THRESHOLD ** 2 if is_eta else _TARGET_CORR_FINDING_THRESHOLD
+        definitional = {
+            frozenset((str(d["col_a"]), str(d["col_b"]))) for d in output.get("definitional_pairs") or []
+        }
+        target_stats = output.get("target_correlation_stats") or {}
+        results: list[Finding] = []
+        for feature, value in (output.get("target_correlations") or {}).items():
+            if len(results) >= _CORR_TOP_N:
+                break
+            key = frozenset((str(feature), str(target)))
+            if value is None or abs(value) < floor or key in definitional or key in covered:
+                continue
+            fstats = target_stats.get(feature) or {}
+            label = "eta²" if is_eta else "r"
+            p_value = fstats.get("p_value")
+            results.append(Finding(
+                finding_id=f"{self.name}_target_{feature}_{target}",
+                kind="correlation",
+                headline=(
+                    f"{feature} explains {value:.0%} of the variance in {target} (eta²={value:.2f})"
+                    if is_eta
+                    else f"{feature} {'rises' if value > 0 else 'falls'} with {target} (r={value:.2f})"
+                ),
+                detail=(
+                    f"{output.get('target_correlation_method')} association between '{feature}' "
+                    f"and target '{target}': {label}={value:.2f}"
+                    + (f" (n={fstats['n']}" + (f", p={p_value:.3g}" if p_value is not None else "") + ")"
+                       if fstats else "")
+                    + "."
+                ),
+                evidence={
+                    "feature": feature, "target": target, "correlation": value,
+                    "method": output.get("target_correlation_method"),
+                    "p_value": p_value, "n": fstats.get("n"),
+                },
+                source_tool=self.name,
+                measure=str(feature),
+                dimension=str(target),
+                effect=value,
+                effect_kind="eta_sq" if is_eta else "r",
                 p_value=p_value,
                 confidence=confidence,
                 layer="analyst",

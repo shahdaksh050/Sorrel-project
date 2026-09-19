@@ -26,6 +26,7 @@ import pandas as pd
 
 from src.core.findings import Finding
 from src.core.profiler import SEVERE_SKEW_THRESHOLD, profile_dataframe
+from src.core.stats_utils import measure_aggregation, repeated_entity
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.ml_pipeline import _read_df
 
@@ -35,6 +36,9 @@ if TYPE_CHECKING:
 
 #: Default upper bound for the automatic k search.
 DEFAULT_MAX_K = 8
+
+#: Fewest units (rows, or entities after aggregation) worth clustering.
+MIN_CLUSTER_UNITS = 20
 
 #: Rows sampled for silhouette scoring and PCA scatter (keeps big data fast).
 SILHOUETTE_SAMPLE = 2_000
@@ -92,6 +96,28 @@ def _select_cluster_features(
     return df[keep]
 
 
+def _per_entity_features(
+    features: pd.DataFrame, df: pd.DataFrame, profile: DatasetProfile | None
+) -> tuple[pd.DataFrame, str]:
+    """One feature row per entity when rows are repeated measurements of
+    the same entity (orders per customer, readings per sensor) — otherwise
+    heavy entities dominate the geometry and segments describe rows, not
+    customers. Each feature combines by its own measure_aggregation (sum for
+    spend, mean for a temperature). Returns (features, unit_of_analysis);
+    falls back to rows when too few entities remain to cluster."""
+    entity_col = repeated_entity(profile, df)
+    if not entity_col or entity_col in features.columns or profile is None or features.empty:
+        return features, "row"
+    by_name = {c.name: c for c in profile.columns}
+    aggs = {str(c): measure_aggregation(by_name.get(str(c))) for c in features.columns}
+    grouped = features.groupby(df[entity_col], dropna=True)
+    # An entity with no observed value stays missing rather than summing to 0.
+    per_entity = grouped.agg(aggs).where(grouped.count() > 0)
+    if len(per_entity) < MIN_CLUSTER_UNITS:
+        return features, "row"
+    return per_entity, entity_col
+
+
 class ClusterDataTool(BaseTool):
     """Discover natural segments in the data with auto-tuned KMeans."""
 
@@ -137,6 +163,8 @@ class ClusterDataTool(BaseTool):
         except Exception:
             profile = None
         features = _select_cluster_features(df, profile, target_column)
+        features, unit_of_analysis = _per_entity_features(features, df, profile)
+        unit_noun = "rows" if unit_of_analysis == "row" else f"'{unit_of_analysis}' entities"
 
         if features.shape[1] < 2:
             raise ToolExecutionError(
@@ -145,9 +173,9 @@ class ClusterDataTool(BaseTool):
                 "non-numeric columns are excluded, as are the target, flags, ordinal codes, "
                 "coordinates and year/time columns."
             )
-        if len(features) < 20:
+        if len(features) < MIN_CLUSTER_UNITS:
             raise ToolExecutionError(
-                f"Clustering needs at least 20 rows; dataset has {len(features)}."
+                f"Clustering needs at least {MIN_CLUSTER_UNITS} rows; dataset has {len(features)}."
             )
 
         # Median-impute then standardise — KMeans is distance-based
@@ -242,8 +270,9 @@ class ClusterDataTool(BaseTool):
         return {
             "summary": (
                 f"Found {best_k} clusters (silhouette={best_score:.3f}, {quality} separation) "
-                f"across {len(features)} rows × {features.shape[1]} numeric features."
+                f"across {len(features)} {unit_noun} × {features.shape[1]} numeric features."
             ),
+            "unit_of_analysis": unit_of_analysis,
             "n_clusters": int(best_k),
             "silhouette_score": round(best_score, 4),
             "separation_quality": quality,
@@ -340,6 +369,8 @@ class ClusterDataTool(BaseTool):
                     # so it shouldn't get the sibling finding's full 0.3-0.4
                     # surprise weight in the ranking.
                     profile_surprise = 0.4 if quality != "weak" else 0.15
+                    unit = output.get("unit_of_analysis", "row")
+                    unit_noun = "rows" if unit == "row" else f"'{unit}' entities"
                     profile_caveats: list[str] = []
                     if quality == "weak":
                         profile_caveats.append(
@@ -352,7 +383,7 @@ class ClusterDataTool(BaseTool):
                             finding_id=f"{self.name}_{largest_name}_profile",
                             kind="cluster",
                             headline=(
-                                f"Largest segment ({largest_name}, {sizes[largest_name]:,} rows, "
+                                f"Largest segment ({largest_name}, {sizes[largest_name]:,} {unit_noun}, "
                                 f"{share * 100:.1f}% of data) stands out on '{defining_feature}' "
                                 f"(mean {largest_profile[defining_feature]:.3g} vs "
                                 f"{overall_mean[defining_feature]:.3g} overall)"

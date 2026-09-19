@@ -23,10 +23,9 @@ import copy
 import json
 import os
 import re
-import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pandas as pd
 from rich.console import Console
@@ -34,16 +33,40 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from src.core.agenda import Question, build_agenda, coverage_report
+from src.core.claim_verification import _CANON_PRECISIONS as _CANON_PRECISIONS
+from src.core.claim_verification import _KEYWORD_TOOL_MAP as _KEYWORD_TOOL_MAP
+from src.core.claim_verification import _KEYWORD_TOOL_PATTERNS as _KEYWORD_TOOL_PATTERNS
+from src.core.claim_verification import _NUMBER_RE as _NUMBER_RE
+from src.core.claim_verification import _UNVERIFIABLE_SKIP_ABS_INT as _UNVERIFIABLE_SKIP_ABS_INT
+from src.core.claim_verification import _canon_number as _canon_number
+from src.core.claim_verification import _collect_numbers as _collect_numbers
+from src.core.claim_verification import flag_unverified_claims, verified_number_pools
 from src.core.coercion import coerce_types
 from src.core.dashboard import build_dashboard, dashboard_to_json
 from src.core.degradations import collect_degradations
 from src.core.domains import infer_domains
 from src.core.findings import Finding, score_objective_fit
-from src.core.governance import CodeGovernor, code_execution_enabled
+from src.core.governance import (
+    AUDIT_SUBDIR,
+    LOCAL_PROVIDERS,
+    CodeGovernor,
+    code_execution_enabled,
+    local_only,
+    max_llm_tokens_per_run,
+)
 from src.core.io import read_any
+from src.core.llm_client import _DEFAULT_MODELS as _DEFAULT_MODELS
+from src.core.llm_client import LLMClient as LLMClient
+from src.core.llm_client import LocalOnlyError as LocalOnlyError
 from src.core.memory import AnalysisStep, DatasetMetadata, MemorySystem, ToolResult
+from src.core.multiple_testing import adjust_findings_run_level
 from src.core.profiler import DatasetProfile, profile_dataframe
-from src.core.prompt_manager import PromptManager
+from src.core.prompt_manager import ARCHETYPES, PromptManager
+from src.core.step_validation import _COLUMN_PARAM_NAMES as _COLUMN_PARAM_NAMES
+from src.core.step_validation import columns_for, is_column_param, validate_step
+from src.core.tool_registry import _INJECTED_PARAMS as _INJECTED_PARAMS
+from src.core.tool_registry import ToolRegistry as ToolRegistry
+from src.core.tool_registry import _short_tool_description as _short_tool_description
 from src.rlm.engine import RLMEngine, RLMSubTask
 
 console = Console()
@@ -61,70 +84,6 @@ MAX_STEP_RETRIES = 2
 #: so they get a larger budget than a deterministic tool that is simply broken.
 MAX_CODE_STEP_RETRIES = 5
 
-# ---------------------------------------------------------------------------
-# Verbatim-metric validation (P0.7) — SYSTEM_PROMPT_CORE tells the LLM to
-# cite only numbers that appear in tool results, but nothing checked that
-# rule. These turn it into a mechanism: any numeric literal the LLM's
-# synthesis states that cannot be traced back to an actual tool result is
-# flagged, not trusted silently.
-# ---------------------------------------------------------------------------
-
-#: Matches numeric literals (integers, decimals, negatives, comma-formatted) in free text.
-_NUMBER_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
-
-#: Single-digit integers are almost always counts ("3 models", "top 5
-#: features") rather than cited metrics, and are cheap to satisfy by
-#: coincidence — excluding them keeps the flag meaningful.
-_UNVERIFIABLE_SKIP_ABS_INT = 9
-
-# ---------------------------------------------------------------------------
-# Attribution-aware verification — a number existing ANYWHERE in the
-# pooled tool output isn't enough: "cleaning handled 503 missing values"
-# verified as long as 503 appeared in ANY tool's output, even when the real
-# clean_data result said "cleaned 0 missing values" and 503 was actually
-# ingest_dataset's row count. When an insight/recommendation sentence names
-# a specific kind of analysis, its numbers must come from the tool(s) that
-# analysis maps to, not merely from the run somewhere.
-# ---------------------------------------------------------------------------
-
-#: Keyword -> the tool name(s) whose own output pool a sentence containing
-#: that keyword must be checked against. Each key is a regex matched with a
-#: leading word boundary against the lower-cased claim text (so "chi-square"
-#: matches but "which" doesn't, and a prefix like "correlat" still covers
-#: "correlation"/"correlated"); a sentence can match several keywords/tools
-#: at once, in which case the union of their pools is used. Deliberately
-#: specific — a generic word ("test", "segment" alone) would pull ordinary
-#: prose into the stricter per-tool check and flag correct numbers.
-_KEYWORD_TOOL_MAP: dict[str, tuple[str, ...]] = {
-    r"clean": ("clean_data",),
-    r"imput": ("clean_data",),
-    r"outlier": ("detect_outliers",),
-    r"correlat": ("correlation_analysis",),
-    r"pca\b": ("dimensionality_analysis",),
-    r"principal component": ("dimensionality_analysis",),
-    r"dimensionality": ("dimensionality_analysis",),
-    r"cluster": ("cluster_data",),
-    r"silhouette": ("cluster_data",),
-    r"concentrat": ("concentration_analysis",),
-    r"gini": ("concentration_analysis",),
-    r"segments?\b": ("segment_comparison", "cluster_data"),
-    r"trend": ("time_series_analysis", "change_analysis"),
-    r"seasonal": ("time_series_analysis", "change_analysis"),
-    r"accuracy": ("train_model", "evaluate_model"),
-    r"f1\b": ("train_model", "evaluate_model"),
-    r"auc\b": ("train_model", "evaluate_model"),
-    r"r2\b": ("train_model", "evaluate_model"),
-    r"statistical test": ("select_statistical_test", "segment_comparison"),
-    r"p-?value": ("select_statistical_test", "segment_comparison"),
-    r"anova": ("select_statistical_test",),
-    r"chi-?squared?\b": ("select_statistical_test",),
-    r"mann-whitney": ("select_statistical_test",),
-    r"kruskal": ("select_statistical_test",),
-}
-_KEYWORD_TOOL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = tuple(
-    (re.compile(r"\b" + kw), tools) for kw, tools in _KEYWORD_TOOL_MAP.items()
-)
-
 #: Appended to a reasoning prompt when the first reply was unusable
 #: (non-JSON, truncated at max_tokens, or empty) — see analyze().
 _COMPACT_RETRY_NOTE = (
@@ -134,701 +93,9 @@ _COMPACT_RETRY_NOTE = (
     "sentence per rationale, no markdown fences, no text outside the JSON.\n"
 )
 
-
-def _canon_number(value: Any, precision: int = 4) -> str:
-    """Normalise a number to a fixed-precision canonical string for
-    set-membership comparison, so '0.8', '0.80' and 0.7999999999999999
-    (float round-trip noise) all match."""
-    try:
-        if isinstance(value, str):
-            value = value.replace(",", "")
-        f = float(value)
-        if f.is_integer() and abs(f) < 1e15:
-            return str(int(f))
-        return f"{round(f, precision):g}"
-    except (TypeError, ValueError, OverflowError):
-        return str(value)
-
-
-#: Finding headlines (7.1) round for readability (e.g. "r=0.81") while the
-#: tool output they're traced back to often carries more decimals
-#: ("correlation=0.8109") — the verified pool indexes several roundings of
-#: each source number so a claim's own (looser) precision still matches
-#: without weakening the check itself (a genuinely wrong number still fails
-#: at every precision).
-_CANON_PRECISIONS = (4, 3, 2, 1, 0)
-
-
-def _collect_numbers(obj: Any, into: set[str]) -> None:
-    """Recursively flatten every numeric leaf/substring in a JSON-like
-    structure into canonical form, at several roundings (see
-    `_CANON_PRECISIONS`)."""
-    if isinstance(obj, bool):
-        return
-    if isinstance(obj, (int, float)):
-        for p in _CANON_PRECISIONS:
-            into.add(_canon_number(obj, p))
-        # Finding headlines and narrative text display rates/fractions as
-        # percentages (e.g. evidence["level_value"]=0.08596 renders as
-        # "8.6%"), while the raw tool output stores the fraction — a unit
-        # mismatch, not a rounding one, since _CANON_PRECISIONS already
-        # covers rounding (that's why "r=0.81" verifies against a stored
-        # 0.8109 but "8.6%" didn't verify against a stored 0.08596). This
-        # function sees only values, not keys, so it can't check the
-        # evidence dict's own `is_rate` flag — a numeric range guard is the
-        # generic equivalent: only fraction-range values get a *100 form,
-        # so this can't turn an unrelated large number into a false
-        # verification.
-        if -1.0 <= obj <= 1.0:
-            for p in _CANON_PRECISIONS:
-                into.add(_canon_number(obj * 100, p))
-    elif isinstance(obj, str):
-        for match in _NUMBER_RE.finditer(obj):
-            val = match.group().replace(",", "")
-            for p in _CANON_PRECISIONS:
-                into.add(_canon_number(val, p))
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            _collect_numbers(v, into)
-    elif isinstance(obj, (list, tuple)):
-        for v in obj:
-            _collect_numbers(v, into)
-
 # Target auto-detection confidence thresholds
 _AUTODETECT_HIGH = 0.75   # proceed autonomously above this
 _AUTODETECT_LOW  = 0.40   # prompt user (CLI) or best-guess (UI) above this
-
-
-# ---------------------------------------------------------------------------
-# LLM Client — thin, provider-agnostic wrapper
-# ---------------------------------------------------------------------------
-
-#: Fallback model per provider, used only when LLM_MODEL is unset.
-_DEFAULT_MODELS: dict[str, str] = {
-    "openai": "gpt-4o",
-    "anthropic": "claude-sonnet-4-6",
-    "gemini": "gemini-flash-latest",
-    "openrouter": "openai/gpt-4o",
-    "nvidia": "openai/gpt-oss-120b",
-    "local": "llama3.1",
-    "ollama": "llama3.1",
-}
-
-
-class LLMClient:
-    """
-    Thin wrapper around LLM provider APIs.
-
-    Supports OpenAI, Anthropic, Google Gemini, OpenRouter, NVIDIA NIM, and
-    any offline/self-hosted OpenAI-compatible server (Ollama, LM Studio,
-    vLLM, llama.cpp server, ...) via provider="local". Credentials come
-    from environment variables only — never hardcoded.
-    """
-
-    def __init__(self) -> None:
-        self.provider: str = os.getenv("LLM_PROVIDER", "openai").lower()
-        self.model: str = os.getenv("LLM_MODEL") or _DEFAULT_MODELS.get(self.provider, "gpt-4o")
-        self.temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
-        self.max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
-        self.timeout: float = float(os.getenv("LLM_TIMEOUT", "120"))
-        # Built lazily on first call and reused — the SDK clients are
-        # long-lived and thread-safe, and re-pooling per call was costing
-        # every invocation a fresh TCP+TLS handshake (~100-300ms).
-        self._client: Any = None
-        # P3.1 — usage from the most recent _dispatch() call, if the
-        # provider branch captured one. `call()` attaches it to the parsed
-        # response under `_rlm_usage` so RLMEngine's `_extract_usage` (which
-        # already looks for that key) reports real token counts instead of
-        # the zeros its own docstring warns about. Not every branch sets
-        # this (the NVIDIA streaming path doesn't request usage in-stream —
-        # left as a smaller follow-up), so it stays best-effort by design.
-        #
-        # Round 8 hardening — this LLMClient instance is shared across RLM
-        # worker threads (RLMEngine.decompose_and_invoke runs concurrent
-        # `call()`s on a ThreadPoolExecutor for Stage 6 decomposition), so a
-        # single `self._last_usage` instance attribute was a data race: one
-        # thread's dispatch could overwrite it between another thread's
-        # dispatch and its read, attaching the wrong call's usage (or
-        # nothing) to a response. threading.local() gives each thread its
-        # own slot, so `call()` always reads back exactly the usage its own
-        # `_dispatch()` just set, however many threads are calling this
-        # instance concurrently.
-        self._usage_local = threading.local()
-
-    def ping(self) -> tuple[bool, str]:
-        """
-        Cheap connectivity + model-validity check (a small token budget).
-
-        Returns (True, "") on success, (False, "<ExceptionType>: <detail>")
-        on any failure — so callers can fail fast with the real reason
-        instead of running a whole analysis on the deterministic fallback.
-        """
-        saved = self.max_tokens
-        # Reasoning/"thinking" models (Gemini 3.x, NVIDIA gpt-oss, o-series-
-        # style models) spend part of the budget on hidden reasoning tokens
-        # before any visible output — 16 was enough for plain chat models
-        # but silently starved thinking models into empty content. 200 is
-        # still a negligible cost for a connectivity check.
-        self.max_tokens = 200
-        try:
-            self._dispatch("You are a connectivity check. Reply with OK.", "Reply with OK.")
-            return True, ""
-        except Exception as exc:
-            return False, f"{type(exc).__name__}: {exc}"
-        finally:
-            self.max_tokens = saved
-
-    def call(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        """
-        Call the configured LLM and return the parsed JSON response.
-
-        Raises:
-            ValueError: If the response cannot be parsed as JSON.
-        """
-        self._usage_local.value = None
-        self._usage_local.truncated = False
-        raw = self._dispatch(system_prompt, user_prompt)
-        try:
-            parsed = self._parse_json(raw)
-        except ValueError as exc:
-            # A reply cut off at max_tokens is the usual reason a long plan
-            # fails to parse — say so, instead of only "non-JSON", so the
-            # fix (raise LLM_MAX_TOKENS / lower reasoning effort) is obvious.
-            if getattr(self._usage_local, "truncated", False):
-                raise ValueError(
-                    f"LLM reply was truncated at max_tokens={self.max_tokens} "
-                    f"(finish_reason=length) and could not be repaired: {exc}"
-                ) from exc
-            raise
-        if not isinstance(parsed, dict):
-            # json.loads happily returns a list/str/number; every caller
-            # (and the `_rlm_usage` attach below) needs an object.
-            raise ValueError(
-                f"LLM returned JSON that is not an object ({type(parsed).__name__})."
-            )
-        usage = getattr(self._usage_local, "value", None)
-        if usage:
-            parsed["_rlm_usage"] = usage
-        return parsed
-
-    def _dispatch(self, system_prompt: str, user_prompt: str) -> str:
-        if self.provider == "anthropic":
-            return self._call_anthropic(system_prompt, user_prompt)
-        return self._call_openai_compat(system_prompt, user_prompt)
-
-    def _call_openai_compat(self, system_prompt: str, user_prompt: str) -> str:
-        """
-        OpenAI, OpenRouter, NVIDIA NIM, Google Gemini, and any offline/
-        self-hosted OpenAI-compatible server all use the OpenAI SDK — only
-        the base_url and api_key differ.
-        """
-        from openai import OpenAI
-        if self.provider == "openrouter":
-            api_key = os.getenv("OPENROUTER_API_KEY", "")
-            base_url: str | None = "https://openrouter.ai/api/v1"
-            extra_headers: dict[str, str] = {
-                "HTTP-Referer": os.getenv("OPENROUTER_REFERER", "https://github.com/agentic-data-analysis"),
-                "X-Title": "Agentic Data Analysis",
-            }
-        elif self.provider == "nvidia":
-            api_key = os.getenv("NVIDIA_API_KEY", "")
-            base_url = "https://integrate.api.nvidia.com/v1"
-            extra_headers = {}
-        elif self.provider == "gemini":
-            # Google's OpenAI-compatible endpoint — no separate SDK needed.
-            # https://ai.google.dev/gemini-api/docs/openai
-            api_key = os.getenv("GEMINI_API_KEY", "")
-            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-            extra_headers = {}
-        elif self.provider in ("local", "ollama"):
-            # Offline / self-hosted OpenAI-compatible server: Ollama, LM
-            # Studio, vLLM, llama.cpp server, text-generation-webui, etc.
-            # No cloud API key required — most local servers accept any
-            # non-empty string, so default to a placeholder.
-            api_key = os.getenv("LOCAL_LLM_API_KEY", "not-needed")
-            base_url = os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
-            extra_headers = {}
-        else:
-            api_key = os.getenv("OPENAI_API_KEY", "")
-            base_url = None
-            extra_headers = {}
-        if not api_key:
-            _key_names = {
-                "openrouter": "OPENROUTER_API_KEY",
-                "nvidia": "NVIDIA_API_KEY",
-                "gemini": "GEMINI_API_KEY",
-            }
-            raise ValueError(
-                f"No API key set for provider '{self.provider}'. "
-                f"Set {_key_names.get(self.provider, 'OPENAI_API_KEY')}."
-            )
-        client_kwargs: dict[str, Any] = {
-            "api_key": api_key,
-            "timeout": self.timeout,
-            "max_retries": 2,
-        }
-        if base_url:
-            client_kwargs["base_url"] = base_url
-        if extra_headers:
-            client_kwargs["default_headers"] = extra_headers
-        if self._client is None:
-            self._client = OpenAI(**client_kwargs)
-        client = self._client
-        create_kwargs: dict[str, Any] = {
-            "model": self.model,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
-        if self.provider in ("openai", "gemini"):
-            # Both support the OpenAI JSON-mode contract; local/offline
-            # servers vary too widely, so JSON there relies on _parse_json's
-            # fence-stripping and repair fallback instead.
-            create_kwargs["response_format"] = {"type": "json_object"}
-        if self.provider == "gemini":
-            # Gemini 2.5+/3.x "thinking" models spend a large, variable, and
-            # otherwise invisible share of max_tokens on hidden reasoning
-            # before writing any visible answer. Left uncapped, a normal
-            # max_tokens budget can be entirely consumed by thinking, so the
-            # JSON answer gets truncated or never starts at all.
-            effort = os.getenv("GEMINI_REASONING_EFFORT", "").strip().lower()
-            if not effort and any(k in self.model.lower() for k in ("thinking", "2.5", "3.")):
-                effort = "low"
-            if effort and effort not in ("none", "off"):
-                create_kwargs["reasoning_effort"] = effort
-        if self.provider == "openrouter":
-            # Same failure mode as Gemini above, on OpenRouter's many
-            # reasoning-capable (often free) models: hidden reasoning tokens
-            # count against max_tokens, so a long Form 1 plan gets truncated
-            # or never starts. OpenRouter's unified `reasoning` parameter caps
-            # that; models without reasoning ignore it. "none"/"off" omits it.
-            effort = os.getenv("OPENROUTER_REASONING_EFFORT", "low").strip().lower()
-            if effort not in ("", "none", "off"):
-                create_kwargs["extra_body"] = {"reasoning": {"effort": effort}}
-        if self.provider == "nvidia":
-            # NVIDIA NIM requires streaming; gpt-oss-120b also emits
-            # reasoning_content chunks (chain-of-thought) before the answer.
-            create_kwargs["stream"] = True
-            create_kwargs["top_p"] = 1
-            stream = client.chat.completions.create(**create_kwargs)
-            content_parts: list[str] = []
-            reasoning_parts: list[str] = []
-            for chunk in stream:
-                if not getattr(chunk, "choices", None):
-                    err = getattr(chunk, "error", None)
-                    if err:
-                        msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-                        raise ValueError(f"nvidia error for model '{self.model}': {msg}")
-                    continue
-                delta = chunk.choices[0].delta
-                # gpt-oss-120b is a reasoning model: the chain-of-thought
-                # arrives in reasoning_content; the final answer arrives in
-                # content. Collect both — content is preferred; if it ends up
-                # empty (some reasoning-only models), fall back to reasoning.
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning is not None:
-                    reasoning_parts.append(reasoning)
-                text = getattr(delta, "content", None)
-                if text is not None:
-                    content_parts.append(text)
-            content = "".join(content_parts).strip() or "".join(reasoning_parts).strip()
-            if not content:
-                raise ValueError(
-                    f"NVIDIA returned empty content for model '{self.model}'. "
-                    "Check that the model ID is correct and your account has access."
-                )
-            return content
-
-        try:
-            resp = client.chat.completions.create(**create_kwargs)
-        except Exception as exc:
-            # If Google or any endpoint rejects reasoning_effort for this model, retry without it
-            if "reasoning_effort" in str(exc) and "reasoning_effort" in create_kwargs:
-                create_kwargs.pop("reasoning_effort", None)
-                resp = client.chat.completions.create(**create_kwargs)
-            else:
-                raise
-        # OpenRouter can return HTTP 200 with an error body instead of raising
-        # (invalid model slug, moderation, no credits). The SDK then yields
-        # choices=None — surface the real message instead of a TypeError.
-        err = getattr(resp, "error", None)
-        if err:
-            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
-            raise ValueError(
-                f"{self.provider} error for model '{self.model}': {msg}"
-            )
-        if not getattr(resp, "choices", None):
-            raise ValueError(
-                f"{self.provider} returned no completion for model '{self.model}' — "
-                f"the model ID may be invalid, unavailable, or blocked by your "
-                f"account's data policy."
-            )
-        content = resp.choices[0].message.content
-        finish_reason = getattr(resp.choices[0], "finish_reason", None)
-        self._usage_local.truncated = finish_reason == "length"
-        if not content or not str(content).strip():
-            # Reasoning models (many OpenRouter free models) can spend the
-            # whole max_tokens budget on hidden reasoning and return no
-            # visible answer at all — name that case instead of a bare
-            # "None content", since the fix is budget/effort, not the prompt.
-            if finish_reason == "length":
-                raise ValueError(
-                    f"{self.provider} model '{self.model}' used the whole "
-                    f"max_tokens={self.max_tokens} budget without producing an answer "
-                    "(likely hidden reasoning) — raise LLM_MAX_TOKENS or lower "
-                    "OPENROUTER_REASONING_EFFORT."
-                )
-            raise ValueError(
-                f"LLM returned empty content (finish_reason={finish_reason!r})."
-            )
-        usage = getattr(resp, "usage", None)
-        if usage is not None:
-            # Thread-local (see __init__) — this dispatch may be running on
-            # one of several concurrent RLM worker threads.
-            self._usage_local.value = {
-                "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
-                "provider": self.provider,
-            }
-        return str(content)
-
-    def _call_anthropic(self, system_prompt: str, user_prompt: str) -> str:
-        import anthropic
-        from anthropic.types import TextBlock
-
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise ValueError("No API key set for provider 'anthropic'. Set ANTHROPIC_API_KEY.")
-        if self._client is None:
-            self._client = anthropic.Anthropic(api_key=api_key, timeout=self.timeout, max_retries=2)
-        client = self._client
-        # P1.6(b) — the tool-description/system block is byte-identical
-        # across all ~15 calls in a run; mark it for prompt caching so it's
-        # billed once instead of on every iteration.
-        msg = client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        usage = getattr(msg, "usage", None)
-        if usage is not None:
-            # Thread-local (see __init__) — this dispatch may be running on
-            # one of several concurrent RLM worker threads.
-            self._usage_local.value = {
-                "prompt_tokens": getattr(usage, "input_tokens", 0) or 0,
-                "completion_tokens": getattr(usage, "output_tokens", 0) or 0,
-                "provider": "anthropic",
-            }
-        for block in msg.content:
-            if isinstance(block, TextBlock):
-                return block.text
-        raise ValueError("Anthropic response contained no text block.")
-
-    @staticmethod
-    def _loads_lenient(text: str) -> dict[str, Any]:
-        """
-        json.loads with a fallback to strict=False.
-
-        Small/free-tier models routinely emit literal, unescaped newlines
-        (and other control characters) inside JSON string values — e.g. a
-        multi-line "reasoning" sentence — instead of the required `\\n`
-        escape. That is otherwise a *complete, well-formed* response (every
-        brace balanced, every field present); strict json.loads rejects it
-        anyway with "Invalid control character", which used to fall all the
-        way through to the truncation-repair/extraction paths below and
-        often still fail there too, discarding a perfectly good plan for a
-        cosmetic escaping mistake. strict=False accepts raw control
-        characters inside strings (the one thing wrong here) while still
-        rejecting genuinely malformed JSON.
-        """
-        try:
-            return cast(dict[str, Any], json.loads(text))
-        except json.JSONDecodeError:
-            return cast(dict[str, Any], json.loads(text, strict=False))
-
-    @staticmethod
-    def _parse_json(raw: str) -> dict[str, Any]:
-        # Strip markdown fences if present
-        for fence in ("```json", "```"):
-            if fence in raw:
-                raw = raw.split(fence)[1].split("```")[0]
-                break
-
-        cleaned = raw.strip()
-
-        try:
-            return LLMClient._loads_lenient(cleaned)
-        except json.JSONDecodeError:
-            pass
-
-        # Try json-repair library if installed (handles all edge cases)
-        try:
-            from json_repair import repair_json
-            candidate = repair_json(cleaned, return_objects=False)
-            if candidate:
-                return LLMClient._loads_lenient(candidate)
-        except (ImportError, json.JSONDecodeError):
-            pass
-
-        # Manual repair: close open strings/structures and fix trailing : or ,
-        repaired = LLMClient._repair_truncated_json(cleaned)
-        try:
-            return LLMClient._loads_lenient(repaired)
-        except json.JSONDecodeError:
-            pass
-
-        # Prose wrapped around the object: small models very often answer
-        # "Looking at the results, I think... {...}" instead of bare JSON,
-        # which used to abort the whole iteration. Pull out the first
-        # balanced {...} and try again — this is what makes a lightweight
-        # model usable at all, and it costs nothing when the reply was
-        # already clean.
-        extracted = LLMClient._extract_json_object(cleaned)
-        if extracted is not None:
-            for candidate in (extracted, LLMClient._repair_truncated_json(extracted)):
-                try:
-                    return LLMClient._loads_lenient(candidate)
-                except json.JSONDecodeError:
-                    continue
-
-        raise ValueError(f"LLM returned non-JSON: {raw[:300]}")
-
-    @staticmethod
-    def _extract_json_object(text: str) -> str | None:
-        """
-        First balanced {...} in `text`, or None.
-
-        Brace counting is string-aware: a `{` or `}` inside a JSON string
-        value (or escaped) must not change the depth, or a reply containing
-        a brace in prose — or in an analysis rationale — truncates at the
-        wrong place and produces something worse than no match.
-        """
-        start = text.find("{")
-        if start == -1:
-            return None
-        depth = 0
-        in_string = False
-        escaped = False
-        for index in range(start, len(text)):
-            char = text[index]
-            if escaped:
-                escaped = False
-                continue
-            if char == "\\":
-                escaped = True
-                continue
-            if char == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start : index + 1]
-        # Unbalanced: hand back the tail so the truncation repair can try.
-        return text[start:]
-
-    @staticmethod
-    def _repair_truncated_json(s: str) -> str:
-        """Close any open strings and bracket structures left by a truncated LLM response."""
-        stack: list[str] = []
-        in_string = False
-        escape_next = False
-
-        for ch in s:
-            if escape_next:
-                escape_next = False
-                continue
-            if ch == "\\" and in_string:
-                escape_next = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if ch in ("{", "["):
-                stack.append("}" if ch == "{" else "]")
-            elif ch in ("}", "]"):
-                if stack and stack[-1] == ch:
-                    stack.pop()
-
-        result = s
-
-        # 1. Close any open string literal
-        if in_string:
-            result += '"'
-
-        if not stack:
-            return result
-
-        # 2. Examine the last meaningful (non-whitespace) character to decide
-        #    what padding is needed before the closing brackets.
-        tail = result.rstrip()
-        last_ch = tail[-1] if tail else ""
-
-        if last_ch == ":":
-            # Truncated right after a colon — value never started
-            result = tail + " null"
-        elif last_ch == ",":
-            # Trailing comma — remove it so the structure closes cleanly
-            result = tail[:-1]
-
-        # 3. Close all open brackets/braces in innermost-first order
-        result += "".join(reversed(stack))
-        return result
-
-
-# ---------------------------------------------------------------------------
-# Tool Registry — discovers and maps all tools
-# ---------------------------------------------------------------------------
-
-class ToolRegistry:
-    """
-    Registry of all available execution-layer tools.
-
-    The LLM references tools by name; this class resolves them to
-    callable BaseTool instances. Tools register themselves generically
-    (register()) rather than the registry hardcoding an exhaustive import
-    list — new tools (built-in or, in future, generated) plug in the same
-    way the built-ins do.
-    """
-
-    def __init__(self) -> None:
-        self._registry: dict[str, Any] = {}
-        self._register_builtin_tools()
-
-    def _register_builtin_tools(self) -> None:
-        from src.tools.change_analysis import ChangeAnalysisTool
-        from src.tools.clustering import ClusterDataTool
-        from src.tools.cohort_analysis import CohortAnalysisTool
-        from src.tools.concentration_analysis import ConcentrationAnalysisTool
-        from src.tools.data_processing import (
-            CleanDataTool,
-            CorrelationAnalysisTool,
-            DetectOutliersTool,
-            IngestDatasetTool,
-        )
-        from src.tools.define_analysis_tool import DefineAnalysisToolTool
-        from src.tools.dimensionality import DimensionalityAnalysisTool
-        from src.tools.dynamic_code import DynamicCodeExecutionTool
-        from src.tools.financial_analysis import FinancialAnalysisTool
-        from src.tools.geospatial import GeospatialAnalysisTool
-        from src.tools.ml_pipeline import EvaluateModelTool, TrainModelTool
-        from src.tools.report_generator import GenerateReportTool
-        from src.tools.segment_comparison import SegmentComparisonTool
-        from src.tools.statistical_analysis import SelectStatisticalTestTool
-        from src.tools.text_analysis import TextAnalysisTool
-        from src.tools.time_series import TimeSeriesAnalysisTool
-        from src.tools.visualization import GenerateVisualizationsTool
-        from src.tools.workforce_analysis import WorkforceAnalysisTool
-
-        for tool in (
-            IngestDatasetTool(),
-            CleanDataTool(),
-            DetectOutliersTool(),
-            CorrelationAnalysisTool(),
-            SelectStatisticalTestTool(),
-            TrainModelTool(),
-            EvaluateModelTool(),
-            ClusterDataTool(),
-            GenerateVisualizationsTool(),
-            GenerateReportTool(),
-            TimeSeriesAnalysisTool(),
-            TextAnalysisTool(),
-            DimensionalityAnalysisTool(),
-            GeospatialAnalysisTool(),
-            DynamicCodeExecutionTool(),
-            # Round 8 — LLM Sandbox mode: define_analysis_tool lets the agent
-            # register a new, named, reusable tool at runtime (registration
-            # itself happens in _maybe_register_generated_tool, called from
-            # _execute_steps after this tool's own pure validate/smoke-test
-            # step succeeds — see AGENTS.md's layer rule).
-            DefineAnalysisToolTool(),
-            FinancialAnalysisTool(),
-            CohortAnalysisTool(),
-            WorkforceAnalysisTool(),
-            # 7.2 — insight library (segment comparison, concentration,
-            # period-over-period change): the "why"/"what happened"
-            # questions no prior tool answered directly.
-            SegmentComparisonTool(),
-            ConcentrationAnalysisTool(),
-            ChangeAnalysisTool(),
-        ):
-            self.register(tool)
-
-    def register(self, tool: Any) -> None:
-        """Add (or replace) a tool in the registry, keyed by its `name`."""
-        self._registry[tool.name] = tool
-
-    def get(self, name: str) -> Any:
-        if name not in self._registry:
-            raise KeyError(
-                f"Unknown tool '{name}'. Available: {list(self._registry.keys())}"
-            )
-        return self._registry[name]
-
-    def has(self, name: str) -> bool:
-        return name in self._registry
-
-    def names(self) -> list[str]:
-        return list(self._registry.keys())
-
-    def get_all_descriptions(self) -> str:
-        """Descriptions for every registered tool, gating aside. Used by
-        offline scripts (validate/dry_run) that have no DatasetProfile."""
-        return "\n\n".join(t.to_prompt_description() for t in self._registry.values())
-
-    def candidate_tools(
-        self,
-        profile: Any | None,
-        metadata: Any | None,
-        use_ml: bool = True,
-        use_llm: bool = True,
-    ) -> list[Any]:
-        """
-        Tools relevant to this dataset, ranked by applies_to() score
-        (highest first). A tool scoring 0.0 is excluded entirely — this
-        IS the dynamic-selection mechanism: what the planner sees is
-        already filtered to what fits the data's nature.
-
-        `use_ml`/`use_llm` drop the tools that declare they need those
-        capabilities (BaseTool.requires_ml / requires_llm). Filtering here
-        rather than at plan time means a disabled capability is invisible
-        everywhere at once: the planner never sees the tool, the
-        deterministic plan never schedules it, and the prompt never
-        describes it.
-        """
-        scored = [(t, t.applies_to(profile, metadata)) for t in self._registry.values()]
-        relevant = [
-            (t, s)
-            for t, s in scored
-            if s > 0.0
-            and not (getattr(t, "requires_ml", False) and not use_ml)
-            and not (getattr(t, "requires_llm", False) and not use_llm)
-            and not (getattr(t, "executes_code", False) and not code_execution_enabled())
-        ]
-        relevant.sort(key=lambda ts: ts[1], reverse=True)
-        return [t for t, _ in relevant]
-
-    def get_candidate_descriptions(
-        self,
-        profile: Any | None,
-        metadata: Any | None,
-        use_ml: bool = True,
-        use_llm: bool = True,
-    ) -> str:
-        tools = self.candidate_tools(profile, metadata, use_ml=use_ml, use_llm=use_llm)
-        if not tools:
-            return self.get_all_descriptions()
-        return "\n\n".join(t.to_prompt_description() for t in tools)
 
 
 # ---------------------------------------------------------------------------
@@ -908,6 +175,7 @@ class AgentController:
                 pass
         # Governance for LLM-authored code: kill switch, per-run budget, audit log.
         self._governor = CodeGovernor(self._output_dir, self.memory.session_id)
+        self.llm_client.audit_dir = str(Path(self._output_dir) / AUDIT_SUBDIR)
         # Natural-language analysis objective supplied by the user (optional).
         self.objective: str = os.getenv("USER_OBJECTIVE", "").strip()
         if self.objective:
@@ -1243,6 +511,7 @@ class AgentController:
             except Exception:
                 pass  # keep the pre-target profile rather than lose it
         self._pending_df = None
+        self._stash_profile_context()
 
         # 7.5 — question agenda: what a human analyst would ask of this
         # data, generated once profiling and the analysis-mode decision are
@@ -1259,6 +528,71 @@ class AgentController:
 
         return metadata
 
+    def _stash_profile_context(self) -> None:
+        """Archetype and PII columns from the live profile into context,
+        where PromptManager reads them. Read with getattr: profiles built
+        before those attributes existed simply lack them."""
+        profile = self.last_profile
+        if profile is None:
+            return
+        archetype = getattr(profile, "archetype", None)
+        if archetype:
+            self.memory.set_context(
+                "data_archetype",
+                {"archetype": str(archetype), "evidence": getattr(profile, "archetype_evidence", None)},
+            )
+        self.memory.set_context(
+            "pii_columns", [c.name for c in profile.columns if getattr(c, "pii", None)]
+        )
+
+    def _add_degradation(self, note: str) -> None:
+        degradations = list(self.memory.get_context("degradations") or [])
+        if note not in degradations:
+            degradations.append(note)
+            self.memory.set_context("degradations", degradations)
+
+    def _llm_budget_exhausted(self) -> bool:
+        """MAX_LLM_TOKENS_PER_RUN reached — no further LLM calls this run.
+        Records the degradation (once) the first time it is hit."""
+        cap = max_llm_tokens_per_run()
+        if not cap or self._rlm_engine is None:
+            return False
+        used = int(self._rlm_engine.usage_summary().get("total_tokens", 0) or 0)
+        if used < cap:
+            return False
+        self.memory.set_context("llm_error", f"LLM token cap reached ({used:,} of {cap:,} tokens)")
+        self._add_degradation(
+            f"LLM token cap reached ({used:,} tokens, MAX_LLM_TOKENS_PER_RUN={cap:,}) — "
+            "the rest of the run was synthesised deterministically from tool output."
+        )
+        return True
+
+    def _register_library_tools(self) -> None:
+        """ENABLE_TOOL_LIBRARY: register generated tools from earlier runs
+        whose required columns exist here with the same kinds."""
+        from src.core.tool_factory import (
+            MAX_GENERATED_TOOLS,
+            load_compatible_tools,
+            record_library_use,
+            register_and_persist,
+            tool_library_dir,
+        )
+
+        if self.last_profile is None:
+            return
+        column_kinds = {c.name: c.kind for c in self.last_profile.columns}
+        library = tool_library_dir()
+        registered = 0
+        for spec in load_compatible_tools(library, column_kinds):
+            if registered >= MAX_GENERATED_TOOLS or self.tool_registry.has(spec.name):
+                continue
+            register_and_persist(spec, self.tool_registry, self.memory, self._output_dir)
+            # use_count = runs that registered the tool, counted here once per run.
+            record_library_use(library, spec)
+            registered += 1
+        if registered:
+            console.print(f"  [green]📚 Registered {registered} tool(s) from the generated-tool library.[/]")
+
     # ------------------------------------------------------------------
     # Stages 2-7 — Full autonomous analysis pipeline
     # ------------------------------------------------------------------
@@ -1273,6 +607,19 @@ class AgentController:
         if not self.memory.dataset_metadata:
             raise RuntimeError("No dataset loaded. Call load_dataset() first.")
 
+        # LOCAL_ONLY: nothing may leave the machine. A cloud provider is
+        # refused up front and the run continues deterministically.
+        if self.use_llm and local_only() and self.llm_client.provider not in LOCAL_PROVIDERS:
+            console.print(
+                f"[yellow]⚠ LOCAL_ONLY=true and provider '{self.llm_client.provider}' is not "
+                "local — running the deterministic plan instead.[/]"
+            )
+            self._add_degradation(
+                f"LOCAL_ONLY=true refused the non-local LLM provider '{self.llm_client.provider}' — "
+                "the run was deterministic and no data was sent to an LLM."
+            )
+            self.use_llm = False
+
         # Initialise PromptManager and RLMEngine. Tool descriptions are
         # filtered/ranked against the dataset's profile — the planner only
         # ever sees tools that actually apply to this data's nature.
@@ -1282,7 +629,15 @@ class AgentController:
             use_ml=self.use_ml,
             use_llm=self.use_llm,
         )
-        self._prompt_manager = PromptManager(self.memory, tool_desc, self.max_iterations)
+        short_desc = self.tool_registry.get_candidate_short_descriptions(
+            self.last_profile,
+            self.memory.dataset_metadata,
+            use_ml=self.use_ml,
+            use_llm=self.use_llm,
+        )
+        self._prompt_manager = PromptManager(
+            self.memory, tool_desc, self.max_iterations, short_tool_descriptions=short_desc
+        )
         if self.use_llm:
             # The deterministic plan doubles as the planner's cycle-1 draft:
             # a small model that edits a profile-grounded plan does far
@@ -1291,6 +646,17 @@ class AgentController:
                 self.memory.set_context("draft_plan", self._build_fallback_plan()["steps"])
             except Exception:
                 pass
+            # Registered after the tool list and draft plan are built, so
+            # library tools are listed once — in the per-cycle "Tools you
+            # created" block, like any generated tool.
+            if code_execution_enabled():
+                from src.core.tool_factory import tool_library_enabled
+
+                if tool_library_enabled():
+                    try:
+                        self._register_library_tools()
+                    except Exception as exc:
+                        console.print(f"  [yellow]⚠ Tool library skipped (non-fatal): {exc}[/]")
         self._rlm_engine = RLMEngine(
             llm_callable=self.llm_client.call,
             system_prompt=self._prompt_manager.get_system_prompt(),
@@ -1352,6 +718,13 @@ class AgentController:
                         self.memory.save()
                     final_result = self._deterministic_final()
                     break
+
+                # ---- Per-run token cap (MAX_LLM_TOKENS_PER_RUN) ----
+                if self._llm_budget_exhausted():
+                    console.print("[yellow]⚠ LLM token cap reached — synthesising final report from results.[/]")
+                    final_result = self._deterministic_final()
+                    break
+                self.llm_client.stage = stage_label
 
                 # ---- Reasoning with graceful degradation ----
                 # An LLM/API failure must never abort a running analysis:
@@ -1426,6 +799,9 @@ class AgentController:
                             "Use execute_dynamic_code if you need a custom calculation.]"
                         )
                         try:
+                            if self._llm_budget_exhausted():
+                                raise RuntimeError("LLM token cap reached")
+                            self.llm_client.stage = f"{stage_label}:deepen_exploration"
                             reprompt_res = self._rlm_engine.invoke(
                                 continue_prompt, depth=0, stage=f"{stage_label}:deepen_exploration"
                             )
@@ -1471,6 +847,9 @@ class AgentController:
                 console.print("[yellow]⚠ Max iterations reached — generating final report.[/]")
                 final_prompt = self._prompt_manager.get_final_interpretation_prompt()
                 try:
+                    if self._llm_budget_exhausted():
+                        raise RuntimeError("LLM token cap reached")
+                    self.llm_client.stage = "stage7:max_iter_synthesis"
                     final_result = self._rlm_engine.invoke(
                         final_prompt, depth=0, stage="stage7:max_iter_synthesis"
                     )
@@ -1500,7 +879,7 @@ class AgentController:
             final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
         if self.memory.get_context("data_understanding"):
             final_result.setdefault("data_understanding", self.memory.get_context("data_understanding"))
-        governance = self._governor.summary()
+        governance = self._governor.summary(self.memory.get_context("llm_usage"))
         self.memory.set_context("governance", governance)
         final_result["governance"] = governance
         try:
@@ -1558,6 +937,9 @@ class AgentController:
                 clean[key] = value.strip()[:160]
         if clean.get("time_column") and clean["time_column"] not in columns:
             clean.pop("time_column")
+        archetype = str(raw.get("archetype") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if archetype in ARCHETYPES:
+            clean["archetype"] = archetype
         for key in self._UNDERSTANDING_LIST_KEYS:
             values = raw.get(key)
             if not isinstance(values, list):
@@ -1648,11 +1030,11 @@ class AgentController:
         "ingest_dataset", "clean_data", "generate_report",
         "train_model", "evaluate_model", "cluster_data",
         "execute_dynamic_code",
-        # R3.1: its PNGs reach no consumer (grep for .png/chart_path/image_path
-        # across app.py, html_report.py, report_generator.py returns nothing) —
-        # excluded from the deterministic sweep rather than wired up, so the
-        # no-LLM path doesn't spend time writing files nobody reads. Left
-        # available to the LLM planner, which can still call it deliberately.
+        # Now returns chart specs the dashboard renders, but everything it
+        # draws unprompted (distributions, correlation heatmap, importances)
+        # the deterministic dashboard already builds from the profile and
+        # tool outputs — scheduling it here would only duplicate panels. The
+        # LLM planner can still call it for a specific chart_type.
         "generate_visualizations",
     })
 
@@ -1660,6 +1042,34 @@ class AgentController:
     #: plan. Below 1.0 so a domain matched on partial evidence (0.65 for a
     #: ticker+price file with no OHLC) still contributes its analysis.
     _FALLBACK_MIN_SCORE = 0.6
+
+    _ARM_NAME_RE = re.compile(r"arm|variant|treat|group|condition|cohort|bucket|version", re.IGNORECASE)
+
+    @classmethod
+    def _experiment_arm_column(cls, profile: DatasetProfile | None, target: str | None) -> str | None:
+        """The arm column of an experiment-archetype profile, else None:
+        a low-cardinality dimension named in the archetype evidence (whatever
+        its shape), else one with an arm-like name, else the first one."""
+        if profile is None or getattr(profile, "archetype", None) != "experiment":
+            return None
+        dims = [c.name for c in profile.dimensions() if 2 <= c.nunique <= 6 and c.name != target]
+        raw_evidence = getattr(profile, "archetype_evidence", None)
+        if isinstance(raw_evidence, dict):
+            evidence = [f"{k} {v}" for k, v in raw_evidence.items()]
+        elif isinstance(raw_evidence, (list, tuple)):
+            evidence = [str(e) for e in raw_evidence]
+        else:
+            evidence = [str(raw_evidence or "")]
+        # A name counts only as a whole word/quoted token of an evidence item.
+        named = [d for d in dims if any(re.search(rf"(?<!\w){re.escape(d)}(?!\w)", e) for e in evidence)]
+        for group in (
+            named,
+            [d for d in dims if cls._ARM_NAME_RE.search(d)],
+            dims,
+        ):
+            if group:
+                return group[0]
+        return None
 
     def _build_fallback_plan(self) -> dict[str, Any]:
         """
@@ -1680,10 +1090,11 @@ class AgentController:
                 "tool_name": "clean_data",
                 "parameters": {
                     "file_path": fp,
-                    "strategy": "median",
                     "target_column": meta.target_column,
                 },
-                "rationale": "Fallback plan: impute missing values before analysis.",
+                # No imputation: inferential tools use complete cases and
+                # models impute inside cross-validation.
+                "rationale": "Fallback plan: clean the dataset (types, duplicates) before analysis.",
             },
         ]
 
@@ -1760,6 +1171,28 @@ class AgentController:
                 ),
             })
             already.add(name)
+
+        # An experiment's primary question is the arm comparison — make sure
+        # the draft tests it rather than leaving the grouping to chance.
+        arm = self._experiment_arm_column(profile, meta.target_column)
+        if arm and self.tool_registry.has("select_statistical_test"):
+            test_tool = self.tool_registry.get("select_statistical_test")
+            if test_tool.applies_to(profile, meta) > 0.0:
+                test_step = next((s for s in steps if s["tool_name"] == "select_statistical_test"), None)
+                if test_step is None:
+                    test_params: dict[str, Any] = {"file_path": fp}
+                    try:
+                        test_params.update(test_tool.default_params(profile, meta) or {})
+                    except Exception:
+                        pass
+                    test_step = {
+                        "step_number": len(steps) + 1,
+                        "tool_name": "select_statistical_test",
+                        "parameters": test_params,
+                        "rationale": f"Fallback plan: experiment data — compare outcomes across arms of '{arm}'.",
+                    }
+                    steps.append(test_step)
+                test_step["parameters"]["group_column"] = arm
 
         if not self.use_ml:
             # No model-fitting branch at all: no supervised training and no
@@ -1996,6 +1429,25 @@ class AgentController:
             params["file_path"] = self.memory.dataset_metadata.file_path
         return params
 
+    # ------------------------------------------------------------------
+    # Plan validation — deterministic, before a step spends a tool run
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_column_param(key: str) -> bool:
+        return is_column_param(key)
+
+    def _columns_for(self, file_path: Any) -> list[str] | None:
+        """Columns of the dataset a step will read — see `step_validation.columns_for`."""
+        return columns_for(self.memory, file_path)
+
+    def _validate_step(
+        self, tool: Any, raw: dict[str, Any], params: dict[str, Any]
+    ) -> tuple[dict[str, Any], list[str], list[str]]:
+        """Check a step against its tool's schema before it runs — see
+        `step_validation.validate_step`."""
+        return validate_step(self.memory, tool, raw, params)
+
     #: Params injected from run state (not chosen by the planner) that must
     #: not key the step cache — they change every step and are large.
     _CACHE_EXCLUDED_PARAMS = frozenset({"prior_results", "_prior_results"})
@@ -2089,6 +1541,28 @@ class AgentController:
                 self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
             )
 
+            # Plan validation: an invalid step never runs (and never spends
+            # code-execution budget); its error — with close column matches —
+            # goes back to the planner and counts against the retry budget.
+            params, dropped, plan_errors = self._validate_step(tool, step.parameters, params)
+            dropped_note = f"Ignored unknown parameter(s): {', '.join(dropped)}." if dropped else ""
+            if dropped:
+                console.print(f"  [yellow]⚠ Step {step.step_number}: {step.tool_name} — {dropped_note}[/]")
+            if plan_errors:
+                message = " ".join(["Plan validation failed, step not run:", *plan_errors, dropped_note]).strip()
+                console.print(f"  [yellow]✗ Step {step.step_number}: {step.tool_name} — {message}[/]")
+                invalid = ToolResult(
+                    tool_name=step.tool_name, status="error", output={}, error_message=message,
+                    iteration=self.memory.iteration_count,
+                )
+                self.memory.append_tool_result(invalid)
+                self.memory.mark_step_complete(step.step_number, invalid)
+                self._tool_failure_counts[step.tool_name] = self._tool_failure_counts.get(step.tool_name, 0) + 1
+                self.memory.increment_retry(step.step_number)
+                if self.on_step_callback:
+                    self.on_step_callback(step.tool_name, "error", f"{idx}/{total_steps} — {message[:80]}")
+                continue
+
             executes_code = getattr(tool, "executes_code", False)
             if executes_code:
                 refusal = self._governor.refusal_reason()
@@ -2131,6 +1605,11 @@ class AgentController:
                         error=result.error_message,
                     )
             result.iteration = self.memory.iteration_count
+            if dropped_note:
+                if result.status == "success":
+                    result.output = {**result.output, "plan_note": dropped_note}
+                else:
+                    result.error_message = f"{result.error_message or ''} ({dropped_note})".strip()
             self.memory.append_tool_result(result)
             self.memory.mark_step_complete(step.step_number, result)
 
@@ -2160,7 +1639,25 @@ class AgentController:
                             finding.source_tool = step.tool_name
                         if self.objective:
                             finding.objective_fit = score_objective_fit(finding, self.objective)
+                        # Entity-level tools count entities, row-level tools
+                        # count rows; a report mixing "n=200" and "n=2,000"
+                        # must say which unit each n is in.
+                        if not isinstance(finding.evidence, dict):
+                            finding.evidence = {}
+                        unit = finding.evidence.get("unit_of_analysis") or result.output.get("unit_of_analysis")
+                        if isinstance(unit, str) and unit and unit != "row":
+                            finding.evidence["unit_of_analysis"] = unit
+                            note = f"Counts are per '{unit}' (repeated rows aggregated), not per row."
+                            if note not in finding.caveats:
+                                finding.caveats.append(note)
                     self.memory.add_findings(new_findings)
+                    # One BH family per run: re-correct every p-value found
+                    # so far, across tools, before anything ranks them.
+                    if any(f.p_value is not None for f in new_findings):
+                        try:
+                            adjust_findings_run_level(self.memory.findings)
+                        except Exception as exc:
+                            console.print(f"  [yellow]⚠ Run-level FDR correction skipped (non-fatal): {exc}[/]")
 
                 derived = result.output.get("derived_dataset")
                 if isinstance(derived, dict) and derived.get("name") and derived.get("path"):
@@ -2316,6 +1813,9 @@ class AgentController:
             GeneratedToolSpec,
             compute_dataset_fingerprint,
             register_and_persist,
+            save_to_library,
+            tool_library_dir,
+            tool_library_enabled,
             validate_spec,
         )
 
@@ -2357,6 +1857,10 @@ class AgentController:
             dataset_fingerprint=fingerprint,
         )
         register_and_persist(spec, self.tool_registry, self.memory, self._output_dir)
+        if tool_library_enabled() and self.last_profile is not None:
+            save_to_library(
+                spec, tool_library_dir(), {c.name: c.kind for c in self.last_profile.columns}
+            )
         console.print(
             f"  [bold green]✓ Registered generated tool[/] '{name}' "
             f"(v{version}, callable starting next iteration)."
@@ -2427,11 +1931,16 @@ class AgentController:
         # synthesis, not a required step, so a transient LLM/API failure here
         # (rate limit, timeout, provider outage) must not abort the run —
         # it should just mean synthesis proceeds without the extra detail.
+        cap = max_llm_tokens_per_run()
+        if self._llm_budget_exhausted():
+            return
+        self.llm_client.stage = "stage6:rlm_decomposition"
         try:
             sub_results = self._rlm_engine.decompose_and_invoke(
                 sub_tasks=sub_tasks,
                 prompt_builder=build_prompt,
                 depth=1,
+                max_total_tokens=cap or None,
             )
         except Exception as exc:
             self.memory.set_context("rlm_decomposition_error", f"{type(exc).__name__}: {exc}")
@@ -2457,126 +1966,14 @@ class AgentController:
         return pool
 
     def _verified_number_pools(self) -> tuple[set[str], dict[str, set[str]]]:
-        """Global pool (unchanged — every numeric literal across all tool
-        results) plus a pool per tool_name, so a claim keyword-attributed to
-        a specific kind of analysis (`_KEYWORD_TOOL_MAP`) can be checked
-        against only that tool's OWN output rather than the whole run's
-        pooled numbers — a row count from ingest_dataset's summary must not
-        verify a claim about what clean_data did."""
-        global_pool: set[str] = set()
-        per_tool: dict[str, set[str]] = {}
-        for r in self.memory.tool_results:
-            tool_pool = per_tool.setdefault(r.tool_name, set())
-            _collect_numbers(r.to_dict(), tool_pool)
-            global_pool |= tool_pool
-        if self.memory.dataset_metadata:
-            meta_pool: set[str] = set()
-            _collect_numbers(self.memory.dataset_metadata.__dict__, meta_pool)
-            global_pool |= meta_pool
-        # Findings are computed by tool code from tool output (ratios, shares,
-        # differences), and the synthesis prompt tells the LLM to copy their
-        # numbers — a derived headline number is verified, not invented.
-        # Scope of the guarantee: `custom_analysis` findings come from
-        # LLM-authored sandbox code, so their numbers are verified as "computed
-        # by code that actually ran on the data", not as "produced by a
-        # built-in tool". This check catches numbers invented at synthesis
-        # time; the audit log (governance.py) is the record of what that code was.
-        for f in self.memory.findings:
-            finding_pool: set[str] = set()
-            _collect_numbers([f.headline, f.detail, f.evidence, f.effect], finding_pool)
-            per_tool.setdefault(f.source_tool, set()).update(finding_pool)
-            global_pool |= finding_pool
-        return global_pool, per_tool
+        """Global and per-tool verified-number pools — see
+        `claim_verification.verified_number_pools`."""
+        return verified_number_pools(self.memory)
 
     def _flag_unverified_claims(self, final_result: dict[str, Any]) -> list[str]:
-        """
-        Enforce SYSTEM_PROMPT_CORE's "cite only verbatim metrics" rule.
-
-        Any numeric literal in `insights`/`recommendations`/`key_metrics`
-        that doesn't trace back to a real tool result is annotated
-        in-place with `[unverified: ...]` (never silently trusted) and
-        returned so the caller can log/report the hallucination rate.
-
-        Round 8 hardening — a number existing ANYWHERE in the pooled tool
-        output used to be enough to "verify" it, which passed claims that
-        cited the right number from the WRONG tool (e.g. citing
-        ingest_dataset's row count as clean_data's missing-value count,
-        since both numbers were in the pool). When a sentence names a
-        specific kind of analysis (`_KEYWORD_TOOL_MAP`) and that analysis's
-        tool(s) actually ran, its numbers are checked against only that
-        tool's own output; a sentence with no such keyword keeps the
-        original global-pool check.
-        """
-        verified, per_tool_pools = self._verified_number_pools()
-        ran_tools = {r.tool_name for r in self.memory.tool_results}
-        flagged: list[str] = []
-
-        meta = self.memory.dataset_metadata
-        meta_pool: set[str] = set()
-        if meta:
-            for p in _CANON_PRECISIONS:
-                meta_pool.add(_canon_number(meta.row_count, p))
-                meta_pool.add(_canon_number(meta.column_count, p))
-
-        for field in ("insights", "recommendations"):
-            items = final_result.get(field)
-            if not isinstance(items, list):
-                continue
-            for i, item in enumerate(items):
-                if not isinstance(item, str):
-                    continue
-                claimed = [
-                    m.group() for m in _NUMBER_RE.finditer(item)
-                    if not (
-                        "." not in m.group()
-                        and abs(int(m.group().replace(",", ""))) <= _UNVERIFIABLE_SKIP_ABS_INT
-                    )
-                ]
-                if not claimed:
-                    continue
-
-                item_l = item.lower()
-                attributed_tools = sorted({
-                    tool
-                    for pattern, tools in _KEYWORD_TOOL_PATTERNS
-                    if pattern.search(item_l)
-                    for tool in tools
-                    if tool in ran_tools
-                })
-                if attributed_tools:
-                    pool = set().union(*(per_tool_pools.get(t, set()) for t in attributed_tools))
-                    valid_pool = pool | meta_pool
-                    bad = sorted({n for n in claimed if _canon_number(n) not in valid_pool})
-                    if bad:
-                        attribution = "/".join(attributed_tools)
-                        items[i] = (
-                            f"{item} [unverified: {', '.join(bad)} "
-                            f"(not in {attribution} output)]"
-                        )
-                        flagged.append(
-                            f"{field}[{i}]: {', '.join(bad)} (attributed to {attribution})"
-                        )
-                    continue
-
-                bad = sorted({n for n in claimed if _canon_number(n) not in verified})
-                if bad:
-                    items[i] = f"{item} [unverified: {', '.join(bad)}]"
-                    flagged.append(f"{field}[{i}]: {', '.join(bad)}")
-
-        key_metrics = final_result.get("key_metrics")
-        if isinstance(key_metrics, dict):
-            for k, v in key_metrics.items():
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    nums = [str(v)]
-                elif isinstance(v, str):
-                    nums = [m.group() for m in _NUMBER_RE.finditer(v)]
-                else:
-                    continue
-                bad = sorted({n for n in nums if _canon_number(n) not in verified})
-                if bad:
-                    flagged.append(f"key_metrics.{k}={v!r} [unverified: {', '.join(bad)}]")
-
-        return flagged
+        """Enforce the "cite only verbatim metrics" rule — see
+        `claim_verification.flag_unverified_claims`."""
+        return flag_unverified_claims(self.memory, final_result)
 
     def _generate_final_report(self, llm_final: dict[str, Any]) -> None:
         """

@@ -1,0 +1,15 @@
+# Sandbox worker dependencies only (src/core/_sandbox_worker.py and the
+# modules it can reach: src/core/{io,profiler,sandbox,sandbox_toolkit} and the
+# tools dsa.run may load). Versions match requirements.lock so code behaves
+# the same in the container as on the subprocess backend.
+pandas==3.0.3
+numpy==2.4.4
+scipy==1.17.1
+scikit-learn==1.8.0
+statsmodels==0.14.6
+pyarrow==24.0.0          # derived datasets are written as parquet
+charset-normalizer==3.4.7
+openpyxl==3.1.5          # the dataset is read inside the container, .xlsx included
+xlrd==2.0.2
+psutil==7.2.2            # imported by src.core.sandbox
+rich==15.0.0             # imported by src.core.memory via src.tools.base

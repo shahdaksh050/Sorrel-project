@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from src.core.html_report import data_understanding_rows, governance_rows
 from src.core.multiple_testing import DEFAULT_ALPHA as _BH_ALPHA
 from src.core.multiple_testing import apply_benjamini_hochberg as _apply_benjamini_hochberg
 from src.tools.base import BaseTool
@@ -155,6 +156,43 @@ def _format_data_overview(
         for c in coercions:
             lines.append(f"| {c.get('column')} | {c.get('rule')} | {c.get('n_converted')} | {c.get('n_failed')} |")
         lines.append("")
+    return lines
+
+
+def _md_cell(value: str) -> str:
+    return value.replace("|", "\\|")
+
+
+def _format_data_understanding(
+    llm_insights: dict[str, Any], data_profile: dict[str, Any] | None,
+) -> list[str]:
+    """How the planner read the data on its first pass (subject, domain,
+    table archetype, key measures/dimensions, caveats) — rows shared with
+    src.core.html_report."""
+    rows, caveats = data_understanding_rows(llm_insights, data_profile)
+    if not (rows or caveats):
+        return []
+    lines = ["## How the Agent Read the Data", ""]
+    for label, value in rows:
+        lines.append(f"- **{label}**: {value}")
+    if caveats:
+        if rows:
+            lines.append("")
+        lines.append("What it flagged to watch out for:")
+        lines.extend(f"- {c}" for c in caveats)
+    lines.append("")
+    return lines
+
+
+def _format_governance(llm_insights: dict[str, Any]) -> list[str]:
+    """Code-execution and LLM-usage accounting for the run — rows shared
+    with src.core.html_report."""
+    rows = governance_rows(llm_insights)
+    if not rows:
+        return []
+    lines = ["## Governance", "", "| Item | Value |", "|------|-------|"]
+    lines.extend(f"| {_md_cell(label)} | {_md_cell(value)} |" for label, value in rows)
+    lines.append("")
     return lines
 
 
@@ -567,6 +605,7 @@ class GenerateReportTool(BaseTool):
         # Data Overview — shape/quality plus what was detected-or-assumed at
         # read time (item 2) and repaired before analysis (item 3).
         md_lines += _format_data_overview(data_profile, read_report, coercions)
+        md_lines += _format_data_understanding(llm_insights, data_profile)
 
         # 7.9 layered skeleton, headline first: the top-ranked findings from
         # the shared bus, in plain language with the numbers embedded. Falls
@@ -653,6 +692,7 @@ class GenerateReportTool(BaseTool):
             data_profile, statistical_test_pvalues, unverified_claims, profile_status,
             degradations, findings=findings,
         )
+        md_lines += _format_governance(llm_insights)
 
         md_lines += [
             "---",

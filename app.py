@@ -443,6 +443,24 @@ iframe:hover {{
 .trust-cell .v {{ font-family: var(--heading); font-size: 24px; font-weight: 800;
                   color: var(--ink); margin-top: .3rem; }}
 
+/* ── How the agent read the data (Answers tab) ── */
+.du {{
+    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
+    box-shadow: var(--lift-sm); padding: .9rem 1.2rem; margin: 0 0 1.5rem;
+    font-size: 14.5px; line-height: 1.6; color: var(--ink); max-width: 74ch;
+}}
+.du .k {{ font-size: 12px; color: var(--graphite); font-weight: 600;
+          text-transform: uppercase; letter-spacing: .5px; margin-right: .4rem; }}
+.du .note {{ color: var(--graphite); }}
+
+/* ── Sandbox isolation badge (Details tab) ── */
+.iso-badge {{
+    display: inline-block; font-family: var(--sans); font-size: 12px; font-weight: 700;
+    padding: 3px 8px; border-radius: 4px; margin: 0 0 .75rem;
+}}
+.iso-badge.ok {{ color: var(--positive); background: color-mix(in srgb, var(--positive) 15%, transparent); }}
+.iso-badge.warn {{ color: var(--risk); background: color-mix(in srgb, var(--risk) 15%, transparent); }}
+
 /* ── KPI strip (technical-detail expander) — classes replace what used to be
    ~35 lines of inline style= per tile (IMPROVEMENTS.md 7.22) ── */
 .kpi-row {{ display: flex; gap: 1.5rem; margin-bottom: 1.2rem; flex-wrap: wrap; }}
@@ -1063,6 +1081,116 @@ def _render_other_findings(tool_results: list[dict[str, Any]]) -> None:
 
     if not shown_any:
         st.caption("No additional analyses ran for this dataset.")
+
+
+def _render_data_understanding(du: dict[str, Any]) -> str:
+    """The planner's first read of the dataset, as one compact card. Every
+    value is LLM-written, so all of it is escaped."""
+    def _row(label: str, value: Any) -> str:
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value)
+        if not value:
+            return ""
+        return f'<div><span class="k">{html.escape(label)}</span>{html.escape(str(value))}</div>'
+
+    kind = " · ".join(str(du[k]) for k in ("domain", "archetype") if du.get(k))
+    rows = "".join([
+        _row("Subject", du.get("subject")),
+        _row("Kind", kind),
+        _row("Measures", du.get("key_measures")),
+        _row("Dimensions", du.get("key_dimensions")),
+        _row("Time", du.get("time_column")),
+    ])
+    caveats = "".join(
+        f'<div class="note">⚠ {html.escape(str(c))}</div>' for c in du.get("caveats") or []
+    )
+    if not rows and not caveats:
+        return ""
+    return f'<div class="du">{rows}{caveats}</div>'
+
+
+def _read_audit_log(path: str | None) -> list[dict[str, Any]]:
+    """Audit records from the append-only JSONL; unreadable lines are skipped."""
+    if not path:
+        return []
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    entries = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+def _render_governance(gov: dict[str, Any]) -> None:
+    """Governance summary and the code-execution audit trail for this run.
+    Audit code is shown with st.code only — it is LLM-authored."""
+    budget = gov.get("execution_budget")
+    cells = [
+        ("Code runs", f"{gov.get('code_executions', 0)} / {budget}" if budget is not None
+         else str(gov.get("code_executions", 0)), False),
+        ("Failed", str(gov.get("code_failures", 0)), bool(gov.get("code_failures"))),
+        ("Refused", str(gov.get("code_refusals", 0)), bool(gov.get("code_refusals"))),
+    ]
+    if gov.get("llm_calls") is not None:
+        cells.append(("LLM calls", f"{gov['llm_calls']:,}", False))
+    if gov.get("llm_tokens") is not None:
+        cap = gov.get("llm_token_cap") or 0
+        cells.append(("LLM tokens", f"{gov['llm_tokens']:,}" + (f" / {cap:,}" if cap else ""),
+                      bool(cap) and gov["llm_tokens"] >= cap))
+    for col, (label, value, flag) in zip(st.columns(len(cells)), cells, strict=True):
+        col.markdown(_gauge(label, value, flag=flag), unsafe_allow_html=True)
+
+    if not gov.get("code_execution_enabled", True):
+        st.caption("AI-written code was switched off for this run.")
+    backends = [b for b in gov.get("sandbox_backends") or [] if b != "refused"]
+    if "subprocess" in backends:
+        note = " — some runs used Docker" if "docker" in backends else ""
+        st.markdown(
+            '<span class="iso-badge warn">Process-level isolation only (subprocess)'
+            f'{note}</span>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Set SANDBOX_BACKEND=docker, or turn on \"Require container isolation\", "
+                   "for a kernel boundary around AI-written code.")
+    elif "docker" in backends:
+        st.markdown('<span class="iso-badge ok">Container isolation (Docker)</span>',
+                    unsafe_allow_html=True)
+
+    entries = _read_audit_log(gov.get("audit_log"))
+    if not entries:
+        st.caption("No AI-written code ran or was refused in this run."
+                   if not gov.get("audit_log") else "The audit log could not be read.")
+        return
+
+    def _ms(value: Any) -> str:
+        return f"{value:,.0f}" if isinstance(value, (int, float)) else "—"
+
+    with st.expander(f"Audit log — {len(entries)} entr{'y' if len(entries) == 1 else 'ies'}"):
+        st.dataframe(_safe_df(pd.DataFrame([{
+            "Time": str(e.get("timestamp") or "")[:19].replace("T", " "),
+            "Tool": e.get("tool_name"),
+            "Status": e.get("status"),
+            "Backend": e.get("backend") or "—",
+            "Duration (ms)": _ms(e.get("duration_ms")),
+            "SHA-256": (e.get("code_sha256") or "")[:12] or "—",
+        } for e in entries])), width='stretch')
+        st.caption(f"Full record: {gov.get('audit_log')}")
+
+    for i, e in enumerate(entries, 1):
+        sha = (e.get("code_sha256") or "")[:12]
+        with st.expander(f"#{i:02d} `{e.get('tool_name', '?')}` · {e.get('status', '?')}"
+                         + (f" · `{sha}`" if sha else "")):
+            if e.get("code"):
+                st.code(e["code"], language="python")
+            if e.get("error"):
+                st.code(e["error"], language=None)
 
 
 def _render_defect_stamp(gap_val: float | None) -> str:
@@ -1939,6 +2067,37 @@ with st.sidebar:
             test_pct = st.slider("Test split %", 10, 40, 20, step=5)
             n_cv = st.slider("CV folds (k)", 3, 10, 5)
 
+    # ── Code execution ────────────────────────────────────────────────────────
+    # Operator controls for LLM-authored code (src/core/governance.py);
+    # defaults match the governance defaults.
+    st.markdown('<div class="side-head">Code execution</div>', unsafe_allow_html=True)
+    enable_code = st.toggle(
+        "Allow AI-written code",
+        value=True,
+        help=(
+            "On: the planner may write and run its own analysis code in the sandbox.\n"
+            "Off: only the built-in tools run."
+        ),
+    )
+    max_code_runs = st.number_input(
+        "Max code runs per analysis",
+        min_value=0,
+        value=40,
+        step=1,
+        disabled=not enable_code,
+        help="Further code steps are refused and logged once the budget is spent.",
+    )
+    require_isolation = st.toggle(
+        "Require container isolation",
+        value=False,
+        disabled=not enable_code,
+        help=(
+            "On: code runs only in the Docker sandbox and is refused if Docker is "
+            "unavailable. Turn on whenever the data or question comes from someone "
+            "you don't trust."
+        ),
+    )
+
     # ── Analysis Settings ─────────────────────────────────────────────────────
     st.markdown('<div class="side-head">Analysis Settings</div>', unsafe_allow_html=True)
     min_iter   = st.slider("Min iterations", 1, 5, 1, help="Number of iterative discovery cycles. 1 is fast and recommended for quick analysis; increase for deeper multi-cycle discovery.")
@@ -2074,6 +2233,9 @@ if run_clicked:
     os.environ["ENABLE_RLM_INFERENCE"]  = "true" if enable_rlm else "false"
     os.environ["ENABLE_LLM"]            = "true" if use_llm else "false"
     os.environ["ENABLE_ML"]             = "true" if use_ml else "false"
+    os.environ["ENABLE_CODE_EXECUTION"] = "true" if enable_code else "false"
+    os.environ["MAX_CODE_EXECUTIONS"]   = str(int(max_code_runs))
+    os.environ["SANDBOX_REQUIRE_ISOLATION"] = "true" if require_isolation else "false"
     os.environ["OUTPUT_DIR"]            = outdir
     if objective.strip():
         os.environ["USER_OBJECTIVE"] = objective.strip()
@@ -2373,6 +2535,11 @@ if st.session_state.get("analysis_done"):
                 f'</div>',
                 unsafe_allow_html=True,
             )
+
+        _du_html = _render_data_understanding(report.get("data_understanding") or {})
+        if _du_html:
+            st.markdown("#### How we read your data")
+            st.markdown(_du_html, unsafe_allow_html=True)
 
         best_model   = report.get("best_model") or "N/A"
         best_cv      = "0"
@@ -2770,6 +2937,13 @@ if st.session_state.get("analysis_done"):
                 for _s_idx, _sub in enumerate(sub_results, 1):
                     with st.expander(f"Part {_s_idx:02d}: {_sub.get('task_name', 'Smaller Question')}", expanded=False):
                         st.json(_sub)
+
+        _gov = report.get("governance")
+        if _gov:
+            with st.container(border=True):
+                st.markdown("#### 9. Governance & audit")
+                st.caption("What AI-written code ran, where it ran, and what was refused.")
+                _render_governance(_gov)
 
     # ═════════════════════════════════════════════════════════════════════════
     # TIER 6: ARTIFACT VAULT & EXPORTS

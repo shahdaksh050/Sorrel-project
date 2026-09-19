@@ -1,26 +1,46 @@
 """
 Visualization Tools — Execution Layer.
 
-Stage 3: Chart generation (correlation heatmap, feature importance,
-         distributions, ROC curve, confusion matrix).
+Stage 3: declarative chart specs (src.core.chart_spec) for a correlation
+heatmap, model feature importances, or numeric distributions. The specs are
+returned in the output's "charts" list and rendered by the dashboard
+(src.core.dashboard), which themes them — this tool writes no files.
 
-Uses Seaborn for static PNG exports and Plotly for interactive HTML.
-All charts are saved to the output directory.
+Model evaluation charts (ROC, confusion matrix) are not produced here: they
+belong to evaluate_model's held-out results, which the dashboard charts
+directly. Computing them over the full file would score the model on the
+rows it was trained on.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 
+from src.core.chart_spec import validate_chart_spec
+from src.core.chart_theme import humanize_label
 from src.core.io import DatasetReadError, read_any
 from src.tools.base import BaseTool, ToolExecutionError
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata, MemorySystem
     from src.core.profiler import DatasetProfile
+
+#: Columns in a correlation heatmap (n² cells must stay under the spec's row cap).
+MAX_HEATMAP_COLUMNS = 20
+#: Numeric columns given a distribution chart.
+MAX_DISTRIBUTIONS = 6
+#: Features shown in an importance chart.
+MAX_IMPORTANCES = 20
+#: Bins per distribution.
+HIST_BINS = 20
+
+#: Chart types that used to be drawn here on training rows; now answered by
+#: evaluate_model's held-out results.
+_EVALUATION_CHARTS = ("roc_curve", "confusion_matrix")
 
 
 def _read_df(file_path: str) -> pd.DataFrame:
@@ -32,26 +52,32 @@ def _read_df(file_path: str) -> pd.DataFrame:
     return df
 
 
+def _validated(spec: dict[str, Any]) -> dict[str, Any]:
+    clean, error = validate_chart_spec(spec)
+    if clean is None:
+        raise ToolExecutionError(f"Chart spec rejected: {error}")
+    return clean
+
+
 class GenerateVisualizationsTool(BaseTool):
     """
-    Generate analysis charts and save them to the output directory.
+    Build declarative chart specs for the dashboard.
 
     Supported chart_type values:
       - correlation_heatmap
       - feature_importance
       - distributions
-      - roc_curve
-      - confusion_matrix
+    (roc_curve / confusion_matrix are rejected with a pointer to
+    evaluate_model, whose held-out results the dashboard already charts.)
     """
 
     name = "generate_visualizations"
     description = (
-        "Generate visual charts for analysis results. "
-        "chart_type: correlation_heatmap | feature_importance | distributions | "
-        "roc_curve | confusion_matrix. "
-        "Saves PNG + HTML to output_dir. Returns file paths."
+        "Add charts to the dashboard. "
+        "chart_type: correlation_heatmap | feature_importance | distributions. "
+        "ROC / confusion-matrix charts come from evaluate_model's held-out results instead. "
+        "Returns validated chart specs under 'charts'."
     )
-    output_subdir = "visualizations"
 
     def prepare_params(
         self, params: dict[str, Any], memory: MemorySystem, output_root: str
@@ -88,81 +114,61 @@ class GenerateVisualizationsTool(BaseTool):
         chart_type: str,
         target_column: str | None = None,
         model_path: str | None = None,
-        output_dir: str = "output/visualizations",
         **_: Any,
     ) -> dict[str, Any]:
-        import matplotlib
-        matplotlib.use("Agg")  # non-interactive backend
-        import matplotlib.pyplot as plt
-        import seaborn as sns
-
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        if chart_type in _EVALUATION_CHARTS:
+            raise ToolExecutionError(
+                f"'{chart_type}' is not drawn here — it would score the model on its own "
+                "training rows. Run evaluate_model: its held-out results are charted on the dashboard."
+            )
         df = _read_df(file_path)
-
-        handlers: dict[str, Callable[..., list[str]]] = {
-            "correlation_heatmap": self._heatmap,
-            "feature_importance": self._feature_importance,
-            "distributions": self._distributions,
-            "roc_curve": self._roc_curve,
-            "confusion_matrix": self._confusion_matrix,
-        }
-
-        handler = handlers.get(chart_type)
-        if handler is None:
+        if chart_type == "correlation_heatmap":
+            charts = self._heatmap(df)
+        elif chart_type == "feature_importance":
+            charts = self._feature_importance(df, target_column, model_path)
+        elif chart_type == "distributions":
+            charts = self._distributions(df)
+        else:
             raise ToolExecutionError(
                 f"Unknown chart_type '{chart_type}'. "
-                f"Valid: {list(handlers.keys())}"
+                "Valid: ['correlation_heatmap', 'feature_importance', 'distributions']"
             )
-
-        saved_paths = handler(
-            df=df,
-            target_column=target_column,
-            model_path=model_path,
-            output_dir=output_dir,
-            plt=plt,
-            sns=sns,
-        )
-
         return {
-            "summary": f"Generated '{chart_type}' chart(s). Files: {saved_paths}",
+            "summary": f"Built {len(charts)} '{chart_type}' chart(s) for the dashboard.",
             "chart_type": chart_type,
-            "saved_paths": saved_paths,
+            "charts": charts,
         }
 
     # ------------------------------------------------------------------
-    # Chart implementations
+    # Chart specs
     # ------------------------------------------------------------------
 
-    def _heatmap(self, df: pd.DataFrame, output_dir: str, plt: Any, sns: Any, **_: Any) -> list[str]:
+    def _heatmap(self, df: pd.DataFrame) -> list[dict[str, Any]]:
         num_df = df.select_dtypes(include="number")
         if num_df.shape[1] < 2:
             raise ToolExecutionError(
                 f"correlation_heatmap needs at least 2 numeric columns; this "
                 f"dataset has {num_df.shape[1]}. Use 'distributions' instead."
             )
+        # Keep the most variable columns when there are too many to show.
+        if num_df.shape[1] > MAX_HEATMAP_COLUMNS:
+            scaled_var = (num_df / num_df.abs().max().replace(0, 1)).var()
+            num_df = num_df[scaled_var.nlargest(MAX_HEATMAP_COLUMNS).index]
         corr = num_df.corr()
-        fig, ax = plt.subplots(figsize=(max(8, len(corr) * 0.7), max(6, len(corr) * 0.6)))
-        sns.heatmap(
-            corr,
-            annot=True,
-            fmt=".2f",
-            cmap="coolwarm",
-            center=0,
-            linewidths=0.5,
-            ax=ax,
-        )
-        ax.set_title("Feature Correlation Heatmap")
-        out = str(Path(output_dir) / "correlation_heatmap.png")
-        fig.tight_layout()
-        fig.savefig(out, dpi=150)
-        plt.close(fig)
-        return [out]
+        rows = [
+            {"feature_x": humanize_label(str(a)), "feature_y": humanize_label(str(b)), "r": round(float(v), 3)}
+            for a in corr.columns for b in corr.index
+            if pd.notna(v := corr.loc[b, a])
+        ]
+        return [_validated({
+            "type": "heatmap", "data": rows, "x": "feature_x", "y": "feature_y", "color": "r",
+            "title": "Feature Correlation Heatmap", "x_title": "Column", "y_title": "Column",
+            "caption": "Pearson correlation between every pair of numeric columns (−1 to +1).",
+        })]
 
     def _feature_importance(
         self, df: pd.DataFrame, target_column: str | None, model_path: str | None,
-        output_dir: str, plt: Any, sns: Any, **_: Any
-    ) -> list[str]:
-        import pickle
+    ) -> list[dict[str, Any]]:
         if not model_path or not Path(model_path).exists():
             raise ToolExecutionError("model_path is required for feature_importance chart.")
         if not target_column:
@@ -189,16 +195,14 @@ class GenerateVisualizationsTool(BaseTool):
 
         if hasattr(model, "feature_importances_"):
             # Tree-based models (RandomForest, XGBoost)
-            raw = model.feature_importances_
-            chart_title = "Top Feature Importances"
+            raw = np.asarray(model.feature_importances_, dtype=float)
+            title, y_title = "Top Feature Importances", "Importance"
         elif hasattr(model, "coef_"):
-            # Linear models (LogisticRegression, LinearRegression, Ridge)
-            # Use absolute coefficient magnitude as importance proxy
-            import numpy as np  # already available as a dep
-            coef = model.coef_
-            # coef_ shape: (n_classes, n_features) for multi-class, (n_features,) for regression
+            # Linear models: absolute coefficient magnitude as the proxy.
+            # coef_ is (n_classes, n_features) for multi-class, (n_features,) otherwise.
+            coef = np.asarray(model.coef_, dtype=float)
             raw = np.abs(coef[0] if coef.ndim == 2 else coef)
-            chart_title = "Top Feature Importances (|coefficient|)"
+            title, y_title = "Top Feature Importances (|coefficient|)", "|Coefficient|"
         else:
             raise ToolExecutionError(
                 "Model does not expose feature_importances_ or coef_. "
@@ -213,162 +217,54 @@ class GenerateVisualizationsTool(BaseTool):
                 f"trained on. Pass the same (cleaned) file used by train_model."
             )
 
-        importances = pd.Series(raw, index=feature_cols)
-        importances = importances.sort_values(ascending=False).head(20)
+        importances = pd.Series(raw, index=feature_cols).sort_values(ascending=False).head(MAX_IMPORTANCES)
+        rows = [{"feature": humanize_label(k), "importance": round(float(v), 4)} for k, v in importances.items()]
+        return [_validated({
+            "type": "bar", "data": rows, "x": "feature", "y": "importance", "sort": "desc",
+            "title": title, "x_title": "", "y_title": y_title,
+            "caption": "The model's own (training-time) importance scores; the dashboard's drivers "
+                       "chart ranks features on held-out data instead.",
+        })]
 
-        fig, ax = plt.subplots(figsize=(10, max(4, len(importances) * 0.4)))
-        sns.barplot(
-            x=importances.values, y=importances.index, hue=importances.index,
-            legend=False, ax=ax, palette="Blues_d",
-        )
-        ax.set_title(chart_title)
-        ax.set_xlabel("Importance score")
-        out = str(Path(output_dir) / "feature_importance.png")
-        fig.tight_layout()
-        fig.savefig(out, dpi=150)
-        plt.close(fig)
-        return [out]
-
-    def _distributions(
-        self, df: pd.DataFrame, output_dir: str, plt: Any, sns: Any, **_: Any
-    ) -> list[str]:
-        import re
-
-        num_cols = df.select_dtypes(include="number").columns.tolist()[:12]
-        saved: list[str] = []
-        for i, col in enumerate(num_cols):
-            fig, ax = plt.subplots(figsize=(6, 4))
-            sns.histplot(df[col].dropna(), kde=True, ax=ax, color="steelblue")
-            ax.set_title(f"Distribution: {col}")
-            # Column names can contain characters illegal in filenames
-            # (slashes, colons, spaces) — sanitise; index prefix keeps
-            # collided names unique.
-            safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(col))[:60] or "col"
-            out = str(Path(output_dir) / f"dist_{i:02d}_{safe}.png")
-            fig.tight_layout()
-            fig.savefig(out, dpi=120)
-            plt.close(fig)
-            saved.append(out)
-        return saved
-
-    def _roc_curve(
-        self, df: pd.DataFrame, target_column: str | None, model_path: str | None,
-        output_dir: str, plt: Any, sns: Any, **_: Any
-    ) -> list[str]:
-        import pickle
-
-        from sklearn.metrics import auc, roc_curve
-
-        if not model_path or not target_column:
-            raise ToolExecutionError("model_path and target_column required for roc_curve.")
-
-        with open(model_path, "rb") as f:
-            model = pickle.load(f)
-
-        y = df[target_column]
-        unique_classes = y.nunique()
-        if unique_classes != 2:
-            raise ToolExecutionError(
-                f"roc_curve requires a binary classification target (2 classes). "
-                f"'{target_column}' has {unique_classes} unique values. "
-                f"Use feature_importance or distributions for regression tasks."
-            )
-
-        # Reuse the training-time feature/target preparation so the model
-        # sees the exact column layout it was fitted on
-        from src.tools.ml_pipeline import _encode_target, _prepare_features
-
-        X, y_raw, _treatments = _prepare_features(df, target_column)
-        y, _class_labels = _encode_target(y_raw)
-
-        if not hasattr(model, "predict_proba"):
-            raise ToolExecutionError("Model does not support probability predictions (no predict_proba).")
-
-        y_prob = model.predict_proba(X)[:, 1]
-        try:
-            fpr, tpr, _thresholds = roc_curve(y, y_prob)
-        except ValueError as exc:
-            raise ToolExecutionError(f"roc_curve failed: {exc}") from exc
-        roc_auc = auc(fpr, tpr)
-
-        fig, ax = plt.subplots(figsize=(7, 6))
-        ax.plot(fpr, tpr, lw=2, label=f"ROC curve (AUC = {roc_auc:.3f})")
-        ax.plot([0, 1], [0, 1], "k--", lw=1)
-        ax.set_xlabel("False Positive Rate")
-        ax.set_ylabel("True Positive Rate")
-        ax.set_title("ROC Curve")
-        ax.legend()
-        out = str(Path(output_dir) / "roc_curve.png")
-        fig.tight_layout()
-        fig.savefig(out, dpi=150)
-        plt.close(fig)
-        return [out]
-
-    def _confusion_matrix(
-        self, df: pd.DataFrame, target_column: str | None, model_path: str | None,
-        output_dir: str, plt: Any, sns: Any, **_: Any
-    ) -> list[str]:
-        import pickle
-
-        from sklearn.metrics import confusion_matrix
-
-        if not model_path or not target_column:
-            raise ToolExecutionError("model_path and target_column required for confusion_matrix.")
-
-        with open(model_path, "rb") as f:
-            model = pickle.load(f)
-
-        # Reuse the training-time feature/target preparation so the model
-        # sees the exact column layout it was fitted on
-        from src.tools.ml_pipeline import _encode_target, _prepare_features
-
-        X, y_raw, _treatments = _prepare_features(df, target_column)
-        y, _class_labels = _encode_target(y_raw)
-
-        y_pred = model.predict(X)
-        cm = confusion_matrix(y, y_pred)
-        # LabelEncoder sorts classes, so _class_labels aligns with encoded ints
-        labels = _class_labels if _class_labels else sorted(y.unique())
-
-        fig, ax = plt.subplots(figsize=(max(5, len(labels)), max(4, len(labels))))
-        sns.heatmap(
-            cm,
-            annot=True,
-            fmt="d",
-            cmap="Blues",
-            xticklabels=labels,
-            yticklabels=labels,
-            ax=ax,
-        )
-        ax.set_xlabel("Predicted")
-        ax.set_ylabel("Actual")
-        ax.set_title("Confusion Matrix")
-        out = str(Path(output_dir) / "confusion_matrix.png")
-        fig.tight_layout()
-        fig.savefig(out, dpi=150)
-        plt.close(fig)
-        return [out]
+    def _distributions(self, df: pd.DataFrame) -> list[dict[str, Any]]:
+        num_cols = df.select_dtypes(include="number").columns.tolist()[:MAX_DISTRIBUTIONS]
+        charts: list[dict[str, Any]] = []
+        for col in num_cols:
+            values = pd.to_numeric(df[col], errors="coerce").dropna()
+            if values.nunique() < 2:
+                continue
+            # Pre-binned over every row (aggregate before charting), drawn as
+            # a frequency polygon through each bin's midpoint.
+            counts, edges = np.histogram(values.to_numpy(dtype=float), bins=min(HIST_BINS, values.nunique()))
+            rows = [
+                {"value": round(float((edges[i] + edges[i + 1]) / 2), 6), "rows": int(n)}
+                for i, n in enumerate(counts)
+            ]
+            label = humanize_label(str(col))
+            charts.append(_validated({
+                "type": "area", "data": rows, "x": "value", "y": "rows", "y_format": "count",
+                "title": f"Distribution — {label}", "x_title": label, "y_title": "Rows",
+            }))
+        if not charts:
+            raise ToolExecutionError("No numeric column with at least two distinct values to chart.")
+        return charts
 
     def get_schema(self) -> dict[str, Any]:
         return {
             "file_path": {"type": "string", "description": "Dataset path.", "required": True},
             "chart_type": {
                 "type": "string",
-                "description": (
-                    "Type of chart: correlation_heatmap | feature_importance | "
-                    "distributions | roc_curve | confusion_matrix."
-                ),
+                "description": "Type of chart: correlation_heatmap | feature_importance | distributions.",
                 "required": True,
             },
             "target_column": {
                 "type": "string",
-                "description": "Target column (required for roc_curve, confusion_matrix, feature_importance).",
+                "description": "Target column (required for feature_importance).",
                 "required": False,
             },
             "model_path": {
                 "type": "string",
-                "description": "Path to .pkl model (required for feature_importance, roc_curve, confusion_matrix).",
+                "description": "Path to .pkl model (required for feature_importance).",
                 "required": False,
             },
-            "output_dir": {"type": "string", "description": "Output directory. Default: output/visualizations.", "required": False},
         }

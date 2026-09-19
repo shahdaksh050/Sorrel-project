@@ -182,6 +182,64 @@ def sanitize_for_prompt(text: object, max_len: int = 80) -> str:
     return s
 
 
+#: Personal-data patterns, unanchored: src.core.profiler fullmatches them
+#: against column values, redact_pii_text substitutes them inside free text.
+#: PHONE_RE demands a leading "+" or separators between digit groups so that
+#: plain counts ("1234567890 rows") and dates never read as phone numbers.
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+IPV4_RE = re.compile(r"(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)")
+SSN_RE = re.compile(r"\d{3}-\d{2}-\d{4}")
+CARD_RE = re.compile(r"\d(?:[ -]?\d){12,18}")
+PHONE_RE = re.compile(
+    r"\+\d{8,15}|(?:\+\d{1,3}[\s.-]?\(?\d{1,4}\)?|\(\d{2,4}\)|\d{2,4})[\s.-]\d{3,4}[\s.-]\d{3,4}"
+)
+
+_EMAIL_TEXT_RE = re.compile(rf"(?<![\w.+-]){EMAIL_RE.pattern}")
+_IPV4_TEXT_RE = re.compile(rf"(?<![\d.]){IPV4_RE.pattern}(?!\.?\d)")
+_SSN_TEXT_RE = re.compile(rf"(?<![\d-]){SSN_RE.pattern}(?![\d-])")
+_CARD_TEXT_RE = re.compile(rf"(?<![\d.]){CARD_RE.pattern}(?!\.?\d)")
+_PHONE_TEXT_RE = re.compile(rf"(?<![\w.+-])(?:{PHONE_RE.pattern})(?!\.?\d)")
+
+
+def luhn_valid(digits: str) -> bool:
+    """Luhn checksum over the digits of `digits` (separators ignored) —
+    separates real card numbers from arbitrary 13-19 digit numbers."""
+    nums = [int(ch) for ch in digits if ch.isdigit()]
+    if not 13 <= len(nums) <= 19:
+        return False
+    total = 0
+    for i, n in enumerate(reversed(nums)):
+        if i % 2:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0
+
+
+def pii_redaction_enabled() -> bool:
+    """Whether PII values are withheld from LLM prompts. On unless the
+    REDACT_PII environment variable is "false"; read per call so an
+    operator can change it without a restart."""
+    return os.getenv("REDACT_PII", "true").strip().lower() != "false"
+
+
+def redact_pii_text(text: str) -> str:
+    """
+    Mask emails, IPv4 addresses, card numbers (Luhn-valid), SSN-style IDs
+    and phone numbers inside free text bound for an LLM (finding headlines,
+    error messages). Ordinary numbers — p-values, counts, years, dates —
+    are left alone.
+    """
+    text = _EMAIL_TEXT_RE.sub("[redacted: email]", text)
+    text = _IPV4_TEXT_RE.sub("[redacted: ip_address]", text)
+    text = _CARD_TEXT_RE.sub(
+        lambda m: "[redacted: card_number]" if luhn_valid(m.group()) else m.group(), text
+    )
+    text = _SSN_TEXT_RE.sub("[redacted: gov_id]", text)
+    return _PHONE_TEXT_RE.sub("[redacted: phone]", text)
+
+
 def escape_csv_formulas(df: pd.DataFrame) -> pd.DataFrame:
     """
     Neutralise spreadsheet formula injection in a DataFrame bound for CSV export.

@@ -60,7 +60,8 @@ class TestChartSelection:
     ) -> None:
         profile = profile_dataframe(churn_df, target_column="churn")
         charts = build_dashboard(
-            churn_df, profile, target_column="churn", task_type="classification"
+            churn_df, profile, target_column="churn", task_type="classification",
+            findings=[{"kind": "distribution", "measure": "monthly_charge"}],
         )
         ids = _ids(charts)
         assert "class_balance" in ids
@@ -70,7 +71,10 @@ class TestChartSelection:
     def test_eda_mode_has_no_target_charts(self, churn_df: pd.DataFrame) -> None:
         df = churn_df.drop(columns=["churn"])
         profile = profile_dataframe(df)
-        ids = _ids(build_dashboard(df, profile, task_type="eda"))
+        ids = _ids(build_dashboard(
+            df, profile, task_type="eda",
+            findings=[{"kind": "distribution", "measure": "monthly_charge"}],
+        ))
         assert "class_balance" not in ids
         assert not any(i.startswith("box_") for i in ids)
         assert any(i.startswith("hist_") for i in ids)

@@ -146,6 +146,12 @@ def build_agenda(
             seen.add(key)
             questions.append(q)
 
+    for q in _specialist_questions(profile):
+        key = (q.kind, q.suggested_tool, tuple(sorted(q.columns)))
+        if key not in seen:
+            seen.add(key)
+            questions.append(q)
+
     # Fallback so a dataset with no dimension, entity or time axis (a sensor
     # dump, a lab table) still gets an agenda: ask about each top measure's
     # distribution and outliers (a generic "what correlates" doesn't count).
@@ -200,7 +206,7 @@ def build_agenda(
     # first cut and costs nothing to compute.
     if objective_l:
         for q in questions:
-            if any(col.lower() in objective_l for col in q.columns):
+            if any(re.search(rf"(?<!\w){re.escape(col.lower())}(?!\w)", objective_l) for col in q.columns):
                 q.expected_value = min(1.0, q.expected_value + 0.15)
 
     questions.sort(key=lambda q: q.expected_value, reverse=True)
@@ -337,6 +343,65 @@ def _archetype_questions(profile: DatasetProfile, arm: ColumnProfile | None) -> 
     return questions
 
 
+#: kind -> (module, class, value, question template, default_params keys).
+_SPECIALIST_TOOLS: dict[str, tuple[str, str, float, str, tuple[str, ...]]] = {
+    "survival": (
+        "survival", "SurvivalAnalysisTool", 0.75,
+        "How long until '{1}' happens, and do some groups leave sooner?", ("duration_column", "event_column"),
+    ),
+    "curve_fit": (
+        "curve_fit", "CurveFitAnalysisTool", 0.7,
+        "What curve does '{1}' follow as '{0}' changes?", ("x_column", "y_column"),
+    ),
+    "mixed_model": (
+        "mixed_model", "MixedModelAnalysisTool", 0.7,
+        "How much of '{0}' differs between '{1}' groups rather than within them?", ("target_column", "group_column"),
+    ),
+    "forecast": (
+        "forecast", "ForecastAnalysisTool", 0.7,
+        "Where is '{1}' heading over the next periods?", ("date_column", "value_column"),
+    ),
+    "association": (
+        "basket", "BasketAnalysisTool", 0.7,
+        "Which items are usually bought together?", ("order_column", "item_column"),
+    ),
+    "elasticity": (
+        "elasticity", "PriceElasticityTool", 0.7,
+        "How sensitive is '{1}' to '{0}'?", ("price_column", "quantity_column"),
+    ),
+    "equity": (
+        "equity", "EquityAnalysisTool", 0.75,
+        "Do '{1}' results differ by '{0}' after allowing for other factors?", ("group_column", "outcome_column"),
+    ),
+}
+
+
+def _specialist_questions(profile: DatasetProfile) -> list[Question]:
+    """One question per specialist tool (survival, curve fit, mixed model,
+    forecast, basket, elasticity, equity) whose `applies_to` fits the data,
+    with columns resolved by the tool's own `default_params`."""
+    import importlib
+
+    questions: list[Question] = []
+    for kind, (module, cls, value, template, keys) in _SPECIALIST_TOOLS.items():
+        try:
+            tool = getattr(importlib.import_module(f"src.tools.{module}"), cls)()
+            if tool.applies_to(profile, None) <= 0:
+                continue
+            params = tool.default_params(profile, None)
+            cols = [str(params[k]) for k in keys]
+            questions.append(Question(
+                text=template.format(*cols),
+                kind=kind,
+                columns=cols,
+                expected_value=value,
+                suggested_tool=tool.name,
+            ))
+        except Exception:
+            continue
+    return questions
+
+
 def _stat(column: Any) -> str:
     """Aggregation-aware wording: "total" for an additive measure, "average"
     for everything else (levels, rates, ordinal scales)."""
@@ -370,6 +435,16 @@ def _mentioned(finding: dict[str, Any], columns: list[str]) -> int:
     )
 
 
+def _about(finding: dict[str, Any], columns: list[str]) -> bool:
+    """A finding is about a question's columns. With two or more columns
+    (e.g. "M by D2") it must name BOTH its measure and dimension among them,
+    else a finding on "M by D1" would mark "M by D2" answered."""
+    m, d = finding.get("measure"), finding.get("dimension")
+    if len(columns) >= 2 and m and d:
+        return m in columns and d in columns
+    return m in columns or d in columns
+
+
 def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Match agenda questions against what the finding bus actually produced,
@@ -381,6 +456,8 @@ def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> d
     they show up as an honest "could not confirm" rather than a false claim
     of coverage.
     """
+    from src.core.findings import CAVEAT_FINDING_KINDS
+
     answered: list[Question] = []
     unanswered: list[Question] = []
     for q in agenda:
@@ -394,7 +471,14 @@ def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> d
             f.get("kind") in _LLM_KINDS and _mentioned(f, q.columns) >= min(2, len(q.columns))
             for f in findings
         ) if q.columns else False
-        if q.kind == "distribution":
+        if q.kind in _SPECIALIST_TOOLS:
+            # A specialist tool having run and reported (not just a caveat)
+            # is the answer, whatever columns its own resolver picked.
+            hit = any(
+                f.get("source_tool") == q.suggested_tool and f.get("kind") not in CAVEAT_FINDING_KINDS
+                for f in findings
+            )
+        elif q.kind == "distribution":
             # detect_outliers reports method_fit findings that carry no
             # measure column, so its having reported at all is the answer.
             hit = llm_hit or any(f.get("source_tool") == q.suggested_tool for f in findings)
@@ -406,9 +490,7 @@ def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> d
             # segment_comparison finding on an unrelated measure/dimension
             # pair would mark every OTHER segment question "answered" too).
             hit = llm_hit or any(
-                f.get("kind") in kind_hit
-                and (f.get("measure") in q.columns or f.get("dimension") in q.columns)
-                for f in findings
+                f.get("kind") in kind_hit and _about(f, q.columns) for f in findings
             )
         else:
             # No columns to check against (e.g. the general "which measures

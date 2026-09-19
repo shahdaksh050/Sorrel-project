@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from rich.console import Console
 from rich.panel import Panel
@@ -38,6 +39,34 @@ _NUMERIC_TARGET_NAMES = frozenset({
     "score", "rating", "demand", "margin", "result", "status",
 })
 _PARTIAL_TARGET_HINTS = ("target", "label", "class", "outcome", "predict", "response")
+
+
+_RESULT_PREVIEW_ROWS = 15
+#: Digest budget multiplier for sandbox-code results: their RESULT is the
+#: computed answer, so it must survive the digest that later cycles read.
+_CODE_DIGEST_FACTOR = 3
+
+
+def _lean_output(output: dict[str, Any]) -> dict[str, Any]:
+    """A tool output as the LLM should read it: no raw frames, a chart as a
+    one-line descriptor (its data rows would crowd RESULT out of the budget),
+    a long table cut to a preview, and the FINDING payload reduced to its
+    headline (its evidence is already a top-level key)."""
+    slim = {k: v for k, v in output.items() if k not in {"raw_data", "dataframe"}}
+    chart = slim.get("chart")
+    if isinstance(chart, dict):
+        rows = chart.get("data")
+        slim["chart"] = {
+            **{k: chart[k] for k in ("type", "x", "y", "title") if k in chart},
+            "rows": len(rows) if isinstance(rows, list) else None,
+        }
+    payload = slim.pop("finding_payload", None)
+    if isinstance(payload, dict) and payload.get("headline"):
+        slim["finding"] = payload["headline"]
+    result = slim.get("result")
+    if isinstance(result, list) and len(result) > _RESULT_PREVIEW_ROWS:
+        slim["result"] = [*result[:_RESULT_PREVIEW_ROWS], f"…and {len(result) - _RESULT_PREVIEW_ROWS} more rows"]
+    return slim
 
 
 def _shrink_to_fit(obj: Any, max_chars: int) -> Any:
@@ -135,8 +164,11 @@ class DatasetMetadata:
         # positional fallback below (or, worse, a coincidental name match
         # like "target_date") and gets auto-selected to train on, which is
         # never the right call regardless of confidence.
+        # An entirely null column has nothing to predict either.
         non_datetime_cols = [
-            c for c in col_names if "datetime" not in self.columns.get(c, "").lower()
+            c for c in col_names
+            if "datetime" not in self.columns.get(c, "").lower()
+            and not (self.row_count > 0 and self.missing_values.get(c, 0) >= self.row_count)
         ]
         if not non_datetime_cols:
             return None, 0.0
@@ -336,7 +368,7 @@ class MemorySystem:
         self.analysis_plan: list[AnalysisStep] = []
         self.tool_results: list[ToolResult] = []
         self.iteration_count: int = 0
-        self.session_id: str = str(int(time.time()))
+        self.session_id: str = f"{int(time.time())}-{uuid4().hex[:8]}"
         self.persist_path: str | None = persist_path
         self._ctx: dict[str, Any] = {}     # generic RLM sub-call context store
         self.findings: list[Finding] = []  # the finding bus (7.1) — one list, every surface projects it
@@ -459,8 +491,7 @@ class MemorySystem:
         lines: list[str] = []
         for r in self.tool_results:
             if r.status == "success":
-                slim = {k: v for k, v in r.output.items() if k not in {"raw_data", "dataframe"}}
-                shrunk = _shrink_to_fit(slim, max_chars_per_result)
+                shrunk = _shrink_to_fit(_lean_output(r.output), max_chars_per_result)
                 serialised = json.dumps(shrunk, default=str)
                 lines.append(f"[{r.tool_name}] SUCCESS → {serialised}")
             elif r.status == "skipped":
@@ -501,8 +532,8 @@ class MemorySystem:
             lines.append("Earlier iterations (digest — key numbers only, already reacted to):")
             for r in earlier:
                 if r.status == "success":
-                    slim = {k: v for k, v in r.output.items() if k not in {"raw_data", "dataframe"}}
-                    shrunk = _shrink_to_fit(slim, digest_chars_per_result)
+                    budget = digest_chars_per_result * (_CODE_DIGEST_FACTOR if "stdout" in r.output else 1)
+                    shrunk = _shrink_to_fit(_lean_output(r.output), budget)
                     serialised = json.dumps(shrunk, default=str)
                     lines.append(f"  [iter {r.iteration}] {r.tool_name} → success → {serialised}")
                 elif r.status == "skipped":
@@ -513,8 +544,7 @@ class MemorySystem:
             lines.append("This iteration's results (in full):")
             for r in current:
                 if r.status == "success":
-                    slim = {k: v for k, v in r.output.items() if k not in {"raw_data", "dataframe"}}
-                    shrunk = _shrink_to_fit(slim, max_chars_per_result)
+                    shrunk = _shrink_to_fit(_lean_output(r.output), max_chars_per_result)
                     lines.append(f"  [{r.tool_name}] SUCCESS → {json.dumps(shrunk, default=str)}")
                 elif r.status == "skipped":
                     lines.append(f"  [{r.tool_name}] SKIPPED → {r.output.get('summary', '')}")

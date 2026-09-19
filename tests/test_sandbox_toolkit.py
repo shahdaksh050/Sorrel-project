@@ -155,13 +155,13 @@ class TestChartSpecAdditions:
             "data": data,
             "x": "category",
             "y": "value",
-            "thresholds": [15, {"value": 18, "label": "Target", "color": "#a33526"}],
+            "annotations": [{"y": 15}, {"y": 18, "label": "Target"}],
         }
         clean, err = validate_chart_spec(spec)
         assert err is None
         assert clean is not None
-        assert "thresholds" in clean
-        assert len(clean["thresholds"]) == 2
+        assert "annotations" in clean
+        assert len(clean["annotations"]) == 2
         vl = spec_to_vegalite(clean)
         assert "layer" in vl
 

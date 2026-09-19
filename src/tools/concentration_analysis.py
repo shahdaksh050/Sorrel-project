@@ -245,6 +245,23 @@ class ConcentrationAnalysisTool(BaseTool):
                 "aggregate the data to one row per entity first."
             )
 
+        # Gini and top-share formulas assume non-negative totals; net-negative
+        # entities (refund-heavy) would push shares above 100% / Gini outside [0, 1].
+        n_negative = int((grouped < 0).sum())
+        caveat = None
+        if n_negative == n_entities:
+            raise ToolExecutionError(
+                f"Every {_entity_noun(entity_column)} total of '{measure_column}' is negative — "
+                "concentration shares are undefined."
+            )
+        if n_negative:
+            grouped = grouped.clip(lower=0)
+            caveat = (
+                f"{n_negative:,} of {n_entities:,} {_entity_noun(entity_column)} have a negative "
+                f"net total of '{measure_column}' (e.g. refunds); they were counted as 0 for "
+                "these concentration metrics."
+            )
+
         total_measure = float(grouped.sum())
         if total_measure == 0:
             raise ToolExecutionError(
@@ -266,9 +283,12 @@ class ConcentrationAnalysisTool(BaseTool):
             f"total {measure_column} (vs {uniform[10] * 100:.1f}% under an even split; "
             f"Gini={gini:.2f}, n={n_entities:,})."
         )
+        if caveat:
+            summary += " " + caveat
 
         return {
             "summary": summary,
+            "caveat": caveat,
             "measure_column": measure_column,
             "entity_column": entity_column,
             "n_entities": n_entities,

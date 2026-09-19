@@ -14,6 +14,12 @@ from src.core.controller import AgentController, LLMClient
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _no_chart_design(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The optional chart-design stage makes one extra LLM call; keep scripted replies intact.
+    monkeypatch.setenv("CHART_DESIGN", "false")
+
+
 @pytest.fixture
 def sample_csv(tmp_path: pytest.TempPathFactory) -> str:
     rng = np.random.default_rng(42)
@@ -48,6 +54,8 @@ class _ScriptedLLM:
     def __init__(self, responses: list[dict[str, Any] | Exception]) -> None:
         self._responses = responses
         self.calls = 0
+        self.provider = "openrouter"
+        self.model = "test-model"
 
     def call(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         idx = min(self.calls, len(self._responses) - 1)
@@ -56,6 +64,9 @@ class _ScriptedLLM:
         if isinstance(item, Exception):
             raise item
         return item
+
+    def get_context_window(self) -> int:
+        return 32_000
 
 
 FINAL_RESPONSE: dict[str, Any] = {
@@ -214,8 +225,22 @@ class TestAnalyzeWorkflow:
                 }
             ],
         }
+        # A replan made ONLY of cached steps now ends the run as converged, so
+        # the replan pairs the verbatim step with one genuinely new step.
+        replan = {
+            **clean_step,
+            "steps": [
+                *clean_step["steps"],
+                {
+                    "step_number": 2,
+                    "tool_name": "correlation_analysis",
+                    "parameters": {"file_path": sample_csv},
+                    "rationale": "Something new.",
+                },
+            ],
+        }
         agent.llm_client = _ScriptedLLM(  # type: ignore[assignment]
-            [clean_step, clean_step, FINAL_RESPONSE]
+            [clean_step, replan, FINAL_RESPONSE]
         )
         agent.load_dataset(sample_csv, target_hint="label", interactive=False)
         agent.analyze()
@@ -224,9 +249,11 @@ class TestAnalyzeWorkflow:
             r for r in agent.memory.tool_results if r.tool_name == "clean_data"
         ]
         assert len(clean_results) == 2, "both planning cycles must record a result"
-        assert clean_results[0] is clean_results[1], (
-            "second occurrence must be the cached object, not a fresh execution"
+        assert "plan_note" not in clean_results[0].output
+        assert "reused, not recomputed" in clean_results[1].output["plan_note"], (
+            "second occurrence must be served from the step cache, not re-executed"
         )
+        assert clean_results[1].output["summary"] == clean_results[0].output["summary"]
 
 
 # ---------------------------------------------------------------------------

@@ -33,10 +33,12 @@ class ToolRegistry:
 
     def _register_builtin_tools(self) -> None:
         from src.tools.anomaly import AnomalyAnalysisTool
+        from src.tools.basket import BasketAnalysisTool
         from src.tools.change_analysis import ChangeAnalysisTool
         from src.tools.clustering import ClusterDataTool
         from src.tools.cohort_analysis import CohortAnalysisTool
         from src.tools.concentration_analysis import ConcentrationAnalysisTool
+        from src.tools.curve_fit import CurveFitAnalysisTool
         from src.tools.data_processing import (
             CleanDataTool,
             CorrelationAnalysisTool,
@@ -46,14 +48,19 @@ class ToolRegistry:
         from src.tools.define_analysis_tool import DefineAnalysisToolTool
         from src.tools.dimensionality import DimensionalityAnalysisTool
         from src.tools.dynamic_code import DynamicCodeExecutionTool
+        from src.tools.elasticity import PriceElasticityTool
+        from src.tools.equity import EquityAnalysisTool
         from src.tools.experiment_analysis import ExperimentAnalysisTool
         from src.tools.financial_analysis import FinancialAnalysisTool
+        from src.tools.forecast import ForecastAnalysisTool
         from src.tools.geospatial import GeospatialAnalysisTool
+        from src.tools.mixed_model import MixedModelAnalysisTool
         from src.tools.ml_pipeline import EvaluateModelTool, TrainModelTool
         from src.tools.regression import RegressionAnalysisTool
         from src.tools.report_generator import GenerateReportTool
         from src.tools.segment_comparison import SegmentComparisonTool
         from src.tools.statistical_analysis import SelectStatisticalTestTool
+        from src.tools.survival import SurvivalAnalysisTool
         from src.tools.text_analysis import TextAnalysisTool
         from src.tools.time_series import TimeSeriesAnalysisTool
         from src.tools.visualization import GenerateVisualizationsTool
@@ -95,6 +102,17 @@ class ToolRegistry:
             RegressionAnalysisTool(),
             ExperimentAnalysisTool(),
             AnomalyAnalysisTool(),
+            # Domain tools — each gates itself in applies_to (score 0 = never
+            # offered), so they cost the planner prompt nothing on data they
+            # don't fit: time-to-event, forecasting, nested/replicated data,
+            # retail baskets and price response, pay/outcome equity.
+            SurvivalAnalysisTool(),
+            CurveFitAnalysisTool(),
+            ForecastAnalysisTool(),
+            MixedModelAnalysisTool(),
+            BasketAnalysisTool(),
+            PriceElasticityTool(),
+            EquityAnalysisTool(),
         ):
             self.register(tool)
 

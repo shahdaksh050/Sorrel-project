@@ -74,7 +74,6 @@ Spec shape (keys not listed here are dropped):
 from __future__ import annotations
 
 import importlib
-import json
 import math
 import re
 import statistics
@@ -99,7 +98,7 @@ CHART_TYPES: frozenset[str] = frozenset({
 #: Kinds whose value axis (`y`, and `y2`) must be numeric to mean anything.
 _NUMERIC_Y_TYPES: frozenset[str] = frozenset({
     "waterfall", "lorenz", "dot_ci", "dual_axis", "boxplot", "pareto", "slope", "bullet",
-    "band", "stacked_bar", "grouped_bar",
+    "band", "stacked_bar", "grouped_bar", "bar", "line", "area",
 })
 _SERIES_TYPES: frozenset[str] = frozenset({"stacked_bar", "grouped_bar"})
 _BAR_FAMILY: frozenset[str] = frozenset({"bar", "stacked_bar", "grouped_bar"})
@@ -179,6 +178,7 @@ def _limit_categories(
     group: str | None,
     sum_fields: list[str],
     aggregate: bool,
+    facet: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Keep the largest categories of `x` (by |rank_field|, or row count when
     `rank_field` is None). The tail is summed into one "Other" row per group
@@ -197,12 +197,15 @@ def _limit_categories(
     if not aggregate:
         return head, f"Showing the {n_keep} largest of {len(levels)} categories."
     label = next((lab for lab in _OTHER_LABELS if lab not in kept), "Other (rest)")
-    others: dict[Any, dict[str, Any]] = {}
+    others: dict[tuple[Any, Any], dict[str, Any]] = {}
     for r in rows:
         if r.get(x) in kept:
             continue
-        key = r.get(group) if group else None
-        row = others.setdefault(key, dict.fromkeys(r) | {x: label} | ({group: key} if group else {}))
+        pf, pg = (r.get(facet) if facet else None), (r.get(group) if group else None)
+        row = others.setdefault(
+            (pf, pg),
+            dict.fromkeys(r) | {x: label} | ({group: pg} if group else {}) | ({facet: pf} if facet else {}),
+        )
         for f in sum_fields:
             if _is_number(r.get(f)):
                 row[f] = (row[f] or 0) + r[f]
@@ -417,6 +420,7 @@ def validate_chart_spec(spec: Any) -> tuple[dict[str, Any] | None, str | None]:
         rows, note = _limit_categories(
             rows, x, None if chart_type == "boxplot" else y, color, sums,
             aggregate=additive and not has_bounds and chart_type != "boxplot",
+            facet=facet if isinstance(facet, str) else None,
         )
         if note:
             notes.append(note)
@@ -539,6 +543,13 @@ def _vl_copy(node: Any, ctx: _VlContext, depth: int = 0) -> Any:
                 _vl_transform(item, ctx)
         elif key == "field" and isinstance(value, str):
             ctx.refs.add(value)
+        elif key == "repeat":
+            # Field lists ({"row": [...], "column": [...]} or a bare list) are
+            # columns the panels read — keep them out of the pruning.
+            lists = value.values() if isinstance(value, dict) else [value]
+            for names in lists:
+                if isinstance(names, list):
+                    ctx.refs.update(n for n in names if isinstance(n, str))
         elif key == "as":
             ctx.produced.update(a for a in (value if isinstance(value, list) else [value]) if isinstance(a, str))
         if key in ("width", "height") and _is_number(value):
@@ -648,7 +659,8 @@ def _is_number(value: Any) -> TypeGuard[int | float]:
 
 
 def _is_iso_date(value: Any) -> bool:
-    if not isinstance(value, str) or len(value) < 7:
+    # Python 3.13 parses compact "20240301", which Vega-Lite cannot: _normalise_dates rewrites it.
+    if not isinstance(value, str) or len(value) < 7 or re.fullmatch(r"\d{8}", value):
         return False
     try:
         datetime.fromisoformat(value + "-01" if len(value) == 7 else value)
@@ -744,9 +756,208 @@ def _datum_color(label: str) -> dict[str, Any]:
     return {"datum": label, "type": "nominal", "legend": {"orient": "top", "title": None}}
 
 
+# ---------------------------------------------------------------------------
+# Field aliasing. Vega-Lite reads "." and "[]" in a field name as a nested
+# path, so a column like `PT08.S2(NMHC)` yields undefined values and the chart
+# draws nothing. Unsafe names are aliased in the rows and every field reference.
+# ---------------------------------------------------------------------------
+
+_UNSAFE_FIELD = re.compile(r"""[.\[\]\\'"]""")
+_TRANSFORM_REFS = ("regression", "on", "loess", "pivot", "key", "impute", "density", "stack")
+_POINTLIKE = frozenset({"point", "circle", "square", "line", "area", "trail"})
+
+
+def _inline_rowsets(node: Any, out: list[list[Any]]) -> None:
+    if isinstance(node, list):
+        for item in node:
+            _inline_rowsets(item, out)
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            if key == "data" and isinstance(value, dict) and isinstance(value.get("values"), list):
+                out.append(value["values"])
+            elif key == "datasets" and isinstance(value, dict):
+                out.extend(v for v in value.values() if isinstance(v, list))
+            else:
+                _inline_rowsets(value, out)
+
+
+def _alias_node(spec: dict[str, Any], amap: dict[str, str]) -> dict[str, Any]:
+    def ref(name: Any) -> Any:
+        return (amap.get(name) or amap.get(name.replace("\\", ""), name)) if isinstance(name, str) else name
+
+    def names(value: Any) -> Any:
+        return [ref(n) for n in value] if isinstance(value, list) else value
+
+    def rows(values: list[Any]) -> list[Any]:
+        return [{amap.get(k, k): v for k, v in r.items()} if isinstance(r, dict) else r for r in values]
+
+    def channel(ch: Any) -> Any:
+        """Encoding channel / tooltip entry / facet header: keeps the real column name as its title."""
+        if isinstance(ch, list):
+            return [channel(c) for c in ch]
+        out = walk(ch)
+        if (isinstance(ch, dict) and isinstance(ch.get("field"), str) and out["field"] != ch["field"]
+                and "title" not in ch and not ("axis" in ch and ch["axis"] is None)):
+            out["title"] = ch["field"].replace("\\", "")
+        return out
+
+    def transform(item: Any) -> Any:
+        out = walk(item)
+        if not isinstance(out, dict):
+            return out
+        for key in _TRANSFORM_REFS:
+            if key in out:
+                out[key] = ref(out[key])
+        for key in ("groupby", "fold"):
+            if key in out:
+                out[key] = names(out[key])
+        if "pivot" in out and "value" in out:  # elsewhere `value` is a constant, not a field
+            out["value"] = ref(out["value"])
+        return out
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, list):
+            return [walk(i) for i in node]
+        if not isinstance(node, dict):
+            return node
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key == "data" and isinstance(value, dict) and isinstance(value.get("values"), list):
+                value = {**value, "values": rows(value["values"])}
+            elif key == "datasets" and isinstance(value, dict):
+                value = {n: rows(v) if isinstance(v, list) else v for n, v in value.items()}
+            elif key == "transform" and isinstance(value, list):
+                value = [transform(t) for t in value]
+            elif key == "encoding" and isinstance(value, dict):
+                value = {c: channel(v) for c, v in value.items()}
+            elif key == "facet" and isinstance(value, dict):
+                value = channel(value) if "field" in value else {c: channel(v) for c, v in value.items()}
+            elif key == "repeat":
+                value = {c: names(v) for c, v in value.items()} if isinstance(value, dict) else names(value)
+            elif key == "field":
+                value = ref(value)
+            else:
+                value = walk(value)
+            out[key] = value
+        return out
+
+    result: dict[str, Any] = walk(spec)
+    return result
+
+
+def alias_fields(spec: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a Vega-Lite spec whose unsafe field names (any of
+    `. [ ] \\ ' "`) are replaced by safe aliases in every inline data row and
+    every field reference (expression strings, titles and text are untouched).
+    Aliased encoding channels/tooltips without a title are titled with the
+    original name. Idempotent; returns `spec` unchanged when nothing is unsafe
+    or on any failure."""
+    try:
+        rowsets: list[list[Any]] = []
+        _inline_rowsets(spec, rowsets)
+        seen: dict[Any, None] = {}
+        for rows in rowsets:
+            for row in rows:
+                if isinstance(row, dict):
+                    for key in row:
+                        if key not in seen:
+                            seen[key] = None
+        unsafe = [k for k in seen if isinstance(k, str) and _UNSAFE_FIELD.search(k)]
+        if not unsafe:
+            return spec
+        taken = set(seen)
+        amap: dict[str, str] = {}
+        for name in unsafe:
+            base = alias = _UNSAFE_FIELD.sub("_", name)
+            n = 1
+            while alias in taken:
+                n += 1
+                alias = f"{base}_{n}"
+            taken.add(alias)
+            amap[name] = alias
+        return _alias_node(spec, amap)
+    except Exception:
+        return spec
+
+
+def _present(value: Any, quantitative: bool) -> bool:
+    if value is None:
+        return False
+    if not quantitative:
+        return True
+    if isinstance(value, str):
+        try:
+            return math.isfinite(float(value))
+        except ValueError:
+            return False
+    return math.isfinite(value) if isinstance(value, (int, float)) else True
+
+
+def _rows_render(rows: list[Any], mark: Any, enc: dict[str, Any]) -> bool:
+    kind = mark.get("type") if isinstance(mark, dict) else mark
+    primary = [enc.get(c) for c in ("x", "y", *(("color",) if kind == "rect" else ()))]
+    wanted = [(c["field"], c.get("type") == "quantitative") for c in primary
+              if isinstance(c, dict) and isinstance(c.get("field"), str)]
+    if not wanted or not all(isinstance(r, dict) for r in rows):
+        return True
+    keys: set[Any] = set().union(*rows)
+    resolved: list[tuple[str, bool]] = []
+    for field, quantitative in wanted:
+        name = field if field in keys else field.replace("\\", "")
+        if name not in keys:
+            if rows and any(ch in field for ch in ".["):  # possibly a nested path
+                return True
+            return False
+        resolved.append((name, quantitative))
+    need = 2 if kind in _POINTLIKE else 1
+    good = 0
+    for r in rows:
+        if all(_present(r.get(k), q) for k, q in resolved):
+            good += 1
+            if good >= need:
+                return True
+    return False
+
+
+def _has_data(node: Any, rows: list[Any] | None, enc: dict[str, Any], transformed: bool) -> bool:
+    if not isinstance(node, dict):
+        return True
+    if (data := node.get("data")) is not None:
+        if not (isinstance(data, dict) and isinstance(data.get("values"), list)):
+            return True  # url / named dataset: nothing to check
+        rows = data["values"]
+    transformed = transformed or bool(node.get("transform"))
+    if isinstance(node.get("encoding"), dict):
+        enc = {**enc, **node["encoding"]}
+    if "mark" in node:
+        return rows is None or transformed or _rows_render(rows, node["mark"], enc)
+    if isinstance(node.get("layer"), list):
+        kids = node["layer"][:1]
+    else:
+        kids = next((node[k] for k in ("hconcat", "vconcat", "concat") if isinstance(node.get(k), list)), None)
+        if kids is None:
+            kids = [node["spec"]] if "spec" in node else []
+    return not kids or any(_has_data(k, rows, enc, transformed) for k in kids)
+
+
+def chart_has_data(spec: dict[str, Any]) -> bool:
+    """False only when an inline-data Vega-Lite chart would definitely draw
+    nothing: no row has finite values for its primary x/y (and rect colour)
+    fields, or such a field exists in no row. Fails open (True) otherwise."""
+    try:
+        return _has_data(spec, None, {}, False)
+    except Exception:
+        return True
+
+
 def spec_to_vegalite(spec: dict[str, Any]) -> dict[str, Any]:
     """Translate a spec already cleaned by `validate_chart_spec` into a
-    Vega-Lite spec (no config — the theme is injected at render time)."""
+    Vega-Lite spec (no config — the theme is injected at render time). Unsafe
+    column names are aliased (see `alias_fields`)."""
+    return alias_fields(_spec_to_vegalite(spec))
+
+
+def _spec_to_vegalite(spec: dict[str, Any]) -> dict[str, Any]:
     if spec["type"] == "vega_lite":
         vl = {**spec["vega_lite"], "data": {"values": spec["data"]}}
         if spec.get("size") == "tall" and _is_number(vl.get("height")):
@@ -982,8 +1193,9 @@ def _build(spec: dict[str, Any]) -> dict[str, Any]:
         return {"mark": mark, "encoding": enc}
 
     if kind in _BAR_FAMILY:
-        # Dates and years keep chronological order; categories sort by value.
-        cat_type = "ordinal" if x_type == "temporal" or _year_like(rows, x) else x_type
+        # Dates and numbers (years, sizes, ...) are discrete bar positions in
+        # natural order, not a continuous axis; categories sort by value.
+        cat_type = "ordinal" if x_type in ("temporal", "quantitative") else x_type
         labels = _labels(rows, x)
         horizontal = cat_type == "nominal" and _prefers_horizontal(labels)
         cat_ch, val_ch = ("y", "x") if horizontal else ("x", "y")
@@ -1123,18 +1335,19 @@ def _build(spec: dict[str, Any]) -> dict[str, Any]:
         }
 
     if kind == "waterfall":
-        field = json.dumps(y)
         # Colour comes from the themed category range; the padded domain puts
         # "Decrease" on its risk slot and "Increase" on its positive slot.
         wf_spec: dict[str, Any] = {
             "data": {"values": rows},
             "height": 260,
             "transform": [
+                # Expressions never name the raw column (dotted names are aliased by field, not by expression).
                 {"window": [{"op": "sum", "field": y, "as": "running_total"}]},
-                {"calculate": f"datum.running_total - datum[{field}]", "as": "bar_start"},
+                {"window": [{"op": "sum", "field": y, "as": "change"}], "frame": [0, 0]},
+                {"calculate": "datum.running_total - datum.change", "as": "bar_start"},
                 {"calculate": "min(datum.bar_start, datum.running_total)", "as": "bar_bottom"},
                 {"calculate": "max(datum.bar_start, datum.running_total)", "as": "bar_top"},
-                {"calculate": f"datum[{field}] < 0 ? 'Decrease' : 'Increase'", "as": "direction"},
+                {"calculate": "datum.change < 0 ? 'Decrease' : 'Increase'", "as": "direction"},
             ],
             "mark": {"type": "bar"},
             "encoding": {
@@ -1275,3 +1488,91 @@ def _build(spec: dict[str, Any]) -> dict[str, Any]:
     if len(layers) > 1:
         return {"data": {"values": rows}, "height": 280, "layer": layers}
     return {"data": {"values": rows}, "height": 280, **points}
+
+
+# ---------------------------------------------------------------------------
+# Deterministic critique of a cleaned spec, fed back to the LLM so its next
+# cycle can redraw a better chart. No LLM call; never raises.
+# ---------------------------------------------------------------------------
+
+_DESCRIBE_MAX = 350
+_FLAT_SPAN = 0.05
+_SPIKE_SHARE = 0.5
+_SPARSE_HEATMAP = 0.6
+_OVERPLOT_POINTS = 300
+
+
+def _short_num(v: float) -> str:
+    return f"{v:,.0f}" if abs(v) >= 1000 else f"{v:.3g}"
+
+
+def _text_hints(clean: dict[str, Any]) -> list[str]:
+    hints = [] if clean.get("title") else ["no title"]
+    if not clean.get("caption"):
+        hints.append("add a caption stating the takeaway")
+    return hints
+
+
+def _series_hints(clean: dict[str, Any], rows: list[dict[str, Any]], x: str, y: Any) -> tuple[str, list[str]]:
+    """(measurement sentence, hints) for a catalog chart type."""
+    kind = clean["type"]
+    hints: list[str] = []
+    ys = [float(r[y]) for r in rows if isinstance(y, str) and _is_number(r.get(y))]
+    n_x = _distinct(rows, x)
+    if kind == "histogram":
+        head = f"Drew histogram of {x}: {len(rows)} rows"
+        vals = [r[x] for r in rows if _is_number(r.get(x))]
+        mode = Counter(vals).most_common(1)
+        if mode and mode[0][1] > _SPIKE_SHARE * len(vals):
+            hints.append(f"{mode[0][1] / len(vals):.0%} of rows equal {mode[0][0]} — check for a placeholder value")
+        return head, hints
+    if kind == "heatmap":
+        ny = _distinct(rows, y)
+        head = f"Drew heatmap of {clean.get('color') or 'row counts'} by {x} and {y}: {n_x}x{ny} grid"
+        if 0 < n_x <= _HEAT_MAX_LEVELS and 0 < ny <= _HEAT_MAX_LEVELS:
+            filled = len({(r.get(x), r.get(y)) for r in rows})
+            if 1 - filled / (n_x * ny) > _SPARSE_HEATMAP:
+                hints.append(f"{1 - filled / (n_x * ny):.0%} of heatmap cells are empty")
+        return head, hints
+    unit = "bars" if kind in _BAR_FAMILY or kind == "pareto" else "points" if len(rows) > 1 else "rows"
+    head = f"Drew {kind} of {y} by {x}: {n_x if unit == 'bars' else len(rows)} {unit}"
+    if ys:
+        lo, hi = min(ys), max(ys)
+        head += f", y {_short_num(lo)}–{_short_num(hi)}"
+        if len(ys) > 1 and kind not in ("lorenz", "boxplot"):
+            top = max(rows, key=lambda r: r[y] if _is_number(r.get(y)) else -math.inf)
+            low = min(rows, key=lambda r: r[y] if _is_number(r.get(y)) else math.inf)
+            head += f" (top {str(top.get(x))[:20]} {_short_num(top[y])}, low {str(low.get(x))[:20]} {_short_num(low[y])})"
+        mean = sum(ys) / len(ys)
+        if kind == "boxplot":
+            top_v = Counter(ys).most_common(1)[0]
+            if top_v[1] > _SPIKE_SHARE * len(ys):
+                hints.append(f"{top_v[1] / len(ys):.0%} of values equal {top_v[0]} — check for a placeholder value")
+        elif kind not in ("lorenz", "histogram") and len(ys) > 1:
+            if hi == lo:
+                hints.append("the series is flat (constant)")
+            elif mean and hi - lo < _FLAT_SPAN * abs(mean):
+                hints.append("y varies by <5% of its mean (near-flat, nothing to see)")
+        if kind in _BAR_FAMILY and clean.get("log_y") and lo > 0:
+            hints.append("log axis on bars has no zero baseline, so bar lengths mislead")
+    if kind in _CATEGORY_TYPES | {"boxplot"} and n_x > _MAX_CATEGORIES:
+        hints.append(f"{n_x} categories on x is too many to read")
+    if kind in ("scatter", "line", "area") and len(rows) > _OVERPLOT_POINTS:
+        hints.append(f"{len(rows)} points overplot — aggregate or bin")
+    return head, hints
+
+
+def describe_chart(clean: dict[str, Any]) -> str:
+    """One-line, deterministic description + critique of a chart cleaned by
+    `validate_chart_spec` ("" on any failure). Fed back to the LLM so it can
+    redraw a better chart in its next cycle."""
+    try:
+        rows = clean["data"]
+        if clean.get("type") == "vega_lite":
+            head, hints = f"Drew a custom Vega-Lite chart with {len(rows)} rows", list[str]()
+        else:
+            head, hints = _series_hints(clean, rows, clean["x"], clean.get("y"))
+        hints += _text_hints(clean)
+        return (f"{head}." + (f" Issues: {'; '.join(hints)}." if hints else ""))[:_DESCRIBE_MAX]
+    except Exception:
+        return ""

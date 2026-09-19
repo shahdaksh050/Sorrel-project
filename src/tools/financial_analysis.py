@@ -45,6 +45,9 @@ _FREQUENCY_TABLE: tuple[tuple[float, int, str], ...] = (
     (400.0, 1, "annual"),
 )
 
+#: A median gap below this (days) is treated as intraday, not daily.
+_INTRADAY_MAX_GAP_DAYS = 0.9
+
 #: Below this many return observations, annualised volatility and Sharpe
 #: are too noisy to report as point estimates.
 _MIN_RETURNS_FOR_ANNUALISATION = 20
@@ -64,6 +67,11 @@ def _infer_periods_per_year(dates: pd.Series) -> tuple[int, str, float]:
     if gaps.empty:
         return 252, "assumed daily (all timestamps identical)", 0.0
     median_gap = float(gaps.median())
+    if median_gap < _INTRADAY_MAX_GAP_DAYS:
+        # Intraday bars: calendar-time annualisation (24h x 365.25d); trading
+        # hours are not known, so this is a stated assumption, not a fact.
+        periods = max(1, round(365.25 / median_gap))
+        return periods, "intraday (annualised over 24h x 365.25d, ignores market hours)", median_gap
     for threshold, periods, label in _FREQUENCY_TABLE:
         if median_gap <= threshold:
             return periods, label, median_gap

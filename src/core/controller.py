@@ -35,6 +35,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from src.core.agenda import Question, build_agenda, coverage_report
+from src.core.chart_designer import design_from_reply
 from src.core.claim_verification import _CANON_PRECISIONS as _CANON_PRECISIONS
 from src.core.claim_verification import _KEYWORD_TOOL_MAP as _KEYWORD_TOOL_MAP
 from src.core.claim_verification import _KEYWORD_TOOL_PATTERNS as _KEYWORD_TOOL_PATTERNS
@@ -44,7 +45,13 @@ from src.core.claim_verification import _canon_number as _canon_number
 from src.core.claim_verification import _collect_numbers as _collect_numbers
 from src.core.claim_verification import flag_unverified_claims, verified_number_pools
 from src.core.coercion import coerce_types
-from src.core.dashboard import build_dashboard, dashboard_to_json
+from src.core.dashboard import (
+    ChartSpec,
+    build_dashboard,
+    dashboard_to_json,
+    designed_chart,
+    merge_designed,
+)
 from src.core.degradations import collect_degradations
 from src.core.domains import infer_domains
 from src.core.findings import Finding, score_objective_fit
@@ -56,7 +63,8 @@ from src.core.governance import (
     local_only,
     max_llm_tokens_per_run,
 )
-from src.core.io import read_any
+from src.core.io import get_max_rows, read_any
+from src.core.joins import join_related
 from src.core.llm_client import _DEFAULT_MODELS as _DEFAULT_MODELS
 from src.core.llm_client import LLMClient as LLMClient
 from src.core.llm_client import LocalOnlyError as LocalOnlyError
@@ -64,13 +72,14 @@ from src.core.memory import AnalysisStep, DatasetMetadata, MemorySystem, ToolRes
 from src.core.model_telemetry import get_limiter
 from src.core.multiple_testing import adjust_findings_run_level
 from src.core.profiler import DatasetProfile, profile_dataframe
-from src.core.prompt_manager import ARCHETYPES, PromptManager
+from src.core.prompt_manager import ARCHETYPES, CHART_DESIGN_PROMPT, PromptManager
+from src.core.security import sanitize_for_prompt
 from src.core.step_validation import _COLUMN_PARAM_NAMES as _COLUMN_PARAM_NAMES
 from src.core.step_validation import columns_for, is_column_param, validate_step
 from src.core.tool_registry import _INJECTED_PARAMS as _INJECTED_PARAMS
 from src.core.tool_registry import ToolRegistry as ToolRegistry
 from src.core.tool_registry import _short_tool_description as _short_tool_description
-from src.rlm.engine import RLMEngine, RLMSubTask
+from src.rlm.engine import RLMEngine, RLMSubTask, _extract_usage
 
 console = Console()
 
@@ -247,7 +256,12 @@ class AgentController:
         "detect_outliers", "correlation_analysis", "select_statistical_test",
         "segment_comparison", "time_series_analysis", "text_analysis",
         "geospatial_analysis", "experiment_analysis", "anomaly_analysis",
+        "survival_analysis", "basket_analysis", "price_elasticity_analysis", "equity_analysis",
+        "curve_fit_analysis",
     })
+
+    #: Concurrent-safe tools that write a fixed-name output file.
+    _FILE_WRITING_TOOLS: frozenset[str] = frozenset({"detect_outliers"})
 
     def _decide_analysis_mode(self, col: str | None, confidence: float) -> dict[str, Any]:
         """
@@ -334,11 +348,41 @@ class AgentController:
     # Stage 1 — Dataset Ingestion
     # ------------------------------------------------------------------
 
+    def _join_related_files(self, file_path: str, related: list[str]) -> tuple[str, list[str]]:
+        """Join related tables onto the main file; returns (dataset path, notes)."""
+        original = file_path
+        base, base_report = read_any(file_path)
+        notes = list(base_report.notes)
+        tables: list[tuple[str, pd.DataFrame]] = []
+        for path in related:
+            try:
+                df, report = read_any(path)
+            except Exception as exc:
+                notes.append(f"Could not read related file {Path(path).name}: {exc}")
+                continue
+            tables.append((Path(path).stem, df))
+            notes.extend(report.notes)
+        merged, join_notes = join_related(base, tables, get_max_rows(), Path(file_path).stem)
+        notes.extend(join_notes)
+        if merged is not base:
+            dest = Path(self._output_dir) / "derived" / f"{Path(file_path).stem}_joined.parquet"
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                merged.to_parquet(dest, index=False)
+                file_path = str(dest)
+            except Exception as exc:
+                notes.append(f"Joined table could not be saved ({exc}); the main table alone was analysed.")
+        if file_path == original:
+            notes = notes[len(base_report.notes):]   # the main file's own notes are reported by its read
+        self.memory.set_context("joins", notes)
+        return file_path, notes
+
     def load_dataset(
         self,
         file_path: str,
         target_hint: str | None = None,
         interactive: bool = True,
+        related_files: list[str] | None = None,
     ) -> DatasetMetadata:
         """
         Stage 1: Ingest the dataset and store metadata in Memory.
@@ -351,6 +395,9 @@ class AgentController:
             interactive: When True and auto-detection confidence is low,
                          prompt the user via stdin. Set to False in
                          non-interactive environments (Streamlit, API).
+            related_files: Optional extra tables (customers, products...) joined
+                         onto the main file on inferred keys; the merged frame
+                         becomes the dataset for every later stage.
 
         Returns:
             DatasetMetadata stored in the Memory System.
@@ -365,6 +412,10 @@ class AgentController:
 
         # Override target from CLI hint or environment
         target = target_hint or os.getenv("TARGET_COLUMN_HINT")
+
+        join_notes: list[str] = []
+        if related_files:
+            file_path, join_notes = self._join_related_files(file_path, related_files)
 
         ingest_tool = self.tool_registry.get("ingest_dataset")
         result = ingest_tool.run(file_path=file_path, target_column=target)
@@ -404,7 +455,7 @@ class AgentController:
                     "delimiter": read_report.delimiter,
                     "delimiter_sniffed": read_report.delimiter_sniffed,
                     "duplicate_headers": read_report.duplicate_headers,
-                    "notes": read_report.notes,
+                    "notes": [*read_report.notes, *join_notes],
                 },
             )
             self.memory.set_context("coercions", [c.to_dict() for c in coercions])
@@ -516,6 +567,15 @@ class AgentController:
             # training (see IMPROVEMENTS.md #1), so don't gate it on
             # `not metadata.task_type` ever again.
             metadata.task_type = metadata.infer_task_type()
+            # Record the decision too, so the agenda's "driver" question and
+            # the methodology "why modelled" note appear for an explicit target.
+            self.memory.set_context("analysis_decision", {
+                "mode": "model",
+                "target": metadata.target_column,
+                "candidate": metadata.target_column,
+                "rationale": f"Target '{metadata.target_column}' was specified explicitly.",
+                "alternatives_rejected": [],
+            })
 
         self.memory.store_dataset_metadata(metadata)
         # Generic context store, not just the DatasetMetadata field — lets
@@ -540,6 +600,15 @@ class AgentController:
                 self.last_profile = reprofiled
                 self.memory.set_context("data_profile", reprofiled.to_dict())
                 self.memory.set_context("data_profile_summary", reprofiled.to_prompt_string())
+                self.memory.set_context(
+                    "degradations",
+                    collect_degradations(
+                        self.memory.get_context("read_report"),
+                        self.memory.get_context("coercions"),
+                        reprofiled.to_dict(),
+                        "ok",
+                    ),
+                )
             except Exception:
                 pass  # keep the pre-target profile rather than lose it
         self._pending_df = None
@@ -1102,6 +1171,7 @@ class AgentController:
                             f"Only these tools exist: {', '.join(self.tool_registry.names())}."
                         )
                     },
+                    iteration=self.memory.iteration_count,
                 )
             )
         return steps
@@ -1345,6 +1415,7 @@ class AgentController:
                 tool_results=[r.to_dict() for r in self.memory.tool_results],
                 findings=[f.to_dict() for f in self.memory.ranked_findings()],
             )
+            charts = self._design_charts(df, profile, charts)
             out_path = Path(self._output_dir) / "reports" / "dashboard.json"
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(dashboard_to_json(charts), encoding="utf-8")
@@ -1355,6 +1426,43 @@ class AgentController:
             )
         except Exception as exc:
             console.print(f"  [yellow]⚠ Dashboard generation failed (non-fatal): {exc}[/]")
+
+    def _design_charts(
+        self, df: pd.DataFrame, profile: DatasetProfile, charts: list[ChartSpec]
+    ) -> list[ChartSpec]:
+        """One low-effort LLM call that designs a few finding-driven charts and
+        drops generic ones they make redundant. Any failure keeps `charts`."""
+        if (
+            not self.use_llm
+            or self._prompt_manager is None
+            or os.getenv("CHART_DESIGN", "").strip().lower() == "false"
+        ):
+            return charts
+        try:
+            findings = [f.to_dict() for f in self.memory.ranked_findings()]
+            if not findings or self._llm_budget_exhausted():
+                return charts
+            self.llm_client.stage = "chart_design"
+            reply = self.llm_client.call(
+                CHART_DESIGN_PROMPT,
+                self._prompt_manager.get_chart_design_prompt(
+                    findings, [c.to_dict() for c in charts], profile
+                ),
+                reasoning_effort="low",
+                max_tokens=3000,  # room for the recipes of as many charts as it judges worthwhile
+            )
+            if self._rlm_engine is not None:
+                self._rlm_engine._record_usage(*_extract_usage(reply))
+                self.memory.set_context("llm_usage", self._rlm_engine.usage_summary())
+            design = design_from_reply(df, reply)
+            designed = [
+                c for i, raw in enumerate(design.charts)
+                if (c := designed_chart(raw, i, findings)) is not None
+            ]
+            return merge_designed(charts, designed, set(design.drop_ids))
+        except Exception as exc:
+            console.print(f"  [dim]Chart design skipped (non-fatal): {exc}[/]")
+            return charts
 
     def _generate_html_report(self, llm_final: dict[str, Any]) -> None:
         """
@@ -1610,8 +1718,6 @@ class AgentController:
         """Record a freshly executed step and fold its output into run state."""
         idx, step, tool, params = prepared.idx, prepared.step, prepared.tool, prepared.params
         executes_code = getattr(tool, "executes_code", False)
-        if result.status == "success":
-            self._step_cache[prepared.cache_key] = result
         if executes_code:
             self._governor.record(
                 tool_name=step.tool_name, code=self._code_of(tool, params), params=params,
@@ -1670,6 +1776,11 @@ class AgentController:
 
         if step.tool_name == "define_analysis_tool" and result.status == "success":
             self._maybe_register_generated_tool(result)
+
+        # Cached only now: registration can flip a define_analysis_tool result
+        # to "error", and an error must never be served from the cache.
+        if result.status == "success":
+            self._step_cache[prepared.cache_key] = result
 
         rationales = self.memory.get_context("plan_rationales") or []
         rationales.append({
@@ -1783,6 +1894,16 @@ class AgentController:
                 tool_name=step.tool_name, status="error", output={}, error_message=str(exc),
             ))
             return None
+        if getattr(tool, "requires_ml", False) and not self.use_ml:
+            console.print(
+                f"  [yellow]⏭ Step {step.step_number}: {step.tool_name} skipped "
+                f"(use_ml=False).[/]"
+            )
+            self._record_step(step, ToolResult(
+                tool_name=step.tool_name, status="skipped",
+                output={"summary": f"Skipped: '{step.tool_name}' needs machine learning, which is turned off (use_ml=False). Do not plan it."},
+            ))
+            return None
 
         # Parameter resolution is driven by each tool's own declarations
         # (BaseTool.prepare_params) so this controller never grows a per-tool
@@ -1869,6 +1990,10 @@ class AgentController:
         prepared = [p for idx, step in batch if (p := self._prepare_step(idx, step, total_steps)) is not None]
         to_run = [p for p in prepared if p.cached is None]
         results: dict[int, ToolResult] = {}
+        # detect_outliers writes <stem>_outliers_flagged.csv, so two of them
+        # in one batch would clobber each other's file: run those serially.
+        if sum(p.step.tool_name in self._FILE_WRITING_TOOLS for p in to_run) > 1:
+            to_run = [p for p in to_run if p.step.tool_name not in self._FILE_WRITING_TOOLS]
         if len(to_run) > 1:
             with ThreadPoolExecutor(max_workers=min(4, len(to_run))) as pool:
                 outcomes = pool.map(lambda p: p.tool.run(**p.params), to_run)
@@ -2021,8 +2146,11 @@ class AgentController:
         sub_tasks = [
             RLMSubTask(
                 task_id=gid,
-                description=f"Analyse {len(cols)}-feature group: {', '.join(cols[:5])}…",
-                context={"columns": cols, "group_id": gid},
+                description=(
+                    f"Analyse {len(cols)}-feature group: "
+                    f"{', '.join(sanitize_for_prompt(c) for c in cols[:5])}…"
+                ),
+                context={"columns": [sanitize_for_prompt(c) for c in cols], "group_id": gid},
             )
             for gid, cols in groups.items()
         ]

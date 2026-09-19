@@ -345,7 +345,12 @@ class ExperimentAnalysisTool(BaseTool):
         work = pd.DataFrame({"arm": df[group_column].astype(str), "y": metric})
         if entity:
             work["entity"] = df[entity]
-        work = work[df[group_column].notna()].dropna()
+        work = work[df[group_column].notna()]
+        # SRM is about assignment, so count arms before rows with a missing
+        # metric are dropped (differential missing outcomes are not SRM).
+        assigned = work.drop_duplicates(["entity", "arm"]) if entity else work
+        assigned_counts = assigned["arm"].value_counts()
+        work = work.dropna()
         contaminated = 0
         if entity:
             contaminated = int((work.groupby("entity")["arm"].nunique() > 1).sum())
@@ -386,14 +391,14 @@ class ExperimentAnalysisTool(BaseTool):
             )
         comparisons.sort(key=lambda c: abs(c["effect"] or 0.0), reverse=True)
 
-        sizes = np.array([len(arm_values[lvl]) for lvl in kept], dtype=float)
+        sizes = np.array([assigned_counts.get(str(lvl), 0) for lvl in kept], dtype=float)
         srm_p = float(stats.chisquare(sizes).pvalue)
         omnibus = self._omnibus(arm_values, binary) if len(kept) >= 3 else None
 
         caveats: list[str] = []
         if srm_p < _SRM_P:
             caveats.append(
-                f"Sample-ratio mismatch: arm sizes ({', '.join(f'{k}={len(arm_values[k]):,}' for k in kept)}) "
+                f"Sample-ratio mismatch: arm sizes ({', '.join(f'{k}={assigned_counts.get(str(k), 0):,}' for k in kept)}) "
                 f"differ from an equal split (p={srm_p:.2g}); if an equal split was intended, "
                 "assignment is broken and the comparison may be biased."
             )

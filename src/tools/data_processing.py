@@ -841,6 +841,7 @@ class CorrelationAnalysisTool(BaseTool):
         target_corrs: dict[str, float] = {}
         target_encoded = False
         target_corr_method = method
+        positive_class: Any = None
         target_values: pd.Series | None = None
         if target_column and target_column in corr.columns:
             target_values = num_df[target_column]
@@ -859,11 +860,12 @@ class CorrelationAnalysisTool(BaseTool):
             and df[target_column].nunique(dropna=True) == 2
         ):
             # Non-numeric binary target (e.g. churn yes/no): encode to 0/1 so
-            # feature↔target correlation still works (point-biserial).
+            # feature↔target correlation still works (point-biserial). The
+            # positive class is the larger label in sorted order (not first
+            # appearance), so the sign is stable and can be named.
             raw_target = df[target_column]
-            encoded = pd.Series(
-                pd.factorize(raw_target)[0], index=df.index, dtype="float64"
-            ).where(raw_target.notna())
+            positive_class = sorted(raw_target.dropna().unique(), key=str)[-1]
+            encoded = (raw_target == positive_class).astype("float64").where(raw_target.notna())
             aligned = encoded.loc[num_df.index]
             target_values = aligned
             target_encoded = True
@@ -947,6 +949,7 @@ class CorrelationAnalysisTool(BaseTool):
             "target_correlations": target_corrs,
             "target_correlation_method": target_corr_method,
             "target_encoded_binary": target_encoded,
+            "target_positive_class": None if positive_class is None else str(positive_class),
             "target_column": target_column,
             "target_correlation_stats": target_stats,
             "definitional_pairs": [
@@ -1043,6 +1046,8 @@ class CorrelationAnalysisTool(BaseTool):
             frozenset((str(d["col_a"]), str(d["col_b"]))) for d in output.get("definitional_pairs") or []
         }
         target_stats = output.get("target_correlation_stats") or {}
+        positive = output.get("target_positive_class")
+        target_label = f"{target}={positive}" if positive is not None else str(target)
         results: list[Finding] = []
         for feature, value in (output.get("target_correlations") or {}).items():
             if len(results) >= _CORR_TOP_N:
@@ -1059,11 +1064,13 @@ class CorrelationAnalysisTool(BaseTool):
                 headline=(
                     f"{feature} explains {value:.0%} of the variance in {target} (eta²={value:.2f})"
                     if is_eta
-                    else f"{feature} {'rises' if value > 0 else 'falls'} with {target} (r={value:.2f})"
+                    else f"{feature} {'rises' if value > 0 else 'falls'} with {target_label} (r={value:.2f})"
                 ),
                 detail=(
                     f"{output.get('target_correlation_method')} association between '{feature}' "
-                    f"and target '{target}': {label}={value:.2f}"
+                    f"and target '{target}'"
+                    + (f" (positive class: {positive})" if positive is not None else "")
+                    + f": {label}={value:.2f}"
                     + (f" (n={fstats['n']}" + (f", p={p_value:.3g}" if p_value is not None else "") + ")"
                        if fstats else "")
                     + "."
@@ -1071,6 +1078,7 @@ class CorrelationAnalysisTool(BaseTool):
                 evidence={
                     "feature": feature, "target": target, "correlation": value,
                     "method": output.get("target_correlation_method"),
+                    "positive_class": positive,
                     "p_value": p_value, "n": fstats.get("n"),
                 },
                 source_tool=self.name,

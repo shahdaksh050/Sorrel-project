@@ -168,7 +168,16 @@ class TestPurity:
 
         tree = ast.parse(inspect.getsource(module))
         imported_names: set[str] = set()
+        # Type-only imports (under `if TYPE_CHECKING:`) don't exist at runtime.
+        type_only = {
+            id(n)
+            for top in ast.walk(tree)
+            if isinstance(top, ast.If) and "TYPE_CHECKING" in ast.unparse(top.test)
+            for n in ast.walk(top)
+        }
         for node in ast.walk(tree):
+            if id(node) in type_only:
+                continue
             if isinstance(node, ast.Import):
                 imported_names.update(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:

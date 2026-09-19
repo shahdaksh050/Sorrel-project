@@ -273,6 +273,6 @@ class TestRunSandboxed:
         assert isinstance(sandbox.get_sandbox_backend(), sandbox.SubprocessSandbox)
 
         monkeypatch.setattr(sandbox.DockerSandbox, "is_available", lambda: False)
-        # Even if docker requested, falls back gracefully to SubprocessSandbox
-        fallback = sandbox.get_sandbox_backend("docker")
-        assert isinstance(fallback, sandbox.SubprocessSandbox)
+        # An explicit docker request with the daemon down is refused, never
+        # silently downgraded to the unisolated subprocess backend.
+        assert sandbox.get_sandbox_backend("docker") is None

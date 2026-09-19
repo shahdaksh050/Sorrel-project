@@ -200,7 +200,7 @@ class GenerateVisualizationsTool(BaseTool):
             # Linear models: absolute coefficient magnitude as the proxy.
             # coef_ is (n_classes, n_features) for multi-class, (n_features,) otherwise.
             coef = np.asarray(model.coef_, dtype=float)
-            raw = np.abs(coef[0] if coef.ndim == 2 else coef)
+            raw = np.abs(coef).mean(axis=0) if coef.ndim == 2 else np.abs(coef)
             title, y_title = "Top Feature Importances (|coefficient|)", "|Coefficient|"
         else:
             raise ToolExecutionError(
@@ -228,24 +228,33 @@ class GenerateVisualizationsTool(BaseTool):
     def _distributions(self, df: pd.DataFrame) -> list[dict[str, Any]]:
         num_cols = df.select_dtypes(include="number").columns.tolist()[:MAX_DISTRIBUTIONS]
         charts: list[dict[str, Any]] = []
+        rejected: list[str] = []
         for col in num_cols:
-            values = pd.to_numeric(df[col], errors="coerce").dropna()
-            if values.nunique() < 2:
+            values = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+            values = values[np.isfinite(values)]
+            n_bins = min(HIST_BINS, len(np.unique(values)))
+            if n_bins < 2:
                 continue
             # Pre-binned over every row (aggregate before charting), drawn as
             # a frequency polygon through each bin's midpoint.
-            counts, edges = np.histogram(values.to_numpy(dtype=float), bins=min(HIST_BINS, values.nunique()))
+            counts, edges = np.histogram(values, bins=n_bins)
             rows = [
                 {"value": round(float((edges[i] + edges[i + 1]) / 2), 6), "rows": int(n)}
                 for i, n in enumerate(counts)
             ]
             label = humanize_label(str(col))
-            charts.append(_validated({
-                "type": "area", "data": rows, "x": "value", "y": "rows", "y_format": "count",
-                "title": f"Distribution — {label}", "x_title": label, "y_title": "Rows",
-            }))
+            try:
+                charts.append(_validated({
+                    "type": "area", "data": rows, "x": "value", "y": "rows", "y_format": "count",
+                    "title": f"Distribution — {label}", "x_title": label, "y_title": "Rows",
+                }))
+            except ToolExecutionError as exc:
+                rejected.append(f"{col}: {exc}")  # one column must not abort the rest
         if not charts:
-            raise ToolExecutionError("No numeric column with at least two distinct values to chart.")
+            raise ToolExecutionError(
+                "No numeric column with at least two distinct values to chart."
+                + (f" Rejected: {'; '.join(rejected)}" if rejected else "")
+            )
         return charts
 
     def get_schema(self) -> dict[str, Any]:

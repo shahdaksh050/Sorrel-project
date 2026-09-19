@@ -165,7 +165,9 @@ def _mean_diff_ci(a: np.ndarray, b: np.ndarray, equal_var: bool, alpha: float) -
 
 
 def _rank_biserial(u_stat: float, n1: int, n2: int) -> float:
-    return 1.0 - (2.0 * u_stat) / (n1 * n2)
+    # u_stat is U for the first sample: positive when the first group is larger
+    # (same direction as mean_diff = mean(g1) - mean(g2)).
+    return (2.0 * u_stat) / (n1 * n2) - 1.0
 
 
 def _eta_squared(group_arrays: list[np.ndarray]) -> float:
@@ -594,9 +596,10 @@ class SelectStatisticalTestTool(BaseTool):
                     "group_column, or pass bin_numeric_group=True to compare its quartiles."
                 )
             df_clean = df_clean.copy()
-            df_clean[group_column] = pd.qcut(
-                group_series, q=4, labels=["Q1", "Q2", "Q3", "Q4"], duplicates="drop"
-            )
+            # labels=False: with duplicates="drop" the bin count can fall
+            # below 4, which a fixed 4-label list rejects with a ValueError.
+            quartile = pd.qcut(group_series, q=4, labels=False, duplicates="drop")
+            df_clean[group_column] = quartile.map(lambda q: None if pd.isna(q) else f"Q{int(q) + 1}")
 
         # Repeated rows of one entity are not independent observations:
         # test one value per entity per group (a flag or score becomes the

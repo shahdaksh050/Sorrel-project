@@ -22,6 +22,7 @@ import gzip
 import io
 import os
 import tempfile
+import threading
 import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -42,8 +43,15 @@ from src.core.sentinels import null_sentinels
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({
     ".csv", ".tsv", ".xlsx", ".xls",
     ".json", ".jsonl", ".parquet",
+    ".dta", ".sas7bdat", ".xpt", ".sav", ".zsav", ".feather",
+    ".h5", ".hdf5", ".nc",
     ".gz", ".zip",
 })
+
+#: Hard cap on rows x columns-of-index-product an xarray/NetCDF dataset may
+#: expand to when flattened with to_dataframe() — a gridded climate file can
+#: be a few MB on disk and billions of cells once unrolled.
+NETCDF_MAX_CELLS = 5_000_000
 
 #: Delimiters considered when sniffing a .csv file's separator.
 _CSV_DELIMITER_CANDIDATES = ",;\t|"
@@ -89,6 +97,9 @@ MAX_ROWS_DEFAULT = 1_000_000
 _FORMAT_BY_SUFFIX = {
     ".csv": "csv", ".tsv": "tsv", ".xlsx": "xlsx", ".xls": "xls",
     ".json": "json", ".jsonl": "jsonl", ".parquet": "parquet",
+    ".dta": "stata", ".sas7bdat": "sas", ".xpt": "sas", ".sav": "spss",
+    ".zsav": "spss", ".feather": "feather", ".h5": "hdf5", ".hdf5": "hdf5",
+    ".nc": "netcdf",
 }
 
 #: Compression sniffed off a compound extension (e.g. "sales.csv.gz"). Only
@@ -101,6 +112,7 @@ _READ_CACHE_MAX_ENTRIES = 4
 _READ_CACHE: OrderedDict[tuple[str, int, int], tuple[pd.DataFrame, ReadReport]] = (
     OrderedDict()
 )
+_READ_CACHE_LOCK = threading.Lock()  # guards _READ_CACHE; never held during a file read
 
 
 def get_max_rows() -> int:
@@ -121,7 +133,7 @@ class ReadReport:
     """What read_any actually did — surfaced, never assumed."""
 
     path: str
-    format: str                    # csv | tsv | xlsx | xls
+    format: str                    # csv | tsv | xlsx | xls | json | parquet | stata | sas | spss | feather | hdf5 | netcdf
     encoding: str
     encoding_confident: bool       # False when guessed via the cp1252 fallback
     delimiter: str | None
@@ -367,6 +379,99 @@ def _read_parquet(path: Path) -> tuple[pd.DataFrame, ReadReport]:
     return df, report
 
 
+def _binary_report(path: Path, format_: str, notes: list[str] | None = None) -> ReadReport:
+    return ReadReport(
+        path=str(path),
+        format=format_,
+        encoding="n/a",
+        encoding_confident=True,
+        delimiter=None,
+        delimiter_sniffed=False,
+        notes=notes if notes is not None else [],
+    )
+
+
+def _read_hdf(path: Path) -> tuple[pd.DataFrame, ReadReport]:
+    notes: list[str] = []
+    try:
+        with pd.HDFStore(str(path), mode="r") as store:
+            keys = list(store.keys())
+            if not keys:
+                raise DatasetReadError(f"'{path.name}' contains no pandas-readable tables.")
+            sizes = {k: int(getattr(store.get_storer(k), "nrows", 0) or 0) for k in keys}
+            key = max(keys, key=lambda k: sizes[k])
+            df = store.get(key)
+    except ImportError as exc:
+        raise DatasetReadError(
+            f"'{path.name}': install pytables to read HDF5 files ({exc})"
+        ) from exc
+    except DatasetReadError:
+        raise
+    except Exception as exc:
+        raise DatasetReadError(f"'{path.name}' could not be read as hdf5: {exc}") from exc
+    if not isinstance(df, pd.DataFrame):
+        df = df.to_frame()
+    if len(keys) > 1:
+        notes.append(f"HDF5 file has {len(keys)} tables; the largest ('{key}') was read.")
+    return df, _binary_report(path, "hdf5", notes)
+
+
+def _read_netcdf(path: Path) -> tuple[pd.DataFrame, ReadReport]:
+    import math
+
+    try:
+        import xarray as xr
+    except ImportError as exc:
+        raise DatasetReadError(
+            f"'{path.name}': install xarray and netCDF4 to read NetCDF files"
+        ) from exc
+    try:
+        with xr.open_dataset(path) as ds:
+            cells = math.prod(int(n) for n in ds.sizes.values())
+            if cells > NETCDF_MAX_CELLS:
+                raise DatasetReadError(
+                    f"'{path.name}' expands to {cells:,} cells, over the "
+                    f"{NETCDF_MAX_CELLS:,}-cell NetCDF cap. Subset it first "
+                    "(fewer time steps / a smaller region)."
+                )
+            df = ds.to_dataframe().reset_index()
+    except ImportError as exc:
+        raise DatasetReadError(
+            f"'{path.name}': install xarray and netCDF4 to read NetCDF files ({exc})"
+        ) from exc
+    except DatasetReadError:
+        raise
+    except Exception as exc:
+        raise DatasetReadError(f"'{path.name}' could not be read as netcdf: {exc}") from exc
+    return df, _binary_report(path, "netcdf")
+
+
+def _read_statistical(path: Path, format_: str) -> tuple[pd.DataFrame, ReadReport]:
+    """Stata / SAS / SPSS / Feather. Value labels stay as categoricals."""
+    try:
+        if format_ == "stata":
+            df = pd.read_stata(path, convert_categoricals=True)
+        elif format_ == "sas":
+            is_xpt = path.suffix.lower() == ".xpt"
+            df = pd.read_sas(
+                path, format="xport" if is_xpt else "sas7bdat",
+                encoding="latin-1" if is_xpt else "infer",
+            )
+        elif format_ == "spss":
+            df = pd.read_spss(path, convert_categoricals=True)
+        else:
+            df = pd.read_feather(path)
+    except ImportError as exc:
+        if format_ == "spss":
+            raise DatasetReadError(
+                f"'{path.name}': install pyreadstat to read SPSS files"
+            ) from exc
+        raise DatasetReadError(f"'{path.name}' could not be read as {format_}: {exc}") from exc
+    except Exception as exc:
+        raise DatasetReadError(f"'{path.name}' could not be read as {format_}: {exc}") from exc
+    return df, _binary_report(path, format_)
+
+
 def _detect_format(path: Path) -> tuple[str | None, str | None]:
     """
     Resolve a path to (format, compression).
@@ -418,6 +523,20 @@ def _cap_rows(df: pd.DataFrame, report: ReadReport) -> pd.DataFrame:
     return sampled
 
 
+def _drop_empty_columns(df: pd.DataFrame, report: ReadReport) -> pd.DataFrame:
+    """Drop columns that are entirely null (e.g. the empty columns a trailing
+    ';;' leaves behind); they carry no information and mislead target/type
+    detection. Nothing is dropped from an empty frame or when every column is
+    empty."""
+    if df.empty:
+        return df
+    empty = [c for c in df.columns if bool(df[c].isna().all())]
+    if not empty or len(empty) == df.shape[1]:
+        return df
+    report.notes.append(f"Dropped {len(empty)} empty column(s): {', '.join(str(c) for c in empty)}.")
+    return df.drop(columns=empty)
+
+
 def _read_uncached(file_path: str) -> tuple[pd.DataFrame, ReadReport]:
     path = Path(file_path)
     format_, compression = _detect_format(path)
@@ -438,8 +557,15 @@ def _read_uncached(file_path: str) -> tuple[pd.DataFrame, ReadReport]:
         df, report = _read_json(path, format_)
     elif format_ == "parquet":
         df, report = _read_parquet(path)
+    elif format_ == "hdf5":
+        df, report = _read_hdf(path)
+    elif format_ == "netcdf":
+        df, report = _read_netcdf(path)
+    elif format_ in ("stata", "sas", "spss", "feather"):
+        df, report = _read_statistical(path, format_)
     else:
         df, report = _read_excel(path, format_)
+    df = _drop_empty_columns(df, report)
     df = _cap_rows(df, report)
     df, report.sentinels = null_sentinels(df)
     report.notes.extend(rec["note"] for rec in report.sentinels)
@@ -464,7 +590,8 @@ def _cache_key(file_path: str) -> tuple[str, int, int] | None:
 
 def clear_read_cache() -> None:
     """Drop every cached frame. For tests and long-lived processes."""
-    _READ_CACHE.clear()
+    with _READ_CACHE_LOCK:
+        _READ_CACHE.clear()
 
 
 def invalidate_read_cache(file_path: str) -> None:
@@ -483,8 +610,9 @@ def invalidate_read_cache(file_path: str) -> None:
         resolved = str(Path(file_path).resolve())
     except OSError:
         return
-    for key in [k for k in _READ_CACHE if k[0] == resolved]:
-        del _READ_CACHE[key]
+    with _READ_CACHE_LOCK:
+        for key in [k for k in _READ_CACHE if k[0] == resolved]:
+            del _READ_CACHE[key]
 
 
 def read_any(file_path: str) -> tuple[pd.DataFrame, ReadReport]:
@@ -503,20 +631,24 @@ def read_any(file_path: str) -> tuple[pd.DataFrame, ReadReport]:
     """
     key = _cache_key(file_path)
     if key is not None:
-        hit = _READ_CACHE.get(key)
+        with _READ_CACHE_LOCK:
+            hit = _READ_CACHE.get(key)
+            if hit is not None:
+                _READ_CACHE.move_to_end(key)
         if hit is not None:
-            _READ_CACHE.move_to_end(key)
             df, report = hit
             return df.copy(), report
 
     df, report = _read_uncached(file_path)
 
     if key is not None:
-        _READ_CACHE[key] = (df.copy(), report)
-        # Frames are large; keep only the few most recent. A single run
-        # touches one dataset plus its cleaned copy, so this is ample.
-        while len(_READ_CACHE) > _READ_CACHE_MAX_ENTRIES:
-            _READ_CACHE.popitem(last=False)
+        entry = (df.copy(), report)
+        with _READ_CACHE_LOCK:
+            _READ_CACHE[key] = entry
+            # Frames are large; keep only the few most recent. A single run
+            # touches one dataset plus its cleaned copy, so this is ample.
+            while len(_READ_CACHE) > _READ_CACHE_MAX_ENTRIES:
+                _READ_CACHE.popitem(last=False)
     return df, report
 
 

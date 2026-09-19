@@ -969,6 +969,12 @@ def _section(title: str, note: str = "", level: str = "h3") -> None:
     )
 
 
+def _md_text(text: object) -> str:
+    """Escape `$` so finding/chart text ("$1.2 million to $3.4 million") isn't
+    rendered as LaTeX by st.markdown/st.caption."""
+    return str(text).replace("$", "\\$")
+
+
 def _safe_df(df: pd.DataFrame) -> pd.DataFrame:
     """Convert any datetime/Timestamp columns to strings so PyArrow can serialise them."""
     out = df.copy()
@@ -1027,7 +1033,7 @@ def _render_other_findings(tool_results: list[dict[str, Any]]) -> None:
         st.markdown(f"#### {name.replace('_', ' ').title()}")
         summary = out.get("summary")
         if summary:
-            st.info(str(summary))
+            st.info(_md_text(summary))
 
         if name == "cluster_data":
             c1, c2, c3 = st.columns(3)
@@ -1047,7 +1053,7 @@ def _render_other_findings(tool_results: list[dict[str, Any]]) -> None:
             top = out.get("top_tokens") or []
             words = [t.get("token", t) if isinstance(t, dict) else t for t in top[:6]]
             if words:
-                st.caption("Most frequent words: " + ", ".join(str(w) for w in words))
+                st.caption(_md_text("Most frequent words: " + ", ".join(str(w) for w in words)))
         elif name == "geospatial_analysis":
             c1, c2 = st.columns(2)
             c1.metric("Points mapped", out.get("n_points", "—"))
@@ -1240,7 +1246,7 @@ def _render_dashboard_chart(ch: dict[str, Any], vega_cfg: dict[str, Any]) -> Non
         st.vega_lite_chart(_spec, width='stretch')
         _caption = ch.get("caption")
         if _caption:
-            st.caption(str(_caption))
+            st.caption(_md_text(_caption))
         elif ch.get("description"):
             st.markdown(
                 f"<div style='font-size: 0.9rem; color: var(--graphite); margin-top: 0.5rem; "
@@ -1928,6 +1934,14 @@ with st.sidebar:
             st.session_state["theme"] = _theme
             st.session_state["from_uploader"] = False
 
+    st.caption("Related tables (optional): customers, products... joined automatically on shared IDs.")
+    related_uploads = st.file_uploader(
+        "Related tables",
+        type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
+        accept_multiple_files=True,
+        label_visibility="collapsed",
+    )
+
     target_col = st.text_input(
         "Target column",
         placeholder="e.g. outcome, price, result  (blank = find groupings)",
@@ -2290,6 +2304,20 @@ if run_clicked:
     outdir = str(Path(tmp) / "output")
     with open(dpath, "wb") as _f:
         _f.write(st.session_state["preview_bytes"])
+    related_paths: list[str] = []
+    if related_uploads:
+        from src.core.security import UploadValidationError, validate_upload
+        for _i, _ru in enumerate(related_uploads):
+            _rb = _ru.getvalue()
+            try:
+                _rname = validate_upload(_ru.name, _rb)
+            except UploadValidationError as _ve:
+                st.warning(f"Related table {_ru.name} skipped. {_ve}")
+                continue
+            _rp = Path(tmp) / "related" / str(_i) / _rname
+            _rp.parent.mkdir(parents=True, exist_ok=True)
+            _rp.write_bytes(_rb)
+            related_paths.append(str(_rp))
 
     # Set env vars before importing src
     os.environ["LLM_PROVIDER"]          = provider
@@ -2408,6 +2436,7 @@ if run_clicked:
             dpath,
             target_hint=target_col.strip() or None,
             interactive=False,
+            related_files=related_paths or None,
         )
         st.session_state["metadata"] = meta
         _upd("1", "done",
@@ -2722,7 +2751,7 @@ if st.session_state.get("analysis_done"):
             st.caption(f"⚠ {len(_unanswered)} question(s) considered, not answered.")
             with st.expander("What wasn't answered, and why"):
                 for _u in _unanswered:
-                    st.markdown(f"- {_u.get('text', '')}")
+                    st.markdown(f"- {_md_text(_u.get('text', ''))}")
 
         # ── Ask a follow-up question (IMPROVEMENTS.md 7.20, scoped down):
         # a plain keyword search over the finding bus — no new tool calls,
@@ -2834,10 +2863,14 @@ if st.session_state.get("analysis_done"):
                 else:
                     _grid_charts.append(_ch)
             if _grid_charts:
-                _dcols = st.columns(2)
-                for _i, _ch in enumerate(_grid_charts):
-                    with _dcols[_i % 2]:
-                        _render_dashboard_chart(_ch, vega_cfg)
+                for _j in range(0, len(_grid_charts), 2):
+                    _row = _grid_charts[_j:_j + 2]
+                    if len(_row) == 1:   # a lone half-width chart takes the full row
+                        _render_dashboard_chart(_row[0], vega_cfg)
+                        continue
+                    for _col, _ch in zip(st.columns(2), _row, strict=True):
+                        with _col:
+                            _render_dashboard_chart(_ch, vega_cfg)
         else:
             # Say *why* when the coverage record can tell us — an "everything
             # was declined" run reads very differently from "nothing ran yet"

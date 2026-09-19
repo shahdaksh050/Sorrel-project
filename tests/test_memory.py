@@ -59,6 +59,16 @@ class TestDatasetMetadata:
         )
         assert meta.infer_task_type() == "clustering"
 
+    def test_all_null_column_never_target_fallback(self) -> None:
+        meta = DatasetMetadata(
+            file_path="x.csv", row_count=100, column_count=3,
+            columns={"a": "float64", "b": "float64", "Unnamed: 2": "float64"},
+            missing_values={"Unnamed: 2": 100},
+            numerical_cols=["a", "b", "Unnamed: 2"], categorical_cols=[],
+        )
+        col, _ = meta.detect_target_with_confidence()
+        assert col == "b"
+
     def test_to_prompt_string_contains_row_count(self, sample_metadata: DatasetMetadata) -> None:
         s = sample_metadata.to_prompt_string()
         assert "1,000" in s or "1000" in s

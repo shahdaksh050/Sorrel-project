@@ -571,19 +571,19 @@ def _detect_formula_leakage(df: pd.DataFrame, target: str, features: list[str]) 
 
 def _encode_target(y: pd.Series[Any]) -> tuple[pd.Series[Any], list[str]]:
     """
-    Deterministically encode non-numeric classification targets to integers.
+    Deterministically encode classification targets to contiguous integers 0..k-1.
 
-    LabelEncoder sorts classes, so train and evaluate produce identical
-    encodings for the same data. Returns (encoded_y, class_labels);
-    class_labels is empty when no encoding was needed.
+    LabelEncoder sorts classes (numerically for numeric targets), so train and
+    evaluate produce identical encodings for the same data. Numeric labels such
+    as 1..5 must be encoded too: XGBoost rejects classes that do not start at 0.
+    Returns (encoded_y, class_labels) with the original labels as strings.
     """
     from sklearn.preprocessing import LabelEncoder
 
-    if not pd.api.types.is_numeric_dtype(y) or str(y.dtype) == "bool":
-        encoder = LabelEncoder()
-        encoded = pd.Series(encoder.fit_transform(y.astype(str)), index=y.index, name=y.name)
-        return encoded, [str(c) for c in encoder.classes_]
-    return y, []
+    numeric = pd.api.types.is_numeric_dtype(y) and str(y.dtype) != "bool"
+    encoder = LabelEncoder()
+    encoded = pd.Series(encoder.fit_transform(y if numeric else y.astype(str)), index=y.index, name=y.name)
+    return encoded, [str(c) for c in encoder.classes_]
 
 
 class TrainModelTool(BaseTool):
@@ -840,7 +840,7 @@ class TrainModelTool(BaseTool):
                 if minority_frac < IMBALANCE_THRESHOLD:
                     balanced = True
                     if len(counts) == 2:
-                        scale_pos_weight = float(counts.max()) / max(float(counts.min()), 1.0)
+                        scale_pos_weight = float(counts.get(0, 0)) / max(float(counts.get(1, 0)), 1.0)
                     treatments.append(
                         f"Class weighting applied — minority class is {minority_frac:.1%} "
                         f"of rows (threshold {IMBALANCE_THRESHOLD:.0%})."

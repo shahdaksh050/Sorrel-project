@@ -73,10 +73,14 @@ Use it when no tool answers a question directly, or to adapt a tool to \
 this data (filter rows, derive a column, reshape, then re-run a tool). \
 Pre-loaded names — do not read files, `df` is already loaded:
 - `df` — the cleaned dataset (pandas DataFrame); `SCHEMA` — {column: kind}; \
-`PRIOR_RESULTS` — {tool_name: output} from earlier steps.
+`PRIOR_RESULTS` — {tool_name: output} from earlier steps (a tool run more than once: latest \
+under its name, every run as `tool_name#1`, `#2`, ...).
 - `pd`, `np`, `scipy`, `stats`, `math` — pre-imported and available directly (no import statements needed).
 - `dsa.run(tool_name, df=frame, **params)` — run one of the tools in `dsa.tools()` on \
-a frame you built; returns {"output": ..., "findings": [...]}. `dsa.tools()` lists them.
+a frame you built; returns {"output": ..., "findings": [...]}. `dsa.tools()` lists every analysis tool, \
+including special-purpose ones not shown above (survival_analysis, curve_fit_analysis, mixed_model_analysis, \
+forecast_analysis, basket_analysis, price_elasticity_analysis, equity_analysis): when the data fits one, run it \
+with explicit column parameters even if the column names look unusual.
 - `dsa.compare_groups(frame, measure, by)`, `dsa.summarize(series)`, \
 `dsa.effect_size(a, b)`, `dsa.cramers_v(frame, col1, col2)`, `dsa.crosstab_shares(frame, col1, col2)`, \
 `dsa.baseline_accuracy(frame, target_col)`, `dsa.profile(frame)`.
@@ -112,7 +116,9 @@ Assign at top level:
 a real discovery. The headline is one plain sentence with the number and unit, naming the \
 real columns and groups — no p-values or test names (those go in `evidence`); every number \
 it states goes in `evidence`. When it is about specific columns, also set `"measure"` \
-and `"dimension"` to their exact names so the question it answers is credited.
+and `"dimension"` to their exact names so the question it answers is credited. Set `"effect"` \
+(the size of the difference, as a fraction: 0.18 = 18%) with `"effect_kind"` ("pct" | "share" | "r" | "lift" | "cohens_d") \
+and `"p_value"` when you tested it — findings without them rank below every tool finding.
 - `CHART = dsa.chart.bar(...)` (optional) — aggregate first, at most 500 rows.
 - `DF_OUT = frame` plus parameter `"save_as": "name"` (optional) — saves a \
 derived dataset; later steps can pass its path as `file_path` to any tool.
@@ -286,6 +292,71 @@ Respond with ONLY this JSON shape:
 Cite only values that appear in the results above. If the results contain \
 nothing about these features, return an empty insights list — do not invent findings.
 """
+
+# ---------------------------------------------------------------------------
+# Chart design — one small extra call after the dashboard is built
+# ---------------------------------------------------------------------------
+
+CHART_DESIGN_PROMPT = """\
+You are the chart designer of a data-analysis dashboard. Given the findings, \
+the charts that already exist and the columns, you add the few charts that \
+best show what the data says. Reply with ONE JSON object and nothing else.
+
+Reply shape:
+{"charts": [recipe, ...], "drop": ["chart_id", ...]}
+recipe = {"type", "x", "y", "value", "agg", "series", "time_grain", "filter", \
+"top_n", "sort", "title", "caption", "y_format", "finding_id"}
+- type: bar | line | area | scatter | heatmap | histogram | boxplot | \
+stacked_bar | grouped_bar | pareto
+- heatmap: x and y are the two category (or date) axes; value is the numeric \
+column to colour by, aggregated with agg (omit value to colour by row count)
+- agg: mean | sum | median | count | nunique | min | max
+- time_grain: day | week | month | quarter | year (line/area over a date column)
+- filter: up to 3 of {"col", "op", "value"}
+- sort: value | x
+
+Rules:
+- Pick the chart from the question the finding answers: change over time -> \
+line; ranking -> sorted bar; parts of a whole -> stacked_bar or pareto; a \
+pattern across two categories -> heatmap; a relationship between two numbers \
+-> scatter; spread -> boxplot or histogram.
+- ONE message per chart. Aggregate; never plot raw rows except scatter, \
+histogram and boxplot.
+- Each chart must answer one finding or the user's goal. Set finding_id to \
+that finding's id from the list; leave it out for a goal-only chart.
+- NEVER repeat an existing chart (same type, x and y).
+- Use exact column names from the column list. At most 12 bars: set top_n.
+- caption: one plain sentence with the takeaway and a number.
+- How many charts is YOUR call: add one for every distinct message the \
+findings and the goal need that no existing chart shows, and stop when a new \
+chart would repeat a message. Ten sharp charts beat three plus filler; never \
+pad and never hold back a chart that carries a finding.
+- drop: ids of GENERIC existing charts (histograms, plain category counts, \
+class balance) that one of your charts makes redundant. Never drop a chart \
+that has a finding_id.
+- If the existing charts already tell the story, reply {"charts": [], "drop": []}.
+"""
+
+_DESIGN_MAX_FINDINGS = 25
+_DESIGN_MAX_COLUMNS = 30
+_DESIGN_MAX_SAMPLES = 3
+_DESIGN_SAMPLE_MAX_NUNIQUE = 12
+
+
+def _chart_axes(chart: dict[str, Any]) -> tuple[str, str, str]:
+    """Best-effort (type, x, y) of a stored dashboard chart from its Vega-Lite spec."""
+    spec = chart.get("spec")
+    if not isinstance(spec, dict):
+        return "", "", ""
+    layers = spec.get("layer")
+    base = layers[0] if isinstance(layers, list) and layers and isinstance(layers[0], dict) else spec
+    mark = base.get("mark", spec.get("mark"))
+    kind = str(mark.get("type", "") if isinstance(mark, dict) else mark or "")
+    enc = base.get("encoding")
+    enc = enc if isinstance(enc, dict) else {}
+    fields = [enc[k].get("field", "") if isinstance(enc.get(k), dict) else "" for k in ("x", "y")]
+    return kind, str(fields[0]), str(fields[1])
+
 
 #: Findings shown to the planner per prompt. Enough to reason over the
 #: whole run, small enough for an 8k-context model.
@@ -675,18 +746,54 @@ class PromptManager:
 
         return self._fit(render)
 
+    def get_chart_design_prompt(
+        self, findings: list[dict[str, Any]], charts: list[dict[str, Any]], profile: Any
+    ) -> str:
+        """User prompt for the chart-design call (system text: CHART_DESIGN_PROMPT)."""
+        lines: list[str] = []
+        objective = self.memory.get_context("user_objective")
+        if objective:
+            lines.append(f'## User goal\n"{_redact(_sp(objective, max_len=300))}"')
+        lines.append("## Findings")
+        for f in findings[:_DESIGN_MAX_FINDINGS]:
+            lines.append(
+                f"- {_sp(f.get('finding_id'), 40)} | {_sp(f.get('kind'), 30)} | "
+                f"measure={_sp(f.get('measure'), 60)} | dimension={_sp(f.get('dimension'), 60)} | "
+                + _redact(_sp(f.get("headline"), max_len=160))
+            )
+        lines.append("## Existing charts (chart_id | type | x | y | title | finding_id)")
+        for c in charts:
+            kind, x, y = _chart_axes(c)
+            lines.append(
+                f"- {_sp(c.get('chart_id'), 60)} | {_sp(kind, 20)} | {_sp(x, 60)} | {_sp(y, 60)} | "
+                f"{_sp(c.get('title'), 80)} | {_sp(c.get('finding_id') or '-', 40)}"
+            )
+        lines.append("## Columns (name | kind | unit | nunique | sample values)")
+        for col in profile.columns[:_DESIGN_MAX_COLUMNS]:
+            samples = ""
+            if col.kind == "categorical" and col.nunique <= _DESIGN_SAMPLE_MAX_NUNIQUE:
+                samples = ", ".join(
+                    _redact(_sp(v, 30)) for v in list(col.top_values)[:_DESIGN_MAX_SAMPLES]
+                )
+            lines.append(
+                f"- {_sp(col.name, 60)} | {col.kind} | {col.unit_hint or '-'} | {col.nunique} | {samples}"
+            )
+        return "\n".join(lines)
+
     def get_rlm_subtask_prompt(
         self,
         task_id: str,
         description: str,
         context_summary: str,
     ) -> str:
-        return RLM_SUBTASK_PROMPT.format(
-            task_id=task_id,
-            description=description,
-            context_summary=context_summary,
-            dataset_metadata=self._metadata(),
-            results_summary=self._results(-1, 0),
+        return self._fit(
+            lambda level: RLM_SUBTASK_PROMPT.format(
+                task_id=task_id,
+                description=description,
+                context_summary=context_summary,
+                dataset_metadata=self._metadata(),
+                results_summary=self._results(-1, level),
+            )
         )
 
 

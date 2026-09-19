@@ -129,25 +129,34 @@ class LLMClient:
         # across RLM worker threads, so instance attributes would race.
         self._usage_local.effort = reasoning_effort
         self._usage_local.max_tokens = max_tokens
+        budget = max_tokens or self.max_tokens
         try:
             raw = self._dispatch(system_prompt, user_prompt)
         except Exception as exc:
             self._audit(system_prompt, user_prompt, None, f"{type(exc).__name__}: {exc}")
+            # RLMEngine counts tokens a failed call already spent.
+            exc.rlm_usage = getattr(self._usage_local, "value", None)  # type: ignore[attr-defined]
             raise
         finally:
             self._usage_local.max_tokens = None
         self._audit(system_prompt, user_prompt, raw, None)
+        truncated = getattr(self._usage_local, "truncated", False)
         try:
-            parsed = self._parse_json(raw)
+            # A reply cut off at max_tokens must not be silently "repaired"
+            # into a half-formed plan — only a clean parse counts.
+            parsed = self._parse_json(raw, allow_repair=not truncated)
         except ValueError as exc:
             # A reply cut off at max_tokens is the usual reason a long plan
             # fails to parse — say so, instead of only "non-JSON", so the
             # fix (raise LLM_MAX_TOKENS / lower reasoning effort) is obvious.
-            if getattr(self._usage_local, "truncated", False):
-                raise ValueError(
-                    f"LLM reply was truncated at max_tokens={self._call_max_tokens()} "
+            exc.rlm_usage = getattr(self._usage_local, "value", None)  # type: ignore[attr-defined]
+            if truncated:
+                err = ValueError(
+                    f"LLM reply was truncated at max_tokens={budget} "
                     f"(finish_reason=length) and could not be repaired: {exc}"
-                ) from exc
+                )
+                err.rlm_usage = exc.rlm_usage  # type: ignore[attr-defined]
+                raise err from exc
             raise
         if not isinstance(parsed, dict):
             # json.loads happily returns a list/str/number; every caller
@@ -323,7 +332,6 @@ class LLMClient:
             create_kwargs["top_p"] = 1
             stream = self._create(client, create_kwargs)
             content_parts: list[str] = []
-            reasoning_parts: list[str] = []
             for chunk in stream:
                 if not getattr(chunk, "choices", None):
                     err = getattr(chunk, "error", None)
@@ -332,17 +340,16 @@ class LLMClient:
                         raise ValueError(f"nvidia error for model '{self.model}': {msg}")
                     continue
                 delta = chunk.choices[0].delta
+                if getattr(chunk.choices[0], "finish_reason", None) == "length":
+                    self._usage_local.truncated = True
                 # gpt-oss-120b is a reasoning model: the chain-of-thought
-                # arrives in reasoning_content; the final answer arrives in
-                # content. Collect both — content is preferred; if it ends up
-                # empty (some reasoning-only models), fall back to reasoning.
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning is not None:
-                    reasoning_parts.append(reasoning)
+                # arrives in reasoning_content and is deliberately ignored —
+                # parsing it as the answer would return the model's scratch
+                # work. Only the final answer in content counts.
                 text = getattr(delta, "content", None)
                 if text is not None:
                     content_parts.append(text)
-            content = "".join(content_parts).strip() or "".join(reasoning_parts).strip()
+            content = "".join(content_parts).strip()
             if not content:
                 raise ValueError(
                     f"NVIDIA returned empty content for model '{self.model}'. "
@@ -369,6 +376,15 @@ class LLMClient:
         content = resp.choices[0].message.content
         finish_reason = getattr(resp.choices[0], "finish_reason", None)
         self._usage_local.truncated = finish_reason == "length"
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            # Thread-local (see __init__) — this dispatch may be running on
+            # one of several concurrent RLM worker threads.
+            self._usage_local.value = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                "provider": self.provider,
+            }
         if not content or not str(content).strip():
             # Reasoning models (many OpenRouter free models) can spend the
             # whole max_tokens budget on hidden reasoning and return no
@@ -384,15 +400,6 @@ class LLMClient:
             raise ValueError(
                 f"LLM returned empty content (finish_reason={finish_reason!r})."
             )
-        usage = getattr(resp, "usage", None)
-        if usage is not None:
-            # Thread-local (see __init__) — this dispatch may be running on
-            # one of several concurrent RLM worker threads.
-            self._usage_local.value = {
-                "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
-                "provider": self.provider,
-            }
         return str(content)
 
     @staticmethod
@@ -500,6 +507,7 @@ class LLMClient:
                     continue
                 raise
 
+        self._usage_local.truncated = getattr(msg, "stop_reason", None) == "max_tokens"
         usage = getattr(msg, "usage", None)
         if usage is not None:
             # Thread-local (see __init__) — this dispatch may be running on
@@ -544,7 +552,7 @@ class LLMClient:
             return cast(dict[str, Any], json.loads(text, strict=False))
 
     @staticmethod
-    def _parse_json(raw: str) -> dict[str, Any]:
+    def _parse_json(raw: str, allow_repair: bool = True) -> dict[str, Any]:
         # Strip markdown fences if present
         for fence in ("```json", "```"):
             if fence in raw:
@@ -558,12 +566,19 @@ class LLMClient:
         except json.JSONDecodeError:
             pass
 
+        if not allow_repair:
+            raise ValueError(f"LLM returned non-JSON: {raw[:300]}")
+
         # Try json-repair library if installed (handles all edge cases)
         try:
             from json_repair import repair_json
             candidate = repair_json(cleaned, return_objects=False)
             if candidate:
-                return LLMClient._loads_lenient(candidate)
+                repaired_obj = LLMClient._loads_lenient(candidate)
+                # json_repair can salvage a bare list/str out of prose; only
+                # an object is a usable reply — else fall through to extraction.
+                if isinstance(repaired_obj, dict):
+                    return repaired_obj
         except (ImportError, json.JSONDecodeError):
             pass
 

@@ -129,3 +129,106 @@ class TestDateTimeFusion:
         rules = [c.rule for c in coercions]
         assert any("date_time_fusion" in r for r in rules)
 
+
+    def test_dotted_time_and_hh_mm_fused(self) -> None:
+        for times in (["18.00.00", "19.30.10"], ["18:00", "19:30"]):
+            df = pd.DataFrame({
+                "Date": ["16/12/2006", "17/12/2006"] * 20,
+                "Time": times * 20,
+            })
+            out, _ = coerce_types(df)
+            assert out["Date"].iloc[0].hour == 18
+            assert out["Date"].iloc[1].hour == 19
+            assert list(out["Time"].iloc[:2]) == times  # time column kept as is
+
+    def test_date_with_time_components_not_refused(self) -> None:
+        df = pd.DataFrame({
+            "Date": ["2006-12-16 10:00:00", "2006-12-17 11:00:00"] * 20,
+            "Time": ["17:24:00", "08:30:15"] * 20,
+        })
+        out, coercions = coerce_types(df)
+        assert out["Date"].iloc[0] == pd.Timestamp("2006-12-16 10:00:00")
+        assert not any("date_time_fusion" in c.rule for c in coercions)
+
+    def test_non_time_column_not_fused(self) -> None:
+        df = pd.DataFrame({
+            "Date": ["16/12/2006", "17/12/2006"] * 20,
+            "note": ["hello", "world"] * 20,
+        })
+        out, _ = coerce_types(df)
+        assert out["Date"].iloc[0] == pd.Timestamp("2006-12-16")
+
+
+class TestDecimalComma:
+    @pytest.mark.parametrize("delimiter", [None, ",", ";"])
+    def test_leading_zero_decimal_comma(self, delimiter: str | None) -> None:
+        vals = ["0,7578", "1,0656", "0,7255", "1,2"] * 10
+        out, _ = coerce_types(pd.DataFrame({"AH": vals}), delimiter=delimiter)
+        assert out["AH"].iloc[0] == pytest.approx(0.7578)
+        assert out["AH"].max() < 2.5
+
+    def test_one_or_two_digit_decimals(self) -> None:
+        out, _ = coerce_types(pd.DataFrame({"T": ["13,6", "-2,5", "10"] * 12}))
+        assert out["T"].iloc[0] == pytest.approx(13.6)
+        assert out["T"].iloc[1] == pytest.approx(-2.5)
+
+    def test_four_digit_decimals_without_leading_zero(self) -> None:
+        out, _ = coerce_types(pd.DataFrame({"x": ["1,2345", "2,5", "3,14159"] * 12}))
+        assert out["x"].iloc[0] == pytest.approx(1.2345)
+
+    def test_all_three_digit_groups_stay_thousands(self) -> None:
+        out, _ = coerce_types(pd.DataFrame({"n": ["1,234", "12,345", "1,234,567"] * 12}))
+        assert out["n"].iloc[0] == 1234
+        assert out["n"].iloc[2] == 1234567
+
+    def test_thousands_with_decimal_kept(self) -> None:
+        out, _ = coerce_types(pd.DataFrame({"n": ["1,234.50", "2,000.25", "12,345.10"] * 12}))
+        assert out["n"].iloc[0] == pytest.approx(1234.5)
+
+    def test_leading_zero_three_digit_is_decimal(self) -> None:
+        out, _ = coerce_types(pd.DataFrame({"n": ["0,750", "0,125", "-0,500"] * 12}))
+        assert out["n"].iloc[0] == pytest.approx(0.75)
+        assert out["n"].iloc[2] == pytest.approx(-0.5)
+
+
+class TestSentinelAtoms:
+    @staticmethod
+    def _sensor_frame() -> pd.DataFrame:
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        n = 600
+        cols = {}
+        for name, lo, hi in (("s1", 400, 2400), ("s2", 300, 2600), ("s3", 200, 2700)):
+            x = rng.integers(lo, hi, n).astype(float)
+            x[rng.choice(n, 30, replace=False)] = -200.0
+            cols[name] = x
+        # Mostly-missing column: -200 is ~85% of rows.
+        y = rng.integers(10, 1100, n).astype(float)
+        y[rng.choice(n, 510, replace=False)] = -200.0
+        cols["mostly"] = y
+        return pd.DataFrame(cols)
+
+    def test_wide_spread_sensor_placeholder_nulled(self) -> None:
+        out, coercions = coerce_types(self._sensor_frame())
+        for c in out.columns:
+            assert not (out[c] == -200).any(), c
+        assert out["mostly"].isna().mean() > 0.8
+        assert {c.column for c in coercions if c.rule == "sentinel"} == set(out.columns)
+
+    def test_zero_inflated_frame_untouched(self) -> None:
+        import numpy as np
+
+        rng = np.random.default_rng(1)
+        n = 600
+        df = pd.DataFrame({
+            f"income{i}": np.where(
+                rng.random(n) < 0.4, 0.0, rng.integers(5000, 90000, n).astype(float)
+            )
+            for i in range(4)
+        })
+        # A heavy non-zero atom sitting right next to the bulk (tiny gap vs IQR).
+        df["capped"] = np.where(rng.random(n) < 0.2, 500.0, rng.integers(400, 500, n).astype(float))
+        out, coercions = coerce_types(df)
+        assert out.equals(df)
+        assert not [c for c in coercions if c.rule == "sentinel"]

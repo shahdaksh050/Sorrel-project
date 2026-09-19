@@ -29,6 +29,11 @@ def measures_df() -> pd.DataFrame:
     })
 
 
+def _findings(*columns: str) -> list[dict]:
+    """Strict curation charts a distribution only for columns a finding names."""
+    return [{"kind": "distribution", "measure": c} for c in columns]
+
+
 def _find_chart(charts: list, chart_id_prefix: str):
     for c in charts:
         if c.chart_id.startswith(chart_id_prefix):
@@ -39,7 +44,7 @@ def _find_chart(charts: list, chart_id_prefix: str):
 class TestCurrencyFormatting:
     def test_histogram_axis_carries_dollar_format(self, measures_df: pd.DataFrame) -> None:
         profile = profile_dataframe(measures_df)
-        charts = build_dashboard(measures_df, profile)
+        charts = build_dashboard(measures_df, profile, findings=_findings("amount"))
         hist = _find_chart(charts, "hist_amount")
         assert hist is not None, "expected a histogram for the currency-hinted 'amount' column"
         x_axis = hist.spec["encoding"]["x"].get("axis", {})
@@ -47,7 +52,7 @@ class TestCurrencyFormatting:
 
     def test_histogram_title_is_humanized_with_dollar_suffix(self, measures_df: pd.DataFrame) -> None:
         profile = profile_dataframe(measures_df)
-        charts = build_dashboard(measures_df, profile)
+        charts = build_dashboard(measures_df, profile, findings=_findings("amount"))
         hist = _find_chart(charts, "hist_amount")
         assert hist is not None
         assert hist.spec["encoding"]["x"]["title"] == "Amount ($)"
@@ -56,7 +61,7 @@ class TestCurrencyFormatting:
         self, measures_df: pd.DataFrame
     ) -> None:
         profile = profile_dataframe(measures_df)
-        charts = build_dashboard(measures_df, profile)
+        charts = build_dashboard(measures_df, profile, findings=_findings("amount"))
         hist = _find_chart(charts, "hist_amount")
         assert hist is not None
         assert hist.caption is not None
@@ -67,7 +72,7 @@ class TestCurrencyFormatting:
 class TestPercentFormatting:
     def test_histogram_axis_carries_percent_format(self, measures_df: pd.DataFrame) -> None:
         profile = profile_dataframe(measures_df)
-        charts = build_dashboard(measures_df, profile)
+        charts = build_dashboard(measures_df, profile, findings=_findings("churn_rate"))
         hist = _find_chart(charts, "hist_churn_rate")
         assert hist is not None, "expected a histogram for the percent-hinted 'churn_rate' column"
         x_axis = hist.spec["encoding"]["x"].get("axis", {})
@@ -75,7 +80,7 @@ class TestPercentFormatting:
 
     def test_histogram_caption_uses_percent_not_raw_fraction(self, measures_df: pd.DataFrame) -> None:
         profile = profile_dataframe(measures_df)
-        charts = build_dashboard(measures_df, profile)
+        charts = build_dashboard(measures_df, profile, findings=_findings("churn_rate"))
         hist = _find_chart(charts, "hist_churn_rate")
         assert hist is not None
         assert "%" in hist.caption
@@ -87,7 +92,7 @@ class TestNoUnitHintUnaffected:
         df = measures_df.copy()
         df["tenure_months"] = RNG.integers(1, 72, len(df))
         profile = profile_dataframe(df)
-        charts = build_dashboard(df, profile)
+        charts = build_dashboard(df, profile, findings=_findings("tenure_months"))
         hist = _find_chart(charts, "hist_tenure_months")
         assert hist is not None
         x_axis = hist.spec["encoding"]["x"].get("axis", {})
@@ -124,7 +129,7 @@ class TestRegressionAgainstPriorRounds:
 
     def test_dashboard_still_produces_multiple_charts(self, measures_df: pd.DataFrame) -> None:
         profile = profile_dataframe(measures_df)
-        charts = build_dashboard(measures_df, profile)
+        charts = build_dashboard(measures_df, profile, findings=_findings("amount", "plan"))
         assert len(charts) >= 2
 
     def test_every_chart_is_json_serializable(self, measures_df: pd.DataFrame) -> None:

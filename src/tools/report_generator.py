@@ -687,7 +687,7 @@ class GenerateReportTool(BaseTool):
             for r in tool_results:
                 name = r.get("tool_name", "?")
                 status = r.get("status", "?")
-                summary = r.get("output", {}).get("summary", r.get("error", ""))[:120]
+                summary = str((r.get("output") or {}).get("summary") or r.get("error") or "")[:120]
                 md_lines.append(f"| {name} | {status} | {summary} |")
             md_lines.append("")
 

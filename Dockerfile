@@ -17,7 +17,7 @@
 #     --memory 512m \
 #     --cpus 1.0 \
 #     --pids-limit 50 \
-#     dsa-sandbox:latest /scratch/input.json /scratch/result.json
+#     dsa-sandbox:latest /scratch/input.json /scratch/result_<uuid>.json
 # =============================================================================
 
 # Same Python minor as the host venv, so sandboxed pandas/numpy match the

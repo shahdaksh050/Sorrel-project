@@ -31,6 +31,7 @@ _W_OBJECTIVE_FIT = 0.20
 #: Finding kinds that are caveats about method/coverage, not discoveries —
 #: shown, but never ranked against real insights.
 CAVEAT_FINDING_KINDS = ("method_fit", "coverage_gap")
+LLM_FINDING_KINDS = ("custom_analysis", "generated_tool")
 
 #: effect_kind -> the effect magnitude that counts as "large" by convention
 #: (Cohen's d 0.8, r 0.5, eta-squared 0.14, Cramer's V 0.3 ...), so effects
@@ -191,7 +192,9 @@ def _diversify_by_source(findings: list[Finding], max_per_source: int) -> list[F
     overflow: list[Finding] = []
     for f in findings:
         key = (f.source_tool, f.kind)
-        if counts.get(key, 0) < max_per_source:
+        # Each LLM-authored finding is a deliberate, distinct discovery, not
+        # one of many rows from a single tool call, so they share no cap.
+        if f.kind in LLM_FINDING_KINDS or counts.get(key, 0) < max_per_source:
             head.append(f)
             counts[key] = counts.get(key, 0) + 1
         else:

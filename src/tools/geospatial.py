@@ -15,15 +15,13 @@ import numpy as np
 import pandas as pd
 
 from src.core.findings import Finding
+from src.core.profiler import is_lat_name, is_lon_name
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
     from src.core.profiler import DatasetProfile
-
-_LAT_NAME_HINTS = ("lat", "latitude")
-_LON_NAME_HINTS = ("lon", "lng", "longitude")
 
 #: How many densest grid cells to report.
 TOP_DENSE_CELLS = 5
@@ -33,14 +31,13 @@ def _autodetect_geo_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
     lat_col: str | None = None
     lon_col: str | None = None
     for col in df.select_dtypes(include="number").columns:
-        name_l = str(col).lower()
         clean = df[col].dropna()
         if clean.empty:
             continue
         lo, hi = float(clean.min()), float(clean.max())
-        if lat_col is None and any(h in name_l for h in _LAT_NAME_HINTS) and -90.0 <= lo and hi <= 90.0:
+        if lat_col is None and is_lat_name(str(col)) and -90.0 <= lo and hi <= 90.0:
             lat_col = str(col)
-        elif lon_col is None and any(h in name_l for h in _LON_NAME_HINTS) and -180.0 <= lo and hi <= 180.0:
+        elif lon_col is None and is_lon_name(str(col)) and -180.0 <= lo and hi <= 180.0:
             lon_col = str(col)
     return lat_col, lon_col
 

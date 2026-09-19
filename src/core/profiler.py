@@ -38,7 +38,11 @@ HIGH_MISSING_FRACTION = 0.20
 SEVERE_SKEW_THRESHOLD = 2.0
 
 #: Identifier-style column name fragments.
-_ID_NAME_HINTS = ("id", "uuid", "guid", "index", "key", "code", "number", "no")
+_ID_NAME_HINTS = (
+    "id", "uuid", "guid", "index", "key", "code", "number", "no",
+    "zip", "zipcode", "postcode", "phone", "sku",
+)
+_INDEX_ID_PREFIXES = ("row", "record", "case", "sample", "entry", "item", "line", "obs", "observation")
 
 #: A string column averaging at least this many words per value reads as
 #: free text (reviews, comments, descriptions) rather than category labels
@@ -70,7 +74,7 @@ HIGH_DIMENSIONAL_THRESHOLD = 8
 _PANEL_GROUP_MIN_CARD = 2
 _PANEL_GROUP_MAX_CARD = 50
 
-#: Column-name fragments that hint at geographic coordinates.
+#: Whole name tokens that hint at geographic coordinates (see is_lat_name).
 _LAT_NAME_HINTS = ("lat", "latitude")
 _LON_NAME_HINTS = ("lon", "lng", "longitude")
 
@@ -267,6 +271,18 @@ def _name_tokens(name: str) -> list[str]:
     """Column name -> lowercase tokens, split on camelCase and any
     non-alphanumeric ("heartRate", "heart-rate", "heart_rate" -> heart, rate)."""
     return [t for t in _NON_ALNUM.split(_CAMEL_BOUNDARY.sub("_", str(name)).lower()) if t]
+
+
+def is_lat_name(name: str) -> bool:
+    """Whole-token latitude name ("start_lat"; not "inflation"/"latency")."""
+    return any(t in _LAT_NAME_HINTS for t in _name_tokens(name))
+
+
+def is_lon_name(name: str) -> bool:
+    """Whole-token longitude name. Bare `long` counts only as the entire name
+    ("long"), so "long_term_debt" is not a longitude."""
+    tokens = _name_tokens(name)
+    return tokens == ["long"] or any(t in _LON_NAME_HINTS for t in tokens)
 
 
 def _has_token(tokens: list[str], hints: tuple[str, ...]) -> bool:
@@ -818,28 +834,38 @@ def has_identifier_name_hint(name: str) -> bool:
     src.tools.statistical_analysis reuses is_identifier_like wholesale
     instead of keeping a second, looser ID heuristic.
     """
-    name_l = name.lower()
-    return any(
-        name_l == h or name_l.endswith(f"_{h}") or name_l.endswith(h)
-        for h in _ID_NAME_HINTS
-    )
+    # Last whole token only: "customer_id"/"zipCode" match, "paid"/"valid"/
+    # "casino" (raw suffix collisions) do not.
+    tokens = _name_tokens(name)
+    if not tokens:
+        return False
+    if tokens[-1] == "index":
+        # "uv_index"/"body_mass_index" are measures; only a bare "index" or a
+        # row-style prefix ("row_index") is an identifier.
+        return len(tokens) == 1 or tokens[-2] in _INDEX_ID_PREFIXES
+    return tokens[-1] in _ID_NAME_HINTS
 
 
 def is_identifier_like(name: str, series: pd.Series, row_count: int) -> bool:
     """Heuristic: near-unique column whose name hints at an identifier, or a
-    fully-unique non-float column. A sorted *float* measurement (a
-    continuous value that happens to be 100% unique) does NOT qualify —
-    only a genuine key does. Public: reused by
-    src.tools.statistical_analysis instead of a duplicate local heuristic.
+    fully-unique non-float column that is a string or a sequential run. A
+    sorted *float* measurement or a unique integer measure (300 distinct
+    `revenue` values) does NOT qualify — only a genuine key does. Public:
+    reused by src.tools.statistical_analysis instead of a duplicate local
+    heuristic.
     """
     if row_count == 0:
         return False
     nunique = int(series.nunique(dropna=True))
     uniqueness = nunique / row_count
-    name_hit = has_identifier_name_hint(name)
-    return (uniqueness >= 0.98 and name_hit) or (
-        uniqueness == 1.0 and not pd.api.types.is_float_dtype(series)
-    )
+    if uniqueness >= 0.98 and has_identifier_name_hint(name):
+        return True
+    if uniqueness != 1.0 or pd.api.types.is_float_dtype(series):
+        return False
+    if not pd.api.types.is_numeric_dtype(series):
+        return True
+    # Unique integers: an ID only when they form a constant-step progression.
+    return int(series.dropna().sort_values().diff().dropna().nunique()) == 1
 
 
 def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfile:
@@ -1290,13 +1316,12 @@ def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = No
     for col in columns:
         if col.kind != "numeric":
             continue
-        name_l = col.name.lower()
         lo, hi = col.stats.get("min"), col.stats.get("max")
         if lo is None or hi is None:
             continue
-        if geo_lat_col is None and any(h in name_l for h in _LAT_NAME_HINTS) and -90.0 <= lo and hi <= 90.0:
+        if geo_lat_col is None and is_lat_name(col.name) and -90.0 <= lo and hi <= 90.0:
             geo_lat_col = col.name
-        elif geo_lon_col is None and any(h in name_l for h in _LON_NAME_HINTS) and -180.0 <= lo and hi <= 180.0:
+        elif geo_lon_col is None and is_lon_name(col.name) and -180.0 <= lo and hi <= 180.0:
             geo_lon_col = col.name
 
     is_high_dimensional = len(numeric_cols) >= HIGH_DIMENSIONAL_THRESHOLD

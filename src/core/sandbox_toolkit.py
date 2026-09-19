@@ -42,6 +42,13 @@ _TOOL_CLASSES: dict[str, tuple[str, str]] = {
     "regression_analysis": ("src.tools.regression", "RegressionAnalysisTool"),
     "experiment_analysis": ("src.tools.experiment_analysis", "ExperimentAnalysisTool"),
     "anomaly_analysis": ("src.tools.anomaly", "AnomalyAnalysisTool"),
+    "survival_analysis": ("src.tools.survival", "SurvivalAnalysisTool"),
+    "curve_fit_analysis": ("src.tools.curve_fit", "CurveFitAnalysisTool"),
+    "forecast_analysis": ("src.tools.forecast", "ForecastAnalysisTool"),
+    "mixed_model_analysis": ("src.tools.mixed_model", "MixedModelAnalysisTool"),
+    "basket_analysis": ("src.tools.basket", "BasketAnalysisTool"),
+    "price_elasticity_analysis": ("src.tools.elasticity", "PriceElasticityTool"),
+    "equity_analysis": ("src.tools.equity", "EquityAnalysisTool"),
     "time_series_analysis": ("src.tools.time_series", "TimeSeriesAnalysisTool"),
     "cohort_analysis": ("src.tools.cohort_analysis", "CohortAnalysisTool"),
     "correlation_analysis": ("src.tools.data_processing", "CorrelationAnalysisTool"),
@@ -332,7 +339,7 @@ def corr_heatmap(
         strength = corr.abs().fillna(0).where(~np.eye(len(corr), dtype=bool), 0).mean()
         keep = strength.nlargest(_MAX_CORR_COLUMNS).index
         corr = corr.loc[keep, keep]
-    dist = (1 - corr.abs().fillna(0)).to_numpy()
+    dist = (1 - corr.abs().fillna(0)).to_numpy(copy=True)
     dist = np.clip((dist + dist.T) / 2, 0, 1)
     np.fill_diagonal(dist, 0)
     from scipy.cluster.hierarchy import leaves_list, linkage

@@ -209,3 +209,11 @@ class TestScale:
         assert df.shape == (1_000_000, 4)
         profile = profile_dataframe(df)
         assert profile.row_count == 1_000_000
+
+
+def test_all_null_columns_dropped_with_note(tmp_path) -> None:
+    path = tmp_path / "trail.csv"
+    path.write_text("a;b;;\n1,5;x;;\n2,5;y;;\n", encoding="utf-8")
+    df, report = read_any(str(path))
+    assert list(df.columns) == ["a", "b"]
+    assert any("Dropped 2 empty column(s)" in n for n in report.notes)

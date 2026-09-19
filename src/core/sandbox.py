@@ -253,10 +253,18 @@ def _static_check(code: str) -> tuple[str, str] | None:
                 f"'{node.id}' is not available in the sandbox. Use df, pandas/numpy/"
                 "scipy/sklearn operations and the dsa toolkit instead.",
             )
-        elif isinstance(node, ast.Attribute) and _blocked_attr(node.attr):
+        elif (
+            isinstance(node, ast.Attribute) and _blocked_attr(node.attr)
+        ) or (
+            # `case object(__class__=c)` resolves kwd_attrs via getattr — no Attribute node.
+            isinstance(node, ast.MatchClass) and any(_blocked_attr(a) for a in node.kwd_attrs)
+        ):
+            attr = node.attr if isinstance(node, ast.Attribute) else next(
+                a for a in node.kwd_attrs if _blocked_attr(a)
+            )
             return (
                 "static_check",
-                f"Attribute '.{node.attr}' is not allowed in the sandbox (private names, "
+                f"Attribute '.{attr}' is not allowed in the sandbox (private names, "
                 "interpreter internals and file/network I/O are blocked). df is already "
                 "loaded; use DF_OUT with save_as to persist a derived dataset.",
             )
@@ -381,6 +389,13 @@ def _result_from_payload(
     """Build the SandboxResult for a worker payload, copying a DF_OUT file out
     of the scratch dir first — it is deleted with the TemporaryDirectory, so
     callers must invoke this inside that block."""
+    if not isinstance(payload, dict) or payload.get("status") not in ("ok", "error"):
+        return SandboxResult(
+            status="error", result=None, finding=None, stdout="",
+            error_type="runtime", traceback=None,
+            hint="The sandboxed process produced a malformed result.",
+            duration_ms=duration_ms,
+        )
     derived_path = None
     derived_error = payload.get("derived_error")
     if payload.get("status") == "ok" and derived_dest and scratch_derived.exists():
@@ -508,7 +523,9 @@ class SubprocessSandbox(SandboxBackend):
             prefix="sandbox_", ignore_cleanup_errors=True
         ) as scratch_dir:
             input_path = Path(scratch_dir) / "input.json"
-            result_path = Path(scratch_dir) / "result.json"
+            # Unpredictable name: user code can write into the scratch dir, so a
+            # fixed name would let it forge the result the parent trusts.
+            result_path = Path(scratch_dir) / f"result_{uuid.uuid4().hex}.json"
             scratch_derived = Path(scratch_dir) / _DERIVED_FILENAME
             input_path.write_text(
                 json.dumps(
@@ -641,22 +658,30 @@ class DockerSandbox(SandboxBackend):
     def __init__(self, image_tag: str = "dsa-sandbox:latest") -> None:
         self.image_tag = image_tag
 
+    _availability: tuple[float, bool] | None = None  # (monotonic checked-at, result)
+    _AVAILABILITY_TTL_S = 30.0
+
     @staticmethod
     def is_available() -> bool:
-        """Return True if docker executable exists and daemon is responsive."""
-        docker_bin = shutil.which("docker")
-        if not docker_bin:
-            return False
-        try:
-            res = subprocess.run(
-                ["docker", "info"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2.0,
-            )
-            return res.returncode == 0
-        except Exception:
-            return False
+        """Return True if docker executable exists and daemon is responsive.
+        Cached for ~30 s so it isn't a `docker info` per execution."""
+        cached = DockerSandbox._availability
+        if cached is not None and time.monotonic() - cached[0] < DockerSandbox._AVAILABILITY_TTL_S:
+            return cached[1]
+        ok = False
+        if shutil.which("docker"):
+            try:
+                res = subprocess.run(
+                    ["docker", "info"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2.0,
+                )
+                ok = res.returncode == 0
+            except Exception:
+                ok = False
+        DockerSandbox._availability = (time.monotonic(), ok)
+        return ok
 
     def execute(
         self,
@@ -713,10 +738,11 @@ class DockerSandbox(SandboxBackend):
                 )
 
             input_path = scratch_path / "input.json"
-            result_path = scratch_path / "result.json"
+            result_name = f"result_{uuid.uuid4().hex}.json"  # unforgeable by user code
+            result_path = scratch_path / result_name
 
             container_input = "/scratch/input.json"
-            container_result = "/scratch/result.json"
+            container_result = f"/scratch/{result_name}"
             container_data = f"/scratch/{dataset_target.name}"
             scratch_derived = scratch_path / _DERIVED_FILENAME
 
@@ -835,14 +861,15 @@ def get_sandbox_backend(backend_name: str | None = None) -> SandboxBackend | Non
     3. If 'docker' is requested, validates Docker daemon is available.
        Defaults to SubprocessSandbox (zero external dependencies).
 
-    Returns None when isolation is required (`isolation_required()`) but
-    Docker is unavailable — the caller must refuse to execute, not fall back.
+    Returns None when Docker is explicitly requested (SANDBOX_BACKEND=docker)
+    or isolation is required (`isolation_required()`) but Docker is
+    unavailable — the caller must refuse to execute, not fall back.
     """
     target = (backend_name or os.environ.get("SANDBOX_BACKEND", "")).strip().lower()
-    if (target == "docker" or isolation_required()) and DockerSandbox.is_available():
-        return DockerSandbox()
-    if isolation_required():
-        return None
+    if target == "docker" or isolation_required():
+        # Explicitly requested (or required) Docker that is down: refuse
+        # rather than silently downgrade to the unisolated subprocess.
+        return DockerSandbox() if DockerSandbox.is_available() else None
     return SubprocessSandbox()
 
 
@@ -880,8 +907,10 @@ def run_sandboxed(
             status="error", result=None, finding=None, stdout="",
             error_type="isolation_unavailable", traceback=None,
             hint=(
-                "Code execution is disabled: SANDBOX_REQUIRE_ISOLATION is set and the "
-                "Docker sandbox is unavailable. Use the built-in tools instead."
+                "Code execution is disabled: the Docker sandbox was requested "
+                "(SANDBOX_BACKEND=docker or SANDBOX_REQUIRE_ISOLATION) but Docker is "
+                "unavailable, and the unisolated subprocess backend will not be used "
+                "instead. Start Docker or use the built-in tools."
             ),
             duration_ms=0.0, backend="refused",
         )

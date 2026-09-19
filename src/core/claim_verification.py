@@ -23,7 +23,9 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 #: Matches numeric literals (integers, decimals, negatives, comma-formatted) in free text.
-_NUMBER_RE = re.compile(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
+#: The minus is a sign only when not glued to a preceding word char, so
+#: ranges and dates ("aged 25-34", "2024-01-05") don't yield negatives.
+_NUMBER_RE = re.compile(r"(?:(?<!\w)-)?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?")
 
 #: Single-digit integers are almost always counts ("3 models", "top 5
 #: features") rather than cited metrics, and are cheap to satisfy by
@@ -68,7 +70,17 @@ _KEYWORD_TOOL_MAP: dict[str, tuple[str, ...]] = {
     r"auc\b": ("train_model", "evaluate_model", "regression_analysis"),
     r"r2\b": ("train_model", "evaluate_model", "regression_analysis"),
     r"statistical test": ("select_statistical_test", "segment_comparison", "experiment_analysis"),
-    r"p-?value": ("select_statistical_test", "segment_comparison", "experiment_analysis", "regression_analysis"),
+    r"p-?value": (
+        "select_statistical_test", "segment_comparison", "experiment_analysis", "regression_analysis",
+        "survival_analysis", "mixed_model_analysis", "price_elasticity_analysis", "equity_analysis",
+        "curve_fit_analysis",
+    ),
+    r"hazard": ("survival_analysis",),
+    r"survival": ("survival_analysis",),
+    r"elasticity": ("price_elasticity_analysis",),
+    r"icc\b": ("mixed_model_analysis",),
+    r"adverse impact": ("equity_analysis",),
+    r"forecast": ("forecast_analysis",),
     r"anova": ("select_statistical_test",),
     r"chi-?squared?\b": ("select_statistical_test",),
     r"mann-whitney": ("select_statistical_test",),

@@ -80,7 +80,7 @@ class TestCategoryQuality:
 
 class TestNewKinds:
     def test_stacked_and_grouped_need_series(self) -> None:
-        rows = [{"q": "Q1", "g": "a", "v": 1}, {"q": "Q1", "g": "b", "v": 2}]
+        rows = [{"q": q, "g": g, "v": 1 + i} for i, (q, g) in enumerate((q, g) for q in ("Q1", "Q2") for g in "ab")]
         assert "series" in _bad({"type": "stacked_bar", "data": rows, "x": "q", "y": "v"})
         stacked = spec_to_vegalite(_ok({"type": "stacked_bar", "data": rows, "x": "q", "y": "v", "series": "g"}))
         grouped = spec_to_vegalite(_ok({"type": "grouped_bar", "data": rows, "x": "q", "y": "v", "series": "g"}))
@@ -98,7 +98,7 @@ class TestNewKinds:
         shares = [r["cumulative_share"] for r in vl["data"]["values"]]
         assert shares == pytest.approx([0.6, 0.9, 1.0])
         assert "independent" in str(vl["resolve"])
-        assert "non-negative" in _bad({"type": "pareto", "data": [{"c": "a", "v": -1}], "x": "c", "y": "v"})
+        assert "non-negative" in _bad({"type": "pareto", "data": [{"c": "a", "v": -1}, {"c": "b", "v": 2}], "x": "c", "y": "v"})
 
     def test_slope_needs_exactly_two_points(self) -> None:
         rows = [{"yr": y, "g": g, "v": float(i)} for i, (y, g) in enumerate((y, g) for y in (2020, 2021, 2022) for g in "ab")]
@@ -137,7 +137,7 @@ class TestNewKinds:
         assert "annotations" in _bad({**spec, "annotations": [{"y": "high"}]})
 
     def test_hints_are_normalised(self) -> None:
-        rows = [{"c": "a", "v": 1.0}]
+        rows = [{"c": "a", "v": 1.0}, {"c": "b", "v": 2.0}]
         clean = _ok({"type": "bar", "data": rows, "x": "c", "y": "v", "size": "wide", "priority": 99,
                      "caption": "x" * 500})
         assert clean["size"] == "wide" and clean["priority"] == 10 and len(clean["caption"]) == 200

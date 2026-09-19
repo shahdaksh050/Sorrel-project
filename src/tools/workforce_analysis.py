@@ -26,6 +26,7 @@ import pandas as pd
 
 from src.core.domains import domain_confidence, resolve_column
 from src.core.findings import Finding
+from src.core.privacy import fold_small_groups, is_small, min_cell_size, suppression_note
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -33,10 +34,11 @@ if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
     from src.core.profiler import DatasetProfile
 
-#: Groups smaller than this are reported but excluded from pay-gap
-#: comparisons — a median over a handful of people is noise, and naming it
-#: invites a conclusion the data cannot support.
-_MIN_GROUP_FOR_COMPARISON = 5
+#: Groups smaller than `min_cell_size()` (src.core.privacy, default 5) are
+#: never reported with a median, mean or rate — a statistic over a handful of
+#: people is noise and can identify them. They are folded into one "Other
+#: (small groups)" row that carries only headcount.
+_OTHER_LABEL = "Other (small groups)"
 
 #: Token sets that mark a status value as "no longer employed".
 _INACTIVE_TOKENS = frozenset(
@@ -82,15 +84,16 @@ def _describe_pay(series: pd.Series) -> dict[str, float]:
 
 def _pay_gap_between(
     work: pd.DataFrame, salary_column: str, grouping_column: str
-) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, int]:
     """Unadjusted median-pay comparison across the levels of
     `grouping_column` (department, gender, or any other categorical split).
 
-    Returns `(pay_by_level, gap)`: `pay_by_level` is every level's
-    count/median/mean pay, sorted by median descending; `gap` compares the
-    highest- and lowest-paid levels with enough headcount to be a real
-    comparison (`_MIN_GROUP_FOR_COMPARISON`), or is `None` when fewer than
-    two levels qualify.
+    Returns `(pay_by_level, gap, folded)`: `pay_by_level` is every reportable
+    level's count/median/mean pay, sorted by median descending; levels under
+    the minimum cell size are folded into one trailing "Other (small groups)"
+    row (`folded` counts them) that shows pay only when the combined group
+    is itself large enough. `gap` compares the highest- and lowest-paid
+    levels, or is `None` when fewer than two levels qualify.
     """
     levels: list[dict[str, Any]] = []
     for name, group in work.groupby(grouping_column)[salary_column]:
@@ -104,12 +107,13 @@ def _pay_gap_between(
                 "mean_pay": round(float(group.mean()), 2),
             }
         )
+    small = [g for g in levels if is_small(g["count"])]
+    levels = [g for g in levels if not is_small(g["count"])]
     levels.sort(key=lambda g: g["median_pay"], reverse=True)
 
-    comparable = [g for g in levels if g["count"] >= _MIN_GROUP_FOR_COMPARISON]
     gap: dict[str, Any] | None = None
-    if len(comparable) >= 2:
-        high, low = comparable[0], comparable[-1]
+    if len(levels) >= 2:
+        high, low = levels[0], levels[-1]
         if high["median_pay"] > 0:
             gap_frac = (high["median_pay"] - low["median_pay"]) / high["median_pay"]
             gap = {
@@ -120,11 +124,18 @@ def _pay_gap_between(
                 "lower_median": low["median_pay"],
                 "note": (
                     "Unadjusted: not controlled for role, level or tenure. "
-                    f"Groups smaller than {_MIN_GROUP_FOR_COMPARISON} were "
+                    f"Groups smaller than {min_cell_size()} were "
                     "excluded from this comparison."
                 ),
             }
-    return levels, gap
+    if small:
+        pooled = work.loc[work[grouping_column].astype(str).isin({g["group"] for g in small}), salary_column].dropna()
+        other: dict[str, Any] = {"group": _OTHER_LABEL, "count": int(pooled.size)}
+        if not is_small(pooled.size):
+            other["median_pay"] = round(float(pooled.median()), 2)
+            other["mean_pay"] = round(float(pooled.mean()), 2)
+        levels.append(other)
+    return levels, gap, len(small)
 
 
 def _is_departure_named(name: object) -> bool:
@@ -151,6 +162,11 @@ def _resolve_status(series: pd.Series) -> pd.Series | None:
     if pd.api.types.is_bool_dtype(series):
         flags = series.astype("boolean")
         return flags if departure else ~flags
+    if pd.api.types.is_float_dtype(series):
+        # A 0/1 flag stored as float (NaN present) would stringify to "1.0"/"0.0".
+        series = series.astype(object).map(
+            lambda v: int(v) if isinstance(v, float) and v.is_integer() else v
+        )
     tokens = series.dropna().astype(str).str.strip().str.lower()
     if tokens.empty:
         return None
@@ -230,6 +246,7 @@ class WorkforceAnalysisTool(BaseTool):
             )
 
         headcount = len(work)
+        caveats: list[str] = []
         result: dict[str, Any] = {
             "headcount": headcount,
             "salary_column": salary_column,
@@ -325,24 +342,49 @@ class WorkforceAnalysisTool(BaseTool):
                     "headcount": int(group.size),
                     "headcount_share_pct": round(int(group.size) / headcount * 100, 2),
                 }
+                if is_small(group.size):
+                    # Small group: only headcount survives (folded below).
+                    rows.append(entry)
+                    continue
                 if group.notna().any():
                     entry["median_pay"] = round(float(group.median()), 2)
                 if departed is not None:
                     mask = work[department_column] == name
                     dept_status = departed[mask].dropna()
                     status_known_by_dept[str(name)] = int(dept_status.size)
-                    if not dept_status.empty:
+                    # Never report a rate for a group under the minimum.
+                    if not is_small(dept_status.size):
                         entry["attrition_rate_pct"] = round(
                             float(dept_status.astype(float).mean()) * 100, 2
                         )
                 rows.append(entry)
             rows.sort(key=lambda r: r["headcount"], reverse=True)
-            result["by_department"] = rows[:_TOP_N]
+            _folded_table, folded_depts = fold_small_groups(pd.DataFrame(rows), "headcount", "department", _OTHER_LABEL)
+            if folded_depts:
+                folded_names = {r["department"] for r in rows if is_small(r["headcount"])}
+                in_other = work[department_column].astype(str).isin(folded_names)
+                other_entry: dict[str, Any] = {
+                    "department": _OTHER_LABEL,
+                    "headcount": int(in_other.sum()),
+                    "headcount_share_pct": round(int(in_other.sum()) / headcount * 100, 2),
+                }
+                other_pay = work.loc[in_other, salary_column].dropna()
+                if not is_small(other_pay.size):
+                    other_entry["median_pay"] = round(float(other_pay.median()), 2)
+                if departed is not None:
+                    other_status = departed[in_other].dropna()
+                    if not is_small(other_status.size):
+                        other_entry["attrition_rate_pct"] = round(float(other_status.astype(float).mean()) * 100, 2)
+                rows = [*[r for r in rows if not is_small(r["headcount"])][:_TOP_N], other_entry]
+                caveats.append(suppression_note(folded_depts))
+            else:
+                rows = rows[:_TOP_N]
+            result["by_department"] = rows
             if departed is not None:
                 eligible = [
                     r for r in rows
-                    if "attrition_rate_pct" in r
-                    and status_known_by_dept.get(r["department"], 0) >= _MIN_GROUP_FOR_COMPARISON
+                    if "attrition_rate_pct" in r and r["department"] != _OTHER_LABEL
+                    and not is_small(status_known_by_dept.get(r["department"], 0))
                 ]
                 if eligible:
                     worst = max(eligible, key=lambda r: r["attrition_rate_pct"])
@@ -363,14 +405,18 @@ class WorkforceAnalysisTool(BaseTool):
             # Not `_` — execute()'s own `**_: Any` kwargs catch-all already
             # binds that name as dict[str, Any] in this scope; reusing it
             # here for a throwaway list would conflict under mypy.
-            _dept_pay_by_level, dept_gap = _pay_gap_between(work, salary_column, department_column)
+            _dept_pay_by_level, dept_gap, dept_pay_folded = _pay_gap_between(work, salary_column, department_column)
+            if dept_pay_folded and not folded_depts:
+                caveats.append(suppression_note(dept_pay_folded))
             if dept_gap:
                 result["department_pay_gap"] = dept_gap
 
         # ---- Unadjusted pay comparison between groups (gender/sex) ----
         if group_column and group_column in work.columns:
             result["group_column"] = group_column
-            pay_by_group, group_gap = _pay_gap_between(work, salary_column, group_column)
+            pay_by_group, group_gap, group_folded = _pay_gap_between(work, salary_column, group_column)
+            if group_folded:
+                caveats.append(suppression_note(group_folded))
             result["pay_by_group"] = pay_by_group
             if group_gap:
                 result["unadjusted_median_pay_gap"] = group_gap
@@ -394,9 +440,12 @@ class WorkforceAnalysisTool(BaseTool):
                 f"({gap['higher_group']} vs {gap['lower_group']})"
             )
         result["summary"] = "; ".join(parts) + "."
+        result["caveats"] = caveats
         return result
 
-    def _pay_gap_finding(self, gap: dict[str, Any], dimension: str) -> Finding | None:
+    def _pay_gap_finding(
+        self, gap: dict[str, Any], dimension: str, extra_caveats: list[str] | None = None
+    ) -> Finding | None:
         """Build a `segment_lift`/`median_pay` Finding from a
         `_pay_gap_between()` result, or `None` below the triviality floor."""
         gap_pct = gap.get("gap_pct", 0.0)
@@ -419,7 +468,7 @@ class WorkforceAnalysisTool(BaseTool):
             effect_kind="pct",
             confidence=0.55,
             surprise=0.5,
-            caveats=[note] if note else [],
+            caveats=([note] if note else []) + list(extra_caveats or []),
         )
 
     def findings(
@@ -429,6 +478,7 @@ class WorkforceAnalysisTool(BaseTool):
         metadata: DatasetMetadata | None,
     ) -> list[Finding]:
         results: list[Finding] = []
+        privacy_caveats = [str(c) for c in output.get("caveats") or []]
 
         summary = output.get("summary")
         if summary:
@@ -456,7 +506,8 @@ class WorkforceAnalysisTool(BaseTool):
         dept_gap = output.get("department_pay_gap")
         if dept_gap is not None:
             finding = self._pay_gap_finding(
-                dept_gap, dimension=output.get("department_column") or "department"
+                dept_gap, dimension=output.get("department_column") or "department",
+                extra_caveats=privacy_caveats,
             )
             if finding is not None:
                 results.append(finding)
@@ -464,7 +515,8 @@ class WorkforceAnalysisTool(BaseTool):
         group_gap = output.get("unadjusted_median_pay_gap")
         if group_gap is not None:
             finding = self._pay_gap_finding(
-                group_gap, dimension=output.get("group_column") or "group"
+                group_gap, dimension=output.get("group_column") or "group",
+                extra_caveats=privacy_caveats,
             )
             if finding is not None:
                 results.append(finding)
@@ -499,6 +551,7 @@ class WorkforceAnalysisTool(BaseTool):
                         effect_kind="pct",
                         confidence=0.6,
                         surprise=0.5,
+                        caveats=privacy_caveats,
                     )
                 )
 

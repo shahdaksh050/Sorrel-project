@@ -568,9 +568,14 @@ class RegressionAnalysisTool(BaseTool):
                 row.update({"effect": change, "ci_lower": ci[0], "ci_upper": ci[1], "std_beta": std_beta,
                             "effect_scale": "percent" if target_log else "target_units"})
             else:
-                bumped = exog.copy()
-                bumped.iloc[:, i] = bumped.iloc[:, i] + k
-                ame = float(np.mean(np.asarray(res.predict(bumped)) - base_p))
+                on, off = exog.copy(), exog.copy()
+                if term.kind in ("binary", "level"):
+                    on.iloc[:, i], off.iloc[:, i] = 1.0, 0.0
+                    p_off = np.asarray(res.predict(off))
+                else:
+                    on.iloc[:, i] = on.iloc[:, i] + k
+                    p_off = np.asarray(base_p)
+                ame = float(np.mean(np.asarray(res.predict(on)) - p_off))
                 row.update({
                     "odds_ratio": math.exp(min(coef * k, 50.0)),
                     "ci_lower": math.exp(min(lo * k, 50.0)), "ci_upper": math.exp(min(hi * k, 50.0)),

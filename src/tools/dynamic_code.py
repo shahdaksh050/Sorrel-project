@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from src.core.chart_spec import describe_chart
 from src.core.sandbox import ALLOWED_MODULES_TEXT, SandboxResult, run_sandboxed
 from src.tools.base import BaseTool, ToolExecutionError, collect_prior_results
 
@@ -71,6 +72,14 @@ def sandbox_output(result: SandboxResult, label: str, derived_name: str | None) 
             output["evidence"] = dict(evidence)
     if result.chart:
         output["chart"] = result.chart
+        if critique := describe_chart(result.chart):
+            summary += " " + critique
+    if result.result not in (None, "", [], {}):
+        # Tell the LLM what will and won't reach the report, so it can act.
+        if not isinstance(result.finding, dict):
+            summary += " No FINDING declared — this result stays out of the report; add FINDING = {...} if it is a real discovery."
+        if not result.chart and not result.chart_error and isinstance(result.result, list) and len(result.result) > 1:
+            summary += " No CHART declared for this table — add CHART = dsa.chart... to show it."
     if result.chart_error:
         output["chart_error"] = result.chart_error
         summary += f" CHART was rejected: {result.chart_error}"
@@ -95,15 +104,23 @@ def sandbox_output(result: SandboxResult, label: str, derived_name: str | None) 
 
 
 def _optional_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Ranking fields from a FINDING payload; the LLM often puts them inside
+    `evidence` instead of at the top level, so both places are read."""
+    evidence = payload.get("evidence")
+    sources = (payload, evidence) if isinstance(evidence, dict) else (payload,)
+
+    def pick(key: str) -> Any:
+        return next((s[key] for s in sources if s.get(key) is not None), None)
+
     fields: dict[str, Any] = {}
     for key in ("measure", "dimension", "effect_kind"):
-        if isinstance(payload.get(key), str):
-            fields[key] = payload[key]
-    level = payload.get("level")
+        if isinstance(pick(key), str):
+            fields[key] = pick(key)
+    level = pick("level")
     if isinstance(level, (str, int, float)) and not isinstance(level, bool):
         fields["level"] = str(level)
     for key in ("effect", "p_value", "confidence"):
-        value = payload.get(key)
+        value = pick(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             fields[key] = float(value)
     if "confidence" in fields:

@@ -49,12 +49,14 @@ class TestPromptManager:
         prompt = pm.get_initial_user_prompt()
         assert "500" in prompt
 
-    def test_iteration_prompt_injects_cleaned_path(
+    def test_iteration_prompt_omits_cleaned_path_but_keeps_dataset_block(
         self, pm: PromptManager, memory: MemorySystem
     ) -> None:
         memory.set_context("cleaned_file_path", "/tmp/churn_cleaned.csv")
         prompt = pm.get_iteration_user_prompt()
-        assert "/tmp/churn_cleaned.csv" in prompt
+        # The controller fills `file_path`; the LLM never needs the raw path.
+        assert "/tmp/churn_cleaned.csv" not in prompt
+        assert "churn.csv" in prompt and "classification" in prompt
 
     def test_iteration_prompt_lists_failed_steps(
         self, pm: PromptManager, memory: MemorySystem

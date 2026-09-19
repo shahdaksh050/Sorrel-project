@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import time
 from abc import ABC, abstractmethod
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -35,6 +36,9 @@ class ToolExecutionError(Exception):
 #: values before being shipped into the sandbox as PRIOR_RESULTS.
 PRIOR_RESULT_CAP_CHARS = 20_000
 _PRIOR_VALUE_CAP_CHARS = 2_000
+#: Never useful as prior data (a chart spec's rows, console output) and large
+#: enough to push the computed RESULT over the cap.
+_PRIOR_SKIP_KEYS = frozenset({"chart", "stdout"})
 
 
 def _needs_cleaned_redirect(file_path: Any, memory: MemorySystem) -> bool:
@@ -61,19 +65,26 @@ def collect_prior_results(memory: MemorySystem) -> dict[str, Any]:
     """{tool_name: JSON-safe output} of every successful step so far, for the
     sandbox's PRIOR_RESULTS. Oversized outputs keep only their small values
     (summary, scalars, short lists) so the subprocess input stays lean."""
+    ok = [tr for tr in memory.tool_results if tr.status == "success" and isinstance(tr.output, dict)]
+    totals = Counter(tr.tool_name for tr in ok)
+    seen: Counter[str] = Counter()
     prior: dict[str, Any] = {}
-    for tr in memory.tool_results:
-        if tr.status != "success" or not isinstance(tr.output, dict):
-            continue
+    for tr in ok:
         sizes: dict[str, int] = {}
         for k, v in tr.output.items():
+            if k in _PRIOR_SKIP_KEYS:
+                continue
             try:
                 sizes[k] = len(json.dumps(v))
             except (TypeError, ValueError, OverflowError):
                 continue
         if sum(sizes.values()) > PRIOR_RESULT_CAP_CHARS:
             sizes = {k: n for k, n in sizes.items() if n <= _PRIOR_VALUE_CAP_CHARS}
-        prior[tr.tool_name] = {k: tr.output[k] for k in sizes}
+        entry = {k: tr.output[k] for k in sizes}
+        seen[tr.tool_name] += 1
+        prior[tr.tool_name] = entry  # the latest run
+        if totals[tr.tool_name] > 1:
+            prior[f"{tr.tool_name}#{seen[tr.tool_name]}"] = entry  # every run, in order
     return prior
 
 

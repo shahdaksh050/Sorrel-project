@@ -203,6 +203,21 @@ class RLMEngine:
         """Read-only copy of the reasoning trace (one entry per LLM call)."""
         return list(self._trace)
 
+    def _record_usage(
+        self, prompt_tokens: int, completion_tokens: int, provider: str | None
+    ) -> tuple[int, int, float]:
+        rates = COST_PER_1K_TOKENS.get(
+            provider or self._default_provider, COST_PER_1K_TOKENS["unknown"]
+        )
+        cost_usd = (prompt_tokens / 1000) * rates["prompt"] + (
+            completion_tokens / 1000
+        ) * rates["completion"]
+        with self._usage_lock:
+            self._total_prompt_tokens += prompt_tokens
+            self._total_completion_tokens += completion_tokens
+            self._total_cost_usd += cost_usd
+        return prompt_tokens, completion_tokens, cost_usd
+
     def invoke(
         self,
         user_prompt: str,
@@ -226,21 +241,16 @@ class RLMEngine:
             )
 
         t0 = time.perf_counter()
-        response = self._llm(self._system_prompt, user_prompt)
+        try:
+            response = self._llm(self._system_prompt, user_prompt)
+        except Exception as exc:
+            # A call that failed after the provider replied (parse failure)
+            # still spent tokens — count them against the budget.
+            self._record_usage(*_extract_usage({"_rlm_usage": getattr(exc, "rlm_usage", None)}))
+            raise
         latency_ms = (time.perf_counter() - t0) * 1000
 
-        prompt_tokens, completion_tokens, provider = _extract_usage(response)
-        rates = COST_PER_1K_TOKENS.get(
-            provider or self._default_provider, COST_PER_1K_TOKENS["unknown"]
-        )
-        cost_usd = (prompt_tokens / 1000) * rates["prompt"] + (
-            completion_tokens / 1000
-        ) * rates["completion"]
-
-        with self._usage_lock:
-            self._total_prompt_tokens += prompt_tokens
-            self._total_completion_tokens += completion_tokens
-            self._total_cost_usd += cost_usd
+        prompt_tokens, completion_tokens, cost_usd = self._record_usage(*_extract_usage(response))
 
         self._trace.append(
             _TraceEntry(

@@ -71,7 +71,7 @@ def _fmt(name: str) -> str:
 
 
 def _floats(series: pd.Series[Any]) -> np.ndarray:
-    values: np.ndarray = series.to_numpy(dtype="float64", na_value=np.nan)
+    values: np.ndarray = np.array(series.to_numpy(dtype="float64", na_value=np.nan), dtype="float64", copy=True)
     values[~np.isfinite(values)] = np.nan
     return values
 

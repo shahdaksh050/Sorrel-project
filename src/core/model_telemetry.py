@@ -578,7 +578,7 @@ class DynamicRateAndTokenLimiter:
 
             wait = max(0.0, self._cooldown_until.get(key, 0.0) - now)
             if rpm_cap and len(req_deq) >= rpm_cap:
-                wait = max(wait, 60.0 - (now - req_deq[0]) + 0.15)
+                wait = max(wait, 60.0 - (now - req_deq[len(req_deq) - rpm_cap]) + 0.15)
             if tpm_cap and tok_deq and sum(t[1] for t in tok_deq) + estimated_tokens > tpm_cap:
                 wait = max(wait, 60.0 - (now - tok_deq[0][0]) + 0.15)
             wait = min(wait, MAX_WAIT_S)

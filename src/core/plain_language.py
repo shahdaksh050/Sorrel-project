@@ -33,7 +33,7 @@ _SCALES: dict[str, tuple[tuple[float, ...], tuple[str, ...]]] = {
 
 _KIND_ALIASES: dict[str, str] = {
     "cohens_d": "d", "hedges_g": "d", "d": "d", "g": "d",
-    "eta_sq": "eta", "eta_squared": "eta", "epsilon_squared": "eta", "eta2": "eta",
+    "eta": "eta", "eta_sq": "eta", "eta_squared": "eta", "epsilon_squared": "eta", "eta2": "eta",
     "cramers_v": "v", "v": "v",
     "r": "r", "rho": "r", "spearman": "r", "pearson": "r", "rank_biserial": "r",
     "r2": "r2", "r_squared": "r2",
@@ -146,10 +146,10 @@ _CI_RE = re.compile(
     rf"(?P<lo>{_NUM})\s*(?:,|;|–|—|\bto\b|-)\s*(?P<hi>{_NUM})\s*[\])]?"
 )
 _N_RE = re.compile(r"(?<![\w.])[nN]\s*=\s*(\d+(?:,\d{3})*)")
-_BIG_RE = re.compile(r"(?<![\w.,])(?P<cur>[$€£₹]?)(?P<num>\d{1,3}(?:,\d{3}){2,})(?![\d,]|\.\d)")
+_BIG_RE = re.compile(r"(?<![\w.,])(?P<sign>-?)(?P<cur>[$€£₹]?)(?P<num>\d{1,3}(?:,\d{3}){2,})(?![\d,]|\.\d)")
 _SIG_RE = re.compile(
-    r"\b(?P<neg>not\s+)?statistically\s+significant(?P<noun>\s+(?:difference|effect|relationship|"
-    r"correlation|association|increase|decrease|gap|trend|link|result|change)s?)?",
+    r"\b(?P<neg>not\s+)?statistically\s+significant(?P<ly>ly)?\b(?P<noun>\s+(?:difference|effect|relationship|"
+    r"correlation|association|increase|decrease|gap|trend|link|result|change)s?\b)?",
     re.IGNORECASE,
 )
 
@@ -187,8 +187,8 @@ def _humanise(match: re.Match[str]) -> str:
             scaled = value / scale
             text = f"{float(f'{scaled:.3g}'):g} {name}"
             approx = abs(float(f"{scaled:.3g}") - scaled) > 1e-9 * scaled
-            cur = match.group("cur")
-            return f"{cur}{text}" if cur or not approx else f"about {text}"
+            cur, sign = match.group("cur"), match.group("sign")
+            return f"{sign}{cur}{text}" if cur or not approx else f"about {sign}{text}"
     return match.group(0)
 
 
@@ -221,14 +221,15 @@ def plainify(text: str) -> str:
 
     def _significant(m: re.Match[str]) -> str:
         noun = m.group("noun") or ""
+        ly = m.group("ly")
         if m.group("neg"):
-            phrase = f"unclear{noun}" if noun else "could easily be down to chance"
+            phrase = f"unclear{noun}" if noun else "not clearly" if ly else "not clearly different"
         else:
-            phrase = f"clear{noun}" if noun else "unlikely to be down to chance"
+            phrase = f"clear{noun}" if noun else "clearly" if ly else "unlikely to be down to chance"
         return phrase[0].upper() + phrase[1:] if m.group(0)[0].isupper() else phrase
 
     out = _SIG_RE.sub(_significant, out)
-    out = _N_RE.sub(lambda m: f"{m.group(1)} records", out)
+    out = _N_RE.sub(lambda m: m.group(1) if re.match(r"\s*[A-Za-z]", m.string[m.end():]) else f"{m.group(1)} records", out)
     out = _BIG_RE.sub(_humanise, out)
     return out
 

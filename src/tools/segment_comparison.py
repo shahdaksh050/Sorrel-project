@@ -48,6 +48,7 @@ from statsmodels.stats.proportion import proportion_confint, proportions_ztest
 
 from src.core.findings import Finding
 from src.core.multiple_testing import apply_benjamini_hochberg
+from src.core.privacy import min_cell_size, suppression_note
 from src.core.profiler import profile_dataframe
 from src.core.stats_utils import aggregate_to_entity, measure_aggregation, repeated_entity
 from src.tools.base import BaseTool, ToolExecutionError
@@ -72,9 +73,10 @@ _MAX_LEVELS_TESTED = 20
 #: column is pinned by the caller — combinatorial guard (IMPROVEMENTS.md 7.2).
 _MAX_PAIRS = 12
 
-#: A level needs at least this many rows, and the rest of the data needs at
-#: least this many too, before a test/CI is attempted at all.
-_MIN_LEVEL_N = 5
+#: A level needs at least `min_cell_size()` rows (src.core.privacy; default 5),
+#: and the rest of the data needs at least that many too, before a test/CI is
+#: attempted or anything is reported about it. Smaller levels are omitted from
+#: every output and counted in a caveat instead.
 
 _ALPHA = 0.05
 
@@ -143,10 +145,9 @@ def _pick_dimension_columns(profile: DatasetProfile) -> list[ColumnProfile]:
 
 
 def _is_rate_measure(df: pd.DataFrame, measure_column: str, profile: DatasetProfile) -> bool:
-    cp = next((c for c in profile.columns if c.name == measure_column), None)
-    if cp is not None and cp.semantic_role == "flag":
-        return True
-    vals = pd.to_numeric(df[measure_column], errors="coerce").dropna().unique()
+    # A "flag" role alone is not enough: a 1/2-coded column is an ordinal
+    # measure, not a rate — the values must be {0, 1} (or booleans).
+    vals =pd.to_numeric(df[measure_column], errors="coerce").dropna().unique()
     if len(vals) == 0:
         return False
     rounded = {round(float(v), 6) for v in vals}
@@ -294,7 +295,9 @@ class SegmentComparisonTool(BaseTool):
         dimension_column: str,
         profile: DatasetProfile,
         entity_col: str | None = None,
+        suppressed: set[tuple[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
+        k = min_cell_size()
         is_rate = _is_rate_measure(df, measure_column, profile)
         cp = _column(profile, measure_column)
         unit_hint = cp.unit_hint if cp else None
@@ -330,6 +333,11 @@ class SegmentComparisonTool(BaseTool):
 
         counts = work[dimension_column].value_counts()
         levels = counts.head(_MAX_LEVELS_TESTED).index.tolist()
+        if suppressed is not None:
+            # Levels beyond the tested head that are also under the minimum.
+            suppressed.update(
+                (dimension_column, str(lvl)) for lvl in counts[counts < k].index
+            )
 
         out: list[dict[str, Any]] = []
         for level in levels:
@@ -337,7 +345,11 @@ class SegmentComparisonTool(BaseTool):
                 work, measure_column, dimension_column, level, entity, agg
             )
             n, n_rest = len(level_vals), len(rest_vals)
-            if n < _MIN_LEVEL_N or n_rest < _MIN_LEVEL_N:
+            if n < k:
+                if suppressed is not None:
+                    suppressed.add((dimension_column, str(level)))
+                continue
+            if n_rest < k:
                 continue
 
             baseline_mean = float(rest_vals.mean())
@@ -457,7 +469,7 @@ class SegmentComparisonTool(BaseTool):
         for stratum, cell in work.groupby(stratify_by, observed=True):
             level_vals, rest_vals = _level_and_rest(cell, measure, dimension, c["level"], entity, agg)
             n, n_rest = len(level_vals), len(rest_vals)
-            if n < _MIN_STRATUM_N or n_rest < _MIN_STRATUM_N:
+            if n < max(_MIN_STRATUM_N, min_cell_size()) or n_rest < max(_MIN_STRATUM_N, min_cell_size()):
                 continue
             effect = _effect(level_vals, rest_vals, by_difference)
             if effect is not None:
@@ -530,14 +542,17 @@ class SegmentComparisonTool(BaseTool):
 
         entity_col = repeated_entity(profile, df)
         comparisons: list[dict[str, Any]] = []
+        suppressed: set[tuple[str, str]] = set()
         for measure, dimension in pairs:
-            comparisons.extend(self._compare_one(df, measure, dimension, profile, entity_col))
+            comparisons.extend(self._compare_one(df, measure, dimension, profile, entity_col, suppressed))
 
         if not comparisons:
             raise ToolExecutionError(
-                f"No segment had at least {_MIN_LEVEL_N} rows on both sides of "
+                f"No segment had at least {min_cell_size()} rows on both sides of "
                 "the comparison — nothing to test."
             )
+        # Levels under the minimum are left out entirely (small-cell suppression).
+        caveats = [suppression_note(len(suppressed))] if suppressed else []
 
         testable = [c for c in comparisons if c["p_value"] is not None]
         untestable = [c for c in comparisons if c["p_value"] is None]
@@ -591,6 +606,8 @@ class SegmentComparisonTool(BaseTool):
             "row_noun": row_noun,
             "unit_of_analysis": entity_col or "row",
             "stratify_by": stratify_by or (to_stratify[0][1] if to_stratify else None),
+            "suppressed_levels": len(suppressed),
+            "caveats": caveats,
         }
 
     @staticmethod
@@ -623,6 +640,7 @@ class SegmentComparisonTool(BaseTool):
         # "customers"/"orders". Old cached output without the field still
         # degrades gracefully to "rows".
         row_noun = output.get("row_noun") or "rows"
+        privacy_caveats = [str(m) for m in output.get("caveats") or []]
         results: list[Finding] = []
         for i, c in enumerate(comparisons):
             if not c.get("significant_after_correction"):
@@ -657,7 +675,7 @@ class SegmentComparisonTool(BaseTool):
                 p_adjusted=c["p_adjusted"],
                 confidence=min(1.0, c["n"] / 200.0),
                 surprise=min(1.0, abs(effect)),
-                caveats=[stratum_caveat] if stratum_caveat else [],
+                caveats=([stratum_caveat] if stratum_caveat else []) + privacy_caveats,
             ))
         return results
 

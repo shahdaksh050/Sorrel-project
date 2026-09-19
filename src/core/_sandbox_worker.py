@@ -11,6 +11,7 @@ from __future__ import annotations
 import builtins as _builtins_module
 import contextlib
 import datetime
+import decimal
 import difflib
 import io
 import json
@@ -77,7 +78,11 @@ def _build_schema(df: pd.DataFrame) -> dict[str, str]:
 def _convert_result(value: Any) -> Any:
     if isinstance(value, pd.DataFrame):
         truncated = len(value) > RESULT_ROW_CAP
-        records = value.head(RESULT_ROW_CAP).to_dict(orient="records")
+        head = value.head(RESULT_ROW_CAP)
+        if not isinstance(head.index, pd.RangeIndex):
+            # A groupby/value_counts result keeps its keys in the index.
+            head = head.reset_index(allow_duplicates=True)
+        records = head.to_dict(orient="records")
         return {"__truncated__": True, "rows": records} if truncated else records
     if isinstance(value, pd.Series):
         return _convert_result(value.to_frame())
@@ -97,6 +102,12 @@ def _json_default(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, (datetime.date, datetime.datetime)):
         return value.isoformat()
+    if isinstance(value, (set, frozenset)):
+        return sorted(value, key=str)
+    if value is pd.NA or isinstance(
+        value, (pd.Timedelta, pd.Period, pd.Interval, decimal.Decimal)
+    ):
+        return str(value)
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
@@ -417,6 +428,15 @@ def _run_restricted(
             "runtime",
             traceback.format_exc(),
             _runtime_hint(exc, code, df),
+            t0,
+            stdout_buf.getvalue(),
+        )
+    except BaseException as exc:
+        # SystemExit and friends must not skip the worker's own result write.
+        return _error_payload(
+            "runtime",
+            traceback.format_exc(),
+            f"{type(exc).__name__} is not allowed; assign the answer to RESULT instead.",
             t0,
             stdout_buf.getvalue(),
         )

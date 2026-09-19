@@ -48,9 +48,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.core.chart_spec import spec_to_vegalite, validate_chart_spec
+from src.core.chart_spec import alias_fields, chart_has_data, spec_to_vegalite, validate_chart_spec
 from src.core.chart_theme import axis_format, humanize_axis_title, humanize_label
 from src.core.plain_language import fallback_caption
+from src.core.privacy import fold_small_groups, is_small, min_cell_size, suppression_note
 from src.core.profiler import ColumnProfile, DatasetProfile
 from src.core.stats_utils import aggregate_to_entity, measure_aggregation
 
@@ -71,8 +72,8 @@ MAX_CATEGORY_CHARTS = 3
 #: most it shows (n² cells), and the |r| at which a cell prints its value.
 HEATMAP_MIN_COLUMNS = 5
 HEATMAP_MAX_COLUMNS = 15
-HEATMAP_TEXT_MAX_COLUMNS = 10
-HEATMAP_TEXT_MIN_ABS_R = 0.5
+HEATMAP_TEXT_MAX_COLUMNS = 15
+HEATMAP_TEXT_MIN_ABS_R = 0.3
 #: Title of the correlation heatmap; the generate_visualizations tool uses the
 #: same one, so the dashboard can tell it already has this view.
 CORRELATION_HEATMAP_TITLE = "Which Columns Move Together"
@@ -85,8 +86,9 @@ MAX_CATEGORIES_SHOWN = 12
 #: Default bin count for pre-aggregated histograms.
 DEFAULT_HIST_BINS = 20
 
-#: Most charts a dashboard shows; lowest-tier/priority charts are dropped.
-MAX_CHARTS = 14
+#: Technical safety ceiling on rendered charts (render-performance protection,
+#: not a target): the design stage decides how many charts are meaningful.
+MAX_CHARTS = 60
 
 #: Scree plots show at most this many leading components.
 SCREE_MAX_COMPONENTS = 15
@@ -106,11 +108,11 @@ _UNIFORM_RATIO_THRESHOLD = 1.15
 #: How many top-ranked findings we *attempt* to build/tag a panel for.
 #: Most won't produce one (no obvious chart, or the underlying tool didn't
 #: run) — this just bounds the work, it isn't a promise of that many panels.
-MAX_FINDING_PANELS = 12
+MAX_FINDING_PANELS = 30
 
 #: At most this many segment-lift / group-test panels (each is one
 #: measure x dimension pairing; more would crowd out every other kind).
-MAX_PANELS_PER_KIND = 2
+MAX_PANELS_PER_KIND = 3
 
 #: Segments drawn individually in a change waterfall; the rest are one bar.
 WATERFALL_MAX_SEGMENTS = 8
@@ -164,6 +166,11 @@ class ChartSpec:
     caption: str | None = None
     size: str | None = None
 
+    def __post_init__(self) -> None:
+        # Vega treats . [ ] \ ' " in a field name as path syntax; alias them
+        # (idempotent) so every consumer gets a spec that actually renders.
+        self.spec = alias_fields(self.spec)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "chart_id": self.chart_id,
@@ -176,6 +183,22 @@ class ChartSpec:
             "caption": self.caption,
             "size": self.size,
         }
+
+
+def _has_data(chart: ChartSpec) -> bool:
+    """False only for a chart that would render nothing; never raises."""
+    return bool(_safe(chart_has_data, chart.spec, default=True))
+
+
+def _covers_pair(charts: list[ChartSpec], pair: list[Any]) -> bool:
+    """True when a chart's id or title already names both columns of `pair`."""
+    if len(pair) != 2:
+        return False
+    for chart in charts:
+        haystack = f"{chart.chart_id} {chart.title}".lower()
+        if all(str(c).lower() in haystack or humanize_label(str(c)).lower() in haystack for c in pair):
+            return True
+    return False
 
 
 def dashboard_to_json(charts: list[ChartSpec]) -> str:
@@ -726,7 +749,7 @@ def _scatter_chart(
         encoding["color"] = {"field": color_field, "type": "nominal", "title": humanize_label(color_field)}
 
     points = {"mark": {"type": "circle", "opacity": 0.55, "size": 36}, "encoding": encoding}
-    spec: dict[str, Any] = {"data": {"values": values}, "height": 280}
+    spec: dict[str, Any] = {"data": {"values": values}, "height": 280, "usermeta": {"columns": list(pair)}}
     has_trend = pd.notna(r) and abs(float(r)) >= _TREND_MIN_ABS_R
     if has_trend:
         # Fitted on the plotted points; drawn in the theme's line colour.
@@ -951,6 +974,18 @@ def _time_series_chart(
             ],
         },
     }
+    layers: list[dict[str, Any]] = [series_layer]
+    if len(values) >= 20:
+        # A noisy series: lighten the raw line and overlay a thicker rolling mean.
+        window = max(3, len(values) // 12)
+        smooth = pd.Series([v["value"] for v in values]).rolling(window, min_periods=1, center=True).mean()
+        for row, s in zip(values, smooth, strict=True):
+            row["smooth"] = round(float(s), 4)
+        series_layer["mark"] = {"type": "line", "opacity": 0.35}
+        layers.append({
+            "mark": {"type": "line", "strokeWidth": 3},
+            "encoding": {"x": x_encoding, "y": {**y_encoding, "field": "smooth"}},
+        })
     spec: dict[str, Any] = {"usermeta": {"value_column": value_col}, "data": {"values": values}, "height": 240}
     # Robust trend annotation: Sen's slope (median pairwise slope per
     # period) through the median-residual intercept, drawn dashed, when
@@ -971,10 +1006,10 @@ def _time_series_chart(
         intercept = float(np.median(series_y - sen_slope * x_pos))
         for row, pos in zip(values, x_pos, strict=True):
             row["sen_fit"] = round(intercept + sen_slope * float(pos), 4)
-        spec["layer"] = [series_layer, {
+        layers.append({
             "mark": {"type": "line", "strokeDash": [4, 3]},
             "encoding": {"x": x_encoding, "y": {"field": "sen_fit", "type": "quantitative"}},
-        }]
+        })
         unit = ts_output.get("sen_slope_unit") or "period"
         mk_p = _num(ts_output.get("mk_p_value"))
         description += (
@@ -984,6 +1019,8 @@ def _time_series_chart(
                if mk_p is not None else "")
             + "."
         )
+    if len(layers) > 1:
+        spec["layer"] = layers
     else:
         spec.update(series_layer)
     return ChartSpec(
@@ -1284,14 +1321,17 @@ def _scree_chart(dim_output: dict[str, Any] | None) -> ChartSpec | None:
     ]
     n_needed = dim_output.get("n_components_for_threshold")
     threshold = dim_output.get("variance_threshold")
-    description = "Variance explained per principal component (bars, left axis) and running total (line, right axis)."
+    description = "Share of the data's variance each principal component captures (bars) and the running total (line)."
     if n_needed and threshold:
         description += f" {n_needed} component(s) reach {threshold:.0%} of total variance."
     if len(explained) > SCREE_MAX_COMPONENTS:
         description += f" First {SCREE_MAX_COMPONENTS} of {len(explained)} components shown."
+    y_scale = {"domain": [0, 100]}
+    x_enc = {"field": "component", "type": "ordinal", "sort": {"field": "order"}, "title": None}
+    # One percent axis; 80% / 90% reference lines show where "enough" is.
     return ChartSpec(
         chart_id="pca_scree",
-        title="Dimensionality — PCA Scree Plot",
+        title="How many underlying factors matter",
         description=description,
         spec={
             "data": {"values": values},
@@ -1303,22 +1343,26 @@ def _scree_chart(dim_output: dict[str, Any] | None) -> ChartSpec | None:
                     # config (bar: pen, line: ink).
                     "mark": {"type": "bar"},
                     "encoding": {
-                        "x": {"field": "component", "type": "ordinal", "sort": {"field": "order"}, "title": None},
-                        "y": {"field": "explained", "type": "quantitative", "title": "Variance explained %"},
-                        "tooltip": [{"field": "component"}, {"field": "explained"}],
+                        "x": x_enc,
+                        "y": {"field": "explained", "type": "quantitative", "scale": y_scale,
+                              "title": "Share of variance (%)"},
+                        "tooltip": [{"field": "component"}, {"field": "explained", "title": "Component %"},
+                                    {"field": "cumulative", "title": "Cumulative %"}],
                     },
                 },
                 {
                     "mark": {"type": "line", "point": True},
                     "encoding": {
-                        "x": {"field": "component", "type": "ordinal", "sort": {"field": "order"}},
-                        "y": {"field": "cumulative", "type": "quantitative", "title": "Cumulative %",
-                              "scale": {"domain": [0, 100]}, "axis": {"orient": "right"}},
-                        "tooltip": [{"field": "component"}, {"field": "cumulative"}],
+                        "x": x_enc,
+                        "y": {"field": "cumulative", "type": "quantitative", "scale": y_scale},
                     },
                 },
+                {
+                    "data": {"values": [{"level": 80}, {"level": 90}]},
+                    "mark": {"type": "rule", "strokeDash": [4, 3], "opacity": 0.5},
+                    "encoding": {"y": {"field": "level", "type": "quantitative", "scale": y_scale}},
+                },
             ],
-            "resolve": {"scale": {"y": "independent"}},
         },
     )
 
@@ -1341,9 +1385,9 @@ def correlation_heatmap(
     corr = corr.loc[corr.index.intersection(corr.columns), corr.index.intersection(corr.columns)]
     if len(corr) < 3:
         return None
-    strength = corr.abs().fillna(0.0).to_numpy()
+    strength = corr.abs().fillna(0.0).to_numpy(copy=True)  # pandas 3 hands back a read-only view
     np.fill_diagonal(strength, 0.0)
-    keep = np.argsort(-strength.sum(axis=1) / (len(corr) - 1), kind="stable")[:max_columns]
+    keep =np.argsort(-strength.sum(axis=1) / (len(corr) - 1), kind="stable")[:max_columns]
     corr = corr.iloc[sorted(keep), sorted(keep)]
     n = len(corr)
     strength = corr.abs().fillna(0.0).to_numpy()
@@ -1393,7 +1437,8 @@ def correlation_heatmap(
 
     r_field = {"field": "r", "type": "quantitative", "title": "r"}
     x_enc: dict[str, Any] = {"field": "feature_x", "type": "nominal", "sort": ordered, "title": None,
-                             "axis": {"labelAngle": -45, "labelLimit": 220, "orient": "bottom"}}
+                             "axis": {"labelAngle": -45, "labelLimit": 260, "labelOverlap": False,
+                                      "orient": "bottom"}}
     y_enc: dict[str, Any] = {"field": "feature_y", "type": "nominal", "sort": ordered, "title": None,
                              "axis": {"labelLimit": 260}}
     layers: list[dict[str, Any]] = [{
@@ -1407,12 +1452,20 @@ def correlation_heatmap(
         },
     }]
     if n <= HEATMAP_TEXT_MAX_COLUMNS:
-        layers.append({
-            "mark": {"type": "text", "fontSize": 10},
-            "transform": [{"filter": {"field": "abs_r", "gte": HEATMAP_TEXT_MIN_ABS_R}}],
-            "encoding": {"x": x_enc, "y": y_enc, "text": {**r_field, "format": ".2f"}},
-        })
-    return rows, {"height": max(220, min(460, 30 * n)), "layer": layers}, caption
+        # Contrast against the cell fill (the scheme is theme-independent),
+        # not against the page: white on strong cells, dark on pale ones.
+        # Two static-colour layers rather than a `test` condition (an
+        # expression, which the raw-spec sanitiser rejects).
+        for colour, text_filter in (
+            ("white", {"field": "abs_r", "gte": 0.6}),
+            ("black", {"and": [{"field": "abs_r", "gte": HEATMAP_TEXT_MIN_ABS_R}, {"field": "abs_r", "lt": 0.6}]}),
+        ):
+            layers.append({
+                "mark": {"type": "text", "fontSize": 10, "color": colour},
+                "transform": [{"filter": text_filter}],
+                "encoding": {"x": x_enc, "y": y_enc, "text": {**r_field, "format": ".2f"}},
+            })
+    return rows, {"width": {"step": 26}, "height": {"step": 26}, "layer": layers}, caption
 
 
 def _correlation_chart(
@@ -1497,8 +1550,16 @@ def _correlation_chart(
 def _cohort_charts(df: pd.DataFrame, cohort_output: dict[str, Any] | None) -> list[ChartSpec]:
     if not cohort_output:
         return []
-    charts: list[ChartSpec] = []
+    # Each panel is isolated so one bad value drops only that panel.
+    return [
+        *_safe(_cohort_rfm_chart, cohort_output, default=[]),
+        *_safe(_cohort_month_chart, cohort_output, default=[]),
+        *_safe(_cohort_pareto_chart, df, cohort_output, default=[]),
+    ]
 
+
+def _cohort_rfm_chart(cohort_output: dict[str, Any]) -> list[ChartSpec]:
+    charts: list[ChartSpec] = []
     segments = cohort_output.get("rfm_segments")
     if isinstance(segments, list) and segments:
         values = [
@@ -1525,7 +1586,7 @@ def _cohort_charts(df: pd.DataFrame, cohort_output: dict[str, Any] | None) -> li
                     "encoding": {
                         "y": {"field": "segment", "type": "nominal", "sort": "-x", "title": None},
                         "x": {"field": "share", "type": "quantitative", "title": "Share %"},
-                        "xOffset": {"field": "metric"},
+                        "yOffset": {"field": "metric"},
                         "color": {
                             "field": "metric", "type": "nominal",
                             "scale": {"domain": ["revenue_share_pct", "customer_share_pct"]},
@@ -1536,6 +1597,11 @@ def _cohort_charts(df: pd.DataFrame, cohort_output: dict[str, Any] | None) -> li
                 },
             ))
 
+    return charts
+
+
+def _cohort_month_chart(cohort_output: dict[str, Any]) -> list[ChartSpec]:
+    charts: list[ChartSpec] = []
     revenue_by_month = cohort_output.get("revenue_by_month")
     if isinstance(revenue_by_month, dict) and len(revenue_by_month) >= 2:
         values = [{"period": k, "revenue": float(v)} for k, v in sorted(revenue_by_month.items())]
@@ -1555,6 +1621,11 @@ def _cohort_charts(df: pd.DataFrame, cohort_output: dict[str, Any] | None) -> li
             },
         ))
 
+    return charts
+
+
+def _cohort_pareto_chart(df: pd.DataFrame, cohort_output: dict[str, Any]) -> list[ChartSpec]:
+    charts: list[ChartSpec] = []
     customer_col = cohort_output.get("customer_column")
     amount_col = cohort_output.get("amount_column")
     if customer_col and amount_col and customer_col in df.columns and amount_col in df.columns:
@@ -1612,13 +1683,19 @@ def _financial_charts(df: pd.DataFrame, financial_output: dict[str, Any] | None)
         return []
 
     label: str | None = None
+    best = False
     if symbol_col and symbol_col in frame.columns:
+        symbols = frame[symbol_col].astype(str)
         best_symbol = (financial_output.get("best_performer") or {}).get("symbol")
-        if best_symbol is not None:
-            matched = frame[frame[symbol_col].astype(str) == str(best_symbol)]
-            if not matched.empty:
-                frame = matched
-                label = str(best_symbol)
+        if best_symbol is not None and (symbols == str(best_symbol)).any():
+            label = str(best_symbol)
+            best = True
+        else:
+            # No usable best performer: pick the most frequent symbol so several
+            # tickers are never interleaved into one series.
+            label = str(symbols.mode().iloc[0])
+            best = False
+        frame = frame[symbols == label]
 
     frame = frame[[date_col, price_col]].sort_values(date_col)
     # Aggregate-first for long series (P2.7) — resample to weekly last-value
@@ -1652,7 +1729,7 @@ def _financial_charts(df: pd.DataFrame, financial_output: dict[str, Any] | None)
         title=f"Return & Drawdown{title_symbol}",
         description=(
             f"Cumulative return and drawdown of '{price_col}' over time"
-            + (f" (best performer '{label}')" if label else "")
+            + (f" ({'best performer' if best else 'most frequent symbol'} '{label}')" if label else "")
             + "."
         ),
         spec={
@@ -1692,19 +1769,35 @@ def _financial_charts(df: pd.DataFrame, financial_output: dict[str, Any] | None)
 def _workforce_charts(df: pd.DataFrame, workforce_output: dict[str, Any] | None) -> list[ChartSpec]:
     if not workforce_output:
         return []
-    charts: list[ChartSpec] = []
+    # Each panel is isolated so one bad value drops only that panel.
+    return [
+        *_safe(_workforce_dept_chart, workforce_output, default=[]),
+        *_safe(_workforce_tenure_chart, df, workforce_output, default=[]),
+    ]
 
-    by_dept = workforce_output.get("by_department")
+
+def _workforce_dept_chart(workforce_output: dict[str, Any]) -> list[ChartSpec]:
+    charts: list[ChartSpec] = []
+    by_dept =workforce_output.get("by_department")
     if isinstance(by_dept, list) and by_dept:
         values = [
             {"department": str(r.get("department")), "headcount": int(r.get("headcount") or 0)}
             for r in by_dept if isinstance(r, dict)
         ]
+        # Small-cell suppression: departments under the minimum headcount are
+        # merged into one "Other" bar (a no-op for output the tool already folded).
+        folded_frame, folded = fold_small_groups(pd.DataFrame(values), "headcount", "department")
+        if folded:
+            values = [
+                {"department": str(r["department"]), "headcount": int(r["headcount"])}
+                for r in folded_frame.to_dict("records")
+            ]
         if values:
             charts.append(ChartSpec(
                 chart_id="workforce_headcount_by_dept",
                 title="Headcount by Department",
-                description="Number of employee records per department.",
+                description="Number of employee records per department."
+                + (f" {suppression_note(folded)}" if folded else ""),
                 spec={
                     "data": {"values": values},
                     "mark": {"type": "bar"},
@@ -1716,7 +1809,38 @@ def _workforce_charts(df: pd.DataFrame, workforce_output: dict[str, Any] | None)
                     },
                 },
             ))
+    return charts
 
+
+def _merge_small_bins(bins: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Small-cell suppression for a pre-binned histogram: a non-empty bin
+    with fewer than the minimum count is merged into its nearest non-empty
+    neighbour (widening that bar) so no bar shows a handful of people."""
+    if len(bins) < 2 or sum(b["count"] for b in bins) < min_cell_size():
+        return bins
+    merged: list[dict[str, Any]] = []
+    carry: dict[str, Any] | None = None
+    for b in bins:
+        b = dict(b)
+        if carry is not None:
+            b["bin_start"] = carry["bin_start"]
+            b["count"] += carry["count"]
+            carry = None
+        if 0 < b["count"] < min_cell_size():
+            carry = b
+            continue
+        merged.append(b)
+    if carry is not None:
+        if merged:
+            merged[-1]["bin_end"] = carry["bin_end"]
+            merged[-1]["count"] += carry["count"]
+        else:
+            merged.append(carry)
+    return merged
+
+
+def _workforce_tenure_chart(df: pd.DataFrame, workforce_output: dict[str, Any]) -> list[ChartSpec]:
+    charts: list[ChartSpec] = []
     hire_col = workforce_output.get("hire_date_column")
     if hire_col and hire_col in df.columns:
         hired = pd.to_datetime(df[hire_col], errors="coerce", format="mixed")
@@ -1731,7 +1855,7 @@ def _workforce_charts(df: pd.DataFrame, workforce_output: dict[str, Any] | None)
         tenure_years = (ended - hired).dt.total_seconds() / (365.25 * 86400)
         tenure_years = tenure_years[tenure_years.notna() & (tenure_years >= 0)]
         if len(tenure_years) >= 5:
-            bins = _histogram_bins(tenure_years, max_bins=15)
+            bins = _merge_small_bins(_histogram_bins(tenure_years, max_bins=15))
             if bins:
                 charts.append(ChartSpec(
                     chart_id="workforce_tenure_hist",
@@ -1783,12 +1907,15 @@ def _segment_lift_chart(
     baseline = _num(ev.get("baseline_value"))
     if not measure or not dimension or baseline is None or _num(ev.get("level_value")) is None:
         return None
+    if ev.get("n") is not None and is_small(ev.get("n") or 0):
+        return None  # the finding's own segment is under the minimum cell size
     siblings: list[dict[str, Any]] = []
     for out in _tool_outputs(results, "segment_comparison"):
         siblings = [
             c for c in out.get("comparisons") or []
             if isinstance(c, dict) and c.get("measure") == measure and c.get("dimension") == dimension
             and _num(c.get("level_value")) is not None
+            and not (c.get("n") is not None and is_small(c.get("n") or 0))
         ]
         if len(siblings) >= 2:
             break
@@ -2093,7 +2220,9 @@ def _group_ci_chart(
         agg = measure_aggregation(col) if col is not None and col.semantic_role == "measure" else "mean"
         frame = aggregate_to_entity(frame, entity, measure, agg, by=dimension)
     grouped = frame.groupby(frame[dimension].astype(str))[measure].agg(["mean", "std", "count"])
-    grouped = grouped[grouped["count"] >= 2].nlargest(MAX_CATEGORIES_SHOWN, "count")
+    # Small-cell suppression: a group under the minimum size is not drawn.
+    dropped = int((grouped["count"] < max(2, min_cell_size())).sum())
+    grouped = grouped[grouped["count"] >= max(2, min_cell_size())].nlargest(MAX_CATEGORIES_SHOWN, "count")
     if len(grouped) < 2:
         return None
     half = stats.t.ppf(0.975, grouped["count"] - 1) * grouped["std"].fillna(0.0) / np.sqrt(grouped["count"])
@@ -2131,6 +2260,8 @@ def _group_ci_chart(
         f"Average {humanize_label(measure).lower()} in each {dim_title} group; whiskers are the "
         "95% confidence interval of each group's mean."
     )
+    if dropped:
+        description += f" {suppression_note(dropped)}"
     if pair:
         p_adj = _num(pair.get("p_adjusted"))
         description += (
@@ -2222,9 +2353,8 @@ def _finding_fits_chart(finding: dict[str, Any], chart: ChartSpec) -> bool:
     if chart.chart_id == "top_correlations":
         rows = (chart.spec.get("data") or {}).get("values") or []
         return any(frozenset((r.get("col_a"), r.get("col_b"))) == pair for r in rows)
-    encoding = (chart.spec.get("layer") or [chart.spec])[0].get("encoding") or {}
-    fields = ((encoding.get("x") or {}).get("field"), (encoding.get("y") or {}).get("field"))
-    return None not in fields and frozenset(fields) == pair
+    columns = (chart.spec.get("usermeta") or {}).get("columns") or []
+    return frozenset(str(c) for c in columns) == pair
 
 
 def _attach_finding_metadata(charts: list[ChartSpec], findings: list[dict[str, Any]]) -> None:
@@ -2286,6 +2416,64 @@ def _llm_chart(clean: dict[str, Any], chart_id: str, finding: dict[str, Any] | N
     )
 
 
+def designed_chart(raw: dict[str, Any], index: int, findings: list[dict[str, Any]]) -> ChartSpec | None:
+    """A validated chart from an LLM-designed recipe (already turned into a raw
+    spec), linked to its finding when `finding_id` matches one; None if rejected."""
+    clean, _ = validate_chart_spec(raw)
+    if clean is None:
+        return None
+    fid = raw.get("finding_id")
+    finding = next((f for f in findings if fid and f.get("finding_id") == fid), None)
+    chart: ChartSpec | None = _safe(_llm_chart, clean, f"design_{index}", finding)
+    if chart is not None and finding is None:
+        chart.priority = 0.5
+    return chart
+
+
+def merge_designed(
+    charts: list[ChartSpec], designed: list[ChartSpec], drop_ids: set[str]
+) -> list[ChartSpec]:
+    """Drop generic charts the designer made redundant, add its charts, re-rank."""
+    kept = [
+        c for c in charts
+        if not (c.chart_id in drop_ids and c.finding_id is None and not c.chart_id.startswith("llm_"))
+    ]
+    merged = [c for c in kept + designed if _has_data(c)]
+    merged.sort(key=lambda c: (
+        0 if c.finding_id
+        else 2 if (c.priority == 0 and not c.chart_id.startswith("llm_"))
+        else 1,
+        -c.priority,
+    ))
+    return merged[:MAX_CHARTS]
+
+
+#: Sandbox runs whose RESULT table gets a chart although the code declared none.
+MAX_AUTO_RESULT_CHARTS = 2
+_DATE_LABEL_RE = re.compile(r"\d{4}-\d{2}(-\d{2})?")
+
+
+def _result_table_chart(result: Any) -> dict[str, Any] | None:
+    """A bar (line for date labels) spec for an aggregated RESULT table the
+    code never charted: 2-24 uniform rows, one label column, one or more
+    numeric columns (the first is plotted)."""
+    if not (isinstance(result, list) and 2 <= len(result) <= 24 and all(isinstance(r, dict) for r in result)):
+        return None
+    cols = list(result[0])
+    if len(cols) < 2 or any(list(r) != cols for r in result):
+        return None
+    nums = [c for c in cols if all(isinstance(r[c], (int, float)) and not isinstance(r[c], bool) for r in result)]
+    labels = [c for c in cols if c not in nums]
+    if len(labels) != 1 or not nums:
+        return None
+    x, y = labels[0], nums[0]
+    kind = "line" if all(_DATE_LABEL_RE.match(str(r[x])) for r in result) else "bar"
+    return {
+        "type": kind, "x": x, "y": y, "data": result,
+        "caption": f"{humanize_label(y)} by {humanize_label(x)}, from a custom calculation.",
+    }
+
+
 def _llm_charts(results: list[dict[str, Any]], findings: list[dict[str, Any]]) -> list[ChartSpec]:
     """Validated, themed charts the LLM declared. Finding-borne specs come
     first so a spec reaching both paths keeps its finding link. A tool-output
@@ -2320,11 +2508,19 @@ def _llm_charts(results: list[dict[str, Any]], findings: list[dict[str, Any]]) -
     runs: dict[str, int] = {}
     for r in ok:
         runs[str(r.get("tool_name"))] = runs.get(str(r.get("tool_name")), 0) + 1
+    auto_left = MAX_AUTO_RESULT_CHARTS
     for i, r in enumerate(ok):
         # A single declared "chart", or a "charts" list (generate_visualizations).
         raw_charts = r["output"].get("charts")
         declared = [r["output"].get("chart"), *(raw_charts if isinstance(raw_charts, list) else [])]
         tool = str(r.get("tool_name"))
+        if (
+            auto_left and all(c is None for c in declared)
+            and "stdout" in r["output"] and not r["output"].get("chart_error")
+        ):
+            auto = _result_table_chart(r["output"].get("result"))
+            if auto is not None:
+                declared, auto_left = [auto], auto_left - 1
         for j, raw in enumerate(c for c in declared if c is not None):
             finding: dict[str, Any] | None = None
             if runs[tool] == 1:
@@ -2399,7 +2595,6 @@ def build_dashboard(
         _safe(_correlation_chart, df, continuous, corr_out),
         _safe(_time_series_chart, df, profile, ranked, col_by_name, target_column, ts_out),
         _safe(_geospatial_chart, geo_out),
-        _safe(_scree_chart, dim_out),
     ]
     charts: list[ChartSpec] = _safe(_llm_charts, results, findings, default=[])
     charts.extend(c for c in candidates if c is not None)
@@ -2422,6 +2617,7 @@ def build_dashboard(
     eda_candidates: list[ChartSpec | None] = [
         _safe(_box_plot_chart, df, continuous, target_column, task_type, col_by_name),
         _safe(_scatter_chart, df, continuous, target_column, task_type, corr_out, col_by_name),
+        _safe(_scree_chart, dim_out),  # technical: ranks with the EDA charts, below findings
     ]
     eda.extend(c for c in eda_candidates if c is not None)
 
@@ -2455,6 +2651,11 @@ def build_dashboard(
         c.title == CORRELATION_HEATMAP_TITLE and c is not corr_chart for c in charts
     ):
         drop.add("top_correlations")
+    # A finding-driven (or LLM) chart of the same column pair makes the generic
+    # top-pair scatter a duplicate.
+    scatter = next((c for c in eda if c.chart_id == "scatter_top_pair"), None)
+    if scatter is not None and _covers_pair(charts, (scatter.spec.get("usermeta") or {}).get("columns") or []):
+        drop.add("scatter_top_pair")
     charts = [c for c in charts if c.chart_id not in drop]
     eda = [c for c in eda if c.chart_id not in drop]
 
@@ -2474,6 +2675,7 @@ def build_dashboard(
     # each tier. An LLM chart is never outranked by a generic one under
     # MAX_CHARTS.
     eda_ids = {id(c) for c in eda}
+    charts = [c for c in charts if _has_data(c)]
     charts.sort(key=lambda c: (
         0 if c.finding_id or c.chart_id.startswith("llm_") else 1 if id(c) not in eda_ids else 2, -c.priority,
     ))

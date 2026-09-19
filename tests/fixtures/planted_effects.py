@@ -54,7 +54,7 @@ def _finalize(df: pd.DataFrame, path: Path | None) -> Path | pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def generate_transactional(
-    path: Path | None = None, n: int = 4000, seed: int = 0
+    path: Path | None = None, n: int = 16000, seed: int = 0
 ) -> tuple[Path | pd.DataFrame, dict[str, Any]]:
     """Order-line transactions with three planted, independent effects:
 
@@ -85,9 +85,10 @@ def generate_transactional(
         ["Electronics", "Apparel", "Home", "Grocery", "Toys"], size=n
     )
 
-    # Two full years so both November and December occur repeatedly.
+    # Four full years: the calendar-month finding needs each month replicated enough
+    # times to stay significant after Benjamini-Hochberg correction (2 obs/month cannot).
     order_date = pd.to_datetime(
-        rng.integers(0, 730, size=n), unit="D", origin="2022-01-01"
+        rng.integers(0, 1461, size=n), unit="D", origin="2022-01-01"
     )
 
     unit_price = rng.gamma(shape=9.0, scale=6.0, size=n)  # mean ~54

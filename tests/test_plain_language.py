@@ -30,7 +30,7 @@ from src.tools.report_generator import _format_evidence, _format_top_findings
         ("Revenue was $12,345,678 over 1,500,000 rows.", "Revenue was $12.3 million over 1.5 million rows."),
         ("It is statistically significant.", "It is unlikely to be down to chance."),
         ("A statistically significant difference.", "A clear difference."),
-        ("Not statistically significant.", "Could easily be down to chance."),
+        ("Not statistically significant.", "Not clearly different."),
         ("Result (t=3.2, p<0.01).", "Result (a result unlikely to be down to chance)."),
     ],
 )

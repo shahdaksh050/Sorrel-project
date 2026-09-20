@@ -147,7 +147,16 @@ Decisions taken (user said "perform the rounds", the four open questions stayed 
 - **Null-data + rubric tests — landed.** `tests/test_null_data.py`, `tests/test_quality_rubric.py`. Found and fixed: a no-skill model still emitted permutation-importance "driver" findings (importance 0.61) — now dropped in `rank_findings` when the model's lift < 0.05.
 - **Not yet done:** Batch B live LLM run (needs a completed run to judge narrative quality; last attempt was killed), 9.12 docs (AGENTS.md/README/HANDOVER), the RFM small-group leftover, and a visual check of the new Streamlit UI pieces.
 
-**Status: Batch A and Batch C landed, Batch B (live run) pending, verification pass in progress. Updated 2026-09-21.**
+### Batch B live run 2 (2026-09-20 16:01-16:33, stopped by the user) — result: the LLM path produced nothing usable
+`main.py --dataset AirQualityUCI.csv --output-dir output/aq_llm2 --max-iterations 3 --objective "Which pollutants move together, show a heatmap of monthly average per pollutant, and what drives CO levels?"`, model `nvidia/nemotron-3.5-lightning:free` via OpenRouter, `.env` has `LLM_MAX_TOKENS=4096`. Partial output kept in `output/aq_llm2/`.
+- **Worked:** objective grounding — log line `Auto-detected 'CO(GT)' as the target (confidence 80%)`, task type regression (run 1 had candidate `AH` at 25% and "describe"). The deterministic fallback plan then ran `regression_analysis`, `train_model`, `evaluate_model` for CO. Cost-aware RLM decomposition skipped itself ("findings already cover all 2 numeric column groups"). The truncation retry path fired as designed.
+- **Failed:** every LLM reply was chain-of-thought prose ("Let me first understand ...") that consumed the whole 4,096-token budget before any JSON, so both plan attempts were unusable and the run fell back to the deterministic plan; iteration 2 returned `empty content (finish_reason='error')` after 11 min.
+- **Timing (audit log):** calls finished 16:05:33 (~4 min), 16:14:53 (+561 s), 16:25:54 (+660 s). 4,096 tokens in 561 s = ~7 tok/s (run 1 the same model did ~68 tok/s, ~60 s per call): free-tier congestion. Tools total ~25 s.
+- **Causes on our side:** (1) no circuit breaker: after 2 unusable replies the run keeps retrying every iteration (~10 min each) although the deterministic fallback already gives the same result; (2) client `timeout` 120 s with `max_retries=2` on cloud providers means one slow call can take 6-10 min (SDK retries timeouts); (3) `.env` `LLM_MAX_TOKENS=4096` disables the per-stage token defaults added in 9.13; (4) `<think>` stripping does not catch the "Here's a thinking process" prose style.
+- **Not verified because no usable plan ever arrived:** chart-design pass, the month-by-pollutant heatmap request, dynamic-code findings reaching the report, the coverage report on an LLM run, `_apply_column_roles`.
+- **Fixes queued (not done):** run-level LLM circuit breaker (2 consecutive unusable replies or a call over a wall-clock limit -> deterministic for the rest of the run, with a one-line note); no SDK retry on timeouts and a per-call wall-clock cap; startup JSON probe that marks a chatty model and switches to a compact plan schema or structured-output mode; document removing `LLM_MAX_TOKENS` from `.env`; recognise "thinking process" prose prefixes when stripping reasoning text.
+
+**Status: Batch A and Batch C landed; Batch B run twice with no usable LLM result (see above); verification pass green (1229 tests, validate 68/68, dry_run 40/40, ruff and mypy clean). Updated 2026-09-21.**
 
 ---
 

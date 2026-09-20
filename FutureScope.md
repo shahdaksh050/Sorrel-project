@@ -420,7 +420,57 @@ Each line is a test case: build a dataset that breaks the assumption and confirm
 - Domain packs contain data, not analysis code; a domain that needs a genuinely new method needs a new property-keyed system.
 - The status column in section 4 is from Round 9 inventory and has not been audited line by line; an audit is the first step of any item that depends on it.
 
-## 10. Known open items from Round 9
+## 10. Implementation runbook (how to run this plan with Claude Code)
+
+Written from Round 9, which used about 60 agents. Numbers are from that session, not from any plan limit: check `/usage` before choosing a phase size.
+
+### Models
+- **Orchestrator: the most capable model available (Opus 5 or Fable 5.1).** Its job is judgment: verifying agent claims, resolving conflicts, deciding what is real. Round 9's mistakes were orchestration mistakes (accepting an unverified "pre-existing failure" claim, reading logs only when prompted). It uses far fewer tokens than the workers, so the premium is small.
+- **Workers: Sonnet 5**, with a tight spec and disjoint file ownership. Haiku for mechanical jobs (docs, lint fixes). The orchestrator's model for subtle statistics (dependence-aware inference, regime detection).
+- **`/advisor`** at the start of each phase and before declaring it done.
+
+### Concurrency and budget
+- 3 to 4 agents at a time; four or more large agents together hit the session limit twice in Round 9.
+- One or two systems per agent; agents used roughly 50k to 200k tokens each.
+- About 8 to 12 agents per phase. Stop after each phase, verify, commit.
+- Use `isolation: "worktree"` for risky refactors (for example the shared analysis context).
+
+### Phases (from section 6)
+| Phase | Content | Agents |
+|---|---|---|
+| 0 | Audit the status column in section 4; build the hidden-assumption test scaffolding (section 8) | 2 |
+| 1 | Layout detection, wide-to-long reshape, total-row detection (share `io.py`: run in sequence) | 3 |
+| 2 | Deliverable contract, question router, shared analysis context, speculative baseline execution | 4 |
+| 3 | Variable-aware methods (counts, compositional, ordinal, heavy tails, heaping, uncertainty) | 4 |
+| 4 | Dependence- and design-aware core | 4-5 |
+| 5-7 | Integrity pass; domain packs plus the test corpus; structure-specific analyses on demand | 2-3 each |
+
+### Prompt to paste at the start of a session
+```
+Implement FutureScope.md phase <N>. Read FutureScope.md and IMPROVEMENTS.md (Round 9) first.
+Rules: every system is keyed on a data property, gated by applies_to, and costs nothing when absent;
+no domain-specific code outside domain packs. Each system ships with a planted test, a null test and
+two structurally different datasets. Testing IS approved: run pytest, ruff, mypy, scripts/validate.py,
+scripts/dry_run.py and scripts/bench.py --check after every wave; the deterministic run must not
+get slower. Enter plan mode first and ask me about ambiguities. Use /advisor before the plan and
+before finishing. Workers: Sonnet, 3-4 at a time, disjoint file ownership, reports under 150 words.
+Verify agent claims yourself. Don't commit; write a "Round 10" status block in IMPROVEMENTS.md
+after every wave so a fresh session can resume. Stop after the phase.
+```
+
+### Guardrails learned in Round 9
+- **Testing permission is per task.** The saved memory rule is "no testing until asked", so state it in the first message.
+- **Resume, don't restart.** After a limit, resume the cut-off agent with `SendMessage`; it keeps its context.
+- **State lives in the repo**, not in the conversation: a status block in `IMPROVEMENTS.md` after every wave.
+- **Live LLM runs go last** in a phase; they are slow and use quota.
+- **Agents must not edit a test to make it pass** without stating why; check such changes yourself.
+- **Verify claims** that decide trust (a "pre-existing failure", a "fixed" item) with a direct check.
+- **Run the gates yourself** between waves; agents report on their own files only.
+
+### Ending a long session
+Start a **new session** for a new phase rather than compacting: the design conclusions are in this file, the state is in `IMPROVEMENTS.md`, and a fresh context is cheaper per turn and avoids compaction losing detail. Before ending the old session: let any live run finish and record its results in `IMPROVEMENTS.md`, commit the work, and update the memory notes.
+
+## 11. Known open items from Round 9
 
 - Live LLM run on `AirQualityUCI.csv` not yet reviewed end to end (chart-design pass, driver analysis for CO, month-by-pollutant heatmap, coverage report). Its first reply was prose again and hit the token cap; the retry path fired.
 - Controller-side role wiring (`_apply_column_roles`) has no test of its own; it needs an LLM run.

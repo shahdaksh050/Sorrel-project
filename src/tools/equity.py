@@ -28,7 +28,8 @@ import numpy as np
 import pandas as pd
 
 from src.core.findings import Finding
-from src.core.privacy import is_small, min_cell_size, suppression_note
+from src.core.privacy import is_small, min_cell_size, redact_small_level, suppression_note
+from src.core.vocab import ROLE_TOKENS, column_role, name_tokens
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -47,22 +48,11 @@ _Z95 = 1.959964
 _MIN_GAP_FOR_FINDING_PCT = 2.0
 _FOUR_FIFTHS = 0.8
 
-_PROTECTED_TOKENS = frozenset({
-    "gender", "sex", "race", "ethnicity", "ethnic", "agegroup", "disability",
-    "nationality", "religion", "marital", "veteran",
-})
-_PAY_TOKENS = frozenset({
-    "salary", "pay", "wage", "income", "compensation", "bonus", "earnings", "earning",
-})
-_BINARY_OUTCOME_TOKENS = frozenset({
-    "hired", "promoted", "attrition", "terminated", "approved", "rejected",
-    "selected", "churn", "left",
-})
+_PROTECTED_TOKENS = ROLE_TOKENS["protected_attribute"]
+_PAY_TOKENS = ROLE_TOKENS["pay"]
+_BINARY_OUTCOME_TOKENS = ROLE_TOKENS["binary_outcome"]
 #: Outcomes where the affirmative value is the adverse one.
-_ADVERSE_TOKENS = frozenset({
-    "attrition", "terminated", "rejected", "churn", "left", "attrited", "fired",
-    "resigned", "quit", "churned",
-})
+_ADVERSE_TOKENS = ROLE_TOKENS["adverse_outcome"]
 _POSITIVE_VALUES = frozenset({
     "1", "yes", "y", "true", "t", "hired", "promoted", "approved", "selected", "accepted",
     "left", "attrited", "terminated", "churned", "rejected", "resigned", "quit", "fired",
@@ -74,29 +64,33 @@ _CONTROL_TOKENS = frozenset({
     "years", "function", "team",
 })
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
-_CAMEL_RE = re.compile(r"([a-z0-9])([A-Z])")
-_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _tokens(name: object) -> set[str]:
-    return {t for t in _SPLIT_RE.split(_CAMEL_RE.sub(r"\1_\2", str(name)).lower()) if t}
+    return set(name_tokens(name))
 
 
 def _slug(text: object) -> str:
     return _SLUG_RE.sub("_", str(text)).strip("_").lower() or "na"
 
 
-def _is_protected(name: object) -> bool:
+def _is_protected(name: object, profile: DatasetProfile | None = None) -> bool:
     tokens = _tokens(name)
-    return bool(tokens & _PROTECTED_TOKENS) or {"age", "group"} <= tokens
+    return column_role(profile, name, "protected_attribute") or bool(tokens & _PROTECTED_TOKENS) or bool(
+        tokens & ROLE_TOKENS["age"] and tokens & ROLE_TOKENS["group"]
+    )
 
 
-def _is_pay(name: object) -> bool:
-    return bool(_tokens(name) & _PAY_TOKENS)
+def _is_pay(name: object, profile: DatasetProfile | None = None) -> bool:
+    return column_role(profile, name, "pay") or bool(_tokens(name) & _PAY_TOKENS)
 
 
-def _is_binary_outcome_name(name: object) -> bool:
-    return bool(_tokens(name) & _BINARY_OUTCOME_TOKENS)
+def _is_binary_outcome_name(name: object, profile: DatasetProfile | None = None) -> bool:
+    return (
+        column_role(profile, name, "binary_outcome")
+        or column_role(profile, name, "adverse_outcome")
+        or bool(_tokens(name) & _BINARY_OUTCOME_TOKENS)
+    )
 
 
 def _label(name: object) -> str:
@@ -117,19 +111,19 @@ def _join_words(items: list[str]) -> str:
 def _candidate_groups(profile: DatasetProfile) -> list[ColumnProfile]:
     cands = [
         c for c in profile.columns
-        if _is_protected(c.name) and 2 <= c.nunique <= 30 and c.kind not in ("identifier", "constant")
+        if _is_protected(c.name, profile) and 2 <= c.nunique <= 30 and c.kind not in ("identifier", "constant")
     ]
     return sorted(cands, key=lambda c: (c.nunique, c.name))
 
 
 def _candidate_pay(profile: DatasetProfile) -> list[ColumnProfile]:
-    return [c for c in profile.columns if _is_pay(c.name) and c.kind == "numeric" and c.nunique > 2]
+    return [c for c in profile.columns if _is_pay(c.name, profile) and c.kind == "numeric" and c.nunique > 2]
 
 
 def _candidate_binary(profile: DatasetProfile) -> list[ColumnProfile]:
     return [
         c for c in profile.columns
-        if _is_binary_outcome_name(c.name) and c.nunique == 2 and c.kind != "constant"
+        if _is_binary_outcome_name(c.name, profile) and c.nunique == 2 and c.kind != "constant"
     ]
 
 
@@ -189,9 +183,9 @@ def _control_columns(df: pd.DataFrame, profile: DatasetProfile, exclude: set[str
     for c in profile.columns:
         if c.name in exclude or c.kind in ("identifier", "constant", "datetime"):
             continue
-        if not _tokens(c.name) & _CONTROL_TOKENS or _is_protected(c.name):
+        if not _tokens(c.name) & _CONTROL_TOKENS or _is_protected(c.name, profile):
             continue
-        if pay_outcome and _is_pay(c.name):
+        if pay_outcome and _is_pay(c.name, profile):
             continue
         picked.append(c.name)
     return picked[:_MAX_CONTROLS]
@@ -484,7 +478,7 @@ class EquityAnalysisTool(BaseTool):
             f"after allowing for {_join_words([_label(c) for c in controls])}"
             if controls else "with no adjustment available"
         )
-        lead = f"{row['group']} {'are paid' if pay else 'have ' + _label(outcome)} "
+        lead = f"{redact_small_level(row['group'], row.get('n'))} {'are paid' if pay else 'have ' + _label(outcome)} "
         if raw is None:
             first = f"{lead}{amount(adj)} on average than {ref}"
         else:
@@ -647,7 +641,7 @@ class EquityAnalysisTool(BaseTool):
                     if flagged else "not below the 0.8 four-fifths guideline"
                 )
                 headline = (
-                    f"{r['group']} have a {_label(outcome)} rate of {r['rate'] * 100:.0f}% vs "
+                    f"{redact_small_level(r['group'], r.get('n'))} have a {_label(outcome)} rate of {r['rate'] * 100:.0f}% vs "
                     f"{ref_rate * 100:.0f}% for {ref} ({basis}ratio {air:.2f}, {verdict})."
                 )
                 results.append(Finding(

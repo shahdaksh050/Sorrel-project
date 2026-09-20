@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from src.core.html_report import data_understanding_rows, governance_rows
 from src.core.multiple_testing import DEFAULT_ALPHA as _BH_ALPHA
 from src.core.multiple_testing import apply_benjamini_hochberg as _apply_benjamini_hochberg
-from src.core.plain_language import describe_uncertainty, plainify
+from src.core.plain_language import describe_uncertainty, format_p, plainify
 from src.tools.base import BaseTool
 
 if TYPE_CHECKING:
@@ -321,10 +321,10 @@ def _format_evidence(findings: list[dict[str, Any]] | None) -> list[str]:
             bits.append(f"effect {round(float(effect), 4)}" + (f" ({kind})" if kind else ""))
         p_value = f.get("p_value")
         if p_value is not None:
-            bits.append(f"p={round(float(p_value), 4)}")
+            bits.append(f"p={format_p(p_value)}")
         p_adj = f.get("p_adjusted")
         if p_adj is not None:
-            bits.append(f"p(adj)={round(float(p_adj), 4)}")
+            bits.append(f"p(adj)={format_p(p_adj)}")
         raw_evidence = f.get("evidence") or {}
         if isinstance(raw_evidence, dict):
             for k, v in raw_evidence.items():
@@ -412,7 +412,7 @@ def _format_limitations(
                 row += f"{t.get('group_column') or '—'} | "
             row += (
                 f"{t.get('test_name', '—')} | "
-                f"{t.get('p_value', 0):.4f} | {t.get('p_adjusted', 0):.4f} | "
+                f"{format_p(t.get('p_value'))} | {format_p(t.get('p_adjusted'))} | "
                 f"{'Yes' if t.get('significant_after_correction') else 'No'} |"
             )
             lines.append(row)

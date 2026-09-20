@@ -24,6 +24,7 @@ import pandas as pd
 
 from src.core.relations import find_relations
 from src.core.security import CARD_RE, EMAIL_RE, IPV4_RE, PHONE_RE, SSN_RE, luhn_valid
+from src.core.vocab import ROLE_TOKENS, foreign_tokens, name_tokens, role_tokens
 
 if TYPE_CHECKING:
     from src.core.domains import DomainMatch
@@ -37,11 +38,6 @@ HIGH_MISSING_FRACTION = 0.20
 #: Absolute skewness above which a numeric column is flagged as skewed.
 SEVERE_SKEW_THRESHOLD = 2.0
 
-#: Identifier-style column name fragments.
-_ID_NAME_HINTS = (
-    "id", "uuid", "guid", "index", "key", "code", "number", "no",
-    "zip", "zipcode", "postcode", "phone", "sku",
-)
 _INDEX_ID_PREFIXES = ("row", "record", "case", "sample", "entry", "item", "line", "obs", "observation")
 
 #: A string column averaging at least this many words per value reads as
@@ -73,10 +69,6 @@ HIGH_DIMENSIONAL_THRESHOLD = 8
 #: (too few = boolean-like, too many = identifier-like).
 _PANEL_GROUP_MIN_CARD = 2
 _PANEL_GROUP_MAX_CARD = 50
-
-#: Whole name tokens that hint at geographic coordinates (see is_lat_name).
-_LAT_NAME_HINTS = ("lat", "latitude")
-_LON_NAME_HINTS = ("lon", "lng", "longitude")
 
 # ---------------------------------------------------------------------------
 # T1 — semantic role layer (Round 7, item 7.3).
@@ -121,6 +113,7 @@ _CURRENCY_NAME_HINTS = (
     "price", "amount", "revenue", "cost", "salary", "income", "sales",
     "profit", "margin", "spend", "fee", "charge", "payment", "balance",
     "wage", "expense", "discount", "fare", "budget", "arpu", "usd", "eur",
+    *foreign_tokens("price"), *foreign_tokens("pay"),
 )
 #: Tokens that always mean a percentage, and tokens that do only when the
 #: values sit on a 0-1 / 0-100 scale ("heart_rate" is a rate, not a percent).
@@ -132,7 +125,9 @@ _NON_PERCENT_RATE_QUALIFIERS = (
     "exchange", "hourly", "daily", "flow", "sampling", "frame", "bit",
 )
 #: Tokens that hint a measure is a plain count.
-_COUNT_NAME_HINTS = ("count", "qty", "quantity", "units", "orders", "visits", "clicks", "views")
+_COUNT_NAME_HINTS = (
+    "count", "qty", "quantity", "units", "orders", "visits", "clicks", "views", *foreign_tokens("quantity"),
+)
 
 #: Tokens that mark a measure additive (a total is meaningful) versus a
 #: level/intensity whose total is meaningless (summing temperatures). Unknown
@@ -141,6 +136,7 @@ _SUM_NAME_HINTS = (
     "amount", "revenue", "sales", "cost", "quantity", "qty", "units", "volume",
     "count", "orders", "visits", "clicks", "views", "spend", "total", "sessions",
     "transactions", "purchases", "downloads", "installs", "impressions",
+    *foreign_tokens("quantity"),
 )
 _DURATION_NAME_HINTS = ("duration", "hours", "minutes", "seconds", "mins", "secs")
 _MEAN_NAME_HINTS = (
@@ -149,6 +145,7 @@ _MEAN_NAME_HINTS = (
     "average", "mean", "median", "latitude", "longitude", "lat", "lon", "lng",
     "humidity", "ph", "density", "concentration", "rating", "price", "rate",
     "ratio", "pct", "percent", "percentage", "glucose", "cholesterol", "std",
+    *foreign_tokens("price"), *foreign_tokens("geo_lat"), *foreign_tokens("geo_lon"),
 )
 #: Share of negative values above which a non-currency measure is treated as
 #: a signed level (temperature anomaly, return, residual), not a total.
@@ -161,7 +158,7 @@ _NEGATIVE_SHARE_FOR_MEAN = 0.05
 _CODED_DIMENSION_HINTS = (
     "year", "month", "day", "week", "quarter", "hour", "weekday", "dow",
     "zip", "zipcode", "postal", "postcode", "category", "class", "group",
-    "type", "region", "segment", "cluster", "cohort",
+    "type", "region", "segment", "cluster", "cohort", *foreign_tokens("time_of_day"),
 )
 #: Tokens that, next to a coded-dimension token, say the column is a
 #: quantity after all ("class_size", "group_count", "total_days").
@@ -174,14 +171,7 @@ _CODED_DIMENSION_MAX_CARD = 100
 #: sensor, per player). Whole-token match. Mirrors the entity roles
 #: src.core.domains looks for, kept independent to avoid a profiler ->
 #: domains import cycle (domains.py imports DatasetProfile from this module).
-_ENTITY_NAME_HINTS = (
-    "customer", "client", "user", "account", "patient", "member", "employee",
-    "subscriber", "sensor", "device", "station", "subject", "participant",
-    "player", "team", "store", "shop", "site", "machine", "vehicle", "school",
-    "hospital", "company", "firm", "ticker", "symbol", "product", "sku",
-    "household", "person", "respondent", "meter", "asset", "fund", "branch",
-    "clinic", "farm", "animal",
-)
+_ENTITY_NAME_HINTS = role_tokens("entity")
 #: Geographic tokens that only name an entity when the table repeats them
 #: over time (country-year panels); otherwise they are just dimensions.
 _GEO_ENTITY_NAME_HINTS = ("country", "state", "city", "county", "province", "district")
@@ -194,9 +184,6 @@ _ENTITY_REPEAT_THRESHOLD = 1.5
 #: Row budget for the panel-structure probe (head of the frame — a random
 #: sample would break the timestamp overlap the probe measures).
 _PANEL_PROBE_ROWS = 20_000
-
-_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 # ---------------------------------------------------------------------------
 # Data archetypes — what kind of study/table this is (ImpPlan Phase 1). Unlike
@@ -267,22 +254,20 @@ _PERSON_ENTITY_TOKENS = (
 )
 
 
-def _name_tokens(name: str) -> list[str]:
-    """Column name -> lowercase tokens, split on camelCase and any
-    non-alphanumeric ("heartRate", "heart-rate", "heart_rate" -> heart, rate)."""
-    return [t for t in _NON_ALNUM.split(_CAMEL_BOUNDARY.sub("_", str(name)).lower()) if t]
+#: Tokenizer lives in src.core.vocab; kept under its old name for callers.
+_name_tokens = name_tokens
 
 
 def is_lat_name(name: str) -> bool:
     """Whole-token latitude name ("start_lat"; not "inflation"/"latency")."""
-    return any(t in _LAT_NAME_HINTS for t in _name_tokens(name))
+    return any(t in ROLE_TOKENS["geo_lat"] for t in name_tokens(name))
 
 
 def is_lon_name(name: str) -> bool:
     """Whole-token longitude name. Bare `long` counts only as the entire name
     ("long"), so "long_term_debt" is not a longitude."""
-    tokens = _name_tokens(name)
-    return tokens == ["long"] or any(t in _LON_NAME_HINTS for t in tokens)
+    tokens = name_tokens(name)
+    return tokens == ["long"] or any(t in ROLE_TOKENS["geo_lon"] for t in tokens)
 
 
 def _has_token(tokens: list[str], hints: tuple[str, ...]) -> bool:
@@ -344,10 +329,10 @@ def _infer_semantic_role(
     return SEMANTIC_DIMENSION
 
 
-#: Last-token identifier words for integer-coded keys. Narrower than
-#: _ID_NAME_HINTS on purpose: "index"/"number"/"no" also end genuine
-#: measures ("uv_index", "room_number" counts) and must not demote them.
-_CODED_KEY_TOKENS = ("id", "ids", "uuid", "guid", "key", "code", "zip", "zipcode", "postal", "postcode")
+#: Last-token identifier words for integer-coded keys. Narrower than the "id"
+#: role on purpose: "index"/"number"/"no" also end genuine measures
+#: ("uv_index", "room_number" counts) and must not demote them.
+_CODED_KEY_TOKENS = role_tokens("coded_key")
 
 
 def _coded_integer_role(name: str, row_count: int, nunique: int) -> str | None:
@@ -591,6 +576,10 @@ class DatasetProfile:
     #: qty, total = sum of parts, running totals) — see src/core/relations.py.
     #: Column names and fit statistics only, no values.
     relations: list[dict[str, Any]] = field(default_factory=list)
+    #: column -> role name (a `vocab.ROLE_TOKENS` key) the LLM proposed and
+    #: `src.core.roles.validate_roles` confirmed against the data. Tools treat
+    #: these exactly like a column-name match (`vocab.column_role`).
+    role_overrides: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -618,6 +607,7 @@ class DatasetProfile:
             "archetype": self.archetype,
             "archetype_evidence": self.archetype_evidence,
             "relations": self.relations,
+            "role_overrides": self.role_overrides,
         }
 
     def columns_of_kind(self, *kinds: str) -> list[ColumnProfile]:
@@ -843,7 +833,7 @@ def has_identifier_name_hint(name: str) -> bool:
         # "uv_index"/"body_mass_index" are measures; only a bare "index" or a
         # row-style prefix ("row_index") is an identifier.
         return len(tokens) == 1 or tokens[-2] in _INDEX_ID_PREFIXES
-    return tokens[-1] in _ID_NAME_HINTS
+    return tokens[-1] in ROLE_TOKENS["id"]
 
 
 def is_identifier_like(name: str, series: pd.Series, row_count: int) -> bool:
@@ -1121,6 +1111,82 @@ def ordinal_scale_columns(columns: list[ColumnProfile]) -> list[ColumnProfile]:
     return named + shaped
 
 
+_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_OBJECTIVE_STOPWORDS = frozenset({
+    "what", "which", "why", "how", "the", "and", "for", "per", "are", "does", "do",
+    "show", "with", "from", "that", "this", "these", "those", "level", "drive",
+    "move", "together", "each", "over", "time", "any", "all", "who", "can",
+})
+#: A measure at least this complete outranks any sparser one as a default.
+_MEASURE_COMPLETE_SHARE = 0.80
+
+
+def _whole_tokens(text: str) -> list[str]:
+    """Lower-cased whole tokens of a name/phrase: split on non-alphanumerics
+    and camelCase, light plural stemming (`CO(GT)` -> co, gt; `levels` -> level)."""
+    out = []
+    for tok in re.split(r"[^0-9A-Za-z]+", _CAMEL_RE.sub(" ", text)):
+        if not tok:
+            continue
+        tok = tok.lower()
+        if len(tok) > 3 and tok.endswith("s") and not tok.endswith("ss"):
+            tok = tok[:-1]
+        out.append(tok)
+    return out
+
+
+def _objective_tokens(objective: str) -> set[str]:
+    return {t for t in _whole_tokens(objective.replace("_", " ")) if len(t) > 1 and t not in _OBJECTIVE_STOPWORDS}
+
+
+def _grounding_key(name: str, objective_tokens: set[str]) -> tuple[int, int] | None:
+    """(extra column tokens, -matched tokens) when the objective names this
+    column by whole tokens, else None. Fewer extras = the plainer name."""
+    col_tokens = set(_whole_tokens(name))
+    matched = col_tokens & objective_tokens
+    if not matched:
+        return None
+    return len(col_tokens - matched), -len(matched)
+
+
+def ground_objective_column(source: DatasetProfile | dict[str, Any] | list[str], objective: str) -> str | None:
+    """The column the objective names ("what drives CO levels" -> `CO(GT)`,
+    not `PT08.S1(CO)`), by whole-token match; None if it names none.
+    `source` is a DatasetProfile (datetime/identifier/constant columns are
+    skipped), a {name: dtype} mapping or a list of names."""
+    tokens = _objective_tokens(objective or "")
+    if not tokens:
+        return None
+    if isinstance(source, DatasetProfile):
+        names = [c.name for c in source.columns if c.kind not in ("datetime", "identifier", "constant")]
+    else:
+        names = [str(n) for n in source]
+    keyed = [(k, i, n) for i, n in enumerate(names) if (k := _grounding_key(n, tokens)) is not None]
+    return min(keyed)[2] if keyed else None
+
+
+def pick_measures(profile: DatasetProfile, objective: str = "") -> list[ColumnProfile]:
+    """Measure columns in a stable, principled order: columns the objective
+    names first (plainest name first), then complete (>= 80% non-null)
+    before sparse, then higher relative dispersion, then column order —
+    deterministic and independent of dict/frame iteration quirks."""
+    tokens = _objective_tokens(objective or "")
+
+    def key(item: tuple[int, ColumnProfile]) -> tuple[Any, ...]:
+        pos, col = item
+        grounded = _grounding_key(col.name, tokens) if tokens else None
+        complete = (100.0 - col.missing_pct) / 100.0 >= _MEASURE_COMPLETE_SHARE
+        std = float(col.stats.get("std") or 0.0)
+        mean = abs(float(col.stats.get("mean") or 0.0))
+        dispersion = std / (mean + std) if std > 0 else 0.0   # bounded CV
+        return (
+            grounded is None, grounded or (0, 0),
+            not complete, -round(dispersion, 6), pos,
+        )
+
+    return [c for _, c in sorted(enumerate(profile.measures()), key=key)]
+
+
 def find_experiment_arm(columns: list[ColumnProfile], row_count: int) -> ColumnProfile | None:
     """The experiment assignment column, if any: a dimension/flag whose name
     tokens are all arm words (group, variant, arm, treatment, control,
@@ -1129,7 +1195,7 @@ def find_experiment_arm(columns: list[ColumnProfile], row_count: int) -> ColumnP
     triggers = (*_ARM_NAME_TOKENS, "ab", "experiment")
     allowed = (*_ARM_NAME_TOKENS, *_ARM_QUALIFIER_TOKENS)
     for c in columns:
-        tokens = _name_tokens(c.name)
+        tokens = _whole_tokens(c.name)
         if (
             c.semantic_role not in (SEMANTIC_DIMENSION, SEMANTIC_FLAG)
             or not 2 <= c.nunique <= _ARM_MAX_LEVELS
@@ -1347,7 +1413,7 @@ def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = No
         ratio = _rows_per_value(row_count, c.nunique)
         if ratio < _ENTITY_REPEAT_THRESHOLD:
             continue
-        tokens = _name_tokens(c.name)
+        tokens = _whole_tokens(c.name)
         if tokens and tokens[-1] in entity_hints:
             hint = tokens[-1]
         elif tokens and tokens[-1] in (*_CODED_KEY_TOKENS, "name"):

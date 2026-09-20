@@ -26,6 +26,7 @@ import pandas as pd
 
 from src.core.domains import domain_confidence, resolve_column
 from src.core.findings import Finding
+from src.core.vocab import resolve_foreign
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -209,10 +210,12 @@ class FinancialAnalysisTool(BaseTool):
         # Sequential resolution so one column cannot fill two roles.
         claimed: set[str] = {c for c in (date_column, price_column, symbol_column) if c}
         date_column = date_column or resolve_column(
-            df, ("date", "timestamp", "datetime", "time", "day"), claimed)
+            df, ("date", "timestamp", "datetime", "time", "day"), claimed
+        ) or resolve_foreign(df.columns, "date", claimed)
         claimed.add(date_column or "")
         price_column = price_column or resolve_column(
-            df, ("adj_close", "close", "closing", "price", "nav"), claimed)
+            df, ("adj_close", "close", "closing", "price", "nav"), claimed
+        ) or resolve_foreign(df.columns, "price", claimed)
         claimed.add(price_column or "")
         if symbol_column is None:
             candidate = resolve_column(

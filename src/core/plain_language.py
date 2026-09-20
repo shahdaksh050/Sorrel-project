@@ -76,6 +76,14 @@ def _pct(fraction: float) -> str:
     return "under 1%" if pct < 1 else f"about {pct:.0f}%"
 
 
+def format_p(p: float | None) -> str:
+    """'<0.001' below 0.001, three decimals otherwise, 'n/a' when missing.
+    An exact 0.0 is never printed."""
+    if p is None:
+        return "n/a"
+    return "<0.001" if float(p) < 0.001 else f"{float(p):.3f}"
+
+
 def _p_phrase(op: str, p: float) -> str:
     if op in (">", ">=", "≥"):
         return _P_WEAK

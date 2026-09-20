@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import difflib
 import json
 import os
 import re
@@ -72,14 +73,19 @@ from src.core.memory import AnalysisStep, DatasetMetadata, MemorySystem, ToolRes
 from src.core.model_telemetry import get_limiter
 from src.core.multiple_testing import adjust_findings_run_level
 from src.core.profiler import DatasetProfile, profile_dataframe
-from src.core.prompt_manager import ARCHETYPES, CHART_DESIGN_PROMPT, PromptManager
+from src.core.prompt_manager import (
+    ARCHETYPES,
+    CHART_DESIGN_PROMPT,
+    RLM_SUBTASK_SYSTEM,
+    PromptManager,
+)
 from src.core.security import sanitize_for_prompt
 from src.core.step_validation import _COLUMN_PARAM_NAMES as _COLUMN_PARAM_NAMES
 from src.core.step_validation import columns_for, is_column_param, validate_step
 from src.core.tool_registry import _INJECTED_PARAMS as _INJECTED_PARAMS
 from src.core.tool_registry import ToolRegistry as ToolRegistry
 from src.core.tool_registry import _short_tool_description as _short_tool_description
-from src.rlm.engine import RLMEngine, RLMSubTask, _extract_usage
+from src.rlm.engine import RLMEngine, RLMSubTask
 
 console = Console()
 
@@ -122,6 +128,14 @@ _COMPACT_RETRY_NOTE = (
 #: and latency grow with prompt size while the ranked findings already keep
 #: what matters compact. LLM_CONTEXT_TOKENS, when set, overrides all of this.
 _MAX_PLANNER_CONTEXT_TOKENS = 32_000
+
+#: Steps run per reasoning cycle — a model that lists twenty is padding, and
+#: each extra step costs a tool run plus digest tokens on every later prompt.
+_MAX_STEPS_PER_CYCLE = 8
+
+#: Below this context window the chart-design call is skipped: a small model
+#: would spend its scarce budget on it and the deterministic dashboard stands.
+_MIN_CHART_DESIGN_CONTEXT = 16_000
 
 # Target auto-detection confidence thresholds
 _AUTODETECT_HIGH = 0.75   # proceed autonomously above this
@@ -245,6 +259,7 @@ class AgentController:
     _PREDICTION_INTENT_KEYWORDS = (
         "predict", "forecast", "model", "classif", "regress",
         "estimate", "will churn", "likely to", "propensity",
+        "drive", "what affect", "what influenc", "what cause", "depends on", "explain", "why ",
     )
 
     #: Read-only analytical tools that only read the dataset file and touch
@@ -348,7 +363,9 @@ class AgentController:
     # Stage 1 — Dataset Ingestion
     # ------------------------------------------------------------------
 
-    def _join_related_files(self, file_path: str, related: list[str]) -> tuple[str, list[str]]:
+    def _join_related_files(
+        self, file_path: str, related: list[str], overrides: dict[str, dict[str, Any]] | None = None
+    ) -> tuple[str, list[str]]:
         """Join related tables onto the main file; returns (dataset path, notes)."""
         original = file_path
         base, base_report = read_any(file_path)
@@ -362,7 +379,7 @@ class AgentController:
                 continue
             tables.append((Path(path).stem, df))
             notes.extend(report.notes)
-        merged, join_notes = join_related(base, tables, get_max_rows(), Path(file_path).stem)
+        merged, join_notes = join_related(base, tables, get_max_rows(), Path(file_path).stem, overrides)
         notes.extend(join_notes)
         if merged is not base:
             dest = Path(self._output_dir) / "derived" / f"{Path(file_path).stem}_joined.parquet"
@@ -383,6 +400,7 @@ class AgentController:
         target_hint: str | None = None,
         interactive: bool = True,
         related_files: list[str] | None = None,
+        join_overrides: dict[str, dict[str, Any]] | None = None,
     ) -> DatasetMetadata:
         """
         Stage 1: Ingest the dataset and store metadata in Memory.
@@ -398,6 +416,8 @@ class AgentController:
             related_files: Optional extra tables (customers, products...) joined
                          onto the main file on inferred keys; the merged frame
                          becomes the dataset for every later stage.
+            join_overrides: Optional per-table review choices keyed by related
+                         file stem: {"skip": True} or {"left_key", "right_key"}.
 
         Returns:
             DatasetMetadata stored in the Memory System.
@@ -415,7 +435,7 @@ class AgentController:
 
         join_notes: list[str] = []
         if related_files:
-            file_path, join_notes = self._join_related_files(file_path, related_files)
+            file_path, join_notes = self._join_related_files(file_path, related_files, join_overrides)
 
         ingest_tool = self.tool_registry.get("ingest_dataset")
         result = ingest_tool.run(file_path=file_path, target_column=target)
@@ -492,7 +512,7 @@ class AgentController:
 
         # Auto-detect target column when user hasn't provided one
         if not metadata.target_column:
-            col, confidence = metadata.detect_target_with_confidence()
+            col, confidence = metadata.detect_target_with_confidence(self.objective)
             decision = self._decide_analysis_mode(col, confidence)
             self.memory.set_context("analysis_decision", decision)
 
@@ -724,18 +744,7 @@ class AgentController:
         # Initialise PromptManager and RLMEngine. Tool descriptions are
         # filtered/ranked against the dataset's profile — the planner only
         # ever sees tools that actually apply to this data's nature.
-        tool_desc = self.tool_registry.get_candidate_descriptions(
-            self.last_profile,
-            self.memory.dataset_metadata,
-            use_ml=self.use_ml,
-            use_llm=self.use_llm,
-        )
-        short_desc = self.tool_registry.get_candidate_short_descriptions(
-            self.last_profile,
-            self.memory.dataset_metadata,
-            use_ml=self.use_ml,
-            use_llm=self.use_llm,
-        )
+        tool_desc, short_desc, compact_desc = self._tool_blocks()
         ctx_tokens = (
             min(self.llm_client.get_context_window(), _MAX_PLANNER_CONTEXT_TOKENS)
             if self.use_llm and not os.getenv("LLM_CONTEXT_TOKENS")
@@ -746,6 +755,7 @@ class AgentController:
             tool_desc,
             self.max_iterations,
             short_tool_descriptions=short_desc,
+            compact_tool_descriptions=compact_desc,
             use_ml=self.use_ml,
             context_tokens=ctx_tokens,
         )
@@ -772,6 +782,7 @@ class AgentController:
             llm_callable=self.llm_client.call,
             system_prompt=self._prompt_manager.get_system_prompt(),
             max_depth=int(os.getenv("RLM_MAX_DEPTH", "5")),
+            base_max_tokens=getattr(self.llm_client, "max_tokens", 4096),
         )
 
         console.print("\n[bold magenta]🚀 Starting Autonomous Analysis — Stages 2-7[/]\n")
@@ -819,7 +830,7 @@ class AgentController:
                             "LLM disabled for this run — plan selected from the "
                             "dataset profile and domain inference."
                         )
-                    steps = self._parse_steps(llm_response)
+                    steps = self._parse_steps(llm_response, cap=False)
                     if steps:
                         self.memory.store_analysis_plan(steps)
                         progress.update(
@@ -863,6 +874,7 @@ class AgentController:
                             depth=0,
                             stage=f"{stage_label}:retry",
                         )
+                    llm_response = self._normalise_reply(llm_response)
                     if llm_response.get("status") == "error":
                         raise RuntimeError(
                             str(llm_response.get("error", "Unknown LLM error"))
@@ -894,6 +906,17 @@ class AgentController:
                 if iteration == 1:
                     self._store_data_understanding(llm_response)
 
+                # A "complete" reply before any tool ran can only be
+                # invented insights: run the profile-driven plan first.
+                if llm_response.get("status") == "complete" and not any(
+                    r.tool_name != "planner" for r in self.memory.tool_results
+                ):
+                    console.print(
+                        "[yellow]ℹ LLM signalled complete before any analysis ran — "
+                        "running the profile-driven plan first.[/]"
+                    )
+                    llm_response = self._build_fallback_plan()
+
                 # ---- Check for completion (Stage 7 trigger) ----
                 if llm_response.get("status") == "complete":
                     if iteration < self.min_iterations:
@@ -916,6 +939,7 @@ class AgentController:
                             reprompt_res = self._rlm_engine.invoke(
                                 continue_prompt, depth=0, stage=f"{stage_label}:deepen_exploration"
                             )
+                            reprompt_res = self._normalise_reply(reprompt_res)
                             if reprompt_res.get("status") != "complete":
                                 llm_response = reprompt_res
                             else:
@@ -932,7 +956,7 @@ class AgentController:
                         break
 
                 # ---- Parse plan steps (tolerant of malformed entries) ----
-                steps = self._parse_steps(llm_response)
+                steps = self._parse_steps(llm_response, cap=not llm_response.get("deterministic"))
                 if not steps:
                     console.print(
                         f"[yellow]⚠ No valid steps on iteration {iteration} — synthesising final report.[/]"
@@ -986,6 +1010,9 @@ class AgentController:
             final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
         if self.memory.get_context("data_understanding"):
             final_result.setdefault("data_understanding", self.memory.get_context("data_understanding"))
+        column_roles = (self.memory.get_context("column_roles") or {}).get("accepted")
+        if column_roles:
+            final_result.setdefault("column_roles", column_roles)
         governance = self._governor.summary(self.memory.get_context("llm_usage"))
         self.memory.set_context("governance", governance)
         final_result["governance"] = governance
@@ -1025,6 +1052,7 @@ class AgentController:
         self._generate_final_report(final_result)
         self._generate_dashboard()
         self._generate_html_report(final_result)
+        self._write_run_summary()
 
         # Print reasoning trace
         if self._rlm_engine:
@@ -1043,9 +1071,9 @@ class AgentController:
             if self._llm_budget_exhausted():
                 raise RuntimeError("LLM token cap reached")
             self.llm_client.stage = stage
-            result = self._rlm_engine.invoke(
+            result: dict[str, Any] = self._normalise_reply(self._rlm_engine.invoke(
                 self._prompt_manager.get_final_interpretation_prompt(), depth=0, stage=stage
-            )
+            ))
             if result.get("status") == "error":
                 raise RuntimeError(str(result.get("error", "Unknown LLM error")))
             if result.get("status") != "complete" or not result.get("insights"):
@@ -1064,7 +1092,7 @@ class AgentController:
             params = tool.prepare_params(
                 self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
             )
-            params, _dropped, errors = self._validate_step(tool, step.parameters, params)
+            params, _dropped, errors, _normalised = self._validate_step(tool, step.parameters, params)
             if errors or self._step_cache_key(step.tool_name, params) not in self._step_cache:
                 return False
         return bool(steps)
@@ -1072,6 +1100,47 @@ class AgentController:
     # ------------------------------------------------------------------
     # Resilience helpers — plan parsing and LLM-failure fallbacks
     # ------------------------------------------------------------------
+
+    def _tool_blocks(self) -> tuple[str, str, str]:
+        """(full, short, compact) candidate-tool descriptions for the current profile."""
+        args = (self.last_profile, self.memory.dataset_metadata)
+        kwargs = {"use_ml": self.use_ml, "use_llm": self.use_llm}
+        return (
+            self.tool_registry.get_candidate_descriptions(*args, **kwargs),
+            self.tool_registry.get_candidate_short_descriptions(*args, **kwargs),
+            self.tool_registry.get_candidate_descriptions(*args, **kwargs, compact=True),
+        )
+
+    def _apply_column_roles(self, proposals: Any) -> None:
+        """Validate the planner's proposed column roles against the data, keep
+        only the confirmed ones on the profile (tools then match those columns
+        like a name match) and refresh the tool blocks so the next cycle lists
+        newly applicable tools. Rejections are logged dim only."""
+        if not isinstance(proposals, dict) or not proposals or self.last_profile is None:
+            return
+        meta = self.memory.dataset_metadata
+        if meta is None:
+            return
+        try:
+            from src.core.roles import validate_roles
+            from src.tools.data_processing import _read_df
+
+            df = _read_df(str(self.memory.get_context("cleaned_file_path") or meta.file_path))
+            accepted, rejected = validate_roles(df, proposals)
+        except Exception as exc:
+            console.print(f"  [dim]Column roles skipped: {exc}[/]")
+            return
+        self.memory.set_context("column_roles", {"accepted": accepted, "rejected": rejected})
+        for column, reason in rejected.items():
+            console.print(f"  [dim]Column role rejected: {column} ({reason})[/]")
+        if not accepted:
+            return
+        self.last_profile.role_overrides = accepted
+        self.memory.set_context("data_profile", self.last_profile.to_dict())
+        if self._prompt_manager is not None:
+            self._prompt_manager.refresh_tools(*self._tool_blocks())
+            if self._rlm_engine is not None:
+                self._rlm_engine.set_system_prompt(self._prompt_manager.get_system_prompt())
 
     #: Caps on the planner's cycle-1 data_understanding block — it is carried
     #: into every later prompt, so an over-long answer taxes every cycle.
@@ -1086,6 +1155,7 @@ class AgentController:
         raw = llm_response.get("data_understanding")
         if not isinstance(raw, dict):
             return
+        self._apply_column_roles(raw.get("roles"))
         columns = set(self.memory.dataset_metadata.columns) if self.memory.dataset_metadata else set()
         clean: dict[str, Any] = {}
         for key in self._UNDERSTANDING_TEXT_KEYS:
@@ -1109,9 +1179,79 @@ class AgentController:
         if clean:
             self.memory.set_context("data_understanding", clean)
 
-    def _parse_steps(self, llm_response: dict[str, Any]) -> list[AnalysisStep]:
+    _PLAN_KEYS = ("steps", "plan", "next_steps", "actions", "tasks")
+    _TOOL_KEYS = ("tool_name", "tool", "name", "function", "action", "tool_call")
+    _PARAM_KEYS = ("parameters", "params", "arguments", "args", "input", "inputs")
+    _STEP_NO_KEYS = ("step_number", "step", "id", "index")
+    _TOOL_PREFIX_RE = re.compile(r"^(?:(?:functions?|tools?)\s*[.:/]\s*)+", re.IGNORECASE)
+    _DONE_STATUSES = frozenset({"complete", "completed", "done", "finished", "final", "finish"})
+    _GOING_STATUSES = frozenset({"in_progress", "inprogress", "continue", "continuing", "running", "ongoing", "working"})
+
+    @classmethod
+    def _plan_items(cls, reply: Any) -> list[Any]:
+        """The plan's step list wherever a drifting model put it: a top-level
+        list, under steps/plan/next_steps/actions/tasks, or a dict keyed by
+        step number."""
+        if isinstance(reply, list):
+            return reply
+        if not isinstance(reply, dict):
+            return []
+        for key in cls._PLAN_KEYS:
+            value = reply.get(key)
+            if isinstance(value, list) and value:
+                return value
+            if isinstance(value, dict) and value:
+                if any(k in value for k in cls._TOOL_KEYS):
+                    return [value]
+                if nested := cls._plan_items(value):
+                    return nested
+                keyed = [(k, v) for k, v in value.items() if isinstance(v, dict)]
+                if keyed:
+                    return [
+                        {**v, "step_number": int(m.group())} if (m := re.search(r"\d+", str(k))) else v
+                        for k, v in keyed
+                    ]
+        return []
+
+    @classmethod
+    def _normalise_reply(cls, reply: Any) -> Any:
+        """Repair reply-form drift: a bare step list, a missing or oddly
+        spelled `status`. Error replies pass through untouched."""
+        if isinstance(reply, list):
+            return {"status": "in_progress", "steps": reply}
+        if not isinstance(reply, dict) or reply.get("status") == "error":
+            return reply
+        reply = dict(reply)
+        status = re.sub(r"[\s-]+", "_", str(reply.get("status") or "").strip().lower())
+        if status in cls._DONE_STATUSES:
+            reply["status"] = "complete"
+        elif status in cls._GOING_STATUSES or cls._plan_items(reply):
+            reply["status"] = "in_progress"
+        elif reply.get("insights") or reply.get("recommendations"):
+            reply["status"] = "complete"
+        return reply
+
+    def _resolve_tool_name(self, raw: str) -> tuple[str | None, str]:
+        """(registered tool name or None, the name cleaned of decoration).
+        Small models write "functions.clean_data", "Clean_Data", "clean_dat":
+        match case-/underscore-insensitively, then by a unique close match."""
+        name = self._TOOL_PREFIX_RE.sub("", raw.strip()).strip("`'\" ").removesuffix("()").split(".")[-1].strip()
+        if not name or self.tool_registry.has(name):
+            return (name or None), name
+        names = self.tool_registry.names()
+        key = re.sub(r"[\W_]+", "", name.lower())
+        exact = [n for n in names if re.sub(r"[\W_]+", "", n.lower()) == key]
+        if len(exact) == 1:
+            return exact[0], name
+        close = difflib.get_close_matches(name.lower(), names, n=2, cutoff=0.8)
+        return (close[0] if len(close) == 1 else None), name
+
+    def _parse_steps(self, llm_response: Any, *, cap: bool = True) -> list[AnalysisStep]:
         """
         Parse LLM plan steps, skipping malformed entries instead of crashing.
+        Field names, tool names and the step container are matched tolerantly;
+        exact duplicates are dropped and the plan is capped at
+        _MAX_STEPS_PER_CYCLE (`cap=False` for a plan the profile built).
 
         Anti-hallucination guard: steps naming tools that do not exist in the
         ToolRegistry are rejected here (never executed), and a planner note is
@@ -1119,26 +1259,35 @@ class AgentController:
         """
         steps: list[AnalysisStep] = []
         rejected: list[str] = []
-        raw_steps = llm_response.get("steps", [])
-        if not isinstance(raw_steps, list):
-            return steps
-        for idx, s in enumerate(raw_steps, 1):
+        notes: list[str] = []
+        seen: set[str] = set()
+        duplicates = 0
+        for idx, s in enumerate(self._plan_items(llm_response), 1):
+            if isinstance(s, str):
+                s = {"tool_name": s}
             if not isinstance(s, dict):
                 continue
-            tool_name = s.get("tool_name")
-            if not isinstance(tool_name, str) or not tool_name.strip():
+            for key in ("function", "tool_call"):  # OpenAI style: {"function": {"name", "arguments"}}
+                if isinstance(s.get(key), dict):
+                    s = {**s, **s[key]}
+            candidates = [v for k in self._TOOL_KEYS if isinstance(v := s.get(k), str) and v.strip()]
+            if not candidates:
                 continue
-            # Small models decorate names ("functions.clean_data", " Clean_Data").
-            tool_name = tool_name.strip().split(".")[-1]
-            if not self.tool_registry.has(tool_name) and self.tool_registry.has(tool_name.lower()):
-                tool_name = tool_name.lower()
-            if not self.tool_registry.has(tool_name) or (
+            resolved = [self._resolve_tool_name(c) for c in candidates]
+            hit = next(((n, c) for n, c in resolved if n), None)
+            if hit is None:
+                rejected.append(resolved[0][1] or candidates[0])
+                continue
+            tool_name, cleaned = hit
+            if (
                 getattr(self.tool_registry.get(tool_name), "executes_code", False)
                 and not code_execution_enabled()
             ):
                 rejected.append(tool_name)
                 continue
-            parameters = s.get("parameters", {})
+            if tool_name != cleaned:
+                notes.append(f"corrected {cleaned!r} -> {tool_name!r}")
+            parameters: Any = next((s[k] for k in self._PARAM_KEYS if s.get(k)), {})
             if isinstance(parameters, str):
                 # ...and sometimes send the parameter object as a JSON string.
                 try:
@@ -1147,30 +1296,51 @@ class AgentController:
                     parameters = {}
             if not isinstance(parameters, dict):
                 parameters = {}
-            step_number = s.get("step_number")
+            signature = f"{tool_name}|{json.dumps(parameters, sort_keys=True, default=str)}"
+            if signature in seen:
+                duplicates += 1
+                continue
+            seen.add(signature)
+            number = next((s[k] for k in self._STEP_NO_KEYS if s.get(k) is not None), None)
+            if isinstance(number, str) and number.strip().isdigit():
+                number = int(number)
             steps.append(
                 AnalysisStep(
-                    step_number=step_number if isinstance(step_number, int) else idx,
+                    step_number=number if isinstance(number, int) and not isinstance(number, bool) and number > 0 else idx,
                     tool_name=tool_name,
                     parameters=parameters,
                     rationale=str(s.get("rationale", "")),
                 )
             )
+        if duplicates:
+            notes.append(f"dropped {duplicates} duplicate step(s)")
+        if cap and len(steps) > _MAX_STEPS_PER_CYCLE:
+            notes.append(
+                f"only the first {_MAX_STEPS_PER_CYCLE} of {len(steps)} steps were run, the rest "
+                "were dropped; plan them in a later cycle"
+            )
+            steps = steps[:_MAX_STEPS_PER_CYCLE]
         if rejected:
             console.print(
                 f"  [yellow]⚠ Rejected {len(rejected)} hallucinated tool name(s): "
                 f"{', '.join(rejected)}[/]"
             )
+        if rejected or notes:
+            summary = [
+                *(
+                    [
+                        f"Rejected unknown tool name(s): {', '.join(sorted(set(rejected)))}. "
+                        f"Only these tools exist: {', '.join(self.tool_registry.names())}."
+                    ]
+                    if rejected else []
+                ),
+                *(f"Plan note: {n}." for n in notes),
+            ]
             self.memory.append_tool_result(
                 ToolResult(
                     tool_name="planner",
                     status="skipped",
-                    output={
-                        "summary": (
-                            f"Rejected unknown tool name(s): {', '.join(sorted(set(rejected)))}. "
-                            f"Only these tools exist: {', '.join(self.tool_registry.names())}."
-                        )
-                    },
+                    output={"summary": " ".join(summary)},
                     iteration=self.memory.iteration_count,
                 )
             )
@@ -1393,6 +1563,7 @@ class AgentController:
             "status": "in_progress",
             "reasoning": "LLM unavailable — executing deterministic fallback plan.",
             "steps": steps,
+            "deterministic": True,   # _parse_steps does not cap a plan the profile built
         }
 
     def _generate_dashboard(self) -> None:
@@ -1442,6 +1613,9 @@ class AgentController:
             findings = [f.to_dict() for f in self.memory.ranked_findings()]
             if not findings or self._llm_budget_exhausted():
                 return charts
+            if self.llm_client.get_context_window() < _MIN_CHART_DESIGN_CONTEXT:
+                console.print("  [dim]Chart design skipped: the model's context window is too small for it.[/]")
+                return charts
             self.llm_client.stage = "chart_design"
             reply = self.llm_client.call(
                 CHART_DESIGN_PROMPT,
@@ -1452,7 +1626,7 @@ class AgentController:
                 max_tokens=3000,  # room for the recipes of as many charts as it judges worthwhile
             )
             if self._rlm_engine is not None:
-                self._rlm_engine._record_usage(*_extract_usage(reply))
+                self._rlm_engine.record_usage(reply.get("_rlm_usage"))
                 self.memory.set_context("llm_usage", self._rlm_engine.usage_summary())
             design = design_from_reply(df, reply)
             designed = [
@@ -1461,8 +1635,39 @@ class AgentController:
             ]
             return merge_designed(charts, designed, set(design.drop_ids))
         except Exception as exc:
+            if self._rlm_engine is not None:  # a failed call still spent tokens
+                self._rlm_engine.record_usage(getattr(exc, "rlm_usage", None))
             console.print(f"  [dim]Chart design skipped (non-fatal): {exc}[/]")
             return charts
+
+    def _write_run_summary(self) -> None:
+        """reports/summary.json: a compact record of this run for run-to-run
+        comparison. Non-fatal on any failure."""
+        meta = self.memory.dataset_metadata
+        if meta is None:
+            return
+        try:
+            times: dict[str, float] = {}
+            for r in self.memory.tool_results:
+                times[r.tool_name] = times.get(r.tool_name, 0.0) + float(r.execution_time_ms or 0.0) / 1000.0
+            summary = {
+                "dataset": {"name": Path(meta.file_path).stem, "rows": meta.row_count, "cols": meta.column_count},
+                "objective": self.objective,
+                "llm": {"enabled": bool(self.use_llm), "model": self.llm_client.model if self.use_llm else None},
+                "created": datetime.now(UTC).isoformat(timespec="seconds"),
+                "findings": [
+                    {"finding_id": f.finding_id, "kind": f.kind, "layer": f.layer,
+                     "importance": f.importance, "headline": f.headline}
+                    for f in self.memory.ranked_findings()
+                ],
+                "charts": [{"chart_id": c.get("chart_id"), "title": c.get("title")} for c in self._last_charts],
+                "tool_seconds": {k: round(v, 3) for k, v in times.items()},
+            }
+            out = Path(self._output_dir) / "reports" / "summary.json"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+        except Exception as exc:
+            console.print(f"  [yellow]Run summary not written (non-fatal): {exc}[/]")
 
     def _generate_html_report(self, llm_final: dict[str, Any]) -> None:
         """
@@ -1679,7 +1884,7 @@ class AgentController:
 
     def _validate_step(
         self, tool: Any, raw: dict[str, Any], params: dict[str, Any]
-    ) -> tuple[dict[str, Any], list[str], list[str]]:
+    ) -> tuple[dict[str, Any], list[str], list[str], str]:
         """Check a step against its tool's schema before it runs — see
         `step_validation.validate_step`."""
         return validate_step(self.memory, tool, raw, params)
@@ -1915,10 +2120,13 @@ class AgentController:
         # Plan validation: an invalid step never runs (and never spends
         # code-execution budget); its error — with close column matches —
         # goes back to the planner and counts against the retry budget.
-        params, dropped, plan_errors = self._validate_step(tool, step.parameters, params)
+        params, dropped, plan_errors, normalised = self._validate_step(tool, step.parameters, params)
         dropped_note = f"Ignored unknown parameter(s): {', '.join(dropped)}." if dropped else ""
         if dropped:
             console.print(f"  [yellow]⚠ Step {step.step_number}: {step.tool_name} — {dropped_note}[/]")
+        if normalised:
+            console.print(f"  [dim]Step {step.step_number}: {step.tool_name} — {normalised}[/]")
+            dropped_note = f"{dropped_note} {normalised}.".strip()
         if plan_errors:
             message = " ".join(["Plan validation failed, step not run:", *plan_errors, dropped_note]).strip()
             console.print(f"  [yellow]✗ Step {step.step_number}: {step.tool_name} — {message}[/]")
@@ -2112,10 +2320,39 @@ class AgentController:
         """Trigger decomposition for wide datasets — the same structural
         fact (is_high_dimensional) that gates dimensionality_analysis, so
         there's one source of truth for "this data has a lot of features"."""
+        mode = os.getenv("RLM_DECOMPOSE", "auto").strip().lower()
+        if mode == "off":
+            return False
+        if mode == "on":
+            return True
         if self.last_profile is not None:
-            return self.last_profile.is_high_dimensional
+            wide = self.last_profile.is_high_dimensional
+        else:
+            meta = self.memory.dataset_metadata
+            wide = meta is not None and meta.column_count > 15
+        if not wide:
+            return False
+        # Auto: each sub-task is a paid LLM call, so skip it when the
+        # deterministic tools already covered the numeric columns.
+        reason = self._rlm_skip_reason()
+        if reason:
+            if not getattr(self, "_rlm_skip_logged", False):
+                self._rlm_skip_logged = True
+                console.print(f"  [dim]RLM decomposition skipped: {reason}.[/]")
+            return False
+        return True
+
+    def _rlm_skip_reason(self) -> str:
         meta = self.memory.dataset_metadata
-        return meta is not None and meta.column_count > 15
+        num_cols = meta.numerical_cols if meta is not None else []
+        if len(num_cols) < 8:
+            return f"only {len(num_cols)} numeric columns (< 8)"
+        if self._prompt_manager is None:
+            return ""
+        groups = [num_cols[i: i + 8] for i in range(0, len(num_cols), 8)]
+        if all(self._prompt_manager.rlm_group_findings(g) for g in groups):
+            return f"findings already cover all {len(groups)} numeric column groups"
+        return ""
 
     def _run_rlm_decomposition(self) -> None:
         """
@@ -2165,6 +2402,7 @@ class AgentController:
                 task_id=task.task_id,
                 description=task.description,
                 context_summary=ctx_summary,
+                columns=groups[task.task_id],
             )
 
         # Graceful degradation, same rationale as the stage-2 planning call
@@ -2182,6 +2420,7 @@ class AgentController:
                 prompt_builder=build_prompt,
                 depth=1,
                 max_total_tokens=cap or None,
+                system_prompt=RLM_SUBTASK_SYSTEM,
             )
         except Exception as exc:
             self.memory.set_context("rlm_decomposition_error", f"{type(exc).__name__}: {exc}")
@@ -2195,6 +2434,12 @@ class AgentController:
             f"  [green]✓ RLM decomposition complete: "
             f"{len(sub_results)} sub-task(s) resolved.[/]"
         )
+        if self._rlm_engine.last_failures:
+            self.memory.set_context("rlm_sub_failures", self._rlm_engine.last_failures)
+            console.print(
+                f"  [yellow]  {len(self._rlm_engine.last_failures)} sub-task(s) unresolved: "
+                f"{', '.join(self._rlm_engine.last_failures)}[/]"
+            )
 
     # ------------------------------------------------------------------
     # Stage 7 — Report generation

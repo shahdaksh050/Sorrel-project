@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -22,6 +23,8 @@ _MAX_MANY_TO_MANY_GROWTH = 1.05
 _NEAR_CONSTANT = 0.95
 _TMP_KEY = "__dsa_join_key__"
 _IDLIKE = ("id", "key", "code")
+_GENERIC_KEYS = frozenset({"id", "index", "code", "key"})   # bare names any table may have
+_GENERIC_MIN_CONTAINMENT = 0.9
 
 
 @dataclass
@@ -64,8 +67,11 @@ def _aligned(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
     return a.astype("string").str.strip(), b.astype("string").str.strip()
 
 
-def _evaluate(left: pd.DataFrame, right: pd.DataFrame, lc: str, rc: str) -> tuple[float, JoinPlan] | None:
-    if not (_eligible(left[lc]) and _eligible(right[rc])):
+def _evaluate(
+    left: pd.DataFrame, right: pd.DataFrame, lc: str, rc: str, strict: bool = True
+) -> tuple[float, JoinPlan] | None:
+    """Score a key pair. `strict=False` (user-chosen keys) skips the confidence gates."""
+    if strict and not (_eligible(left[lc]) and _eligible(right[rc])):
         return None
     ls, rs = _aligned(left[lc], right[rc])
     rvals = rs.dropna()
@@ -77,14 +83,16 @@ def _evaluate(left: pd.DataFrame, right: pd.DataFrame, lc: str, rc: str) -> tupl
     if len(lu) > _SAMPLE_UNIQUES:
         lu = lu.sample(_SAMPLE_UNIQUES, random_state=0)
     containment = float(lu.isin(rset).mean())
-    if containment < _MIN_CONTAINMENT:
-        return None
+    if strict:
+        bare = _norm(lc) in _GENERIC_KEYS and _norm(rc) in _GENERIC_KEYS
+        if containment < (_GENERIC_MIN_CONTAINMENT if bare else _MIN_CONTAINMENT):
+            return None
     if len(rset) / len(rvals) >= _MIN_RIGHT_UNIQUE:
         one = lvals.nunique() / len(lvals) >= _MIN_RIGHT_UNIQUE
         card = "one_to_one" if one else "many_to_one"
     else:
         grown = float(ls.map(rvals.value_counts()).fillna(1).clip(lower=1).sum())
-        if grown > _MAX_MANY_TO_MANY_GROWTH * len(left):
+        if strict and grown > _MAX_MANY_TO_MANY_GROWTH * len(left):
             return None
         card = "many_to_many"
     return containment, JoinPlan(lc, rc, "left", card, float(ls.isin(rset).mean()))
@@ -149,26 +157,50 @@ def join_frames(left: pd.DataFrame, right: pd.DataFrame, plan: JoinPlan, max_row
     return out.reset_index(drop=True), notes
 
 
+def _override_plan(
+    joined: pd.DataFrame, df: pd.DataFrame, ov: dict[str, Any], base_name: str, name: str
+) -> JoinPlan | None:
+    lk, rk = ov.get("left_key"), ov.get("right_key")
+    if lk not in joined.columns or rk not in df.columns:
+        return None
+    hit = _evaluate(joined, df, str(lk), str(rk), strict=False)
+    return None if hit is None else replace(hit[1], left_name=base_name, right_name=name)
+
+
 def join_related(
     base: pd.DataFrame,
     related: list[tuple[str, pd.DataFrame]],
     max_rows: int,
     base_name: str = "main table",
+    overrides: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     Greedily attach each related table to the base or an already-joined table.
     Returns `base` itself (same object) when nothing could be joined.
+
+    `overrides[name]` may be {"skip": True} or {"left_key", "right_key"} (the
+    user's review choice, honoured without the confidence gates).
     """
+    overrides = overrides or {}
     joined = base
     notes: list[str] = []
     owners = {base_name: set(map(str, base.columns))}
-    pending = list(related)
+    pending = []
+    for item in related:
+        if overrides.get(item[0], {}).get("skip"):
+            notes.append(f"Skipped {item[0]}: you chose not to join it.")
+        else:
+            pending.append(item)
     progress = True
     while pending and progress:
         progress = False
         for item in list(pending):
             name, df = item
-            plan = suggest_join(joined, df, base_name, name)
+            ov = overrides.get(name) or {}
+            if ov.get("left_key") and ov.get("right_key"):
+                plan = _override_plan(joined, df, ov, base_name, name)
+            else:
+                plan = suggest_join(joined, df, base_name, name)
             if plan is None:
                 continue
             plan.left_name = next((n for n, cols in owners.items() if plan.left_key in cols), base_name)
@@ -179,3 +211,47 @@ def join_related(
             progress = True
     notes += [f"Skipped {n}: no confident join key found." for n, _ in pending]
     return joined, notes
+
+
+def preview_joins(
+    base: pd.DataFrame | str | Path,
+    related: list[tuple[str, pd.DataFrame | str | Path]],
+    base_name: str = "main table",
+) -> list[dict[str, Any]]:
+    """
+    What `join_related` would propose, without merging. Per related table:
+    {name, plan (left_key, right_key, cardinality, coverage, left_name) or None,
+    reason_if_none, columns (its own), left_columns (candidate left keys)}.
+    A table is tried against the base first, then against the other related tables.
+    """
+    def load(x: pd.DataFrame | str | Path) -> pd.DataFrame:
+        if isinstance(x, pd.DataFrame):
+            return x
+        from src.core.io import read_any
+        return read_any(str(x))[0]
+
+    base_df = load(base)
+    frames = [(n, load(d)) for n, d in related]
+    out: list[dict[str, Any]] = []
+    for name, df in frames:
+        lefts = [(base_name, base_df)] + [(n, d) for n, d in frames if n != name]
+        plan = None
+        for lname, ldf in lefts:
+            plan = suggest_join(ldf, df, lname, name)
+            if plan:
+                break
+        out.append({
+            "name": name,
+            "plan": None if plan is None else {
+                "left_key": plan.left_key, "right_key": plan.right_key,
+                "cardinality": plan.cardinality, "coverage": plan.coverage,
+                "left_name": plan.left_name,
+            },
+            "reason_if_none": "" if plan else (
+                "The table is empty." if df.empty or base_df.empty
+                else "No shared ID column with enough matching values."),
+            "columns": [str(c) for c in df.columns],
+            "left_columns": [str(c) for c in base_df.columns]
+            + [str(c) for n, d in frames if n != name for c in d.columns],
+        })
+    return out

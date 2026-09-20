@@ -21,7 +21,7 @@ from typing import Any
 
 from src.core.chart_theme import vega_config
 from src.core.multiple_testing import apply_benjamini_hochberg
-from src.core.plain_language import describe_uncertainty, plainify
+from src.core.plain_language import describe_uncertainty, format_p, plainify
 
 # ---------------------------------------------------------------------------
 # 3a — executive summary: prefer the LLM's own `insights` over its raw
@@ -242,10 +242,10 @@ def _finding_evidence_html(finding: dict[str, Any]) -> str:
         numeric_bits.append(f"effect {_esc(round(float(effect), 4))}" + (f" ({_esc(kind)})" if kind else ""))
     p_value = finding.get("p_value")
     if p_value is not None:
-        numeric_bits.append(f"p={_esc(round(float(p_value), 4))}")
+        numeric_bits.append(f"p={_esc(format_p(p_value))}")
     p_adj = finding.get("p_adjusted")
     if p_adj is not None:
-        numeric_bits.append(f"p(adj)={_esc(round(float(p_adj), 4))}")
+        numeric_bits.append(f"p(adj)={_esc(format_p(p_adj))}")
     evidence = finding.get("evidence") or {}
     if isinstance(evidence, dict):
         for k, v in evidence.items():
@@ -303,6 +303,12 @@ def data_understanding_rows(
     for key, label in (("key_measures", "Key measures"), ("key_dimensions", "Key dimensions")):
         if isinstance(du.get(key), list) and du[key]:
             rows.append((label, ", ".join(str(v) for v in du[key])))
+    roles = llm_insights.get("column_roles")
+    if isinstance(roles, dict) and roles:
+        rows.append((
+            "Column roles inferred (validated against the data)",
+            ", ".join(f"`{col}` → {role}" for col, role in roles.items()),
+        ))
     caveats = [str(c) for c in du.get("caveats") or [] if str(c).strip()] if isinstance(du.get("caveats"), list) else []
     return rows, caveats
 
@@ -607,8 +613,8 @@ def build_html_report(
             has_group = any(t.get("group_column") for t in shown)
             bh_rows = []
             for t in shown:
-                p_val = f"{t.get('p_value', 0):.4f}"
-                p_adj = f"{t.get('p_adjusted', 0):.4f}"
+                p_val = format_p(t.get('p_value'))
+                p_adj = format_p(t.get('p_adjusted'))
                 sig = "Yes" if t.get("significant_after_correction") else "No"
                 group_cell = f"<td>{_esc(t.get('group_column') or '—')}</td>" if has_group else ""
                 bh_rows.append(

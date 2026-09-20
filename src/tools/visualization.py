@@ -232,22 +232,33 @@ class GenerateVisualizationsTool(BaseTool):
         for col in num_cols:
             values = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
             values = values[np.isfinite(values)]
-            n_bins = min(HIST_BINS, len(np.unique(values)))
-            if n_bins < 2:
-                continue
-            # Pre-binned over every row (aggregate before charting), drawn as
-            # a frequency polygon through each bin's midpoint.
-            counts, edges = np.histogram(values, bins=n_bins)
-            rows = [
-                {"value": round(float((edges[i] + edges[i + 1]) / 2), 6), "rows": int(n)}
-                for i, n in enumerate(counts)
-            ]
+            uniq, freq = np.unique(values, return_counts=True)
+            if len(uniq) < 2:
+                continue  # a constant column has no distribution to draw
             label = humanize_label(str(col))
-            try:
-                charts.append(_validated({
-                    "type": "area", "data": rows, "x": "value", "y": "rows", "y_format": "count",
+            counts, edges = np.histogram(values, bins=min(HIST_BINS, len(uniq)))
+            # Two values or evenly spread counts (a balanced flag, a 1..N id) would be a flat line: a plain
+            # bar of counts is the honest drawing, and a uniform distribution is a valid one.
+            if len(uniq) == 2 or len(set(counts.tolist())) == 1:
+                bars = (
+                    [(int(v) if float(v).is_integer() else float(v), int(n)) for v, n in zip(uniq, freq, strict=True)] if len(uniq) <= HIST_BINS
+                    else [(round(float((edges[i] + edges[i + 1]) / 2), 6), int(n)) for i, n in enumerate(counts)]
+                )
+                spec: dict[str, Any] = {
+                    "type": "bar", "data": [{"value": k, "rows": n} for k, n in bars], "x": "value", "y": "rows",
+                    "y_format": "count", "title": f"Distribution — {label}", "x_title": label, "y_title": "Rows",
+                }
+            else:
+                # Pre-binned over every row (aggregate before charting), drawn as a frequency polygon
+                # through each bin's midpoint.
+                spec = {
+                    "type": "area", "y_format": "count", "x": "value", "y": "rows",
+                    "data": [{"value": round(float((edges[i] + edges[i + 1]) / 2), 6), "rows": int(n)}
+                             for i, n in enumerate(counts)],
                     "title": f"Distribution — {label}", "x_title": label, "y_title": "Rows",
-                }))
+                }
+            try:
+                charts.append(_validated(spec))
             except ToolExecutionError as exc:
                 rejected.append(f"{col}: {exc}")  # one column must not abort the rest
         if not charts:

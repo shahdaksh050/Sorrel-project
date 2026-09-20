@@ -27,7 +27,8 @@ import numpy as np
 import pandas as pd
 
 from src.core.findings import Finding
-from src.core.profiler import _name_tokens, profile_dataframe
+from src.core.profiler import profile_dataframe
+from src.core.vocab import ROLE_TOKENS, column_role, name_tokens
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -56,15 +57,8 @@ _MAX_BAND_GROUPS = 3
 _MIN_HR_EFFECT = 0.10
 _MAX_HR_FINDINGS = 3
 
-_DURATION_TOKENS = frozenset({
-    "time", "duration", "tenure", "day", "month", "week", "survival", "followup",
-    "lifetime", "elapsed",
-})
-_EVENT_TOKENS = frozenset({
-    "event", "status", "churn", "churned", "censor", "censored", "died", "death", "dead",
-    "deceased", "attrition", "failure", "failed", "dropout", "converted", "relapse", "left",
-    "terminated",
-})
+_DURATION_TOKENS = ROLE_TOKENS["duration"]
+_EVENT_TOKENS = ROLE_TOKENS["event"]
 _TIME_UNITS = {
     "day": "days", "week": "weeks", "month": "months", "year": "years", "hour": "hours",
     "minute": "minutes",
@@ -101,24 +95,24 @@ _WORD_MAP: dict[str, float] = {
 
 def _tokens(name: str) -> set[str]:
     out: set[str] = set()
-    for tok in _name_tokens(name):
+    for tok in name_tokens(name):
         out.add(tok)
         if len(tok) > 3 and tok.endswith("s"):
             out.add(tok[:-1])
     return out
 
 
-def _is_duration_name(name: str) -> bool:
+def _is_duration_name(name: str, profile: DatasetProfile | None = None) -> bool:
     toks = _tokens(name)
-    return bool(
+    return column_role(profile, name, "duration") or bool(
         toks & _DURATION_TOKENS
         or {"age", "at"} <= toks
         or {"follow", "up"} <= toks
     )
 
 
-def _is_event_name(name: str) -> bool:
-    return bool(_tokens(name) & _EVENT_TOKENS)
+def _is_event_name(name: str, profile: DatasetProfile | None = None) -> bool:
+    return column_role(profile, name, "event") or bool(_tokens(name) & _EVENT_TOKENS)
 
 
 def _mappable(top_values: dict[str, int]) -> bool:
@@ -128,14 +122,14 @@ def _mappable(top_values: dict[str, int]) -> bool:
 def _duration_candidates(profile: DatasetProfile) -> list[ColumnProfile]:
     return [
         c for c in profile.columns
-        if c.kind == "numeric" and c.nunique >= 3 and _is_duration_name(c.name)
+        if c.kind == "numeric" and c.nunique >= 3 and _is_duration_name(c.name, profile)
     ]
 
 
 def _event_candidates(profile: DatasetProfile, exclude: set[str]) -> list[ColumnProfile]:
     out: list[ColumnProfile] = []
     for c in profile.columns:
-        if c.name in exclude or not _is_event_name(c.name):
+        if c.name in exclude or not _is_event_name(c.name, profile):
             continue
         if c.kind in ("boolean", "numeric") and c.nunique == 2:
             out.append(c)
@@ -566,7 +560,16 @@ class SurvivalAnalysisTool(BaseTool):
         for d in _duration_candidates(profile):
             events = _event_candidates(profile, {d.name})
             if events:
-                return {"duration_column": d.name, "event_column": events[0].name}
+                params: dict[str, Any] = {"duration_column": d.name, "event_column": events[0].name}
+                taken = {d.name, events[0].name}
+                groups = [
+                    c for c in profile.columns
+                    if c.kind == "categorical" and 2 <= c.nunique <= _MAX_GROUPS and c.name not in taken
+                    and not _is_event_name(c.name, profile)
+                ]
+                if groups:
+                    params["group_column"] = groups[0].name
+                return params
         return {}
 
     def execute(  # type: ignore[override]

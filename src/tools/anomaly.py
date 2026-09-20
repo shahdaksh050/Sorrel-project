@@ -23,13 +23,14 @@ Everything is deterministic and fitted per call; nothing is trained or stored.
 from __future__ import annotations
 
 import math
+import os
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 
 from src.core.findings import Finding
-from src.core.profiler import profile_dataframe
+from src.core.profiler import pick_measures, profile_dataframe
 from src.core.stats_utils import is_partial_final_period, measure_aggregation
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
@@ -284,7 +285,8 @@ class AnomalyAnalysisTool(BaseTool):
         if profile is None:
             return {}
         date_col = profile.datetime_cols[0] if profile.datetime_cols else None
-        measures = _measure_candidates(profile, {date_col} if date_col else set())
+        objective = os.environ.get("USER_OBJECTIVE", "").strip()
+        measures = [c for c in pick_measures(profile, objective) if c.name != date_col]
         if not measures:
             return {}
         params: dict[str, Any] = {"value_column": measures[0].name}

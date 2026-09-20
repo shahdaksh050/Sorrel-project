@@ -16,11 +16,13 @@ from __future__ import annotations
 import ast
 import datetime
 import difflib
+import functools
 import importlib
 import inspect
 import json
 import math
 import re
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -217,37 +219,89 @@ def _records(data: Any, x: str | None) -> list[Any]:
     raise ValueError("Chart data must be a DataFrame, a Series, or a list of record dicts.")
 
 
+#: Options the chart validator reads; any other keyword is dropped (and noted).
+_CHART_OPTS = frozenset({
+    "color", "series", "title", "x_title", "y_title", "y2_title", "y_format", "y2_format", "sort",
+    "log_y", "caption", "annotations", "size", "priority", "facet", "y_lower", "y_upper", "scale",
+    "order", "note", "target", "y2",
+})
+#: Helpers where a weak model's `hue=`/`group=`/`by=` safely means `color=` (the series field).
+_COLOR_HELPERS = frozenset({"bar", "line", "area", "scatter", "dot_ci"})
+_SERIES_ALIASES = ("hue", "group", "by", "series", "color")
+
+
+def _lenient(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]:
+    """Accept the plotting-library keywords weak models reach for instead of
+    raising: hue/group/by -> the helper's series/color field, values -> y,
+    xlabel/ylabel/label -> axis/plot titles (when unset), kind/bins dropped.
+    Nothing that changes what is plotted in a risky way is mapped (no y2)."""
+    names = list(inspect.signature(fn).parameters)
+    own = next((p for p in ("series", "group") if p in names), None)
+
+    def given(name: str, args: tuple[Any, ...], kw: dict[str, Any]) -> bool:
+        return name in kw or (name in names and names.index(name) < len(args))
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kw: Any) -> dict[str, Any]:
+        kw.pop("kind", None)
+        if fn.__name__ != "histogram":
+            kw.pop("bins", None)
+        for alias, target in (("label", "title"), ("xlabel", "x_title"), ("ylabel", "y_title")):
+            text = kw.pop(alias, None)
+            if isinstance(text, str) and target not in kw:
+                kw[target] = text
+        dest = "y" if "y" in names else "x" if "x" in names else None
+        if dest and fn.__name__ != "heatmap" and "values" in kw and not given(dest, args, kw):
+            kw[dest] = kw.pop("values")
+        goal = own or ("color" if fn.__name__ in _COLOR_HELPERS else None)
+        if goal and not given(goal, args, kw):
+            found = next((a for a in _SERIES_ALIASES if a != goal and a in kw), None)
+            if found:
+                kw[goal] = kw.pop(found)
+        return fn(*args, **kw)
+
+    return wrapper
+
+
 def _chart(chart_type: str, data: Any, x: str, y: str | None, opts: dict[str, Any]) -> dict[str, Any]:
-    spec = {**opts, "type": chart_type, "data": _records(data, x), "x": x}
+    dropped = sorted(k for k in opts if k not in _CHART_OPTS)
+    spec = {**{k: v for k, v in opts.items() if k in _CHART_OPTS}, "type": chart_type, "data": _records(data, x), "x": x}
     if y is not None:
         spec["y"] = y
     clean, error = validate_chart_spec(spec)
     if clean is None:
         raise ValueError(error)
+    if dropped:
+        clean["note"] = " ".join(filter(None, [clean.get("note"), f"ignored: {', '.join(dropped)}"]))[:200]
     return clean
 
 
+@_lenient
 def bar(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
     """Bar chart spec. opts (every helper): color, title, x_title, y_title, y_format, sort,
     log_y, caption, annotations, size, priority, facet."""
     return _chart("bar", data, x, y, opts)
 
 
+@_lenient
 def line(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
     """Line chart spec; `color` names the series field."""
     return _chart("line", data, x, y, opts)
 
 
+@_lenient
 def area(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
     """Area chart spec; `color` names the series field."""
     return _chart("area", data, x, y, opts)
 
 
+@_lenient
 def scatter(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
     """Scatter chart spec; `color` names the group field."""
     return _chart("scatter", data, x, y, opts)
 
 
+@_lenient
 def histogram(data: Any, x: str, **opts: Any) -> dict[str, Any]:
     """Histogram of the numeric field `x` (no y)."""
     return _chart("histogram", data, x, None, opts)
@@ -281,6 +335,7 @@ def _wide_to_long(data: Any, x: str, columns: list[str], scale: str | None) -> p
     return long.dropna(subset=[value])
 
 
+@_lenient
 def heatmap(data: Any, x: str, y: str | list[str], color: str | None = None, **opts: Any) -> dict[str, Any]:
     """Heatmap spec. LONG: heatmap(long_df, x, y, color=<value col>) — `x`/`y` are the two
     categorical axes, `color` the QUANTITATIVE value filling each cell. WIDE:
@@ -319,6 +374,7 @@ def heatmap(data: Any, x: str, y: str | list[str], color: str | None = None, **o
 _MAX_CORR_COLUMNS = 20
 
 
+@_lenient
 def corr_heatmap(
     data: Any, columns: list[str] | None = None, method: str = "pearson", **opts: Any
 ) -> dict[str, Any]:
@@ -352,21 +408,25 @@ def corr_heatmap(
     return _chart("heatmap", long, "x", "y", {**opts, "color": "r", "order": order})
 
 
+@_lenient
 def waterfall(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
     """Waterfall chart spec showing sequential positive and negative contributions."""
     return _chart("waterfall", data, x, y, opts)
 
 
+@_lenient
 def lorenz(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
     """Lorenz curve spec showing cumulative distribution vs equality diagonal."""
     return _chart("lorenz", data, x, y, opts)
 
 
+@_lenient
 def dot_ci(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
     """Dot plot with intervals. opts: y_lower and y_upper (both, or neither), color."""
     return _chart("dot_ci", data, x, y, opts)
 
 
+@_lenient
 def dual_axis(data: Any, x: str, y: str, y2: str | None = None, **opts: Any) -> dict[str, Any]:
     """Dual-axis line spec: `y` on the left axis and `y2` (required) on an
     independent right axis, over a shared `x`. opts also take y2_title, y2_format."""
@@ -375,6 +435,7 @@ def dual_axis(data: Any, x: str, y: str, y2: str | None = None, **opts: Any) -> 
     return _chart("dual_axis", data, x, y, {**opts, "y2": y2})
 
 
+@_lenient
 def boxplot(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
     """Box plot of the RAW numeric values `y` per group `x` (quartiles are
     computed for you; needs >= 4 rows per group, not pre-aggregated numbers)."""
@@ -383,31 +444,37 @@ def boxplot(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
     return _chart("boxplot", data, x, y, opts)
 
 
+@_lenient
 def stacked_bar(data: Any, x: str, y: str, series: str, **opts: Any) -> dict[str, Any]:
     """Stacked bar spec: segments of `y` per `x`, split by the `series` field."""
     return _chart("stacked_bar", data, x, y, {**opts, "color": series})
 
 
+@_lenient
 def grouped_bar(data: Any, x: str, y: str, series: str, **opts: Any) -> dict[str, Any]:
     """Grouped (side-by-side) bar spec: one bar per `series` value within each `x`."""
     return _chart("grouped_bar", data, x, y, {**opts, "color": series})
 
 
+@_lenient
 def pareto(data: Any, x: str, y: str, **opts: Any) -> dict[str, Any]:
     """Pareto spec: additive `y` per category as sorted bars plus a cumulative-share line."""
     return _chart("pareto", data, x, y, opts)
 
 
+@_lenient
 def slope(data: Any, x: str, y: str, group: str, **opts: Any) -> dict[str, Any]:
     """Slope chart spec: `x` has exactly 2 values (e.g. before/after); one line per `group`."""
     return _chart("slope", data, x, y, {**opts, "color": group})
 
 
+@_lenient
 def bullet(data: Any, x: str, y: str, target: str, **opts: Any) -> dict[str, Any]:
     """Bullet spec: actual `y` (bar) against the `target` column (tick), per category `x`."""
     return _chart("bullet", data, x, y, {**opts, "target": target})
 
 
+@_lenient
 def band(data: Any, x: str, y: str, y_lower: str, y_upper: str, **opts: Any) -> dict[str, Any]:
     """Line with a shaded band between the `y_lower` and `y_upper` columns."""
     return _chart("band", data, x, y, {**opts, "y_lower": y_lower, "y_upper": y_upper})

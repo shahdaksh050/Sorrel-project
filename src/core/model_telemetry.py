@@ -43,6 +43,8 @@ class ModelCapabilityProfile:
     description: str = ""
     speed_tag: str = "Standard"  # "Fast" | "Ultra Fast" | "Deep" | "Standard"
     is_free: bool = False
+    #: True when the window/limits were guessed from the model name, not catalogued.
+    inferred: bool = False
 
     def format_dropdown_label(self) -> str:
         """Format human-readable label with context and limits for UI dropdowns."""
@@ -539,6 +541,7 @@ class DynamicRateAndTokenLimiter:
                         model, 16_000 if provider in ("local", "ollama") else 32_000
                     ),
                     speed_tag=_infer_speed_tag(model),
+                    inferred=True,
                 )
             return self._profiles[key]
 

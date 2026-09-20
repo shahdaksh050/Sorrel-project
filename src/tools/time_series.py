@@ -25,6 +25,7 @@ Entity x time panels also get a per-entity trend read.
 """
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -33,7 +34,7 @@ from scipy import stats
 
 from src.core.findings import Finding
 from src.core.multiple_testing import apply_benjamini_hochberg
-from src.core.profiler import profile_dataframe
+from src.core.profiler import pick_measures, profile_dataframe
 from src.core.stats_utils import (
     is_partial_final_period,
     mann_kendall,
@@ -191,7 +192,14 @@ def _choose_value_column_and_aggregation(
         if measures:
             currency = [c for c in measures if c.unit_hint == "currency"]
             pool = currency if currency else measures
-            best = max(pool, key=lambda c: (c.stats.get("std") or 0.0) ** 2)
+            # Raw variance depends on units (a 1,000-scale sensor always beats a
+            # 10-scale concentration); the shared ranking is objective-aware,
+            # completeness-first and unit-free.
+            allowed = {c.name for c in pool}
+            ranked = pick_measures(profile, os.environ.get("USER_OBJECTIVE", "").strip())
+            best = next((c for c in ranked if c.name in allowed), None) or max(
+                pool, key=lambda c: (c.stats.get("std") or 0.0) ** 2
+            )
             return best.name, measure_aggregation(best), profile
 
     return _fallback_numeric_column(df, date_column), "sum", profile
@@ -415,6 +423,176 @@ def _day_of_week_factors(working: pd.DataFrame, aggregation: str) -> dict[str, f
     return {str(k): round((float(v) - overall_mean) / abs(overall_mean), 4) for k, v in by_dow.items()}
 
 
+#: Time-of-day / day-of-week profile: only for sub-daily data (median gap at
+#: most this long) with at least this many days of coverage.
+_TOD_MAX_GAP = pd.Timedelta(hours=6)
+_TOD_MIN_DAYS = 14
+_TOD_MIN_OBS_PER_HOUR = 20
+_TOD_MIN_HOURS = 4
+_TOD_MIN_OBS_PER_WEEKDAY = 10
+#: Measures screened for an hour effect besides the tool's own (first N by
+#: profile order), and how many of them may be reported.
+_TOD_MAX_CANDIDATES = 8
+_TOD_MAX_EXTRA = 3
+#: Extra measures need this share of usable rows: a 90%-missing column is not evidence
+#: of a cycle worth headlining, however clean its eta^2 looks.
+_TOD_MIN_COMPLETENESS = 0.5
+#: A cycle is real only at eta^2 >= this and an ANOVA p below _TOD_ALPHA (the
+#: p guards short samples, where eta^2 alone is inflated by group count).
+_TOD_MIN_ETA_SQ = 0.05
+_TOD_ALPHA = 0.01
+#: Weekend-vs-weekday gap is quoted in the headline from this size up.
+_TOD_WEEKEND_GAP_MIN = 0.10
+_WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _num(v: float) -> str:
+    a = abs(v)
+    return f"{v:,.0f}" if a >= 100 else f"{v:.1f}" if a >= 10 else f"{v:.2f}"
+
+
+def _day_part(hour: int) -> str:
+    return (
+        "morning" if 5 <= hour < 11 else "midday" if 11 <= hour < 14
+        else "afternoon" if 14 <= hour < 17 else "evening" if 17 <= hour < 22 else "night"
+    )
+
+
+def _hour_eta_squared(frame: pd.DataFrame, hours: np.ndarray) -> pd.Series:
+    """eta^2 of hour-of-day groups for every column at once (one groupby)."""
+    grouped = frame.groupby(hours)
+    grand = frame.mean()
+    between = (grouped.count() * (grouped.mean() - grand) ** 2).sum()
+    total = ((frame - grand) ** 2).sum()
+    return (between / total.where(total > 0)).dropna()
+
+
+def _tod_charts(name: str, hours: dict[int, float], weekdays: dict[str, float] | None, mean: float) -> tuple[Any, Any]:
+    from src.core.chart_spec import validate_chart_spec
+
+    hour_chart, _ = validate_chart_spec({
+        "type": "line", "x": "hour", "y": "average", "x_title": "Hour of day", "y_title": name,
+        "data": [{"hour": h, "average": v} for h, v in hours.items()],
+        "title": f"When {name} is highest: average by hour of day",
+        "annotations": [{"y": round(mean, 4), "label": "overall average"}],
+    })
+    day_chart = None
+    if weekdays:
+        day_chart, _ = validate_chart_spec({
+            "type": "bar", "x": "weekday", "y": "average", "x_title": "Day of week", "y_title": name,
+            "data": [{"weekday": d, "average": v} for d, v in weekdays.items()],
+            "title": f"{name} by day of week: average",
+            "annotations": [{"y": round(mean, 4), "label": "overall average"}],
+        })
+    return hour_chart, day_chart
+
+
+def _measure_tod_profile(
+    name: str, values: pd.Series, dates: pd.Series
+) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+    """(diurnal, weekly_profile) for one measure, or None when there is no
+    real hour-of-day cycle (eta^2 / ANOVA gate) or too few observations."""
+    ok = values.notna().to_numpy() & dates.notna().to_numpy()
+    v = values.to_numpy(dtype=float)[ok]
+    ts = pd.DatetimeIndex(dates[ok])
+    hour = np.asarray(ts.hour)
+    by_hour = pd.DataFrame({"h": hour, "v": v}).groupby("h")["v"].agg(["mean", "count"])
+    by_hour = by_hour[by_hour["count"] >= _TOD_MIN_OBS_PER_HOUR]
+    if len(by_hour) < _TOD_MIN_HOURS:
+        return None
+    keep = np.isin(hour, by_hour.index.to_numpy())
+    n, k = int(keep.sum()), len(by_hour)
+    grand = float(v[keep].mean())
+    ss_tot = float(np.sum((v[keep] - grand) ** 2))
+    if grand == 0 or ss_tot <= 0 or n <= k:
+        return None
+    ss_between = float((by_hour["count"] * (by_hour["mean"] - grand) ** 2).sum())
+    eta_sq = ss_between / ss_tot
+    if eta_sq >= 1.0:
+        return None
+    f_stat = (eta_sq / (k - 1)) / ((1 - eta_sq) / (n - k))
+    p_value = float(stats.f.sf(f_stat, k - 1, n - k))
+    if eta_sq < _TOD_MIN_ETA_SQ or p_value >= _TOD_ALPHA:
+        return None
+    means = by_hour["mean"]
+    peak_hour, trough_hour = int(means.idxmax()), int(means.idxmin())
+    peak, trough = float(means.max()), float(means.min())
+    hours = {int(h): round(float(m), 4) for h, m in means.items()}
+
+    weekly: dict[str, Any] | None = None
+    dow = np.asarray(ts.dayofweek)
+    by_dow = pd.DataFrame({"d": dow, "v": v}).groupby("d")["v"].agg(["mean", "count"])
+    if len(by_dow) == 7 and int(by_dow["count"].min()) >= _TOD_MIN_OBS_PER_WEEKDAY:
+        weekday_mean, weekend_mean = float(v[dow < 5].mean()), float(v[dow >= 5].mean())
+        days = {_WEEKDAY_NAMES[int(d)]: round(float(m), 4) for d, m in by_dow["mean"].items()}
+        weekly = {
+            "means": days,
+            "weekday_mean": round(weekday_mean, 4),
+            "weekend_mean": round(weekend_mean, 4),
+            "weekend_gap": round((weekend_mean - weekday_mean) / abs(weekday_mean), 4) if weekday_mean else None,
+            "eta_squared": round(float(
+                (by_dow["count"] * (by_dow["mean"] - float(v.mean())) ** 2).sum()
+                / float(np.sum((v - v.mean()) ** 2))
+            ), 4),
+            "n": len(v),
+        }
+    hour_chart, day_chart = _tod_charts(name, hours, weekly["means"] if weekly else None, grand)
+    if weekly is not None:
+        weekly["chart"] = day_chart
+    diurnal = {
+        "hourly_means": hours,
+        "hourly_counts": {int(h): int(c) for h, c in by_hour["count"].items()},
+        "peak_hour": peak_hour, "peak_value": round(peak, 4),
+        "trough_hour": trough_hour, "trough_value": round(trough, 4),
+        "peak_trough_ratio": round(peak / trough, 3) if trough > 0 and peak > 0 else None,
+        "effect": round((peak - trough) / abs(grand), 4),
+        "overall_mean": round(grand, 4),
+        "eta_squared": round(eta_sq, 4), "p_value": p_value, "n": n,
+        "chart": hour_chart,
+    }
+    return diurnal, weekly
+
+
+def _time_of_day_profile(
+    df: pd.DataFrame,
+    dates: pd.Series,
+    date_column: str,
+    value_column: str,
+    profile: DatasetProfile | None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Hour-of-day and day-of-week profile for sub-daily data: the tool's own
+    measure plus up to _TOD_MAX_EXTRA more with the strongest hour effect
+    (screened over at most _TOD_MAX_CANDIDATES others). None when the axis is
+    not sub-daily / too short, or no measure has a real cycle."""
+    stamps = pd.DatetimeIndex(dates.dropna().drop_duplicates().sort_values())
+    if len(stamps) < 2 * _TOD_MIN_HOURS or (stamps[-1] - stamps[0]).days < _TOD_MIN_DAYS:
+        return None
+    if stamps.to_series().diff().median() > _TOD_MAX_GAP:
+        return None
+    names = [c.name for c in profile.measures()] if profile is not None else list(df.select_dtypes("number").columns)
+    others = [c for c in dict.fromkeys(names) if c not in (date_column, value_column) and c in df.columns]
+    frame = df[others[:_TOD_MAX_CANDIDATES]].apply(pd.to_numeric, errors="coerce")
+    valid = dates.notna().to_numpy()
+    extras: list[str] = []
+    if frame.shape[1]:
+        eta = _hour_eta_squared(frame[valid], np.asarray(pd.DatetimeIndex(dates[valid]).hour))
+        # ~1.0 is a clock field in disguise, not a measured quantity.
+        complete = frame[valid].notna().mean()
+        eta = eta[complete.reindex(eta.index).fillna(0.0) >= _TOD_MIN_COMPLETENESS]
+        extras = [str(c) for c in eta[eta < 0.999].sort_values(ascending=False).index[:_TOD_MAX_EXTRA]]
+    diurnal: dict[str, Any] = {}
+    weekly: dict[str, Any] = {}
+    for i, col in enumerate([value_column, *extras]):
+        values = pd.to_numeric(df[col], errors="coerce")
+        got = _measure_tod_profile(col, values, dates)
+        if got is None:
+            continue
+        diurnal[col] = {**got[0], "is_primary": i == 0}
+        if got[1] is not None:
+            weekly[col] = got[1]
+    return (diurnal, weekly) if diurnal else None
+
+
 class TimeSeriesAnalysisTool(BaseTool):
     """Trend direction, stationarity, and seasonality diagnostics for a time-indexed value."""
 
@@ -590,6 +768,11 @@ class TimeSeriesAnalysisTool(BaseTool):
         notable_months = {
             name: lift for name, lift in month_factors.items() if abs(lift) >= _MONTH_LIFT_THRESHOLD
         }
+        tod: tuple[dict[str, Any], dict[str, Any]] | None
+        try:
+            tod = _time_of_day_profile(df, dates, date_column, value_column, profile)
+        except Exception:
+            tod = None
 
         agg_word = "total" if aggregation == "sum" else "average"
         series_label = f"{_GRAIN_LABEL[grain]} {agg_word} {value_column}"
@@ -629,7 +812,23 @@ class TimeSeriesAnalysisTool(BaseTool):
                 )
             )
 
+        tod_note = ""
+        extra_out: dict[str, Any] = {"diurnal": None, "weekly_profile": None}
+        if tod is not None:
+            first_name, first = next(iter(tod[0].items()))
+            tod_note = (
+                f" Time of day: {first_name} peaks at {first['peak_hour']:02d}:00 "
+                f"({_num(first['peak_value'])}) and is lowest at {first['trough_hour']:02d}:00 "
+                f"({_num(first['trough_value'])}); hour of day explains {first['eta_squared']:.0%} of its variation."
+            )
+            charts = [d["chart"] for d in tod[0].values() if d.get("chart")]
+            charts += [w["chart"] for w in tod[1].values() if w.get("chart")][:1]
+            extra_out = {"diurnal": tod[0], "weekly_profile": tod[1] or None}
+            if charts:
+                extra_out["charts"] = charts
+
         return {
+            **extra_out,
             "summary": (
                 f"{series_label} ({grain}, {len(values)} periods): "
                 + (
@@ -652,6 +851,7 @@ class TimeSeriesAnalysisTool(BaseTool):
                     else ""
                 )
                 + seasonal_note
+                + tod_note
                 + gap_note
                 + (
                     f" Final period starting {dropped_partial_period} excluded as incomplete."
@@ -727,6 +927,13 @@ class TimeSeriesAnalysisTool(BaseTool):
 
         # A trend is a finding only when Mann-Kendall rejects "no monotonic
         # trend" — R² alone is not a significance test.
+        # Under two full seasonal cycles a visibly seasonal series cannot separate a
+        # rise or fall over the window from the season itself: keep the finding but
+        # say so, and demote it (a year of humidity 'increasing' is just winter->summer).
+        calendar_periods = output.get("calendar_periods") or output.get("periods_used") or 0
+        two_year_floor = _PERIODS_FOR_TWO_YEARS.get(str(grain), 24)
+        seasonal_series = bool(output.get("notable_months") or output.get("seasonal_lags_detected"))
+        short_seasonal = seasonal_series and calendar_periods < two_year_floor
         has_real_trend = False
         if (
             mk_p_value is not None
@@ -741,6 +948,10 @@ class TimeSeriesAnalysisTool(BaseTool):
                 finding_id="",
                 kind="trend",
                 headline=(
+                    f"{measure_label} moved {'up' if direction == 'increasing' else 'down'} across "
+                    f"{output.get('periods_used')} {grain} periods, but with under two years of history "
+                    f"this may be the season, not a trend (Sen's slope {sen_slope:+.4g} per {slope_unit})."
+                    if short_seasonal else
                     f"{measure_label} is {direction} across {output.get('periods_used')} "
                     f"{grain} periods (Sen's slope {sen_slope:+.4g} per {slope_unit}, "
                     f"Mann-Kendall p={mk_p_value:.3g})."
@@ -773,9 +984,13 @@ class TimeSeriesAnalysisTool(BaseTool):
                 effect=mk_tau,
                 effect_kind="r",
                 p_value=mk_p_value,
-                confidence=round(min(0.95, 0.5 + abs(mk_tau) / 2), 3),
+                confidence=round(min(0.95, 0.5 + abs(mk_tau) / 2), 3) * (0.5 if short_seasonal else 1),
                 chart_hint={"kind": "line", "data": {"series_label": output.get("series_label")}},
-                layer="analyst",
+                caveats=(
+                    ["Less than two full seasonal cycles: a rise or fall over this window cannot be "
+                     "separated from the season."] if short_seasonal else []
+                ),
+                layer="appendix" if short_seasonal else "analyst",
             ))
 
         panel = output.get("panel_trends")
@@ -786,8 +1001,6 @@ class TimeSeriesAnalysisTool(BaseTool):
         # enough history to separate "later in the calendar" from "later in
         # time" — flag it on every month finding rather than silently
         # reporting a trend artifact as a repeating season.
-        calendar_periods = output.get("calendar_periods") or output.get("periods_used") or 0
-        two_year_floor = _PERIODS_FOR_TWO_YEARS.get(str(grain), 24)
         trend_confounded = has_real_trend and calendar_periods < two_year_floor
 
         notable_months = output.get("notable_months") or {}
@@ -870,7 +1083,80 @@ class TimeSeriesAnalysisTool(BaseTool):
                 chart_hint={"kind": "bar", "data": {"category": "month_of_year"}},
                 layer="analyst",
             ))
+        results.extend(self._diurnal_findings(output, profile))
         return results
+
+    def _diurnal_findings(self, output: dict[str, Any], profile: DatasetProfile | None) -> list[Finding]:
+        """One finding per measure with a real hour-of-day cycle; the one
+        with the highest eta^2 goes on the executive tier."""
+        diurnal = output.get("diurnal") or {}
+        weekly = output.get("weekly_profile") or {}
+        if not diurnal:
+            return []
+        # The tool's primary measure (objective-aware, completeness-first) comes first
+        # in `diurnal`; it carries the executive headline. When it has no cycle the
+        # first entry is the strongest of the complete extras.
+        strongest = next(iter(diurnal))
+        units = {c.name: c.unit_hint for c in (profile.columns if profile else [])}
+        out: list[Finding] = []
+        for name, d in diurnal.items():
+            suffix = "%" if units.get(name) == "percent" else ""
+            ph, th = d["peak_hour"], d["trough_hour"]
+            ratio = d["peak_trough_ratio"]
+            headline = (
+                f"{name} peaks at {ph:02d}:00 ({_num(d['peak_value'])}{suffix}) and is lowest at "
+                f"{th:02d}:00 ({_num(d['trough_value'])}{suffix})"
+            )
+            if ratio is not None and ratio >= 1.25:
+                headline += f", about {ratio:.1f}x higher in the {_day_part(ph)}".replace(".0x", "x")
+            else:
+                headline += f", a swing of {d['effect']:.0%} of the average"
+            w = weekly.get(name)
+            gap = w.get("weekend_gap") if w else None
+            if gap is not None and abs(gap) >= _TOD_WEEKEND_GAP_MIN:
+                headline += f"; weekends run {abs(gap):.0%} {'lower' if gap < 0 else 'higher'}"
+            evidence: dict[str, Any] = {
+                "value_column": name, "date_column": output.get("date_column"),
+                "peak_hour": ph, "peak_value": d["peak_value"],
+                "trough_hour": th, "trough_value": d["trough_value"],
+                "peak_trough_ratio": ratio, "overall_mean": d["overall_mean"],
+                "eta_squared": d["eta_squared"], "p_value": d["p_value"], "n": d["n"],
+                "hourly_means": d["hourly_means"],
+            }
+            if w:
+                evidence.update({
+                    "weekday_mean": w["weekday_mean"], "weekend_mean": w["weekend_mean"],
+                    "weekend_gap": gap, "weekday_means": w["means"],
+                    "weekday_eta_squared": w["eta_squared"],
+                })
+            out.append(Finding(
+                finding_id="",
+                kind="trend",
+                headline=headline,
+                detail=(
+                    f"Average {name} by hour of day over {d['n']:,} readings: highest at {ph:02d}:00 "
+                    f"({d['peak_value']}), lowest at {th:02d}:00 ({d['trough_value']}), overall average "
+                    f"{d['overall_mean']}. Hour of day explains {d['eta_squared']:.1%} of the variation "
+                    f"(eta squared {d['eta_squared']}, ANOVA p={d['p_value']:.3g})."
+                    + (
+                        f" Weekday average {w['weekday_mean']} vs weekend {w['weekend_mean']}"
+                        + (f" ({gap:+.0%})." if gap is not None else ".")
+                        if w else ""
+                    )
+                ),
+                evidence=evidence,
+                source_tool=self.name,
+                measure=name,
+                dimension="hour_of_day",
+                level=f"{ph:02d}:00",
+                effect=d["effect"],
+                effect_kind="pct",
+                p_value=d["p_value"],
+                confidence=round(min(0.95, 0.4 + 0.6 * d["eta_squared"] + 0.15 * min(d["n"] / 2000, 1.0)), 3),
+                chart_hint=d.get("chart"),
+                layer="exec" if name == strongest else "analyst",
+            ))
+        return out
 
     def _panel_findings(
         self, panel: dict[str, Any], output: dict[str, Any], measure_label: str

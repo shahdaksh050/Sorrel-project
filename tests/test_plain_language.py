@@ -91,3 +91,9 @@ def test_helpers_do_not_mutate_findings_and_render_keeps_bus_intact() -> None:
     assert finding.headline == "Churn differs by region (p=0.003)"
     assert "p=0.003)" not in top and "unlikely to be down to chance" in top
     assert "a large effect" in evidence and "p=0.003" in evidence
+
+
+def test_format_p_never_prints_zero() -> None:
+    from src.core.plain_language import format_p
+
+    assert (format_p(0.0), format_p(0.0004), format_p(0.04567), format_p(None)) == ("<0.001", "<0.001", "0.046", "n/a")

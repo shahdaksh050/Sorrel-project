@@ -569,7 +569,7 @@ def _vl_rect_degenerate(vl: dict[str, Any], rows: list[dict[str, Any]], produced
         enc = {**(vl.get("encoding") or {}), **(layer.get("encoding") or {})}
         for channel in ("x", "y"):
             field = (enc.get(channel) or {}).get("field") if isinstance(enc.get(channel), dict) else None
-            field = field.replace("\\", "") if isinstance(field, str) else None
+            field = (field if any(field in r for r in rows) else field.replace("\\", "")) if isinstance(field, str) else None
             if field and field not in produced and any(field in r for r in rows) and _distinct(rows, field) < 2:
                 return (
                     f"vega_lite rect mark: '{field}' on {channel} has fewer than 2 distinct values, so every cell "
@@ -610,14 +610,17 @@ def _validate_vega_lite(spec: dict[str, Any]) -> tuple[dict[str, Any] | None, st
     except ValueError as exc:
         return None, f"vega_lite rejected: {exc}."
     fields = {k for r in raw_rows for k in r if isinstance(k, str)}
-    missing = sorted(f for f in {r.replace("\\", "") for r in ctx.refs} if f not in fields | ctx.produced)
+    # A literal backslash in a real column name is a name; otherwise `\.` is an escaped path character.
+    known = fields | ctx.produced
+    refs = {r if r in known else r.replace("\\", "") for r in ctx.refs}
+    missing = sorted(f for f in refs if f not in known)
     if missing:
         return None, f"vega_lite references field(s) {missing} not in the data rows (available: {sorted(fields)[:12]})."
 
     if not compound and (error := _vl_rect_degenerate(clean_vl, raw_rows, ctx.produced)):
         return None, error
 
-    used = (fields & {r.replace("\\", "") for r in ctx.refs}) or set(sorted(fields)[:8])
+    used = (fields & refs) or set(sorted(fields)[:8])
     rows = [{k: _clean_value(r.get(k)) for k in used} for r in raw_rows[:MAX_CHART_ROWS]]
     if not compound:
         clean_vl["width"] = "container"
@@ -798,7 +801,7 @@ def _alias_node(spec: dict[str, Any], amap: dict[str, str]) -> dict[str, Any]:
         out = walk(ch)
         if (isinstance(ch, dict) and isinstance(ch.get("field"), str) and out["field"] != ch["field"]
                 and "title" not in ch and not ("axis" in ch and ch["axis"] is None)):
-            out["title"] = ch["field"].replace("\\", "")
+            out["title"] = ch["field"] if ch["field"] in amap else ch["field"].replace("\\", "")
         return out
 
     def transform(item: Any) -> Any:

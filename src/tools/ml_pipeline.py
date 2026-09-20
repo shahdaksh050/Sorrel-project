@@ -86,6 +86,21 @@ def _detect_cuda_gpu() -> bool:
 #: Hyperparameter search never sees more than this many training rows.
 _TUNE_SAMPLE_ROWS = 5_000
 
+#: evaluate_model scores the train side (for the train-test gap) on at most
+#: this many rows, and ranks drivers by permutation importance (one full
+#: prediction pass per feature per repeat) on at most _PERMUTATION_MAX_ROWS
+#: held-out rows; a seeded random sample above those sizes.
+_EVAL_TRAIN_MAX_ROWS = 100_000
+_PERMUTATION_MAX_ROWS = 25_000
+
+
+def _seeded_rows(n: int, cap: int) -> np.ndarray | None:
+    """Sorted positions of a seeded random sample of `cap` of `n` rows, or None
+    when n <= cap (nothing is sampled)."""
+    if n <= cap:
+        return None
+    return np.sort(np.random.default_rng(0).choice(n, cap, replace=False))
+
 
 def _tuning_sample(
     X: pd.DataFrame,
@@ -515,12 +530,17 @@ def _detect_target_leakage(
                     continue
                 # Share of rows whose target equals their group's majority
                 # class. 1.0 means the feature fixes the target exactly.
-                purity = (
+                # = sum of each group's majority count / rows with a feature
+                # value, from one groupby instead of a Python call per group.
+                pair_counts = (
                     pd.DataFrame({"f": feature, "y": y})
-                    .groupby("f", observed=True)["y"]
-                    .transform(lambda g: g.value_counts().iloc[0] / len(g))
-                    .mean()
+                    .groupby(["f", "y"], observed=True)
+                    .size()
                 )
+                majority = pair_counts.groupby(level=0, observed=True).max()
+                if len(majority) < n_groups:  # a group with no target value
+                    continue
+                purity = majority.sum() / int(feature.notna().sum())
                 if float(purity) >= purity_bar:
                     warnings.append(
                         f"'{column}' determines the target in "
@@ -1561,11 +1581,35 @@ class EvaluateModelTool(BaseTool):
             X, y, df, split_strategy, group_column, task_type, test_size
         )
         y_pred_test = model.predict(X_test)
+        n_train_full = len(X_train)
+        train_rows = _seeded_rows(n_train_full, _EVAL_TRAIN_MAX_ROWS)
+        if train_rows is not None:
+            X_train, y_train = X_train.iloc[train_rows], y_train.iloc[train_rows]
         y_pred_train = model.predict(X_train)
 
+        perm_rows = _seeded_rows(len(X_test), _PERMUTATION_MAX_ROWS)
         drivers, driver_narrative = self._explain_drivers(
-            model, X_test, y_test, task_type, target_column, class_labels
+            model,
+            X_test if perm_rows is None else X_test.iloc[perm_rows],
+            y_test if perm_rows is None else y_test.iloc[perm_rows],
+            task_type, target_column, class_labels,
         )
+        sampling: dict[str, Any] = {}
+        caveats = []
+        if train_rows is not None:
+            caveats.append(
+                f"train score computed on a random sample of {len(X_train):,} of {n_train_full:,} training rows"
+            )
+        if perm_rows is not None:
+            caveats.append(
+                f"driver ranking computed on a random sample of {len(perm_rows):,} of {len(X_test):,} held-out rows"
+            )
+        if caveats:
+            sampling = {
+                "sampled_from": n_train_full if train_rows is not None else len(X_test),
+                "sampled_to": len(X_train) if train_rows is not None else _PERMUTATION_MAX_ROWS,
+                "sample_caveat": "; ".join(caveats),
+            }
 
         if task_type == "classification":
             from sklearn.metrics import accuracy_score
@@ -1593,6 +1637,7 @@ class EvaluateModelTool(BaseTool):
                 "class_labels": class_labels,
                 "top_drivers": drivers,
                 "driver_narrative": driver_narrative,
+                **sampling,
                 **self._held_out_curves(model, X_test, y_test, y_pred_test, class_labels),
             }
         else:
@@ -1614,6 +1659,7 @@ class EvaluateModelTool(BaseTool):
                 "task_type": task_type,
                 "top_drivers": drivers,
                 "driver_narrative": driver_narrative,
+                **sampling,
             }
 
     #: ROC points kept for the dashboard — enough for a smooth curve, small

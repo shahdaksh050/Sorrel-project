@@ -27,6 +27,7 @@ import pandas as pd
 from src.core.domains import domain_confidence, resolve_column
 from src.core.findings import Finding
 from src.core.privacy import fold_small_groups, is_small, min_cell_size, suppression_note
+from src.core.vocab import resolve_foreign
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -215,7 +216,8 @@ class WorkforceAnalysisTool(BaseTool):
                         exit_date_column, status_column, group_column) if c
         }
         salary_column = salary_column or resolve_column(
-            df, ("salary", "compensation", "pay", "wage", "income", "ctc"), claimed)
+            df, ("salary", "compensation", "pay", "wage", "income", "ctc"), claimed
+        ) or resolve_foreign(df.columns, "pay", claimed)
         claimed.add(salary_column or "")
         department_column = department_column or resolve_column(
             df, ("department", "dept", "division", "team", "function"), claimed)
@@ -231,7 +233,9 @@ class WorkforceAnalysisTool(BaseTool):
             df, ("employment_status", "status", "attrition", "active", "left",
                  "churn"), claimed)
         claimed.add(status_column or "")
-        group_column = group_column or resolve_column(df, ("gender", "sex"), claimed)
+        group_column = group_column or resolve_column(
+            df, ("gender", "sex"), claimed
+        ) or resolve_foreign(df.columns, "gender", claimed)
 
         if salary_column is None or salary_column not in df.columns:
             raise ToolExecutionError(
@@ -526,7 +530,20 @@ class WorkforceAnalysisTool(BaseTool):
         if highest_attrition:
             dept_rate = highest_attrition.get("attrition_rate_pct", 0.0)
             lift = dept_rate - overall_attrition if overall_attrition is not None else dept_rate
-            if lift > 3.0:
+            dept_n = highest_attrition.get("headcount")
+            if lift > 3.0 and dept_n is not None and is_small(dept_n):
+                results.append(
+                    Finding(
+                        finding_id=f"{self.name}_attrition_small_group",
+                        kind="workforce",
+                        headline="Attrition is concentrated in a small group; exact figures are withheld.",
+                        evidence={"n": dept_n},
+                        measure="attrition_rate",
+                        confidence=0.3,
+                        caveats=[suppression_note(1), *privacy_caveats],
+                    )
+                )
+            elif lift > 3.0:
                 results.append(
                     Finding(
                         finding_id=f"{self.name}_attrition_{highest_attrition.get('department')}",
@@ -543,6 +560,7 @@ class WorkforceAnalysisTool(BaseTool):
                         evidence={
                             **highest_attrition,
                             "overall_attrition_rate_pct": overall_attrition,
+                            "n": dept_n,
                         },
                         measure="attrition_rate",
                         dimension="department",

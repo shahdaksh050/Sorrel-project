@@ -43,7 +43,7 @@ class TestGenerateVisualizationsTool:
             file_path=numeric_csv, chart_type="distributions", output_dir=out
         )
         assert result.status == "success"
-        assert "charts" in result.output and len(result.output["charts"]) == 3  # f1, f2, f3; the 2-value label is rejected by the critic
+        assert "charts" in result.output and len(result.output["charts"]) == 4  # f1, f2, f3 and the 2-value label (a bar of counts)
 
     def test_unknown_chart_type_errors(self, numeric_csv: str) -> None:
         result = GenerateVisualizationsTool().run(

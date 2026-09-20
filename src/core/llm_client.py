@@ -7,6 +7,7 @@ Split out of ``src/core/controller.py``; re-exported from there, so
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -15,6 +16,58 @@ from typing import Any, cast
 
 from src.core.governance import LOCAL_PROVIDERS, local_only, record_llm_call
 from src.core.model_telemetry import get_limiter
+
+logger = logging.getLogger(__name__)
+
+#: Ollama's real server context is usually 2-8k whatever the model's native
+#: window says, so a local model is assumed to have at most this much unless
+#: LOCAL_LLM_CONTEXT says otherwise.
+_LOCAL_DEFAULT_CONTEXT = 8192
+_local_ctx_warned = False
+
+#: Default max_tokens per reasoning stage (matched by substring on
+#: LLMClient.stage) when neither the caller nor LLM_MAX_TOKENS sets one.
+_STAGE_MAX_TOKENS: tuple[tuple[str, int], ...] = (
+    ("chart_design", 2500),
+    ("stage7", 2500),
+    ("stage6", 1200),
+    ("understanding", 1200),
+    ("stage2", 1500),
+    ("stage4", 1500),
+)
+
+_CONTEXT_ERROR_HINTS = (
+    "context length", "context_length", "context window", "maximum context",
+    "prompt is too long", "too many tokens", "input is too long", "reduce the length",
+)
+
+_REASONING_BLOCK = re.compile(r"<(think|thinking|reasoning)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_REASONING_CLOSE = re.compile(r"</(?:think|thinking|reasoning)\s*>", re.IGNORECASE)
+_REASONING_OPEN = re.compile(r"<(?:think|thinking|reasoning)\b[^>]*>", re.IGNORECASE)
+_SMART_QUOTES = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
+_TRAILING_COMMA = re.compile(r",\s*([}\]])")
+
+_net_slots: threading.BoundedSemaphore | None = None
+_net_slots_lock = threading.Lock()
+
+
+def llm_concurrency(provider: str | None = None) -> int:
+    """Max simultaneous LLM network calls: LLM_MAX_CONCURRENCY, else 1 for a
+    local model server (it serialises requests anyway) and 4 for cloud."""
+    raw = os.getenv("LLM_MAX_CONCURRENCY", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    provider = provider or os.getenv("LLM_PROVIDER", "openai").lower()
+    return 1 if provider in LOCAL_PROVIDERS else 4
+
+
+def _net_slot(provider: str) -> threading.BoundedSemaphore:
+    """Process-wide semaphore around the network call (never the rate-limiter wait)."""
+    global _net_slots
+    with _net_slots_lock:
+        if _net_slots is None:
+            _net_slots = threading.BoundedSemaphore(llm_concurrency(provider))
+        return _net_slots
 
 #: Fallback model per provider, used only when LLM_MODEL is unset.
 _DEFAULT_MODELS: dict[str, str] = {
@@ -33,6 +86,11 @@ class LocalOnlyError(RuntimeError):
     """LOCAL_ONLY=true and the configured provider would send data off-machine."""
 
 
+class LLMContextError(RuntimeError):
+    """The prompt does not fit the model's context window (not a ValueError:
+    a retry with the same prompt cannot help, so callers fall back instead)."""
+
+
 class LLMClient:
     """
     Thin wrapper around LLM provider APIs.
@@ -47,8 +105,11 @@ class LLMClient:
         self.provider: str = os.getenv("LLM_PROVIDER", "openai").lower()
         self.model: str = os.getenv("LLM_MODEL") or _DEFAULT_MODELS.get(self.provider, "gpt-4o")
         self.temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
-        self.max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
-        self.timeout: float = float(os.getenv("LLM_TIMEOUT", "120"))
+        local = self.provider in LOCAL_PROVIDERS
+        #: True when LLM_MAX_TOKENS is set: it then beats the per-stage defaults.
+        self._max_tokens_env = bool(os.getenv("LLM_MAX_TOKENS", "").strip())
+        self.max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "").strip() or (2048 if local else 4096))
+        self.timeout: float = float(os.getenv("LLM_TIMEOUT", "").strip() or (600 if local else 120))
         # Built lazily on first call and reused — the SDK clients are
         # long-lived and thread-safe, and re-pooling per call was costing
         # every invocation a fresh TCP+TLS handshake (~100-300ms).
@@ -58,8 +119,7 @@ class LLMClient:
         # response under `_rlm_usage` so RLMEngine's `_extract_usage` (which
         # already looks for that key) reports real token counts instead of
         # the zeros its own docstring warns about. Not every branch sets
-        # this (the NVIDIA streaming path doesn't request usage in-stream —
-        # left as a smaller follow-up), so it stays best-effort by design.
+        # this (best-effort by design: an endpoint may not report usage).
         #
         # Round 8 hardening — this LLMClient instance is shared across RLM
         # worker threads (RLMEngine.decompose_and_invoke runs concurrent
@@ -106,8 +166,28 @@ class LLMClient:
             self._usage_local.max_tokens = None
 
     def _call_max_tokens(self) -> int:
-        """This thread's max_tokens for the current call (per-call override or the default)."""
-        return getattr(self._usage_local, "max_tokens", None) or self.max_tokens
+        """This thread's max_tokens for the current call: per-call override,
+        LLM_MAX_TOKENS, else the per-stage default (reasoning models keep >=4096)."""
+        explicit = getattr(self._usage_local, "max_tokens", None)
+        if explicit:
+            return int(explicit)
+        if self._max_tokens_env:
+            return self.max_tokens
+        if self._is_reasoning_model():
+            return max(self.max_tokens, 4096)
+        stage = (self.stage or "").lower()
+        return next((v for k, v in _STAGE_MAX_TOKENS if k in stage), self.max_tokens)
+
+    def _is_reasoning_model(self) -> bool:
+        """Models whose hidden reasoning eats max_tokens: never shrink their budget.
+        Gemini and OpenRouter are treated as reasoning wholesale (see the
+        reasoning params in _call_openai_compat)."""
+        m = self.model.lower()
+        return (
+            self.provider in ("nvidia", "openrouter", "gemini")
+            or (self.provider == "openai" and re.match(r"(o\d|gpt-5)", m) is not None)
+            or re.search(r"thinking|reasoning|(^|[^a-z0-9])(r1|qwq|qwen3|gpt-oss)", m) is not None
+        )
 
     def call(
         self,
@@ -129,9 +209,9 @@ class LLMClient:
         # across RLM worker threads, so instance attributes would race.
         self._usage_local.effort = reasoning_effort
         self._usage_local.max_tokens = max_tokens
-        budget = max_tokens or self.max_tokens
         try:
             raw = self._dispatch(system_prompt, user_prompt)
+            budget = self._call_max_tokens()  # as clamped to the context window
         except Exception as exc:
             self._audit(system_prompt, user_prompt, None, f"{type(exc).__name__}: {exc}")
             # RLMEngine counts tokens a failed call already spent.
@@ -158,6 +238,10 @@ class LLMClient:
                 err.rlm_usage = exc.rlm_usage  # type: ignore[attr-defined]
                 raise err from exc
             raise
+        if isinstance(parsed, list) and parsed and all(isinstance(i, dict) for i in parsed):
+            # Weak models often answer a plan as a bare list of steps; the
+            # controller's tolerant parser reads it from "steps".
+            parsed = {"steps": parsed}
         if not isinstance(parsed, dict):
             # json.loads happily returns a list/str/number; every caller
             # (and the `_rlm_usage` attach below) needs an object.
@@ -183,9 +267,55 @@ class LLMClient:
                 f"LOCAL_ONLY=true forbids sending prompts to provider '{self.provider}'. "
                 "Use LLM_PROVIDER=local or ollama, or unset LOCAL_ONLY."
             )
+        self._fit_budget(system_prompt, user_prompt)
         if self.provider == "anthropic":
             return self._call_anthropic(system_prompt, user_prompt)
-        return self._call_openai_compat(system_prompt, user_prompt)
+        try:
+            return self._call_openai_compat(system_prompt, user_prompt)
+        except Exception as exc:
+            if self.provider in LOCAL_PROVIDERS and (
+                isinstance(exc, (ConnectionError, TimeoutError))
+                or type(exc).__name__ in ("APIConnectionError", "APITimeoutError")
+            ):
+                base = os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+                raise RuntimeError(
+                    f"Could not reach the local model server at {base} ({type(exc).__name__}): "
+                    "is the model server running and the model pulled? Check LOCAL_LLM_BASE_URL "
+                    "(and raise LLM_TIMEOUT for a slow model)."
+                ) from exc
+            raise
+
+    def _fit_budget(self, system_prompt: str, user_prompt: str) -> None:
+        """Clamp this call's max_tokens to what is left of the context window,
+        or fail loudly when the prompt alone does not fit — otherwise the
+        server silently truncates the START of the prompt (the instructions)."""
+        window = self.get_context_window()
+        if not (
+            self.provider in LOCAL_PROVIDERS
+            or os.getenv("LLM_CONTEXT_TOKENS", "").strip()
+            or not get_limiter().get_profile(self.provider, self.model).inferred
+        ):
+            return  # window is a guess for an unknown hosted model: don't act on it
+        prompt_tokens = int((len(system_prompt) + len(user_prompt)) / 3.5)
+        if prompt_tokens > window * 0.92:
+            raise LLMContextError(
+                f"prompt of ~{prompt_tokens} tokens does not fit the model's {window}-token window: "
+                "use a larger-context model or set LOCAL_LLM_CONTEXT"
+            )
+        room = max(256, window - prompt_tokens - 256)
+        if room < self._call_max_tokens():
+            self._usage_local.max_tokens = room
+
+    def _raise_if_context_error(self, exc: Exception) -> None:
+        """A 400 'context length exceeded' is final: surface it, never retry it
+        (least of all as a rejected JSON-mode parameter)."""
+        if getattr(exc, "status_code", None) in (400, 413, 422) and any(
+            k in str(exc).lower() for k in _CONTEXT_ERROR_HINTS
+        ):
+            raise LLMContextError(
+                f"{self.provider} model '{self.model}' rejected the prompt as too long for its "
+                f"context window ({str(exc)[:200]}): use a larger-context model or set LOCAL_LLM_CONTEXT."
+            ) from exc
 
     def _call_openai_compat(self, system_prompt: str, user_prompt: str) -> str:
         """
@@ -243,7 +373,10 @@ class LLMClient:
         client_kwargs: dict[str, Any] = {
             "api_key": api_key,
             "timeout": self.timeout,
-            "max_retries": 2,
+            # SDK backoff retries (connection errors, 408/409/429/5xx): at most 2 in
+            # the cloud; none locally, where a refused/hung server won't recover
+            # and a retried 600 s timeout would stall the run for half an hour.
+            "max_retries": 0 if self.provider in LOCAL_PROVIDERS else 2,
         }
         if base_url:
             client_kwargs["base_url"] = base_url
@@ -330,9 +463,19 @@ class LLMClient:
             # reasoning_content chunks (chain-of-thought) before the answer.
             create_kwargs["stream"] = True
             create_kwargs["top_p"] = 1
+            # Final chunk carries the token usage (choices empty); _create
+            # drops this again if an endpoint rejects it.
+            create_kwargs["stream_options"] = {"include_usage": True}
             stream = self._create(client, create_kwargs)
             content_parts: list[str] = []
             for chunk in stream:
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    self._usage_local.value = {
+                        "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
+                        "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
+                        "provider": self.provider,
+                    }
                 if not getattr(chunk, "choices", None):
                     err = getattr(chunk, "error", None)
                     if err:
@@ -418,14 +561,18 @@ class LLMClient:
 
         while True:
             try:
-                if hasattr(client.chat.completions, "with_raw_response") and not is_stream:
-                    raw_resp = client.chat.completions.with_raw_response.create(**create_kwargs)
-                    resp = raw_resp.parse()
-                    headers = getattr(raw_resp, "headers", None)
-                    if headers:
-                        get_limiter().update_from_headers(self.provider, self.model, headers)
-                else:
-                    resp = client.chat.completions.create(**create_kwargs)
+                # Network call only — the limiter wait happened before, outside
+                # the slot. A stream's body is read after this returns, so the
+                # slot bounds request initiation for streamed (NVIDIA) calls.
+                with _net_slot(self.provider):
+                    if hasattr(client.chat.completions, "with_raw_response") and not is_stream:
+                        raw_resp = client.chat.completions.with_raw_response.create(**create_kwargs)
+                        resp = raw_resp.parse()
+                        headers = getattr(raw_resp, "headers", None)
+                        if headers:
+                            get_limiter().update_from_headers(self.provider, self.model, headers)
+                    else:
+                        resp = client.chat.completions.create(**create_kwargs)
             except Exception as exc:
                 status = getattr(exc, "status_code", None)
                 msg = str(exc).lower()
@@ -438,6 +585,10 @@ class LLMClient:
                     time.sleep(backoff)
                     continue
 
+                self._raise_if_context_error(exc)
+                if "stream_options" in create_kwargs and "stream_options" in msg:
+                    create_kwargs.pop("stream_options")
+                    continue
                 # Google (or any endpoint) rejecting reasoning_effort for this model.
                 if "reasoning_effort" in create_kwargs and "reasoning_effort" in msg:
                     create_kwargs.pop("reasoning_effort")
@@ -488,14 +639,15 @@ class LLMClient:
         attempt_429 = 0
         while True:
             try:
-                if hasattr(client.messages, "with_raw_response"):
-                    raw_resp = client.messages.with_raw_response.create(**create_kwargs)
-                    msg = raw_resp.parse()
-                    headers = getattr(raw_resp, "headers", None)
-                    if headers:
-                        get_limiter().update_from_headers(self.provider, self.model, headers)
-                else:
-                    msg = client.messages.create(**create_kwargs)
+                with _net_slot(self.provider):
+                    if hasattr(client.messages, "with_raw_response"):
+                        raw_resp = client.messages.with_raw_response.create(**create_kwargs)
+                        msg = raw_resp.parse()
+                        headers = getattr(raw_resp, "headers", None)
+                        if headers:
+                            get_limiter().update_from_headers(self.provider, self.model, headers)
+                    else:
+                        msg = client.messages.create(**create_kwargs)
                 break
             except Exception as exc:
                 if self._is_rate_limit(getattr(exc, "status_code", None), str(exc).lower()) and attempt_429 < max_429_retries:
@@ -505,6 +657,7 @@ class LLMClient:
                         raise
                     time.sleep(backoff)
                     continue
+                self._raise_if_context_error(exc)
                 raise
 
         self._usage_local.truncated = getattr(msg, "stop_reason", None) == "max_tokens"
@@ -527,7 +680,23 @@ class LLMClient:
         raw = os.getenv("LLM_CONTEXT_TOKENS", "").strip()
         if raw.isdigit() and int(raw) > 0:
             return int(raw)
-        return get_limiter().get_profile(self.provider, self.model).context_window
+        window = get_limiter().get_profile(self.provider, self.model).context_window
+        if self.provider not in LOCAL_PROVIDERS:
+            return window
+        # The table lists a model's native window (llama3.1 = 128k) but the
+        # server's real context is usually 2-8k: trust only an explicit value.
+        raw = os.getenv("LOCAL_LLM_CONTEXT", "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            return int(raw)
+        global _local_ctx_warned
+        if not _local_ctx_warned:
+            _local_ctx_warned = True
+            logger.warning(
+                "LOCAL_LLM_CONTEXT is not set: assuming a %d-token context for the local model. "
+                "Set it to your server's real context (e.g. Ollama num_ctx).",
+                _LOCAL_DEFAULT_CONTEXT,
+            )
+        return min(window, _LOCAL_DEFAULT_CONTEXT)
 
     @staticmethod
     def _loads_lenient(text: str) -> dict[str, Any]:
@@ -552,7 +721,39 @@ class LLMClient:
             return cast(dict[str, Any], json.loads(text, strict=False))
 
     @staticmethod
+    def _strip_reasoning(raw: str) -> str:
+        """The answer with chain-of-thought removed: <think>/<thinking>/<reasoning>
+        blocks, a lone closing tag (opener was in the prompt template), and an
+        unterminated leading opener (reply cut off mid-thought -> "")."""
+        text = raw.lstrip("﻿").strip()
+        if "<" not in text:
+            return text
+        text = _REASONING_BLOCK.sub("", text)
+        closes = list(_REASONING_CLOSE.finditer(text))
+        if closes:
+            text = text[closes[-1].end():]
+        text = text.strip()
+        return "" if _REASONING_OPEN.match(text) else text
+
+    @staticmethod
+    def _light_repair(text: str) -> str:
+        """Smart quotes -> ASCII and trailing commas dropped. Only tried after a
+        strict parse failed, so legitimate curly quotes in values survive."""
+        return _TRAILING_COMMA.sub(r"\1", text.translate(_SMART_QUOTES))
+
+    @staticmethod
     def _parse_json(raw: str, allow_repair: bool = True) -> dict[str, Any]:
+        raw = LLMClient._strip_reasoning(raw)
+        if not raw:
+            raise ValueError(
+                "LLM reply held only reasoning text and no answer (likely cut off while "
+                "thinking) — raise LLM_MAX_TOKENS or lower LLM_REASONING_EFFORT."
+            )
+        try:
+            return LLMClient._loads_lenient(raw)
+        except json.JSONDecodeError:
+            pass
+
         # Strip markdown fences if present
         for fence in ("```json", "```"):
             if fence in raw:
@@ -561,13 +762,27 @@ class LLMClient:
 
         cleaned = raw.strip()
 
-        try:
-            return LLMClient._loads_lenient(cleaned)
-        except json.JSONDecodeError:
-            pass
+        for candidate in (cleaned, LLMClient._light_repair(cleaned)):
+            try:
+                return LLMClient._loads_lenient(candidate)
+            except json.JSONDecodeError:
+                continue
 
         if not allow_repair:
             raise ValueError(f"LLM returned non-JSON: {raw[:300]}")
+
+        # Prose around the object, or several objects in one reply: take the
+        # first balanced one (preferring a plan/answer) before json_repair,
+        # which would blur several objects together.
+        extracted = LLMClient._extract_json_object(cleaned)
+        if extracted is not None:
+            for candidate in (extracted, LLMClient._light_repair(extracted)):
+                try:
+                    obj = LLMClient._loads_lenient(candidate)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    return obj
 
         # Try json-repair library if installed (handles all edge cases)
         try:
@@ -608,40 +823,52 @@ class LLMClient:
     @staticmethod
     def _extract_json_object(text: str) -> str | None:
         """
-        First balanced {...} in `text`, or None.
+        First balanced {...} in `text` — or, when the reply holds several, the
+        first one containing "status" or "steps" — or None.
 
         Brace counting is string-aware: a `{` or `}` inside a JSON string
         value (or escaped) must not change the depth, or a reply containing
         a brace in prose — or in an analysis rationale — truncates at the
         wrong place and produces something worse than no match.
         """
-        start = text.find("{")
-        if start == -1:
+        objects: list[str] = []
+        pos = 0
+        while (start := text.find("{", pos)) != -1:
+            depth = 0
+            in_string = False
+            escaped = False
+            end = -1
+            for index in range(start, len(text)):
+                char = text[index]
+                if escaped:
+                    escaped = False
+                    continue
+                if char == "\\":
+                    escaped = True
+                    continue
+                if char == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = index
+                        break
+            if end == -1:
+                # Unbalanced: with nothing better, hand back the tail so the
+                # truncation repair can try.
+                if not objects:
+                    return text[start:]
+                break
+            objects.append(text[start : end + 1])
+            pos = end + 1
+        if not objects:
             return None
-        depth = 0
-        in_string = False
-        escaped = False
-        for index in range(start, len(text)):
-            char = text[index]
-            if escaped:
-                escaped = False
-                continue
-            if char == "\\":
-                escaped = True
-                continue
-            if char == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start : index + 1]
-        # Unbalanced: hand back the tail so the truncation repair can try.
-        return text[start:]
+        return next((o for o in objects if '"status"' in o or '"steps"' in o), objects[0])
 
     @staticmethod
     def _repair_truncated_json(s: str) -> str:

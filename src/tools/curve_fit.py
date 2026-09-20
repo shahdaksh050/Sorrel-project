@@ -31,7 +31,12 @@ import numpy as np
 import pandas as pd
 
 from src.core.findings import Finding
-from src.core.profiler import _name_tokens, profile_dataframe
+from src.core.profiler import (
+    ARCHETYPE_EXPERIMENT,
+    ARCHETYPE_SENSOR,
+    profile_dataframe,
+)
+from src.core.vocab import ROLE_TOKENS, column_role, name_tokens
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -55,11 +60,10 @@ _SMALL_N = 20
 _POINT_BUDGET = 240
 _CURVE_BUDGET = 120
 
-_X_TOKENS = frozenset({
-    "dose", "conc", "concentration", "time", "temperature", "temp", "age", "day", "hour",
-    "minute", "distance", "depth", "pressure", "ph", "wavelength", "dilution", "cycle",
-    "generation",
-})
+#: Axis names common in ordinary business data (weak) never suffice alone for applies_to.
+_WEAK_X_TOKENS = ROLE_TOKENS["dose_x_weak"]
+_X_TOKENS = ROLE_TOKENS["dose_x_strong"] | _WEAK_X_TOKENS
+_NARROW_TABLE_COLS = 6
 _X_UNITS = {
     "day": "days", "hour": "hours", "minute": "minutes", "week": "weeks", "month": "months",
     "year": "years", "generation": "generations", "cycle": "cycles",
@@ -77,23 +81,31 @@ _ALIASES = {
 
 def _tokens(name: str) -> set[str]:
     out: set[str] = set()
-    for tok in _name_tokens(name):
+    for tok in name_tokens(name):
         out.add(tok)
         if len(tok) > 3 and tok.endswith("s"):
             out.add(tok[:-1])
     return out
 
 
+def _is_x_override(profile: DatasetProfile, name: str) -> bool:
+    return column_role(profile, name, "dose_x_strong") or column_role(profile, name, "dose_x_weak")
+
+
 def _x_candidates(profile: DatasetProfile) -> list[ColumnProfile]:
     return [
         c for c in profile.columns
-        if c.kind == "numeric" and c.nunique >= _MIN_X_DISTINCT and _tokens(c.name) & _X_TOKENS
+        if c.kind == "numeric" and c.nunique >= _MIN_X_DISTINCT
+        and (_tokens(c.name) & _X_TOKENS or _is_x_override(profile, c.name))
     ]
 
 
 def _y_candidates(profile: DatasetProfile, x_name: str) -> list[ColumnProfile]:
     numeric = [c for c in profile.columns if c.kind == "numeric" and c.name != x_name and c.nunique >= 3]
-    return sorted(numeric, key=lambda c: (not c.is_measure(), bool(_tokens(c.name) & _X_TOKENS)))
+    return sorted(
+        numeric,
+        key=lambda c: (not c.is_measure(), bool(_tokens(c.name) & _X_TOKENS or _is_x_override(profile, c.name))),
+    )
 
 
 def _x_unit(name: str) -> str:
@@ -789,7 +801,18 @@ class CurveFitAnalysisTool(BaseTool):
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
         if profile is None or profile.row_count < _MIN_APPLIES_ROWS:
             return 0.0
+        # Generic axis names (age, time, day, distance...) exist in most business
+        # tables, so on their own they must not offer this tool: they count only
+        # on sensor/experiment-shaped data. Dose/concentration-style names always do.
+        # A narrow all-numeric table (time, signal) is a measurement table too.
+        scientific = profile.archetype in (ARCHETYPE_SENSOR, ARCHETYPE_EXPERIMENT) or (
+            profile.column_count <= _NARROW_TABLE_COLS and all(c.kind == "numeric" for c in profile.columns)
+        )
         for xc in _x_candidates(profile):
+            if not scientific and not (
+                (_tokens(xc.name) & _X_TOKENS) - _WEAK_X_TOKENS or column_role(profile, xc.name, "dose_x_strong")
+            ):
+                continue
             if _y_candidates(profile, xc.name):
                 return 0.4
         return 0.0

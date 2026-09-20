@@ -19,7 +19,6 @@ not as a real preference for higher prices. Everything is fitted per call.
 from __future__ import annotations
 
 import math
-import re
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +27,7 @@ import pandas as pd
 
 from src.core.chart_spec import validate_chart_spec
 from src.core.findings import Finding
+from src.core.vocab import name_tokens, role_tokens
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -43,15 +43,13 @@ _MIN_ROWS_TO_APPLY = 50
 _NEAR_ZERO = 0.1
 _POOLED_MIN_PRODUCTS = 3
 _MAX_FINDINGS = 5
-_PRICE_TOKENS = ("price", "unit_price", "unitprice", "cost_per", "rate", "fare")
-_QTY_TOKENS = ("quantity", "qty", "units", "volume", "sold", "orders", "count")
-_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-_SPLIT = re.compile(r"[^a-z0-9]+")
+_PRICE_TOKENS = role_tokens("price")
+_QTY_TOKENS = role_tokens("quantity")
 _ALL = "All products"
 
 
 def _tokens(name: str) -> set[str]:
-    words = [t for t in _SPLIT.split(_CAMEL.sub("_", str(name)).lower()) if t]
+    words = name_tokens(name)
     return set(words) | {"_".join(p) for p in pairwise(words)} | {"".join(p) for p in pairwise(words)}
 
 
@@ -68,10 +66,15 @@ def _detect_columns(profile: DatasetProfile | None) -> tuple[str, str] | None:
         return None
     prices: list[tuple[int, str]] = []
     quantities: list[tuple[int, str]] = []
+    overrides = profile.role_overrides
     for c in profile.columns:
         if c.kind != "numeric" or c.nunique < 3:
             continue
-        if (rank := _matches(c.name, _PRICE_TOKENS)) is not None:
+        if overrides.get(c.name) == "price":
+            prices.append((-1, c.name))
+        elif overrides.get(c.name) == "quantity":
+            quantities.append((-1, c.name))
+        elif (rank := _matches(c.name, _PRICE_TOKENS)) is not None:
             prices.append((rank, c.name))
         elif (rank := _matches(c.name, _QTY_TOKENS)) is not None:
             quantities.append((rank, c.name))

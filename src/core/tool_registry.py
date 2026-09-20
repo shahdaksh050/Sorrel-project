@@ -15,6 +15,13 @@ from src.core.governance import code_execution_enabled
 #: never required from the planner and never "unknown".
 _INJECTED_PARAMS = frozenset({"file_path", "output_dir", "prior_results"})
 
+#: Compact tool block (8k-context models): at most this many tools, one line of
+#: at most this many characters (~70 tokens) each; the workbench tools are never cut.
+_COMPACT_MAX_TOOLS = 10
+_COMPACT_LINE_CHARS = 240
+_COMPACT_MAX_OPTIONAL = 8
+_ALWAYS_LISTED = frozenset({"clean_data", "execute_dynamic_code"})
+
 
 class ToolRegistry:
     """
@@ -176,8 +183,18 @@ class ToolRegistry:
         metadata: Any | None,
         use_ml: bool = True,
         use_llm: bool = True,
+        compact: bool = False,
     ) -> str:
+        """`compact` (8k-context models): one `name(params) — sentence` line for
+        each of the top-scoring candidates, the workbench tools always kept."""
         tools = self.candidate_tools(profile, metadata, use_ml=use_ml, use_llm=use_llm)
+        if compact:
+            tools = tools or list(self._registry.values())
+            pinned = [t.name for t in tools if t.name in _ALWAYS_LISTED]
+            others = [t.name for t in tools if t.name not in _ALWAYS_LISTED]
+            keep = {*pinned, *others[: _COMPACT_MAX_TOOLS - len(pinned)]}
+            lines = [_compact_tool_description(t) for t in tools if t.name in keep]
+            return "\n".join([*lines, "(other tools available via dsa.tools())"])
         if not tools:
             return self.get_all_descriptions()
         return "\n\n".join(t.to_prompt_description() for t in tools)
@@ -197,9 +214,13 @@ class ToolRegistry:
         return "\n".join(_short_tool_description(t) for t in tools)
 
 
-def _short_tool_description(tool: Any) -> str:
+def _first_sentence(tool: Any, limit: int) -> str:
     description = " ".join(str(getattr(tool, "description", "")).split())
-    first = re.split(r"(?<=[.!?])\s", description, maxsplit=1)[0][:200]
+    return re.split(r"(?<=[.!?])\s", description, maxsplit=1)[0][:limit]
+
+
+def _tool_params(tool: Any) -> tuple[list[str], list[str]]:
+    """(required, optional) planner-facing parameter names."""
     try:
         schema = tool.get_schema() or {}
     except Exception:
@@ -209,6 +230,22 @@ def _short_tool_description(tool: Any) -> str:
         if isinstance(v, dict) and v.get("required") and k not in _INJECTED_PARAMS
     ]
     optional = [k for k in schema if k not in required and k not in _INJECTED_PARAMS]
+    return required, optional
+
+
+def _compact_tool_description(tool: Any) -> str:
+    """`name(required; optional: a,b) — first sentence`, about 70 tokens at most."""
+    required, optional = _tool_params(tool)
+    args = ", ".join(required)
+    if optional:
+        args += ("; " if args else "") + "optional: " + ",".join(optional[:_COMPACT_MAX_OPTIONAL])
+    head = f"{tool.name}({args}) — "
+    return head + _first_sentence(tool, max(40, _COMPACT_LINE_CHARS - len(head)))
+
+
+def _short_tool_description(tool: Any) -> str:
+    first = _first_sentence(tool, 200)
+    required, optional = _tool_params(tool)
     line = f"- {tool.name}: {first}"
     if required:
         line += f" Required: {', '.join(required)}."

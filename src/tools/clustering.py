@@ -262,14 +262,19 @@ class ClusterDataTool(BaseTool):
                 "log1p_features": log_features,
             }, f)
 
+        # Kaufman & Rousseeuw: 0.71+ strong, 0.51-0.70 reasonable,
+        # 0.26-0.50 weak (possibly artificial), <= 0.25 no real structure.
         quality = (
-            "strong" if best_score >= 0.5
-            else "moderate" if best_score >= 0.25
-            else "weak"
+            "strong" if best_score >= 0.71
+            else "reasonable" if best_score >= 0.51
+            else "weak" if best_score > 0.25
+            else "none"
         )
         return {
             "summary": (
-                f"Found {best_k} clusters (silhouette={best_score:.3f}, {quality} separation) "
+                f"Found {best_k} clusters (silhouette={best_score:.3f}, "
+                + ("no real structure" if quality == "none" else f"{quality} separation")
+                + ") "
                 f"across {len(features)} {unit_noun} × {features.shape[1]} numeric features."
             ),
             "unit_of_analysis": unit_of_analysis,
@@ -297,15 +302,44 @@ class ClusterDataTool(BaseTool):
         n_clusters = output.get("n_clusters")
         silhouette = output.get("silhouette_score")
         quality = output.get("separation_quality")
-        if n_clusters and n_clusters >= 2 and silhouette is not None:
-            results.append(
+        if n_clusters and n_clusters >= 2 and silhouette is not None and quality == "none":
+            # Nothing to segment on: a caveat, not a headline, and no
+            # segment-profile finding built on the same geometry.
+            return [
                 Finding(
                     finding_id=f"{self.name}_segments",
                     kind="cluster",
                     headline=(
-                        f"Data splits into {n_clusters} segments with {quality} "
-                        f"separation (silhouette={silhouette:.3f})"
+                        f"No distinct segments found (silhouette={silhouette:.3f}); "
+                        "clusters would be artificial"
                     ),
+                    detail="KMeans over the numeric features found no real cluster structure.",
+                    evidence={"n_clusters": n_clusters, "silhouette_score": silhouette},
+                    source_tool=self.name,
+                    measure="silhouette_score",
+                    effect=round(silhouette, 4),
+                    effect_kind="r",
+                    confidence=0.35,
+                    surprise=0.1,
+                    layer="appendix",
+                )
+            ]
+        if n_clusters and n_clusters >= 2 and silhouette is not None:
+            if quality == "weak":
+                headline = (
+                    f"Data may split into {n_clusters} segments, but separation is weak "
+                    f"and may be an artefact (silhouette={silhouette:.3f})"
+                )
+            else:
+                headline = (
+                    f"Data splits into {n_clusters} segments with {quality} "
+                    f"separation (silhouette={silhouette:.3f})"
+                )
+            results.append(
+                Finding(
+                    finding_id=f"{self.name}_segments",
+                    kind="cluster",
+                    headline=headline,
                     detail=(
                         f"KMeans over {len(output.get('features_used', []))} feature(s); "
                         "k selected by silhouette score."
@@ -321,7 +355,7 @@ class ClusterDataTool(BaseTool):
                     effect_kind="r",
                     confidence=0.6 if quality != "weak" else 0.35,
                     surprise=0.3,
-                    layer="exec" if quality != "weak" else "analyst",
+                    layer="exec" if quality in ("strong", "reasonable") else "analyst",
                 )
             )
 

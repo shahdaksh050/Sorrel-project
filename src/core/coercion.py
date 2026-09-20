@@ -228,6 +228,14 @@ def _parse_time_of_day(values: pd.Series) -> pd.Series:
     return pd.to_timedelta(secs, unit="s")
 
 
+def _map_unique(values: pd.Series, parser: Callable[[str], Any]) -> pd.Series:
+    """`values.map(parser)` calling the (pure) parser once per distinct string
+    instead of once per row: a 500k-row categorical has a handful of values."""
+    codes, uniques = pd.factorize(values)
+    mapped = pd.Series(uniques).map(parser)
+    return pd.Series(mapped.array.take(codes), index=values.index)
+
+
 def _try_coerce_column(
     values: pd.Series, decimal_comma: bool
 ) -> tuple[str, str, pd.Series] | None:
@@ -237,10 +245,10 @@ def _try_coerce_column(
     for rule, to_kind, parser in _RULES:
         if rule == "thousands" and decimal_comma:
             continue
-        parsed = values.map(parser)
+        parsed = _map_unique(values, parser)
         if parsed.notna().sum() / total >= COERCE_MATCH_THRESHOLD:
             return rule, to_kind, parsed
-    generic_parsed = values.map(_make_numeric_generic_parser(decimal_comma))
+    generic_parsed = _map_unique(values, _make_numeric_generic_parser(decimal_comma))
     if generic_parsed.notna().sum() / total >= COERCE_MATCH_THRESHOLD:
         return "numeric", "numeric", generic_parsed
     return None

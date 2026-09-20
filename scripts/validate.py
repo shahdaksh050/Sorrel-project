@@ -334,10 +334,10 @@ def main() -> None:
             output_dir=viz_dir,
         )
         check("S3", "Visualization success", viz.status == "success")
-        saved = viz.output.get("saved_paths", [])
-        check("S3", "At least one chart saved", len(saved) > 0)
-        if saved:
-            check("S3", "Chart file exists on disk", Path(saved[0]).exists())
+        charts = viz.output.get("charts", [])  # the tool returns Vega-Lite specs, not image files
+        check("S3", "At least one chart spec produced", len(charts) > 0)
+        if charts:
+            check("S3", "Chart specs carry inline data", all(isinstance(c, dict) and c.get("data") for c in charts))
         mem.append_tool_result(viz)
 
         # ----------------------------------------------------------

@@ -390,6 +390,8 @@ def _specialist_questions(profile: DatasetProfile) -> list[Question]:
                 continue
             params = tool.default_params(profile, None)
             cols = [str(params[k]) for k in keys]
+            if kind == "survival" and params.get("group_column"):
+                cols.append(str(params["group_column"]))  # optional: the group comparison
             questions.append(Question(
                 text=template.format(*cols),
                 kind=kind,

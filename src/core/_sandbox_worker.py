@@ -13,6 +13,7 @@ import contextlib
 import datetime
 import decimal
 import difflib
+import inspect
 import io
 import json
 import math
@@ -128,7 +129,8 @@ def _restricted_import(
         ):
             raise ImportError(
                 f"Only {ALLOWED_MODULES_TEXT} are available (without their I/O "
-                f"submodules). Import of '{name}' is not permitted in the sandbox."
+                f"submodules). Import of '{name}' is not permitted. Plots and models "
+                "come from `dsa` (dsa.chart.*, dsa.run); pd, np, scipy, stats, math are pre-imported."
             )
         return real_import(name, globals, locals, fromlist, level)
 
@@ -337,7 +339,13 @@ def _runtime_hint(exc: Exception, code: str, df: pd.DataFrame) -> str:
     if isinstance(exc, KeyError) and exc.args:
         columns = [str(c) for c in df.columns]
         key = str(exc.args[0])
-        names = re.findall(r"'([^']+)'", key) if "not in index" in key else [key]
+        # df[[...]] -> "['a'] not in index"; .agg({...}) -> "Column(s) ['a'] do not exist";
+        # groupby(...)['a'] -> "Column not found: a"; df['a'] / groupby(['a']) -> the bare key.
+        names = (
+            re.findall(r"'([^']+)'", key)
+            if "not in index" in key or "do not exist" in key
+            else [key.removeprefix("Column not found: ")]
+        )
         for name in names:
             if name in columns:
                 continue
@@ -346,7 +354,54 @@ def _runtime_hint(exc: Exception, code: str, df: pd.DataFrame) -> str:
                 f" '{name}' is not a column of df; closest: {close}." if close
                 else f" df columns are: {columns[:30]}."
             )
-    return hint
+    return hint + _dsa_hint(exc)
+
+
+#: Names a weak model reaches for that the sandbox deliberately does not provide.
+_UNAVAILABLE_NAMES = frozenset({"plt", "sns", "sklearn", "px", "go", "open", "requests"})
+
+
+def _dsa_hint(exc: Exception) -> str:
+    """Extra guidance (<= 300 chars) for the usual `dsa` mistakes: a wrong helper
+    name, a wrong keyword, or a plotting/file library that is not installed."""
+    if isinstance(exc, AttributeError):
+        obj, bad = getattr(exc, "obj", None), str(getattr(exc, "name", "") or "")
+        chart = vars(Toolkit.chart)
+        if obj is Toolkit.chart:
+            scope, names = "dsa.chart", sorted(chart)
+        elif isinstance(obj, Toolkit):
+            scope = "dsa"
+            names = sorted(n for n in dir(Toolkit) if not n.startswith("_") and n != "collected_findings")
+        else:
+            return ""
+        close = [f"dsa.chart.{bad}"] if scope == "dsa" and bad in chart else [
+            f"{scope}.{n}" for n in difflib.get_close_matches(bad, names, n=1, cutoff=0.5)
+        ]
+        return f" `{scope}` has no `{bad}`. Available: {', '.join(names)}." + (
+            f" Did you mean `{close[0]}`?" if close else ""
+        )
+    if isinstance(exc, NameError) and getattr(exc, "name", None) in _UNAVAILABLE_NAMES:
+        return (
+            f" `{exc.name}` is not available: no plotting, file or network libraries here. Charts: "
+            "CHART = dsa.chart.bar/line/scatter/histogram(df, x, y, title=...). Models and tests: "
+            "dsa.run(tool_name, df=frame, ...). df is already loaded."
+            + (" sklearn needs an explicit `from sklearn.x import y`." if exc.name == "sklearn" else "")
+        )
+    if isinstance(exc, TypeError):
+        m = re.match(r"([\w.]+)\(\) (?:got an unexpected keyword argument '(\w+)'|missing|takes)", str(exc))
+        if not m:
+            return ""
+        qual, bad = m.group(1), m.group(2)
+        last = qual.rsplit(".", 1)[-1]
+        fn = getattr(Toolkit, last, None) if qual.startswith("Toolkit.") else getattr(Toolkit.chart, last, None)
+        if not callable(fn):
+            return ""
+        params = [p for p in inspect.signature(fn).parameters.values() if p.name != "self"]
+        names = [p.name for p in params if p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)]
+        close = difflib.get_close_matches(bad, names, n=1, cutoff=0.4) if bad else []
+        more = " (+ options such as title, caption, color)" if any(p.kind is p.VAR_KEYWORD for p in params) else ""
+        return f" `{last}` accepts: {', '.join(names)}{more}." + (f" Did you mean `{close[0]}`?" if close else "")
+    return ""
 
 
 def _save_derived(value: Any, derived_output_path: str | None) -> dict[str, Any]:

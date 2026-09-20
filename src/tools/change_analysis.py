@@ -21,13 +21,14 @@ is reported rather than read as a 100% drop or an infinite rise.
 """
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 
 from src.core.findings import Finding
-from src.core.profiler import profile_dataframe
+from src.core.profiler import pick_measures, profile_dataframe
 from src.core.stats_utils import is_partial_final_period, measure_aggregation
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
@@ -47,6 +48,20 @@ _MIN_CHANGE_FOR_FINDING = 0.10
 #: period-over-period movement — a 15% swing in a series that routinely
 #: swings 20% is an ordinary period.
 _VOLATILITY_MULTIPLE = 2.0
+
+#: Same-period-last-year lookback per grain: (calendar offset, periods of
+#: history needed before a YoY comparison exists). Daily has none — its span
+#: is always under a year.
+_YOY_LOOKBACK: dict[str, tuple[pd.DateOffset, int]] = {
+    "monthly": (pd.DateOffset(months=12), 13),
+    "weekly": (pd.DateOffset(weeks=52), 53),
+}
+#: A move is seasonal when the same-period-last-year change is under this
+#: fraction of the period-over-period change.
+_SEASONAL_YOY_RATIO = 0.5
+_SHORT_HISTORY_CAVEAT = (
+    "less than a year of history: seasonal effects cannot be separated from a real change"
+)
 
 #: Segment-breakdown dimension cardinality window, mirroring segment_comparison.
 _MIN_DIM_CARD = 2
@@ -137,9 +152,14 @@ class ChangeAnalysisTool(BaseTool):
         measures = _pick_measure_columns(profile)
         if not measures:
             return {}
+        # Stable, objective-aware choice (shared with the other tools), limited
+        # to the columns this tool already accepts.
+        allowed = {m.name for m in measures}
+        ranked = pick_measures(profile, os.environ.get("USER_OBJECTIVE", "").strip())
+        first = next((m for m in ranked if m.name in allowed), measures[0])
         params: dict[str, Any] = {
             "date_column": profile.datetime_cols[0],
-            "measure_column": measures[0].name,
+            "measure_column": first.name,
         }
         dim = _pick_dimension_column(profile)
         if dim:
@@ -333,6 +353,25 @@ class ChangeAnalysisTool(BaseTool):
         change_threshold = max(
             _MIN_CHANGE_FOR_FINDING, _VOLATILITY_MULTIPLE * (typical_volatility or 0.0)
         )
+        # Same period last year: separates a seasonal rebound from a real move.
+        yoy_value: float | None = None
+        yoy_change_pct: float | None = None
+        yoy_label: str | None = None
+        seasonal_move: bool | None = None
+        lookback = _YOY_LOOKBACK.get(grain_label)
+        short_history = lookback is None or len(series) < lookback[1]
+        if lookback is not None and not short_history:
+            yoy_ts = latest_period - lookback[0]
+            yoy_label = _period_label(yoy_ts, grain_label)
+            raw = series.get(yoy_ts)
+            if raw is not None and not np.isnan(raw):
+                yoy_value = float(raw)
+                if not comparison_missing and yoy_value != 0:
+                    yoy_change_pct = (latest_value - yoy_value) / yoy_value
+        if pct_change is not None and yoy_change_pct is not None:
+            seasonal_move = abs(yoy_change_pct) < _SEASONAL_YOY_RATIO * abs(pct_change) or (
+                typical_volatility is not None and abs(yoy_change_pct) < typical_volatility
+            )
         trailing_avg = float(trailing.mean()) if trailing.notna().any() else None
         pct_change_vs_trailing = (
             (latest_value - trailing_avg) / trailing_avg
@@ -383,6 +422,13 @@ class ChangeAnalysisTool(BaseTool):
                     f" Biggest contributor to the {contributor_word}: "
                     f"{mover['level']} ({mover['delta']:+,.2f})."
                 )
+            if yoy_change_pct is not None:
+                summary += (
+                    f" Vs the same period last year ({yoy_label}): {yoy_change_pct * 100:+.1f}%"
+                    + (" - a seasonal pattern, not a new change." if seasonal_move else ".")
+                )
+            elif short_history:
+                summary += f" Note: {_SHORT_HISTORY_CAVEAT}."
             if latest_period_partial:
                 summary += (
                     f" Note: the latest {grain_label} period is not yet complete in "
@@ -404,6 +450,12 @@ class ChangeAnalysisTool(BaseTool):
             "period_grain": grain_label,
             "aggregation": agg_func,
             "latest_period": latest_label,
+            "prior_period": _period_label(prior_period, grain_label),
+            "yoy_period": yoy_label,
+            "yoy_value": round(yoy_value, 4) if yoy_value is not None else None,
+            "yoy_change_pct": round(yoy_change_pct, 6) if yoy_change_pct is not None else None,
+            "seasonal_move": seasonal_move,
+            "short_history": short_history,
             "latest_value": None if np.isnan(latest_value) else round(latest_value, 4),
             "prior_period_value": None if np.isnan(prior_value) else round(prior_value, 4),
             "comparison_period_missing": comparison_missing,
@@ -452,6 +504,35 @@ class ChangeAnalysisTool(BaseTool):
             f"flag threshold {threshold * 100:.1f}% (max of 10% and 2x the typical "
             f"period-over-period move)."
         )
+        caveats: list[str] = []
+        confidence, surprise, layer = 0.6, min(1.0, abs(pct_change)), "analyst"
+        yoy = output.get("yoy_change_pct")
+        yoy_label = output.get("yoy_period")
+        if yoy is not None:
+            yoy_word = (
+                "level with" if abs(yoy) < 0.05
+                else f"{abs(yoy) * 100:.0f}% {'above' if yoy > 0 else 'below'}"
+            )
+            if output.get("seasonal_move"):
+                prior_label = output.get("prior_period", "the prior period")
+                headline = (
+                    f"{agg_word} {measure} is {abs(pct_change) * 100:.0f}% "
+                    f"{'above' if pct_change > 0 else 'below'} {prior_label} but {yoy_word} "
+                    f"{yoy_label} ({yoy * 100:+.0f}%): a normal seasonal pattern."
+                )
+                confidence, surprise, layer = 0.35, min(1.0, abs(yoy)), "appendix"
+                caveats.append(
+                    f"The move vs {prior_label} is mostly seasonal: vs the same period last "
+                    f"year ({yoy_label}) it is {yoy * 100:+.1f}%."
+                )
+            else:
+                joiner = "and" if yoy * pct_change > 0 else "but"
+                headline = (
+                    f"{headline[:-1]} {joiner} {abs(yoy) * 100:.0f}% "
+                    f"{'above' if yoy > 0 else 'below'} {yoy_label}."
+                )
+        elif output.get("short_history"):
+            caveats.append(_SHORT_HISTORY_CAVEAT)
         breakdown = output.get("segment_breakdown")
         if breakdown:
             total_change = (output.get("latest_value") or 0.0) - (
@@ -478,8 +559,10 @@ class ChangeAnalysisTool(BaseTool):
             dimension=output.get("dimension_column"),
             effect=round(pct_change, 4),
             effect_kind="pct",
-            confidence=0.6,
-            surprise=min(1.0, abs(pct_change)),
+            confidence=confidence,
+            surprise=surprise,
+            caveats=caveats,
+            layer=layer,
         )]
 
     def get_schema(self) -> dict[str, Any]:

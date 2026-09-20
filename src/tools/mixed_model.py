@@ -23,7 +23,6 @@ independent-rows inference would understate the uncertainty.
 from __future__ import annotations
 
 import math
-import re
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +31,7 @@ import pandas as pd
 
 from src.core.findings import Finding
 from src.core.profiler import profile_dataframe
+from src.core.vocab import ROLE_TOKENS, column_role, name_tokens
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -57,20 +57,11 @@ _MIN_DEFF_FOR_NOTE = 1.1
 _GROUP_ROLES = ("dimension", "identifier", "ordinal")
 _SKIP_FEATURE_ROLES = ("identifier", "text", "time", "constant")
 _ID_WORDS = frozenset({"id", "ids", "code", "no", "num", "number", "key"})
-_GROUP_TOKENS = frozenset({
-    "subject", "patient", "participant", "site", "batch", "plot", "replicate", "cluster",
-    "school", "plate", "sample", "station", "unit",
-})
-_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+_GROUP_TOKENS = ROLE_TOKENS["entity_group"]
 
 
-def _tokens(name: str) -> list[str]:
-    return [t for t in _NON_ALNUM.split(_CAMEL.sub("_", str(name)).lower()) if t]
-
-
-def _is_group_name(name: str) -> bool:
-    return any(t in _GROUP_TOKENS or (t.endswith("s") and t[:-1] in _GROUP_TOKENS) for t in _tokens(name))
+def _is_group_name(name: str, profile: DatasetProfile | None = None) -> bool:
+    return column_role(profile, name, "entity_group") or any(t in _GROUP_TOKENS or (t.endswith("s") and t[:-1] in _GROUP_TOKENS) for t in name_tokens(name))
 
 
 def _group_candidates(profile: DatasetProfile) -> list[ColumnProfile]:
@@ -81,7 +72,12 @@ def _group_candidates(profile: DatasetProfile) -> list[ColumnProfile]:
             continue
         if n / c.nunique < _MIN_GROUP_SIZE:
             continue
-        if c.name == profile.entity_col or _is_group_name(c.name):
+        # A repeated id, or the entity of a panel / event log, is a real grouping;
+        # a plain category of a cross-section (product, region) is not.
+        is_entity = c.name == profile.entity_col and (
+            c.semantic_role == "identifier" or profile.archetype in ("panel", "event_log")
+        )
+        if is_entity or _is_group_name(c.name, profile):
             out.append(c)
     return out
 
@@ -95,7 +91,7 @@ def _best_group(profile: DatasetProfile) -> str | None:
 
 
 def _group_nouns(column: str) -> tuple[str, str]:
-    words = [t for t in _tokens(column) if t not in _ID_WORDS]
+    words = [t for t in name_tokens(column) if t not in _ID_WORDS]
     word = words[-1] if words else str(column)
     plural = word if word.endswith("s") else (word + "es" if word.endswith(("x", "ch", "sh")) else word + "s")
     return word, plural
@@ -272,6 +268,19 @@ def _icc_anova(y: np.ndarray, groups: np.ndarray) -> float:
 
 
 def _fit_mixed(work: pd.DataFrame, xcols: list[str], slope: str | None) -> tuple[dict[str, Any] | None, str]:
+    """REML mixed model. L-BFGS is fast but can stall on the zero-variance boundary from its
+    starting point, so a singular / non-converged result is retried with derivative-free Powell."""
+    why = "did not converge"
+    for method in ("lbfgs", "powell"):
+        fit, why = _fit_mixed_once(work, xcols, slope, method)
+        if fit is not None:
+            return fit, ""
+    return None, why
+
+
+def _fit_mixed_once(
+    work: pd.DataFrame, xcols: list[str], slope: str | None, method: str
+) -> tuple[dict[str, Any] | None, str]:
     import statsmodels.formula.api as smf
     from statsmodels.tools.sm_exceptions import ConvergenceWarning
 
@@ -280,7 +289,7 @@ def _fit_mixed(work: pd.DataFrame, xcols: list[str], slope: str | None) -> tuple
         warnings.simplefilter("always")
         try:
             model = smf.mixedlm(formula, work, groups=work["g"], re_formula=f"~{slope}" if slope else None)
-            res = model.fit(reml=True, method="lbfgs", maxiter=200)
+            res = model.fit(reml=True, method=method, maxiter=200)
         except (np.linalg.LinAlgError, ValueError, FloatingPointError, IndexError) as exc:
             return None, str(exc)[:80] or type(exc).__name__
     if any(issubclass(w.category, ConvergenceWarning) or "singular" in str(w.message).lower() for w in caught):
@@ -472,6 +481,11 @@ class MixedModelAnalysisTool(BaseTool):
                 f"least {_MIN_ROWS} rows and {_MIN_GROUPS} groups."
             )
         mean_size = n_obs / n_groups
+        if mean_size < 2.0 or int((sizes >= 2).sum()) < _MIN_GROUPS:
+            raise ToolExecutionError(
+                f"'{group_column}' has {n_groups:,} groups but almost none repeat ({mean_size:.1f} rows per group on "
+                "average), so there is no repeated-measures structure to model. Pick a column that several rows share."
+            )
 
         design, terms = _build_terms(df, feats, notes)
         if not terms:
@@ -529,7 +543,16 @@ class MixedModelAnalysisTool(BaseTool):
             e["sentence"] = _effect_sentence(e, target_column)
         effects.sort(key=lambda e: abs(e["std_effect"] or 0.0), reverse=True)
 
-        icc = _icc_anova(work["y"].to_numpy(dtype=float), work["g"].to_numpy())
+        icc_raw = _icc_anova(work["y"].to_numpy(dtype=float), work["g"].to_numpy())
+        # After accounting for the factors, the model's own variance split is the
+        # meaningful share; the raw one-way ICC also counts variation the factors explain.
+        adjusted = fit["var_group"] is not None and fit["var_group"] + fit["var_resid"] > 0
+        if adjusted:
+            icc = fit["var_group"] / (fit["var_group"] + fit["var_resid"])
+        else:
+            xmat = np.column_stack([np.ones(n_obs), design.to_numpy(dtype=float)])
+            resid = work["y"].to_numpy(dtype=float) - xmat @ np.linalg.lstsq(xmat, work["y"].to_numpy(dtype=float), rcond=None)[0]
+            icc = _icc_anova(resid, work["g"].to_numpy())
         deff = 1.0 + (mean_size - 1.0) * icc
         inflation = math.sqrt(max(deff, 1.0))
         singular, plural = _group_nouns(group_column)
@@ -576,6 +599,7 @@ class MixedModelAnalysisTool(BaseTool):
             "max_obs_per_group": int(sizes.max()),
             "target_sd": _r(target_sd),
             "icc": _r(icc),
+            "icc_unadjusted": _r(icc_raw),
             "between_groups_text": f"{icc_text} of the variation is between {plural}, the rest is within.",
             "design_effect": _r(deff, 3),
             "se_inflation": _r(inflation, 2),

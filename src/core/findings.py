@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.core.privacy import redact_level_in_text
+
 #: A finding whose |effect| falls below this is suppressed outright unless
 #: it is the only finding available — the T5 "triviality suppression" rule.
 TRIVIAL_EFFECT_FLOOR = 0.02
@@ -94,6 +96,21 @@ class Finding:
     caveats: list[str] = field(default_factory=list)
     chart_hint: dict[str, Any] | None = None   # {"kind": "bar"/"line"/..., "data": {...}} — what would show this
     layer: str = "analyst"             # exec | analyst | appendix — which report tier this belongs on by default
+
+    def __post_init__(self) -> None:
+        """Small-cell guard: a finding naming a level whose evidence `n` is
+        below the minimum cell size must not carry that name in its text."""
+        if not self.level or not isinstance(self.evidence, dict):
+            return
+        sizes = [
+            v for k in ("n", "n_level")
+            if isinstance(v := self.evidence.get(k), (int, float)) and not isinstance(v, bool)
+        ]
+        if not sizes:
+            return
+        n = min(sizes)
+        self.headline = redact_level_in_text(self.headline, self.level, n)
+        self.detail = redact_level_in_text(self.detail, self.level, n)
 
     def normalized_effect(self) -> float:
         """|effect| on a common [0, 1] scale, 1.0 = a conventionally large
@@ -257,6 +274,28 @@ def _dedupe(findings: list[Finding]) -> tuple[list[Finding], list[Finding]]:
     return kept, dupes
 
 
+_NO_SKILL_LIFT = 0.05  # same floor train_model uses to call a model "barely beats no-skill"
+
+
+def _drop_unskilled_drivers(findings: list[Finding]) -> list[Finding]:
+    """Permutation-importance drivers (evaluate_model) of a target whose best
+    model does not beat a no-skill baseline explain nothing: on pure-noise data
+    they still name a "top" feature/level. Drop them; the model_performance
+    finding, which carries the "not a usable predictor" caveat, stays."""
+    unskilled = {
+        f.measure for f in findings
+        if f.kind == "model_performance" and f.measure
+        and isinstance(lift := f.evidence.get("lift_over_baseline"), (int, float))
+        and lift < _NO_SKILL_LIFT
+    }
+    if not unskilled:
+        return findings
+    return [
+        f for f in findings
+        if not (f.kind == "driver" and f.source_tool == "evaluate_model" and f.measure in unskilled)
+    ]
+
+
 def rank_findings(
     findings: list[Finding],
     suppress_trivial: bool = True,
@@ -280,6 +319,7 @@ def rank_findings(
     findings, and caveat kinds (CAVEAT_FINDING_KINDS) always come after
     every discovery — they are shown, not ranked as insight.
     """
+    findings = _drop_unskilled_drivers(findings)
     for f in findings:
         f.compute_importance()
     ranked = sorted(findings, key=lambda f: f.importance, reverse=True)

@@ -1,6 +1,7 @@
 """Recursive inference layer — task decomposition and context offloading."""
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from collections.abc import Callable
@@ -11,6 +12,8 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
+from src.core.llm_client import llm_concurrency
+
 console = Console()
 
 #: Bounded worker pool for parallel sub-task invocation in
@@ -18,6 +21,16 @@ console = Console()
 #: correct and the GIL is irrelevant; bounded by policy (not hardware) so a
 #: wide decomposition doesn't slam the provider's own rate limits.
 _MAX_DECOMPOSE_WORKERS = 6
+
+#: Appended to a sub-task prompt on its one retry: a model that wrote prose
+#: (chain-of-thought) instead of JSON, and ran out of tokens doing it, gets
+#: told plainly what shape is wanted.
+_JSON_ONLY_REMINDER = (
+    "\n\nReply with ONE JSON object only. No preamble, no reasoning, no markdown."
+)
+#: A retried sub-task may use up to twice the original max_tokens, but not
+#: more than this (unless the original budget was already larger).
+_RETRY_MAX_TOKENS_CEILING = 8192
 
 # ---------------------------------------------------------------------------
 # P3.1 — Token / cost accounting
@@ -173,8 +186,24 @@ class RLMEngine:
         system_prompt: str,
         max_depth: int = 5,
         default_provider: str = "unknown",
+        base_max_tokens: int = 4096,
     ) -> None:
         self._llm = llm_callable
+        #: The LLM's normal max_tokens, so a retry can raise it (x2, capped).
+        self._base_max_tokens = base_max_tokens
+        #: Whether the callable accepts per-call `max_tokens` / `reasoning_effort`
+        #: (LLMClient.call does; a plain two-argument callable does not).
+        try:
+            params = inspect.signature(llm_callable).parameters
+            self._llm_takes_overrides = "max_tokens" in params or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+        except (TypeError, ValueError):
+            self._llm_takes_overrides = False
+        #: task_id -> {"status": "failed", "error": ..., "attempts": n} for
+        #: the sub-tasks of the latest decompose_and_invoke() that never
+        #: produced a usable reply (they are absent from its return value).
+        self.last_failures: dict[str, dict[str, Any]] = {}
         self._system_prompt = system_prompt
         self.max_depth = max_depth
         self.repl_env = REPLEnvironment()
@@ -198,6 +227,10 @@ class RLMEngine:
         """Tell the engine which outer reasoning cycle we are in."""
         self._iteration = iteration
 
+    def set_system_prompt(self, system_prompt: str) -> None:
+        """Swap the injected system prompt (its tool block was refreshed)."""
+        self._system_prompt = system_prompt
+
     @property
     def trace(self) -> list[_TraceEntry]:
         """Read-only copy of the reasoning trace (one entry per LLM call)."""
@@ -218,11 +251,21 @@ class RLMEngine:
             self._total_cost_usd += cost_usd
         return prompt_tokens, completion_tokens, cost_usd
 
+    def record_usage(self, usage: dict[str, Any] | None) -> None:
+        """Count a token-usage payload (``{"prompt_tokens", "completion_tokens",
+        "provider"}``, e.g. a reply's ``_rlm_usage``) against this run's totals —
+        for LLM calls made outside invoke() (chart design) or failed ones."""
+        self._record_usage(*_extract_usage({"_rlm_usage": usage}))
+
     def invoke(
         self,
         user_prompt: str,
         depth: int = 0,
         stage: str = "",
+        *,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        system_prompt: str | None = None,
     ) -> dict[str, Any]:
         """
         Call the LLM with the injected system prompt and the given user prompt.
@@ -231,6 +274,8 @@ class RLMEngine:
             user_prompt: The fully-formed user message.
             depth:       Current recursion depth (0 = top-level call).
             stage:       Human-readable label for the reasoning trace.
+            system_prompt: Replaces the injected one for this call only (a
+                         small sub-task needs no tool catalog).
 
         Returns:
             Parsed JSON dict from the LLM, or an error dict on failure.
@@ -242,11 +287,17 @@ class RLMEngine:
 
         t0 = time.perf_counter()
         try:
-            response = self._llm(self._system_prompt, user_prompt)
+            overrides: dict[str, Any] = {}
+            if self._llm_takes_overrides:
+                if max_tokens is not None:
+                    overrides["max_tokens"] = max_tokens
+                if reasoning_effort is not None:
+                    overrides["reasoning_effort"] = reasoning_effort
+            response = self._llm(system_prompt or self._system_prompt, user_prompt, **overrides)
         except Exception as exc:
             # A call that failed after the provider replied (parse failure)
             # still spent tokens — count them against the budget.
-            self._record_usage(*_extract_usage({"_rlm_usage": getattr(exc, "rlm_usage", None)}))
+            self.record_usage(getattr(exc, "rlm_usage", None))
             raise
         latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -294,6 +345,7 @@ class RLMEngine:
         prompt_builder: Callable[[RLMSubTask], str],
         depth: int = 1,
         max_total_tokens: int | None = None,
+        system_prompt: str | None = None,
     ) -> dict[str, dict[str, Any]]:
         """
         Stage 6: run one LLM call per sub-task and aggregate results.
@@ -313,6 +365,8 @@ class RLMEngine:
             sub_tasks:        List of RLMSubTask instances to process.
             prompt_builder:   Callable that turns an RLMSubTask into a prompt string.
             depth:            Recursion depth to pass to invoke().
+            system_prompt:    System prompt for every sub-task call (default:
+                the engine's own planner prompt).
             max_total_tokens: Optional running-total token budget (prompt +
                 completion, across this engine's whole lifetime, per
                 usage_summary()). Once exceeded, remaining sub-tasks are
@@ -332,15 +386,31 @@ class RLMEngine:
             both simply absent from the returned dict — one bad sub-task
             must not discard the others that already succeeded, same
             graceful-degradation rationale as the caller's own try/except
-            around this whole method.
+            around this whole method. A sub-task whose reply was truncated
+            or not JSON is retried once (larger max_tokens, JSON-only
+            reminder, low reasoning effort) after the first pass; those that
+            still fail are reported in ``self.last_failures``.
         """
+        self.last_failures = {}
         for sub_task in sub_tasks:
             self.repl_env.set(f"subtask_ctx_{sub_task.task_id}", sub_task.context)
 
-        def _run(sub_task: RLMSubTask) -> dict[str, Any]:
+        def _run(sub_task: RLMSubTask, retry: bool = False) -> dict[str, Any]:
             prompt = prompt_builder(sub_task)
+            stage = f"stage6:decompose:{sub_task.task_id}"
+            if not retry:
+                return self.invoke(prompt, depth=depth, stage=stage, system_prompt=system_prompt)
+            # The one retry: bigger budget, JSON-only reminder, low reasoning.
             return self.invoke(
-                prompt, depth=depth, stage=f"stage6:decompose:{sub_task.task_id}"
+                prompt + _JSON_ONLY_REMINDER,
+                depth=depth,
+                stage=f"{stage}:retry",
+                system_prompt=system_prompt,
+                max_tokens=max(
+                    self._base_max_tokens,
+                    min(self._base_max_tokens * 2, _RETRY_MAX_TOKENS_CEILING),
+                ),
+                reasoning_effort="low",
             )
 
         def _run_safe(sub_task: RLMSubTask) -> tuple[RLMSubTask, dict[str, Any] | None, Exception | None]:
@@ -356,10 +426,11 @@ class RLMEngine:
             )
 
         completed: list[tuple[RLMSubTask, dict[str, Any]]] = []
+        failed: list[tuple[RLMSubTask, Exception]] = []
 
         def _record(sub_task: RLMSubTask, response: dict[str, Any] | None, exc: Exception | None) -> None:
             if exc is not None:
-                console.print(f"[yellow]  ⚠ sub-task '{sub_task.task_id}' failed: {exc}[/]")
+                failed.append((sub_task, exc))
                 return
             assert response is not None
             completed.append((sub_task, response))
@@ -370,10 +441,36 @@ class RLMEngine:
                     break
                 _record(*_run_safe(sub_task))
         else:
-            with ThreadPoolExecutor(max_workers=min(_MAX_DECOMPOSE_WORKERS, len(sub_tasks))) as pool:
+            # Also bounded by LLM_MAX_CONCURRENCY (1 for a local model), so a
+            # local server isn't handed parallel sub-tasks it would only queue.
+            workers = min(_MAX_DECOMPOSE_WORKERS, llm_concurrency(), len(sub_tasks))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
                 for sub_task, response, exc in pool.map(_run_safe, sub_tasks):
                     _record(sub_task, response, exc)
 
+        # Sequential retry, once, for sub-tasks whose reply was truncated or
+        # not JSON (ValueError from the client). Other failures (network,
+        # auth, policy) are not fixed by a bigger budget, so they are final.
+        for sub_task, first_exc in failed:
+            attempts, last_exc = 1, first_exc
+            if isinstance(first_exc, ValueError) and not _budget_exceeded():
+                attempts = 2
+                console.print(
+                    f"[yellow]  ↻ sub-task '{sub_task.task_id}' reply unusable "
+                    f"({str(first_exc)[:120]}) — retrying once with a larger budget.[/]"
+                )
+                try:
+                    completed.append((sub_task, _run(sub_task, retry=True)))
+                    continue
+                except Exception as exc:
+                    last_exc = exc
+            console.print(f"[yellow]  ⚠ sub-task '{sub_task.task_id}' failed: {last_exc}[/]")
+            self.last_failures[sub_task.task_id] = {
+                "status": "failed", "error": str(last_exc), "attempts": attempts,
+            }
+
+        order = {t.task_id: i for i, t in enumerate(sub_tasks)}
+        completed.sort(key=lambda pair: order[pair[0].task_id])
         results: dict[str, dict[str, Any]] = {}
         for sub_task, response in completed:
             results[sub_task.task_id] = response

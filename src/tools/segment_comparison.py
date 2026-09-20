@@ -48,7 +48,7 @@ from statsmodels.stats.proportion import proportion_confint, proportions_ztest
 
 from src.core.findings import Finding
 from src.core.multiple_testing import apply_benjamini_hochberg
-from src.core.privacy import min_cell_size, suppression_note
+from src.core.privacy import min_cell_size, redact_small_level, suppression_note
 from src.core.profiler import profile_dataframe
 from src.core.stats_utils import aggregate_to_entity, measure_aggregation, repeated_entity
 from src.tools.base import BaseTool, ToolExecutionError
@@ -623,7 +623,7 @@ class SegmentComparisonTool(BaseTool):
         else:
             comparison = f"{c['ratio']:.2f}x"
         return (
-            f"{c['level']} {c['dimension']} {row_noun} {middle} vs {baseline_str} "
+            f"{redact_small_level(c['level'], c.get('n'))} {c['dimension']} {row_noun} {middle} vs {baseline_str} "
             f"for everyone else ({comparison}, n={c['n']:,} vs {c['n_rest']:,})."
         )
 

@@ -22,6 +22,7 @@ import sys
 import tempfile
 import traceback
 import types
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -1848,6 +1849,101 @@ def _get_dynamic_models(
     ]
 
 
+def _join_review(uploads: list[Any]) -> dict[int, dict[str, Any]]:
+    """Compact review card per related table. Default accepts the proposed
+    join (no override); returns {upload_index: override} for Skip / Change key."""
+    from src.core.joins import preview_joins
+
+    base = st.session_state.get("preview_df")
+    if base is None:
+        return {}
+    sig = (st.session_state.get("preview_name"), tuple((u.name, u.size) for u in uploads))
+    cached = st.session_state.get("_join_prev")
+    if not cached or cached[0] != sig:
+        idx: list[int] = []
+        tables: list[tuple[str, pd.DataFrame]] = []
+        for i, u in enumerate(uploads):
+            try:
+                tables.append((Path(u.name).stem, read_any_bytes(u.getvalue(), u.name)[0]))
+                idx.append(i)
+            except Exception:
+                continue   # unreadable files are reported at run time
+        try:
+            prev = preview_joins(base, tables, Path(st.session_state.get("preview_name") or "main").stem)
+        except Exception:
+            prev = []
+        cached = (sig, idx, prev)
+        st.session_state["_join_prev"] = cached
+    _, idx, previews = cached
+    out: dict[int, dict[str, Any]] = {}
+    for i, p in zip(idx, previews, strict=False):
+        plan = p["plan"]
+        if plan is None:
+            color, body = "var(--risk)", f"No join proposed. {html.escape(p['reason_if_none'])}"
+        else:
+            cov = float(plan["coverage"])
+            color = "var(--positive)" if cov >= 0.9 else "var(--accent)" if cov >= 0.6 else "var(--risk)"
+            if plan["cardinality"] == "many_to_many":
+                color = "var(--accent)"
+            body = (
+                f"<b>{html.escape(plan['left_key'])}</b> = <b>{html.escape(plan['right_key'])}</b> · "
+                f"{plan['cardinality'].replace('_', '-')} · {cov:.0%} matched"
+            )
+        st.markdown(
+            f'<div style="border:1px solid var(--rule-faint); border-left:3px solid {color}; '
+            f'background:var(--sheet); border-radius:var(--radius); padding:.4rem .6rem; '
+            f'font-size:13px; margin-top:.5rem;"><b>{html.escape(p["name"])}</b><br>{body}</div>',
+            unsafe_allow_html=True,
+        )
+        opts = ["Use this join", "Skip", "Change key"] if plan else ["Skip", "Change key"]
+        mode = st.radio("Join", opts, horizontal=True, key=f"jr_mode_{i}", label_visibility="collapsed")
+        if mode == "Skip":
+            out[i] = {"skip": True}
+        elif mode == "Change key":
+            lcols, rcols = p["left_columns"], p["columns"]
+            lk = st.selectbox("Main table column", lcols, key=f"jr_l_{i}",
+                              index=lcols.index(plan["left_key"]) if plan and plan["left_key"] in lcols else 0)
+            rk = st.selectbox("Related table column", rcols, key=f"jr_r_{i}",
+                              index=rcols.index(plan["right_key"]) if plan and plan["right_key"] in rcols else 0)
+            out[i] = {"left_key": lk, "right_key": rk}
+    return out
+
+
+def _render_run_compare() -> None:
+    """Diff the current run against a chosen earlier one (output/runs)."""
+    from src.core.run_compare import compare_runs, list_runs
+
+    cur_path = st.session_state.get("current_summary_path")
+    if not cur_path:
+        return
+    others = [r for r in list_runs() if r["path"] != cur_path]
+    with st.expander("Compare with a previous run"):
+        if not others:
+            st.caption("No earlier runs saved yet.")
+            return
+        pick = st.selectbox("Previous run", others, format_func=lambda r: r["label"], key="cmp_pick")
+        cur = json.loads(Path(cur_path).read_text(encoding="utf-8"))
+        d = compare_runs(pick, cur)
+        for title, key in (("New findings", "findings_added"), ("No longer found", "findings_removed"),
+                           ("New charts", "charts_added"), ("Charts dropped", "charts_removed")):
+            if d[key]:
+                st.markdown(f"**{title}**")
+                for h in d[key]:
+                    st.markdown(f"- {_md_text(h)}")
+        if d["findings_changed"]:
+            st.markdown("**Changed importance**")
+            for c in d["findings_changed"]:
+                st.markdown(f"- {_md_text(c['headline'])} ({c['old']:.2f} to {c['new']:.2f})")
+        slow = [t for t in d["tool_time_deltas"] if abs(t["delta"]) >= 0.5]
+        if slow:
+            st.markdown("**Tool time change (seconds)**")
+            for t in slow[:8]:
+                st.markdown(f"- `{t['tool']}`: {t['delta']:+.1f}s ({t['old']:.1f} to {t['new']:.1f})")
+        if not any(d[k] for k in ("findings_added", "findings_removed", "findings_changed",
+                                  "charts_added", "charts_removed")):
+            st.caption("No differences in findings or charts.")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1940,6 +2036,9 @@ with st.sidebar:
         type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
         accept_multiple_files=True,
         label_visibility="collapsed",
+    )
+    join_choices: dict[int, dict[str, Any]] = (
+        _join_review(related_uploads) if related_uploads and st.session_state.get("preview_bytes") else {}
     )
 
     target_col = st.text_input(
@@ -2147,6 +2246,14 @@ with st.sidebar:
             test_pct = st.slider("Test split %", 10, 40, 20, step=5)
             n_cv = st.slider("CV folds (k)", 3, 10, 5)
 
+    # ── Privacy ───────────────────────────────────────────────────────────────
+    from src.core.privacy import min_cell_size
+
+    st.markdown('<div class="side-head">Privacy</div>', unsafe_allow_html=True)
+    min_cell = st.number_input("Minimum group size", min_value=1, max_value=50,
+                               value=min_cell_size(), step=1)
+    st.caption("Groups smaller than this are combined so individuals can't be identified")
+
     # ── Code execution ────────────────────────────────────────────────────────
     # Operator controls for LLM-authored code (src/core/governance.py);
     # defaults match the governance defaults.
@@ -2305,6 +2412,7 @@ if run_clicked:
     with open(dpath, "wb") as _f:
         _f.write(st.session_state["preview_bytes"])
     related_paths: list[str] = []
+    join_overrides: dict[str, dict[str, Any]] = {}
     if related_uploads:
         from src.core.security import UploadValidationError, validate_upload
         for _i, _ru in enumerate(related_uploads):
@@ -2318,6 +2426,8 @@ if run_clicked:
             _rp.parent.mkdir(parents=True, exist_ok=True)
             _rp.write_bytes(_rb)
             related_paths.append(str(_rp))
+            if _i in join_choices:
+                join_overrides[_rp.stem] = join_choices[_i]
 
     # Set env vars before importing src
     os.environ["LLM_PROVIDER"]          = provider
@@ -2339,6 +2449,7 @@ if run_clicked:
     os.environ["MAX_CODE_EXECUTIONS"]   = str(int(max_code_runs))
     os.environ["SANDBOX_REQUIRE_ISOLATION"] = "true" if require_isolation else "false"
     os.environ["OUTPUT_DIR"]            = outdir
+    os.environ["DSA_MIN_CELL_SIZE"]     = str(int(min_cell))
     if objective.strip():
         os.environ["USER_OBJECTIVE"] = objective.strip()
     else:
@@ -2437,6 +2548,7 @@ if run_clicked:
             target_hint=target_col.strip() or None,
             interactive=False,
             related_files=related_paths or None,
+            join_overrides=join_overrides or None,
         )
         st.session_state["metadata"] = meta
         _upd("1", "done",
@@ -2511,6 +2623,15 @@ if run_clicked:
                     _dash_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 st.session_state["dashboard"] = None
+        _sum_path = Path(outdir) / "reports" / "summary.json"
+        if _sum_path.exists():
+            try:   # keep a copy where "Compare with a previous run" looks
+                _keep = Path("output") / "runs" / f"ui-{datetime.now():%Y%m%d-%H%M%S}" / "reports"
+                _keep.mkdir(parents=True, exist_ok=True)
+                (_keep / "summary.json").write_bytes(_sum_path.read_bytes())
+                st.session_state["current_summary_path"] = str(_keep / "summary.json")
+            except OSError:
+                pass
         st.session_state["analysis_done"] = True
         st.session_state["progress_lines"] = _progress_lines
         llm_err = agent.memory.get_context("llm_error")
@@ -2752,6 +2873,15 @@ if st.session_state.get("analysis_done"):
             with st.expander("What wasn't answered, and why"):
                 for _u in _unanswered:
                     st.markdown(f"- {_md_text(_u.get('text', ''))}")
+
+        _small_notes = list(dict.fromkeys(
+            str(c) for f in _all_findings for c in f.get("caveats") or []
+            if "to avoid identifying individuals" in str(c)
+        ))
+        if _small_notes:
+            st.caption("Small groups combined. " + " ".join(_small_notes[:3]))
+
+        _render_run_compare()
 
         # ── Ask a follow-up question (IMPROVEMENTS.md 7.20, scoped down):
         # a plain keyword search over the finding bus — no new tool calls,

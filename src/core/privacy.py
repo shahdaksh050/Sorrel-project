@@ -56,6 +56,23 @@ def is_small(n: int | float) -> bool:
         return False
 
 
+SMALL_GROUP_LABEL = "a small group"
+
+
+def redact_small_level(level: object, n: int | float | None) -> str:
+    """The level's name, or "a small group" when its size `n` is below the minimum."""
+    return SMALL_GROUP_LABEL if n is not None and is_small(n) else str(level)
+
+
+def redact_level_in_text(text: str, level: object, n: int | float | None) -> str:
+    """`text` with every whole-token mention of `level` replaced by "a small
+    group" when `n` is below the minimum; unchanged otherwise."""
+    name = str(level) if level is not None else ""
+    if not text or not name.strip() or n is None or not is_small(n):
+        return text
+    return re.sub(rf"(?<![\w.=]){re.escape(name)}(?![\w.])", SMALL_GROUP_LABEL, text, flags=re.IGNORECASE)
+
+
 def _is_additive(column: str, n_col: str) -> bool:
     if column == n_col:
         return True

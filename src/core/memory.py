@@ -23,6 +23,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from src.core.findings import Finding, rank_findings
+from src.core.profiler import ground_objective_column
 
 console = Console()
 
@@ -39,6 +40,14 @@ _NUMERIC_TARGET_NAMES = frozenset({
     "score", "rating", "demand", "margin", "result", "status",
 })
 _PARTIAL_TARGET_HINTS = ("target", "label", "class", "outcome", "predict", "response")
+#: Objective phrasings that ask for a driver/prediction analysis of a column.
+_DRIVER_PHRASES = (
+    "drive", "driving", "predict", "what affect", "what influence", "why", "explain",
+    "determin", "cause", "factors", "what impact",
+)
+#: Confidence for a column the objective names in driver phrasing — an
+#: explicit ask, so above the autonomy floor (0.40) and the auto-proceed line.
+_OBJECTIVE_GROUNDED_CONFIDENCE = 0.80
 
 
 _RESULT_PREVIEW_ROWS = 15
@@ -140,9 +149,13 @@ class DatasetMetadata:
     column_nunique: dict[str, int] = field(default_factory=dict)   # {col: nunique count}
 
     # ------------------------------------------------------------------
-    def detect_target_with_confidence(self) -> tuple[str | None, float]:
+    def detect_target_with_confidence(self, objective: str = "") -> tuple[str | None, float]:
         """
         Heuristic target detection returning (column_name, confidence).
+
+        `objective` grounds the target: a column the objective names in
+        driver/prediction phrasing ("what drives CO levels") wins with
+        confidence >= 0.80, overriding name-keyword guesses.
 
         Scoring pipeline:
           1. Naming convention match — exact keywords, domain names, partial hints
@@ -172,6 +185,12 @@ class DatasetMetadata:
         ]
         if not non_datetime_cols:
             return None, 0.0
+
+        objective_l = objective.lower()
+        if any(p in objective_l for p in _DRIVER_PHRASES):
+            grounded = ground_objective_column(non_datetime_cols, objective)
+            if grounded is not None:
+                return grounded, _OBJECTIVE_GROUNDED_CONFIDENCE
 
         lower_to_orig = {c.lower(): c for c in non_datetime_cols}
         candidates: list[tuple[str, float]] = []

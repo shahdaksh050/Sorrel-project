@@ -10,6 +10,9 @@ All tools are deterministic and return structured dicts.
 """
 from __future__ import annotations
 
+import os
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +21,14 @@ import pandas as pd
 
 from src.core.coercion import coerce_types
 from src.core.findings import Finding
-from src.core.io import DatasetReadError, invalidate_read_cache, read_any
+from src.core.io import (
+    _READ_CACHE,
+    _READ_CACHE_LOCK,
+    DatasetReadError,
+    _cache_key,
+    invalidate_read_cache,
+    read_any,
+)
 from src.core.memory import DatasetMetadata, MemorySystem
 from src.core.security import UploadValidationError, escape_csv_formulas, resolve_output_path
 from src.tools.base import BaseTool, ToolExecutionError
@@ -45,6 +55,17 @@ _CORR_FINDING_THRESHOLD = 0.3
 
 #: Cap on how many top correlation pairs become Findings per run.
 _CORR_TOP_N = 3
+
+#: Columns linked by |r| >= this form a "group" (one shared driver reported
+#: once) when three or more are connected; a lone strong pair stays a pair.
+_CORR_GROUP_R = 0.9
+_CORR_GROUP_MIN_COLS = 3
+_CORR_GROUP_NAMES = 5  # member names spelled out in a group headline
+
+#: A numeric column missing more than this share of its values gets a
+#: coverage_gap finding from clean_data; at most _COVERAGE_GAP_MAX_COLS listed.
+_COVERAGE_GAP_SHARE = 0.5
+_COVERAGE_GAP_MAX_COLS = 5
 
 #: |r| floor for promoting a feature<->target correlation to a Finding
 #: (eta-squared targets use its square, the same share of variance).
@@ -82,6 +103,67 @@ def _read_raw_df(file_path: str) -> pd.DataFrame:
     return df
 
 
+#: Coerced frames by the read cache's (path, mtime, size) key. Coercing a
+#: 500k-row export costs seconds per call and every tool re-reads, so the
+#: repaired frame is kept for the few most recent files. An entry is only
+#: served while the raw frame is still in src.core.io's cache: a writer's
+#: invalidate_read_cache() (the guard against same-tick rewrites) drops both.
+_COERCED_MAX_ENTRIES = 2
+_COERCED: OrderedDict[tuple[str, int, int], pd.DataFrame] = OrderedDict()
+_COERCED_LOCK = threading.Lock()
+_COERCED_KEY_LOCKS: dict[tuple[str, int, int], threading.Lock] = {}
+
+
+def analysis_sample_rows() -> int:
+    """Row count above which exploratory statistics run on a seeded random
+    sample (env DSA_ANALYSIS_SAMPLE_ROWS, default 200,000)."""
+    try:
+        return max(1_000, int(os.environ.get("DSA_ANALYSIS_SAMPLE_ROWS", "200000")))
+    except ValueError:
+        return 200_000
+
+
+def sample_note(n_from: int, n_to: int) -> dict[str, Any]:
+    """Output fields marking an exploratory result computed on a random sample."""
+    return {
+        "sampled_from": n_from,
+        "sampled_to": n_to,
+        "sample_caveat": f"computed on a random sample of {n_to:,} of {n_from:,} rows",
+    }
+
+
+#: pearson_matrix uses the matrix-product path from this many columns up.
+_FAST_CORR_MIN_COLS = 30
+
+
+def pearson_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """`df.corr(method="pearson")` (pairwise-complete). pandas loops over every
+    column pair, O(k^2 n) single-threaded; on a wide frame the complete columns
+    go through one matrix product instead, and only pairs involving a column
+    with missing values are computed pairwise. Narrow, mostly-incomplete or
+    non-finite frames use pandas as before."""
+    k = df.shape[1]
+    if k < _FAST_CORR_MIN_COLS:
+        return df.corr(method="pearson")
+    arr = df.to_numpy(dtype=float, na_value=np.nan)
+    has_nan = np.isnan(arr).any(axis=0)
+    if int(has_nan.sum()) * 4 > k or bool(np.isinf(arr).any()):
+        return df.corr(method="pearson")
+    ok, bad = np.flatnonzero(~has_nan), np.flatnonzero(has_nan)
+    out = np.full((k, k), np.nan)
+    with np.errstate(all="ignore"):
+        out[np.ix_(ok, ok)] = np.corrcoef(arr[:, ok], rowvar=False)
+        for j in bad:
+            rows = np.flatnonzero(~np.isnan(arr[:, j]))
+            xc = arr[rows, j] - arr[rows, j].mean()
+            yc = arr[np.ix_(rows, ok)]
+            yc = yc - yc.mean(axis=0)
+            out[j, ok] = out[ok, j] = (yc.T @ xc) / np.sqrt((yc**2).sum(axis=0) * (xc**2).sum())
+    if len(bad):
+        out[np.ix_(bad, bad)] = df.iloc[:, bad].corr(method="pearson").to_numpy()
+    return pd.DataFrame(out, index=df.columns, columns=df.columns)
+
+
 def _read_df(file_path: str) -> pd.DataFrame:
     """
     Read a dataset ready for analysis: unified reader + type coercion.
@@ -99,9 +181,29 @@ def _read_df(file_path: str) -> pd.DataFrame:
     the ingestion path (memory context "coercions" -> the report's Data
     Overview), so nothing here is silent.
     """
-    df = _read_raw_df(file_path)
-    repaired, _coercions = coerce_types(df)
-    return repaired
+    key = _cache_key(file_path)
+    if key is None:
+        return coerce_types(_read_raw_df(file_path))[0]
+    # One lock per file: tools run in parallel batches, and N threads coercing
+    # the same 500k rows at once would each pay N times the GIL-bound cost.
+    with _COERCED_LOCK:
+        key_lock = _COERCED_KEY_LOCKS.setdefault(key, threading.Lock())
+    with key_lock:
+        with _READ_CACHE_LOCK:
+            raw_cached = key in _READ_CACHE
+        with _COERCED_LOCK:
+            hit = _COERCED.get(key) if raw_cached else _COERCED.pop(key, None)
+            if hit is not None:
+                _COERCED.move_to_end(key)
+        if hit is not None:
+            return hit.copy()
+        df = _read_raw_df(file_path)
+        repaired, _coercions = coerce_types(df)
+        with _COERCED_LOCK:
+            _COERCED[key] = repaired.copy()
+            while len(_COERCED) > _COERCED_MAX_ENTRIES:
+                _COERCED_KEY_LOCKS.pop(_COERCED.popitem(last=False)[0], None)
+        return repaired
 
 
 # ============================================================
@@ -279,6 +381,15 @@ class CleanDataTool(BaseTool):
         missing_by_column = {str(c): int(n) for c, n in df.isnull().sum().items() if n > 0}
         duplicate_rows = int(df.duplicated().sum())
         constant_columns = [str(c) for c in df.columns if df[c].nunique(dropna=True) <= 1]
+        # Numeric columns mostly empty (all-null ones were dropped at read).
+        sparse_columns: list[dict[str, Any]] = sorted(
+            (
+                {"column": str(c), "missing": n, "usable": len(df) - n, "pct_missing": round(100 * n / len(df), 1)}
+                for c in df.select_dtypes(include="number").columns
+                if (n := int(df[c].isnull().sum())) < len(df) and n > _COVERAGE_GAP_SHARE * len(df)
+            ),
+            key=lambda d: int(d["missing"]), reverse=True,
+        )
 
         # Exclude target column from imputation
         cols_to_clean = [c for c in df.columns if c != target_column]
@@ -338,7 +449,55 @@ class CleanDataTool(BaseTool):
             "missing_by_column": missing_by_column,
             "duplicate_rows": duplicate_rows,
             "constant_columns": constant_columns,
+            "sparse_columns": sparse_columns,
         }
+
+    def findings(
+        self,
+        output: dict[str, Any],
+        profile: DatasetProfile | None,
+        metadata: DatasetMetadata | None,
+    ) -> list[Finding]:
+        """One coverage_gap caveat when any numeric column is mostly empty:
+        analyses on it rest on far fewer rows than the dataset has."""
+        sparse = output.get("sparse_columns") or []
+        rows = output.get("rows_before")
+        if not sparse or not rows:
+            return []
+        worst = sparse[0]
+        listed = sparse[:_COVERAGE_GAP_MAX_COLS]
+        if len(sparse) == 1:
+            headline = (
+                f"{worst['column']} is {worst['pct_missing']:.0f}% missing "
+                f"({worst['usable']:,} of {rows:,} rows usable); analyses using it rest on far fewer rows"
+            )
+        else:
+            headline = (
+                f"{len(sparse)} numeric columns are over {_COVERAGE_GAP_SHARE:.0%} missing "
+                f"(worst: {worst['column']}, {worst['pct_missing']:.0f}% missing, "
+                f"{worst['usable']:,} of {rows:,} rows usable); analyses using them rest on far fewer rows"
+            )
+        strategy = output.get("strategy_used")
+        handling = (
+            "Gaps were left unfilled: correlations use only the rows where both columns have "
+            "a value (pairwise deletion) and other analyses use complete cases."
+            if strategy == "none"
+            else f"Gaps were handled with '{strategy}', so those values are estimates, not observations."
+        )
+        return [Finding(
+            finding_id=f"{self.name}_coverage_gap",
+            kind="coverage_gap",
+            headline=headline,
+            detail="; ".join(
+                f"{d['column']}: {d['usable']:,} usable of {rows:,} ({d['pct_missing']:.0f}% missing)" for d in listed
+            ) + ". " + handling,
+            evidence={"columns": listed, "rows": rows, "n_sparse_columns": len(sparse)},
+            source_tool=self.name,
+            measure=worst["column"],
+            confidence=0.9,
+            caveats=[handling],
+            layer="analyst",
+        )]
 
     def get_schema(self) -> dict[str, Any]:
         return {
@@ -540,7 +699,12 @@ class DetectOutliersTool(BaseTool):
             from sklearn.ensemble import IsolationForest
             model = IsolationForest(contamination=0.05, random_state=42, n_jobs=-1)
             clean = num_df.dropna()
-            preds = model.fit_predict(clean)
+            # Fit on a seeded sample above the size cap, score every row.
+            cap = analysis_sample_rows()
+            fit_rows = clean if len(clean) <= cap else clean.sample(n=cap, random_state=0)
+            preds = model.fit(fit_rows).predict(clean)
+            if len(fit_rows) < len(clean):
+                report.update(sample_note(len(clean), len(fit_rows)))
             mask = pd.Series(False, index=df.index)
             mask.loc[clean.index[preds == -1]] = True
             total_iso = int((preds == -1).sum())
@@ -596,7 +760,7 @@ class DetectOutliersTool(BaseTool):
             "method_unsuitable_columns."
             if report["method_unsuitable_columns"]
             else ""
-        )
+        ) + (f" Model {report['sample_caveat']}." if "sample_caveat" in report else "")
 
         return {
             "summary": (
@@ -677,6 +841,48 @@ class DetectOutliersTool(BaseTool):
         }
 
 
+def _correlation_groups(
+    corr: pd.DataFrame, skip: set[frozenset[str]],
+) -> list[dict[str, Any]]:
+    """Connected groups (union-find over |r| >= _CORR_GROUP_R pairs, definitional
+    pairs in `skip` ignored) of at least _CORR_GROUP_MIN_COLS columns, in column
+    order, each with its member r range and mean |r| over all member pairs."""
+    cols = [str(c) for c in corr.columns]
+    parent = {c: c for c in cols}
+
+    def find(c: str) -> str:
+        while parent[c] != c:
+            parent[c] = parent[parent[c]]
+            c = parent[c]
+        return c
+
+    values = corr.to_numpy(dtype=float)
+    for i, a in enumerate(cols):
+        for j in range(i + 1, len(cols)):
+            r = values[i, j]
+            if not np.isnan(r) and abs(r) >= _CORR_GROUP_R and frozenset((a, cols[j])) not in skip:
+                parent[find(a)] = find(cols[j])
+    members: dict[str, list[int]] = {}
+    for i, c in enumerate(cols):
+        members.setdefault(find(c), []).append(i)
+
+    groups: list[dict[str, Any]] = []
+    for idx in members.values():
+        if len(idx) < _CORR_GROUP_MIN_COLS:
+            continue
+        rs = [values[a, b] for k, a in enumerate(idx) for b in idx[k + 1:] if not np.isnan(values[a, b])]
+        abs_rs = [abs(r) for r in rs]
+        groups.append({
+            "columns": [cols[i] for i in idx],
+            "min_r": round(float(min(abs_rs)), 4),
+            "max_r": round(float(max(abs_rs)), 4),
+            "mean_abs_r": round(float(np.mean(abs_rs)), 4),
+            "any_negative": any(r < 0 for r in rs),
+        })
+    groups.sort(key=lambda g: g["mean_abs_r"], reverse=True)
+    return groups
+
+
 def _definitional_pairs(num_df: pd.DataFrame, corr: pd.DataFrame) -> dict[frozenset[str], str]:
     """Column pairs whose correlation is true by construction, mapped to
     the reason: identity-like (|r| >= _IDENTITY_R), or one column being the
@@ -685,11 +891,11 @@ def _definitional_pairs(num_df: pd.DataFrame, corr: pd.DataFrame) -> dict[frozen
 
     cols = [str(c) for c in corr.columns]
     found: dict[frozenset[str], str] = {}
-    for i, a in enumerate(cols):
-        for b in cols[i + 1:]:
-            r = float(corr.loc[a, b])
-            if not np.isnan(r) and abs(r) >= _IDENTITY_R:
-                found[frozenset((a, b))] = f"|r| >= {_IDENTITY_R}: the same quantity recorded twice"
+    values_r = corr.to_numpy(dtype=float)
+    with np.errstate(invalid="ignore"):
+        strong = np.triu(np.abs(values_r) >= _IDENTITY_R, 1)
+    for i, j in np.argwhere(strong):
+        found[frozenset((cols[i], cols[j]))] = f"|r| >= {_IDENTITY_R}: the same quantity recorded twice"
     if not 3 <= len(cols) <= _MAX_RELATION_COLS:
         return found
     sample = num_df[cols].dropna()
@@ -787,20 +993,28 @@ class CorrelationAnalysisTool(BaseTool):
         if num_df.shape[1] < 2:
             raise ToolExecutionError("Need at least 2 numerical columns for correlation analysis.")
 
+        # The matrix is exploratory, so above the size cap it is computed on a
+        # seeded sample; the p-values below are tests and use every row.
+        test_df = num_df
+        sampled: dict[str, Any] = {}
+        if len(num_df) > analysis_sample_rows():
+            num_df = num_df.sample(n=analysis_sample_rows(), random_state=0)
+            sampled = sample_note(len(test_df), len(num_df))
+
         # DataFrame.corr is pairwise-complete, so no global dropna.
         if method == "auto":
             skewed = {
                 c for c in num_df.columns
                 if abs(float(num_df[c].skew())) >= SEVERE_SKEW_THRESHOLD
             }
-            corr = num_df.corr(method="pearson")
+            corr = pearson_matrix(num_df)
             if skewed:
                 spearman = num_df.corr(method="spearman")
                 use_rank = np.array([[a in skewed or b in skewed for b in corr.columns] for a in corr.columns])
                 corr = corr.where(~use_rank, spearman)
         else:
             skewed = set()
-            corr = num_df.corr(method=method)
+            corr = pearson_matrix(num_df) if method == "pearson" else num_df.corr(method=method)
 
         def _pair_method(a: str, b: str) -> str:
             if method != "auto":
@@ -808,13 +1022,14 @@ class CorrelationAnalysisTool(BaseTool):
             return "spearman" if a in skewed or b in skewed else "pearson"
 
         # Top correlated pairs (exclude self-correlations)
-        pairs: list[dict[str, Any]] = []
         cols = corr.columns.tolist()
-        for i, ca in enumerate(cols):
-            for cb in cols[i + 1 :]:
-                val = float(corr.loc[ca, cb])
-                if not np.isnan(val):
-                    pairs.append({"col_a": ca, "col_b": cb, "correlation": round(val, 4)})
+        ii, jj = np.triu_indices(len(cols), 1)
+        rr = corr.to_numpy(dtype=float)[ii, jj]
+        keep = ~np.isnan(rr)
+        pairs: list[dict[str, Any]] = [
+            {"col_a": cols[i], "col_b": cols[j], "correlation": round(float(v), 4)}
+            for i, j, v in zip(ii[keep], jj[keep], rr[keep], strict=True)
+        ]
         pairs.sort(key=lambda x: abs(x["correlation"]), reverse=True)
         # Correlations true by construction (total = qty * price) are
         # reported, tagged, and never promoted to findings.
@@ -824,10 +1039,17 @@ class CorrelationAnalysisTool(BaseTool):
             if reason:
                 pair["definitional"] = True
                 pair["definitional_reason"] = reason
+        # Columns that all move together are one phenomenon, not many pairs.
+        corr_groups = _correlation_groups(corr, set(definitional))
+        group_of = {c: g["columns"] for g in corr_groups for c in g["columns"]}
+        for pair in pairs:
+            cols_a = group_of.get(str(pair["col_a"]))
+            if cols_a is not None and str(pair["col_b"]) in cols_a and not pair.get("definitional"):
+                pair["in_group"] = True
         top_pairs = pairs[:top_n]
         tests = {"pearson": stats.pearsonr, "spearman": stats.spearmanr, "kendall": stats.kendalltau}
         for pair in top_pairs:
-            both = num_df[[pair["col_a"], pair["col_b"]]].dropna()
+            both = test_df[[pair["col_a"], pair["col_b"]]].dropna()
             pair_method = _pair_method(pair["col_a"], pair["col_b"])
             pair["method"] = pair_method
             pair["n"] = len(both)
@@ -844,7 +1066,7 @@ class CorrelationAnalysisTool(BaseTool):
         positive_class: Any = None
         target_values: pd.Series | None = None
         if target_column and target_column in corr.columns:
-            target_values = num_df[target_column]
+            target_values = test_df[target_column]
         if target_column and target_column in corr.columns:
             target_corrs = {
                 c: round(float(corr.loc[c, target_column]), 4)
@@ -866,7 +1088,7 @@ class CorrelationAnalysisTool(BaseTool):
             raw_target = df[target_column]
             positive_class = sorted(raw_target.dropna().unique(), key=str)[-1]
             encoded = (raw_target == positive_class).astype("float64").where(raw_target.notna())
-            aligned = encoded.loc[num_df.index]
+            aligned = encoded.loc[test_df.index]
             target_values = aligned
             target_encoded = True
             target_corr_method = "point-biserial"
@@ -917,7 +1139,7 @@ class CorrelationAnalysisTool(BaseTool):
         target_stats: dict[str, dict[str, Any]] = {}
         if target_values is not None and target_column:
             for c in list(target_corrs)[:_CORR_TOP_N]:
-                both = pd.concat([num_df[c], target_values], axis=1).dropna()
+                both = pd.concat([test_df[c], target_values], axis=1).dropna()
                 t_method = "pearson" if target_encoded else _pair_method(c, target_column)
                 try:
                     p_val = float(tests[t_method](both.iloc[:, 0], both.iloc[:, 1])[1])
@@ -940,12 +1162,15 @@ class CorrelationAnalysisTool(BaseTool):
             top_summary += f". {len(definitional)} definitional pair(s) excluded from findings"
 
         return {
+            **sampled,
             "summary": (
                 f"Correlation ({method}) on {len(cols)} features. {top_summary}."
+                + (f" Correlation matrix {sampled['sample_caveat']}; p-values use all rows." if sampled else "")
             ),
             "method": method,
             "spearman_columns": sorted(str(c) for c in skewed),
             "top_correlations": top_pairs,
+            "correlation_groups": corr_groups,
             "target_correlations": target_corrs,
             "target_correlation_method": target_corr_method,
             "target_encoded_binary": target_encoded,
@@ -958,7 +1183,7 @@ class CorrelationAnalysisTool(BaseTool):
             ],
             "features_analyzed": cols,
             "n_features": len(cols),
-            "n_samples": int(num_df.dropna(how="all").shape[0]),
+            "n_samples": int(test_df.dropna(how="all").shape[0]),
         }
 
     def findings(
@@ -995,7 +1220,41 @@ class CorrelationAnalysisTool(BaseTool):
 
         results: list[Finding] = []
         covered: set[frozenset[str]] = set()
-        for i, pair in enumerate(top_pairs[:_CORR_TOP_N]):
+        # One finding per group of columns that move together, ahead of any
+        # pair; the pairs inside a group drop to the appendix.
+        for group in (output.get("correlation_groups") or [])[:_CORR_TOP_N]:
+            cols = [str(c) for c in group["columns"]]
+            shown = cols if len(cols) <= _CORR_GROUP_NAMES else [*cols[:_CORR_GROUP_NAMES - 1], f"{len(cols) - _CORR_GROUP_NAMES + 1} more"]
+            names = ", ".join(shown[:-1]) + f" and {shown[-1]}"
+            lo, hi = group["min_r"], group["max_r"]
+            label = "|r|" if group.get("any_negative") else "r"
+            results.append(Finding(
+                finding_id=f"{self.name}_group_{'_'.join(cols)}",
+                kind="correlation",
+                headline=f"{names} move together ({label} between {lo:.2f} and {hi:.2f})",
+                detail=(
+                    f"{len(cols)} columns are strongly correlated with each other "
+                    f"(|r| >= {_CORR_GROUP_R}): {', '.join(cols)}. Mean |r| across their "
+                    f"pairs is {group['mean_abs_r']:.2f}."
+                ),
+                evidence={
+                    "columns": cols, "min_r": lo, "max_r": hi,
+                    "mean_abs_r": group["mean_abs_r"], "n": n_samples,
+                },
+                source_tool=self.name,
+                measure=cols[0],
+                effect=group["mean_abs_r"],
+                effect_kind="r",
+                confidence=confidence,
+                caveats=[
+                    "Columns in a group usually reflect one shared driver (a common "
+                    "cycle or the same source) rather than independent evidence."
+                ],
+                layer="analyst",
+            ))
+        loose = [(i, p) for i, p in enumerate(top_pairs) if not p.get("in_group")]
+        grouped = [(i, p) for i, p in enumerate(top_pairs) if p.get("in_group")]
+        for i, pair in loose[:_CORR_TOP_N] + grouped[:_CORR_TOP_N]:
             r = pair.get("correlation")
             col_a, col_b = pair.get("col_a"), pair.get("col_b")
             if r is None or col_a is None or col_b is None or abs(r) < _CORR_FINDING_THRESHOLD:
@@ -1026,7 +1285,7 @@ class CorrelationAnalysisTool(BaseTool):
                 effect_kind="r",
                 p_value=p_value,
                 confidence=confidence,
-                layer="analyst",
+                layer="appendix" if pair.get("in_group") else "analyst",
             ))
         results.extend(self._target_findings(output, covered, confidence))
         return results

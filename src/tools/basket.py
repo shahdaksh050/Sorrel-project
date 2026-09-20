@@ -15,7 +15,6 @@ pair. Everything is deterministic and fitted per call; nothing is stored.
 from __future__ import annotations
 
 import math
-import re
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +23,7 @@ import pandas as pd
 
 from src.core.chart_spec import validate_chart_spec
 from src.core.findings import Finding
+from src.core.vocab import ROLE_TOKENS, column_role, name_tokens, role_tokens
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -38,15 +38,13 @@ _MAX_FINDINGS = 5
 _MIN_ORDERS = 20
 _MIN_ROWS_TO_APPLY = 200
 _MIN_ROWS_PER_ORDER = 1.5
-_ORDER_TOKENS = ("order", "transaction", "invoice", "basket", "receipt", "cart", "ticket", "session")
-_ITEM_TOKENS = ("item", "product", "sku", "article", "description", "category", "good")
-_NOT_AN_ID_TOKENS = frozenset({"date", "time", "datetime", "timestamp", "day", "month", "year", "amount", "total", "value"})
-_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-_SPLIT = re.compile(r"[^a-z0-9]+")
+_ORDER_TOKENS = role_tokens("order")
+_ITEM_TOKENS = role_tokens("item")
+_NOT_AN_ID_TOKENS = ROLE_TOKENS["date"] | {"month", "year", "amount", "total", "value"}
 
 
 def _tokens(name: str) -> set[str]:
-    words = [t for t in _SPLIT.split(_CAMEL.sub("_", str(name)).lower()) if t]
+    words = name_tokens(name)
     return set(words) | {"".join(p) for p in pairwise(words)}
 
 
@@ -65,15 +63,16 @@ def _detect_columns(profile: DatasetProfile | None) -> tuple[str, str] | None:
         return None
     orders: list[tuple[int, str]] = []
     items: list[tuple[int, str]] = []
+    overrides = profile.role_overrides
     for c in profile.columns:
         if c.kind == "datetime" or c.nunique < 2:
             continue
-        if _tokens(c.name) & _NOT_AN_ID_TOKENS:
+        if _tokens(c.name) & _NOT_AN_ID_TOKENS or column_role(profile, c.name, "date"):
             continue
-        rank = _priority(c.name, _ORDER_TOKENS)
+        rank = -1 if overrides.get(c.name) == "order" else _priority(c.name, _ORDER_TOKENS)
         if rank is not None and c.semantic_role != "measure" and profile.row_count / c.nunique >= _MIN_ROWS_PER_ORDER:
             orders.append((rank, c.name))
-        rank = _priority(c.name, _ITEM_TOKENS)
+        rank = -1 if overrides.get(c.name) == "item" else _priority(c.name, _ITEM_TOKENS)
         if rank is not None and c.kind != "numeric" and c.nunique >= 3:
             items.append((rank, c.name))
     for _, order in sorted(orders):

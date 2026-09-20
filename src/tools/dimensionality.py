@@ -18,7 +18,7 @@ from src.core.findings import Finding
 from src.core.profiler import profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.clustering import _per_entity_features, _select_cluster_features
-from src.tools.data_processing import _read_df
+from src.tools.data_processing import _read_df, analysis_sample_rows, pearson_matrix, sample_note
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
@@ -68,19 +68,24 @@ class DimensionalityAnalysisTool(BaseTool):
                 f"found {features.shape[1]}."
             )
 
+        sampled: dict[str, Any] = {}
+        if len(features) > analysis_sample_rows():
+            sampled = sample_note(len(features), analysis_sample_rows())
+            features = features.sample(n=analysis_sample_rows(), random_state=0)
         filled = features.fillna(features.median(numeric_only=True))
 
         # ---- Multicollinearity screen ----
         # Pairwise-complete on the raw values: median-filled rows would
         # dilute every correlation toward zero.
-        corr = features.corr(method="pearson")
+        corr = pearson_matrix(features)
         cols = corr.columns.tolist()
-        high_corr_pairs: list[dict[str, Any]] = []
-        for i, ca in enumerate(cols):
-            for cb in cols[i + 1:]:
-                val = float(corr.loc[ca, cb])
-                if not np.isnan(val) and abs(val) >= HIGH_CORRELATION_THRESHOLD:
-                    high_corr_pairs.append({"col_a": ca, "col_b": cb, "correlation": round(val, 4)})
+        values_r = corr.to_numpy(dtype=float)
+        with np.errstate(invalid="ignore"):
+            strong = np.triu(np.abs(values_r) >= HIGH_CORRELATION_THRESHOLD, 1)
+        high_corr_pairs: list[dict[str, Any]] = [
+            {"col_a": cols[i], "col_b": cols[j], "correlation": round(float(values_r[i, j]), 4)}
+            for i, j in np.argwhere(strong)
+        ]
         high_corr_pairs.sort(key=lambda x: abs(x["correlation"]), reverse=True)
 
         # ---- PCA ----
@@ -96,10 +101,12 @@ class DimensionalityAnalysisTool(BaseTool):
         n_for_threshold = min(n_for_threshold, len(explained))
 
         return {
+            **sampled,
             "summary": (
                 f"{features.shape[1]} numeric features → {n_for_threshold} PCA component(s) "
                 f"explain {variance_threshold:.0%} of variance. "
                 f"{len(high_corr_pairs)} feature pair(s) with |r| ≥ {HIGH_CORRELATION_THRESHOLD}."
+                + (f" PCA and correlations {sampled['sample_caveat']}." if sampled else "")
             ),
             "n_features": int(features.shape[1]),
             "features_used": list(features.columns),
@@ -125,6 +132,8 @@ class DimensionalityAnalysisTool(BaseTool):
         variance_threshold = output.get("variance_threshold")
         if n_features and n_for_threshold:
             reduction = 1.0 - (n_for_threshold / n_features)
+            first = (output.get("explained_variance_ratio") or [0.0])[0]
+            main_story = n_features >= 30 or first > 0.6
             if reduction > 0.15:
                 results.append(
                     Finding(
@@ -148,6 +157,7 @@ class DimensionalityAnalysisTool(BaseTool):
                         effect_kind="share",
                         confidence=0.6,
                         surprise=0.3,
+                        layer="analyst" if main_story else "appendix",
                     )
                 )
 

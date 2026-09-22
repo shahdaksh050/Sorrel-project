@@ -580,6 +580,11 @@ class DatasetProfile:
     #: `src.core.roles.validate_roles` confirmed against the data. Tools treat
     #: these exactly like a column-name match (`vocab.column_role`).
     role_overrides: dict[str, str] = field(default_factory=dict)
+    # ---- Table Layout & Structure (Phase 1) ----
+    header_row_offset: int = 0
+    subtotals_excluded: int = 0
+    reshaped_from_wide: bool = False
+    wide_time_vars: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -608,6 +613,10 @@ class DatasetProfile:
             "archetype_evidence": self.archetype_evidence,
             "relations": self.relations,
             "role_overrides": self.role_overrides,
+            "header_row_offset": self.header_row_offset,
+            "subtotals_excluded": self.subtotals_excluded,
+            "reshaped_from_wide": self.reshaped_from_wide,
+            "wide_time_vars": self.wide_time_vars,
         }
 
     def columns_of_kind(self, *kinds: str) -> list[ColumnProfile]:

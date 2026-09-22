@@ -288,11 +288,20 @@ class BaseTool(ABC):
     def to_prompt_description(self) -> str:
         """Format tool info for LLM system prompt injection."""
         schema = self.get_schema()
+        if "properties" in schema and isinstance(schema["properties"], dict):
+            req_set = set(schema.get("required", [])) if isinstance(schema.get("required"), list) else set()
+            params_dict: dict[str, Any] = {
+                k: {**v, "required": k in req_set} if isinstance(v, dict) else {"type": "any", "description": str(v)}
+                for k, v in schema["properties"].items()
+            }
+        else:
+            params_dict = schema
+
         params = "\n".join(
-            f"  - {k} ({v.get('type', 'any')}) "
-            f"{'[required]' if v.get('required') else '[optional]'}: "
-            f"{v.get('description', '')}"
-            for k, v in schema.items()
+            f"  - {k} ({v.get('type', 'any') if isinstance(v, dict) else 'any'}) "
+            f"{'[required]' if isinstance(v, dict) and v.get('required') else '[optional]'}: "
+            f"{v.get('description', '') if isinstance(v, dict) else ''}"
+            for k, v in params_dict.items()
         )
         return (
             f"tool_name: {self.name}\n"

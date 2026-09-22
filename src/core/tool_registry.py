@@ -61,6 +61,7 @@ class ToolRegistry:
         from src.tools.financial_analysis import FinancialAnalysisTool
         from src.tools.forecast import ForecastAnalysisTool
         from src.tools.geospatial import GeospatialAnalysisTool
+        from src.tools.graph_analysis import GraphAnalysisTool
         from src.tools.mixed_model import MixedModelAnalysisTool
         from src.tools.ml_pipeline import EvaluateModelTool, TrainModelTool
         from src.tools.regression import RegressionAnalysisTool
@@ -70,6 +71,7 @@ class ToolRegistry:
         from src.tools.survival import SurvivalAnalysisTool
         from src.tools.text_analysis import TextAnalysisTool
         from src.tools.time_series import TimeSeriesAnalysisTool
+        from src.tools.variable_methods import VariableScaleAnalysisTool
         from src.tools.visualization import GenerateVisualizationsTool
         from src.tools.workforce_analysis import WorkforceAnalysisTool
 
@@ -120,6 +122,10 @@ class ToolRegistry:
             BasketAnalysisTool(),
             PriceElasticityTool(),
             EquityAnalysisTool(),
+            # FutureScope Phase 3: Variable-scale methods
+            VariableScaleAnalysisTool(),
+            # FutureScope Phase 5: Graph analysis
+            GraphAnalysisTool(),
         ):
             self.register(tool)
 

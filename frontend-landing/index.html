@@ -3103,7 +3103,8 @@
         type: type,
       }, data);
       if (componentId) outData.id = componentId;
-      window.parent.postMessage(outData, '*');
+      const targetOrigin = (window.location.origin && window.location.origin !== "null") ? window.location.origin : "*";
+      window.parent.postMessage(outData, targetOrigin);
     }
 
     // The console's session theme arrives as the `theme` render arg. Adopt it on the first render

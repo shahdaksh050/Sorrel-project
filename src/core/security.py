@@ -15,8 +15,10 @@ Design rules:
 """
 from __future__ import annotations
 
+import io
 import os
 import re
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -32,6 +34,15 @@ ALLOWED_EXTENSIONS: frozenset[str] = SUPPORTED_EXTENSIONS
 
 #: Default upload ceiling in megabytes (override with MAX_UPLOAD_MB env var).
 DEFAULT_MAX_UPLOAD_MB = 200
+
+#: Default uncompressed container size ceiling in megabytes (override with MAX_UNCOMPRESSED_MB).
+DEFAULT_MAX_UNCOMPRESSED_MB = 500
+
+#: Default maximum compression ratio for archives before flagging as a potential bomb.
+DEFAULT_MAX_COMPRESSION_RATIO = 100.0
+
+#: Maximum entries in a zip archive (e.g. .xlsx) before rejection.
+DEFAULT_MAX_ZIP_ENTRIES = 5000
 
 #: Windows reserved device names — writing to these can hang or misbehave.
 _RESERVED_NAMES: frozenset[str] = frozenset(
@@ -68,6 +79,23 @@ def max_upload_bytes() -> int:
     except ValueError:
         mb = DEFAULT_MAX_UPLOAD_MB
     return max(1, mb) * 1024 * 1024
+
+
+def max_uncompressed_bytes() -> int:
+    """Return the configured uncompressed container size ceiling in bytes."""
+    try:
+        mb = int(os.getenv("MAX_UNCOMPRESSED_MB", str(DEFAULT_MAX_UNCOMPRESSED_MB)))
+    except ValueError:
+        mb = DEFAULT_MAX_UNCOMPRESSED_MB
+    return max(1, mb) * 1024 * 1024
+
+
+def max_compression_ratio() -> float:
+    """Return the configured maximum compression ratio before flagging as a bomb."""
+    try:
+        return float(os.getenv("MAX_COMPRESSION_RATIO", str(DEFAULT_MAX_COMPRESSION_RATIO)))
+    except ValueError:
+        return DEFAULT_MAX_COMPRESSION_RATIO
 
 
 def sanitize_filename(name: str) -> str:
@@ -147,12 +175,76 @@ def validate_upload(filename: str, raw_bytes: bytes) -> str:
             raise UploadValidationError(
                 "File claims to be CSV but contains null bytes (binary data)."
             )
-    elif suffix == ".xlsx" and not head.startswith(_XLSX_SIGNATURE):
-        raise UploadValidationError("File claims to be .xlsx but is not a valid Excel container.")
+    elif suffix == ".xlsx":
+        if not head.startswith(_XLSX_SIGNATURE):
+            raise UploadValidationError("File claims to be .xlsx but is not a valid Excel container.")
+        if zipfile.is_zipfile(io.BytesIO(raw_bytes)):
+            _check_decompression_safety(raw_bytes, suffix)
     elif suffix == ".xls" and not head.startswith(_XLS_SIGNATURE):
         raise UploadValidationError("File claims to be .xls but is not a valid Excel container.")
+    elif suffix == ".parquet":
+        _check_decompression_safety(raw_bytes, suffix)
 
     return safe_name
+
+
+def _check_decompression_safety(raw_bytes: bytes, suffix: str) -> None:
+    """
+    Inspect compressed containers (e.g. .xlsx zip archives, .parquet) to prevent
+    decompression bombs (zip bombs) or excessive memory allocation before reading.
+    """
+    max_uncompressed = max_uncompressed_bytes()
+    max_ratio = max_compression_ratio()
+
+    if suffix == ".xlsx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+                infolist = zf.infolist()
+                if len(infolist) > DEFAULT_MAX_ZIP_ENTRIES:
+                    raise UploadValidationError(
+                        f"Excel archive contains {len(infolist)} entries, exceeding the "
+                        f"safety limit of {DEFAULT_MAX_ZIP_ENTRIES}."
+                    )
+                total_uncompressed = sum(info.file_size for info in infolist)
+                if total_uncompressed > max_uncompressed:
+                    raise UploadValidationError(
+                        f"Uncompressed Excel content is {total_uncompressed / 1_048_576:.1f} MB, "
+                        f"exceeding the {max_uncompressed // 1_048_576} MB limit."
+                    )
+                ratio = total_uncompressed / max(1, len(raw_bytes))
+                if ratio > max_ratio:
+                    raise UploadValidationError(
+                        f"Suspicious compression ratio ({ratio:.1f}:1 > {max_ratio:.0f}:1). "
+                        "File rejected as a potential decompression bomb."
+                    )
+        except zipfile.BadZipFile as err:
+            raise UploadValidationError(f"Malformed or corrupted Excel archive: {err}") from err
+
+    elif suffix == ".parquet":
+        try:
+            import pyarrow.parquet as pq
+
+            pf = pq.ParquetFile(io.BytesIO(raw_bytes))  # type: ignore[no-untyped-call]
+            metadata = pf.metadata
+            total_uncompressed = sum(
+                metadata.row_group(i).total_byte_size
+                for i in range(metadata.num_row_groups)
+            )
+            if total_uncompressed > max_uncompressed:
+                raise UploadValidationError(
+                    f"Uncompressed Parquet content is {total_uncompressed / 1_048_576:.1f} MB, "
+                    f"exceeding the {max_uncompressed // 1_048_576} MB limit."
+                )
+            ratio = total_uncompressed / max(1, len(raw_bytes))
+            if ratio > max_ratio:
+                raise UploadValidationError(
+                    f"Suspicious Parquet compression ratio ({ratio:.1f}:1 > {max_ratio:.0f}:1). "
+                    "File rejected as a potential decompression bomb."
+                )
+        except UploadValidationError:
+            raise
+        except Exception as err:
+            raise UploadValidationError(f"Invalid or corrupted Parquet file: {err}") from err
 
 
 #: Characters that make a spreadsheet treat a CSV cell as a formula.

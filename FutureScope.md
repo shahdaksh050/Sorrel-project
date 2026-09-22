@@ -297,8 +297,8 @@ Rows are usually not independent and the data-generating design changes the vali
 | System | What it does | Speed | Effort |
 |---|---|---|---|
 | **Deliverable contract** | Parse the objective into required deliverables (chart type, driver analysis, comparison, forecast). After the run, check each was delivered; run a deterministic recipe for any that was not. | ~0 | Medium |
-| **Objective-to-plan compiler** | Map common intents to tool calls so a small model does not have to remember the goal. | ~0 | Medium |
-| **Question-type router** | Choose the analysis family from axis E (describe, compare, associate, predict, explain, forecast, detect, segment, rank, monitor, audit, fairness, benchmark, decide). | ~0 | Medium |
+| **Objective-to-plan compiler** | Map common intents to tool calls so a small model does not have to remember the goal; can be powered by OpenJev for zero-latency tool selection. | ~0 | Medium |
+| **Question-type router** | Choose the analysis family from axis E (describe, compare, associate, predict, explain, forecast, detect, segment, rank, monitor, audit, fairness, benchmark, decide); prime candidate for OpenJev System 1 classification. | ~0 | Medium |
 
 ### 5.7 The one domain-specific door: domain packs
 
@@ -321,10 +321,29 @@ Properties here are properties of the model and the workload, not of the data.
 |---|---|---|---|---|
 | **Speculative baseline execution** | LLM planning is slower than the baseline tools | Start the deterministic tools immediately while the LLM plans; the LLM then adds or removes steps. Live calls take about a minute; the tools take seconds. | **faster** | Medium |
 | **Chatty-model handling** | the model answers in prose or exhausts its token budget before JSON | One tiny JSON probe at startup; if the model answers in prose, mark it chatty and switch to a compact plan schema, structured-output or tool-calling mode where available, and a lower reasoning setting; fall back to the deterministic plan sooner. Observed in the live run. | faster | Medium |
+| **OpenJev (Future Scope / System 1 track)** | post-Phase 7 optimization for routing & claim guard | Run structured classification and routing in a single parallel forward pass (sub-50 ms) using local open weights (OpenJev) instead of an autoregressive LLM. Eliminates conversational prose failures (e.g. line 475) and JSON retry cycles, saves token budget for Stage 7 narrative, and guarantees zero cloud data leakage (`LOCAL_ONLY=true`). Non-blocking for Phases 1–7. | **faster** | Medium |
 | Optional critic pass | one extra call is affordable | Reads findings and narrative; flags contradictions and overclaims. | +1 call | Low |
 | Citations to finding ids in the narrative | any narrative | Verified deterministically. | ~0 | Low |
 | Progressive report | slow model | Deterministic findings first, narrative when it arrives. | faster (perceived) | Low-Medium |
 | Grounded follow-up Q&A | a finished run | See section 5.9. | +1 call on demand | Medium |
+
+#### OpenJev: local "System 1" future optimization track (post-Phase 7)
+
+*Note: This is a future optimization track and does not block implementation of Phases 1–7. The pipeline initially uses deterministic heuristics and existing LLM providers (`LLMClient`).*
+
+Autoregressive LLMs (Claude, GPT-4o, Gemini, or local 8B models) generate text token-by-token. For structured decisions (such as question routing in 5.6, archetype confirmation in 4.1, and causal-claim guarding in 5.3), this introduces high latency (15–60 s), token consumption, and failure modes where the model emits prose instead of JSON (as observed in Round 9 on `AirQualityUCI.csv`, line 475).
+
+**OpenJev** provides an open-weights, non-autoregressive decision model architecture designed specifically for typed classification, routing, and scoring in a single parallel forward pass:
+
+- **Theoretical improvements over generative LLMs:**
+  - **Latency (40–200x faster):** Decision passes take 10–50 ms locally, compared to 15–60 s for cloud LLMs or 20–40 s for local Ollama/vLLM instances.
+  - **Reliability & zero retry penalty:** Outputs are constrained directly by classification heads to predefined typed schemas (enums, booleans, probabilities). Conversational preamble, JSON syntax errors, and reprompting cycles are structurally impossible.
+  - **Token and cost savings:** Eliminates thousands of system-prompt and catalog tokens during Stage 2 planning, preserving the `MAX_LLM_TOKENS_PER_RUN` quota entirely for Stage 7 narrative synthesis.
+  - **Zero cloud leakage (`LOCAL_ONLY=true`):** Runs completely on-device/in-process (e.g., via ONNX or local PyTorch/C++ runtime), satisfying the strictest privacy and governance requirements.
+
+- **Hybrid System 1 + System 2 division of labor:**
+  - *System 1 (OpenJev):* Question-type router (5.6), dataset archetype detection, tool selection & applicability gating, and fast causal/overclaim guardrails (5.3).
+  - *System 2 (Generative LLM via `RLMEngine`):* Workbench dynamic code authoring (`execute_dynamic_code`) and Stage 7 executive narrative synthesis, where expressive natural language is genuinely required.
 
 ### 5.9 Retrieval (RAG): recommendation
 
@@ -358,6 +377,7 @@ Properties: wide or long tables, repeated work across tools, many series, LLM la
 6. **Integrity pass and constraint discovery** (5.5).
 7. **Domain-pack schema with two initial packs**, and the **cross-shape corpus** (section 7) so each later system is proven general.
 8. **Structure-specific analyses** (5.4): graph, spatial, event-log, many-series and functional analysis, each only when a real user need shows up.
+9. **(Future scope / optimization track) OpenJev System 1 migration** (5.8): Replace LLM decision/routing passes with local non-autoregressive decision heads for sub-50ms latency and zero retry penalty.
 
 ## 7. Proving generality: the cross-shape corpus
 
@@ -444,6 +464,7 @@ Written from Round 9, which used about 60 agents. Numbers are from that session,
 | 3 | Variable-aware methods (counts, compositional, ordinal, heavy tails, heaping, uncertainty) | 4 |
 | 4 | Dependence- and design-aware core | 4-5 |
 | 5-7 | Integrity pass; domain packs plus the test corpus; structure-specific analyses on demand | 2-3 each |
+| 8 (Future) | OpenJev System 1 Decision Engine (local non-autoregressive routing & claim-guard migration) | 2 |
 
 ### Prompt to paste at the start of a session
 ```
@@ -472,7 +493,7 @@ Start a **new session** for a new phase rather than compacting: the design concl
 
 ## 11. Known open items from Round 9
 
-- Live LLM run on `AirQualityUCI.csv` not yet reviewed end to end (chart-design pass, driver analysis for CO, month-by-pollutant heatmap, coverage report). Its first reply was prose again and hit the token cap; the retry path fired.
+- Live LLM run on `AirQualityUCI.csv` not yet reviewed end to end (chart-design pass, driver analysis for CO, month-by-pollutant heatmap, coverage report). Its first reply was prose again and hit the token cap; the retry path fired (the OpenJev System 1 decision engine in §5.8 is designed to eliminate this failure mode).
 - Controller-side role wiring (`_apply_column_roles`) has no test of its own; it needs an LLM run.
 - Join review cards, group-size input and run-comparison expander in the Streamlit UI were only syntax-checked, not looked at.
 - Local-model path (8k context, compact prompts, reasoning-tag stripping, concurrency limit) tested with fakes only; needs a real Ollama run with `LOCAL_LLM_CONTEXT=8192`.

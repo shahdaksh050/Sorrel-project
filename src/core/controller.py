@@ -36,6 +36,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from src.core.agenda import Question, build_agenda, coverage_report
+from src.core.causal_guard import audit_findings_causal_language, classify_study_design
 from src.core.chart_designer import design_from_reply
 from src.core.claim_verification import _CANON_PRECISIONS as _CANON_PRECISIONS
 from src.core.claim_verification import _KEYWORD_TOOL_MAP as _KEYWORD_TOOL_MAP
@@ -54,6 +55,8 @@ from src.core.dashboard import (
     merge_designed,
 )
 from src.core.degradations import collect_degradations
+from src.core.deliverable_contract import audit_deliverables, parse_deliverable_contract
+from src.core.domain_packs import detect_domain_pack, evaluate_domain_pack
 from src.core.domains import infer_domains
 from src.core.findings import Finding, score_objective_fit
 from src.core.governance import (
@@ -64,6 +67,7 @@ from src.core.governance import (
     local_only,
     max_llm_tokens_per_run,
 )
+from src.core.integrity import evaluate_data_integrity
 from src.core.io import get_max_rows, read_any
 from src.core.joins import join_related
 from src.core.llm_client import _DEFAULT_MODELS as _DEFAULT_MODELS
@@ -79,7 +83,9 @@ from src.core.prompt_manager import (
     RLM_SUBTASK_SYSTEM,
     PromptManager,
 )
+from src.core.question_router import route_question
 from src.core.security import sanitize_for_prompt
+from src.core.shared_context import SharedAnalysisContext
 from src.core.step_validation import _COLUMN_PARAM_NAMES as _COLUMN_PARAM_NAMES
 from src.core.step_validation import columns_for, is_column_param, validate_step
 from src.core.tool_registry import _INJECTED_PARAMS as _INJECTED_PARAMS
@@ -163,6 +169,8 @@ class AgentController:
         use_llm: bool | None = None,
         use_ml: bool | None = None,
         min_iterations: int | None = None,
+        objective: str | None = None,
+        output_dir: str | None = None,
     ) -> None:
         # Capability switches. Both default on, and both are honest about
         # what they cost: with use_llm off the run is fully deterministic
@@ -207,8 +215,11 @@ class AgentController:
         # reports/ directory. A pointer file (not a symlink — no elevated
         # rights needed on Windows) records the most recent run for humans
         # poking at the output tree by hand.
-        if os.getenv("OUTPUT_DIR"):
-            self._output_dir: str = os.environ["OUTPUT_DIR"]
+        if output_dir:
+            self._output_dir = output_dir
+            Path(self._output_dir).mkdir(parents=True, exist_ok=True)
+        elif os.getenv("OUTPUT_DIR"):
+            self._output_dir = os.environ["OUTPUT_DIR"]
         else:
             self._output_dir = str(Path("output") / "runs" / self.memory.session_id)
             try:
@@ -221,9 +232,17 @@ class AgentController:
         self._governor = CodeGovernor(self._output_dir, self.memory.session_id)
         self.llm_client.audit_dir = str(Path(self._output_dir) / AUDIT_SUBDIR)
         # Natural-language analysis objective supplied by the user (optional).
-        self.objective: str = os.getenv("USER_OBJECTIVE", "").strip()
+        self.objective = (objective or os.getenv("USER_OBJECTIVE") or "").strip()
+        self.deliverable_contract = parse_deliverable_contract(self.objective)
+        self.question_routing = route_question(self.objective)
         if self.objective:
             self.memory.set_context("user_objective", self.objective)
+            self.memory.set_context("question_routing", {
+                "primary_family": self.question_routing.primary_family,
+                "secondary_families": self.question_routing.secondary_families,
+                "recommended_tools": self.question_routing.recommended_tools,
+                "rationale": self.question_routing.rationale,
+            })
         # Most recent dataset profile (set during load_dataset).
         self.last_profile: DatasetProfile | None = None
         # The coerced dataframe from load_dataset's first profiling pass,
@@ -231,6 +250,8 @@ class AgentController:
         # (7.4 needs profile-before-target; class-imbalance warnings need
         # target-before-profile). Cleared at the end of load_dataset.
         self._pending_df: pd.DataFrame | None = None
+        self.shared_context: SharedAnalysisContext | None = None
+        self.study_design: str = "observational"
         # Charts from the most recent dashboard build (for the HTML report).
         self._last_charts: list[dict[str, Any]] = []
         self._rlm_decomposed: bool = False   # run decomposition at most once per session
@@ -456,6 +477,10 @@ class AgentController:
             df, read_report = read_any(file_path)
             df, coercions = coerce_types(df, delimiter=read_report.delimiter)
             self._pending_df = df
+            self.shared_context = SharedAnalysisContext(df=df)
+            self.memory.set_context("shared_analysis_context", self.shared_context)
+            self.study_design = classify_study_design(df, self.objective)
+            self.memory.set_context("study_design", self.study_design)
             profile = profile_dataframe(df, target_column=None)
             try:
                 profile.domains = infer_domains(df, profile)
@@ -465,6 +490,21 @@ class AgentController:
             self.last_profile = profile
             self.memory.set_context("data_profile", profile.to_dict())
             self.memory.set_context("data_profile_summary", profile.to_prompt_string())
+
+            # ---- Domain Pack Evaluation (Phase 5) ----
+            pack = detect_domain_pack(df, self.objective)
+            if pack:
+                self.memory.set_context("active_domain_pack", pack.name)
+                pack_findings = evaluate_domain_pack(df, pack=pack, objective=self.objective)
+                if pack_findings:
+                    self.memory.add_findings(pack_findings)
+                    console.print(f"  [cyan]🏛 Domain Pack '{pack.display_name}': {len(pack_findings)} contextual finding(s) generated.[/]")
+
+            # ---- Data Integrity & Constraint Audit (Phase 6) ----
+            integrity_findings = evaluate_data_integrity(df)
+            if integrity_findings:
+                self.memory.add_findings(integrity_findings)
+                console.print(f"  [yellow]🛡 Integrity Audit: {len(integrity_findings)} data integrity finding(s) detected.[/]")
             self.memory.set_context(
                 "read_report",
                 {
@@ -718,13 +758,22 @@ class AgentController:
     # Stages 2-7 — Full autonomous analysis pipeline
     # ------------------------------------------------------------------
 
-    def analyze(self) -> dict[str, Any]:
+    def analyze(
+        self,
+        file_path: str | None = None,
+        target_hint: str | None = None,
+        interactive: bool = False,
+    ) -> dict[str, Any]:
         """
         Run the complete autonomous analysis pipeline (Stages 2-7).
+        Optionally loads the dataset first if file_path is provided.
 
         Returns:
             Final analysis report as a structured dict.
         """
+        if file_path is not None:
+            self.load_dataset(file_path, target_hint=target_hint, interactive=interactive)
+
         if not self.memory.dataset_metadata:
             raise RuntimeError("No dataset loaded. Call load_dataset() first.")
 
@@ -1047,6 +1096,43 @@ class AgentController:
                 f"[yellow]⚠ {len(unverified)} unverified metric claim(s) in the "
                 f"final synthesis — see memory context 'unverified_claims'.[/]"
             )
+
+        # ---- Deliverable Contract Audit (Phase 2) ----
+        if hasattr(self, "deliverable_contract") and not self.deliverable_contract.is_empty():
+            df_for_audit = None
+            try:
+                from src.tools.data_processing import _read_df
+                c_path = self.memory.get_context("cleaned_file_path") or getattr(self.memory.dataset_metadata, "file_path", None)
+                if c_path:
+                    df_for_audit = _read_df(str(c_path))
+            except Exception:
+                df_for_audit = None
+            audit_rep = audit_deliverables(self.deliverable_contract, final_result, df=df_for_audit)
+            self.memory.set_context("deliverable_audit", {
+                "delivered": audit_rep.delivered,
+                "missing": audit_rep.missing,
+                "repaired": audit_rep.repaired,
+            })
+            if audit_rep.missing:
+                console.print(
+                    f"[yellow]⚠ Deliverable Contract: {len(audit_rep.missing)} deliverable(s) missing: "
+                    f"{', '.join(audit_rep.missing)}[/]"
+                )
+            if audit_rep.repaired:
+                console.print(
+                    f"[green]✓ Deliverable Contract: {len(audit_rep.repaired)} deliverable(s) repaired: "
+                    f"{', '.join(audit_rep.repaired)}[/]"
+                )
+
+        # ---- Causal Claim Guard (Phase 4) ----
+        study_design = getattr(self, "study_design", "observational")
+        causal_warns = audit_findings_causal_language(self.memory.findings, study_design=study_design)
+        if causal_warns:
+            console.print(
+                f"[yellow]⚠ Causal Claim Guard: {len(causal_warns)} claim(s) downgraded to association "
+                f"due to {study_design} study design.[/]"
+            )
+            final_result["findings"] = [f.to_dict() for f in self.memory.findings]
 
         # ---- Stage 7: Report Generation ----
         self._generate_final_report(final_result)

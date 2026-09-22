@@ -78,6 +78,7 @@ ignore = ["E501", "B008", "RUF001", "RUF002", "RUF003"]
 "src/tools/dimensionality.py" = ["N806"]
 "tests/test_ml_enhancements.py" = ["N806"]
 "tests/fixtures/planted_effects.py" = ["N806"]
+"app.py" = ["E402"]
 
 
 [tool.ruff.lint.isort]

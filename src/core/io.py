@@ -21,6 +21,7 @@ import csv
 import gzip
 import io
 import os
+import re
 import tempfile
 import threading
 import zipfile
@@ -146,6 +147,10 @@ class ReadReport:
     sampled_to: int | None = None      # rows kept after sampling (== get_max_rows() at read time)
     notes: list[str] = field(default_factory=list)
     sentinels: list[dict[str, Any]] = field(default_factory=list)  # numeric placeholders nulled (src.core.sentinels)
+    header_row_offset: int = 0
+    subtotals_excluded: int = 0
+    reshaped_from_wide: bool = False
+    wide_time_vars: list[str] = field(default_factory=list)
 
 
 class DatasetReadError(Exception):
@@ -239,6 +244,209 @@ def _decompress(raw: bytes, compression: str, filename: str) -> bytes:
     return raw
 
 
+# ---------------------------------------------------------------------------
+# Layout and Subtotal Detection (Phase 1, FutureScope 5.1)
+# ---------------------------------------------------------------------------
+
+_SUBTOTAL_EXACT_KEYWORDS = frozenset({
+    "total", "subtotal", "sub-total", "grand total", "all", "overall",
+    "totalen", "somme", "gesamt", "totale",
+})
+
+_YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
+_YEAR_PREFIX_RE = re.compile(r"^[YyFf](?:19|20)\d{2}$")
+_YEAR_MONTH_RE = re.compile(r"^(?:19|20)\d{2}[-_/](?:0[1-9]|1[0-2])$")
+_MONTH_NAME_RE = re.compile(
+    r"^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+    r"(?:uary|ruary|ch|il|e|y|ust|ember|ober)?$",
+    re.IGNORECASE,
+)
+_SEQ_STEP_RE = re.compile(r"^[TtQq]\d+$")
+
+
+def _is_numeric_str(s: str) -> bool:
+    try:
+        float(s.replace(",", ""))
+        return True
+    except ValueError:
+        return False
+
+
+def _detect_header_offset(text: str, delimiter: str) -> tuple[int, int, list[str]]:
+    """
+    Detect if the real header row is preceded by title/metadata rows or blank lines,
+    and if the file has trailing footnote lines.
+
+    Returns:
+        (header_offset, trailing_trim_count, notes)
+    """
+    lines = text.splitlines()
+    if len(lines) <= 2:
+        return 0, 0, []
+
+    scan_limit = min(25, len(lines))
+    parsed_lines: list[list[str]] = []
+    for line in lines[:scan_limit]:
+        if not line.strip():
+            parsed_lines.append([])
+            continue
+        try:
+            fields = next(csv.reader([line], delimiter=delimiter))
+            parsed_lines.append([f.strip() for f in fields])
+        except csv.Error:
+            parsed_lines.append([])
+
+    field_counts = [len(f) for f in parsed_lines if len(f) > 1]
+    if not field_counts:
+        return 0, 0, []
+
+    from collections import Counter
+    modal_count, _ = Counter(field_counts).most_common(1)[0]
+    if modal_count < 2:
+        return 0, 0, []
+
+    header_offset = 0
+    found_offset = False
+    for i, fields in enumerate(parsed_lines):
+        if len(fields) == modal_count:
+            non_numeric = sum(1 for f in fields if f and not _is_numeric_str(f))
+            if non_numeric >= max(1, modal_count // 2):
+                header_offset = i
+                found_offset = True
+                break
+
+    notes: list[str] = []
+    if found_offset and header_offset > 0:
+        notes.append(f"Header detected at row {header_offset + 1}; skipped {header_offset} title/metadata row(s).")
+
+    trailing_trim = 0
+    for j in range(len(lines) - 1, max(header_offset, len(lines) - 15), -1):
+        line = lines[j].strip()
+        if not line:
+            trailing_trim += 1
+            continue
+        if any(line.startswith(prefix) for prefix in ("*", "Note", "Notes:", "Source:", "Footnote:", "Disclaimer:")):
+            trailing_trim += 1
+            continue
+        try:
+            fields = next(csv.reader([line], delimiter=delimiter))
+            if len(fields) < modal_count:
+                trailing_trim += 1
+                continue
+        except csv.Error:
+            trailing_trim += 1
+            continue
+        break
+
+    if trailing_trim > 0:
+        notes.append(f"Trimmed {trailing_trim} trailing footnote/metadata line(s).")
+
+    return header_offset, trailing_trim, notes
+
+
+def detect_and_exclude_subtotals(df: pd.DataFrame) -> tuple[pd.DataFrame, list[int], list[str]]:
+    """
+    Identify rows that are subtotals or grand totals (e.g. 'North Total', 'Grand Total',
+    or rows matching the sum of preceding rows) and exclude them from analysis to prevent double counting.
+    """
+    if df.empty or len(df) <= 2:
+        return df, [], []
+
+    subtotal_indices: list[int] = []
+
+    text_cols = [c for c in df.columns if df[c].dtype == object or pd.api.types.is_string_dtype(df[c])]
+    for idx, row in df.iterrows():
+        row_idx = int(idx)
+        is_subtotal = False
+        for c in text_cols:
+            val = str(row[c]).strip().lower()
+            if val in _SUBTOTAL_EXACT_KEYWORDS or val.endswith(" total") or val.endswith(" subtotal"):
+                is_subtotal = True
+                break
+        if is_subtotal:
+            subtotal_indices.append(row_idx)
+
+    # Check if bottom row is a mathematical sum of the remaining rows
+    if not (subtotal_indices and subtotal_indices[-1] == len(df) - 1):
+        numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+        if len(numeric_cols) >= 2 and len(df) >= 4:
+            last_row = df.iloc[-1]
+            non_last = df.iloc[:-1]
+            sums = non_last[numeric_cols].sum()
+            matches = 0
+            for c in numeric_cols:
+                val = last_row[c]
+                if pd.notna(val) and abs(val - sums[c]) < 1e-4:
+                    matches += 1
+            if matches == len(numeric_cols):
+                if (len(df) - 1) not in subtotal_indices:
+                    subtotal_indices.append(len(df) - 1)
+
+    if not subtotal_indices:
+        return df, [], []
+
+    subtotal_indices = sorted(set(subtotal_indices))
+    clean_df = df.drop(index=subtotal_indices).reset_index(drop=True)
+    notes = [f"Excluded {len(subtotal_indices)} subtotal/total row(s) to prevent double-counting."]
+    return clean_df, subtotal_indices, notes
+
+
+def detect_wide_time_headers(df: pd.DataFrame) -> tuple[list[str], list[str]] | None:
+    """
+    Detect if the dataframe has columns representing time points (years, months, steps).
+    Returns (id_vars, time_vars) if at least 3 time columns are found, else None.
+    """
+    if df.shape[1] < 4:
+        return None
+
+    time_cols: list[str] = []
+    for col in df.columns:
+        c_str = str(col).strip()
+        if (
+            _YEAR_RE.match(c_str)
+            or _YEAR_PREFIX_RE.match(c_str)
+            or _YEAR_MONTH_RE.match(c_str)
+            or _MONTH_NAME_RE.match(c_str)
+            or _SEQ_STEP_RE.match(c_str)
+        ):
+            time_cols.append(str(col))
+
+    if len(time_cols) >= 3:
+        id_cols = [str(c) for c in df.columns if str(c) not in time_cols]
+        valid_numeric = 0
+        for c in time_cols:
+            if pd.api.types.is_numeric_dtype(df[c]):
+                valid_numeric += 1
+            else:
+                try:
+                    pd.to_numeric(df[c].dropna().head(10))
+                    valid_numeric += 1
+                except (ValueError, TypeError):
+                    pass
+        if valid_numeric >= len(time_cols) - 1:
+            return id_cols, time_cols
+
+    return None
+
+
+def reshape_wide_to_long(
+    df: pd.DataFrame,
+    id_vars: list[str],
+    time_vars: list[str],
+    time_col: str = "time",
+    value_col: str = "value",
+) -> pd.DataFrame:
+    """Reshape a wide time-in-header table into a long panel format."""
+    long_df = pd.melt(
+        df,
+        id_vars=id_vars,
+        value_vars=time_vars,
+        var_name=time_col,
+        value_name=value_col,
+    )
+    return long_df
+
+
 def _read_delimited(
     path: Path, format_: str, compression: str | None = None
 ) -> tuple[pd.DataFrame, ReadReport]:
@@ -264,11 +472,17 @@ def _read_delimited(
     sample = text[:_SNIFF_SAMPLE_BYTES]
 
     if format_ == "tsv":
-        # The extension is unambiguous — sniffing a small sample of quoted
-        # or numeric text is what mis-detects, so trust the extension.
         delimiter, delimiter_sniffed = "\t", False
     else:
         delimiter, delimiter_sniffed = _sniff_delimiter(sample)
+
+    header_offset, trailing_trim, layout_notes = _detect_header_offset(text, delimiter)
+    notes.extend(layout_notes)
+    if header_offset > 0 or trailing_trim > 0:
+        lines = text.splitlines()
+        end_idx = len(lines) - trailing_trim if trailing_trim > 0 else len(lines)
+        text = "\n".join(lines[header_offset:end_idx])
+        sample = text[:_SNIFF_SAMPLE_BYTES]
 
     duplicate_headers = _find_duplicate_headers(sample, delimiter)
     if duplicate_headers:
@@ -296,6 +510,7 @@ def _read_delimited(
         delimiter_sniffed=delimiter_sniffed,
         duplicate_headers=duplicate_headers,
         notes=notes,
+        header_row_offset=header_offset,
     )
     return df, report
 
@@ -566,6 +781,22 @@ def _read_uncached(file_path: str) -> tuple[pd.DataFrame, ReadReport]:
     else:
         df, report = _read_excel(path, format_)
     df = _drop_empty_columns(df, report)
+    df, subtotal_indices, subtotal_notes = detect_and_exclude_subtotals(df)
+    report.subtotals_excluded = len(subtotal_indices)
+    report.notes.extend(subtotal_notes)
+
+    wide_spec = detect_wide_time_headers(df)
+    if wide_spec is not None:
+        id_vars, time_vars = wide_spec
+        report.wide_time_vars = [str(c) for c in time_vars]
+        if id_vars:
+            df = reshape_wide_to_long(df, id_vars, time_vars)
+            report.reshaped_from_wide = True
+            report.notes.append(
+                f"Reshaped wide table with {len(time_vars)} time columns ({time_vars[0]}..{time_vars[-1]}) "
+                "to long panel format."
+            )
+
     df = _cap_rows(df, report)
     df, report.sentinels = null_sentinels(df)
     report.notes.extend(rec["note"] for rec in report.sentinels)

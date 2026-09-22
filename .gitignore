@@ -41,3 +41,9 @@ Beautiful3dFrontend/
 beautiful-3d-frontend/
 3d-ui-skill/
 *.zip
+
+# Runtime logs & scratch reports
+*.log
+streamlit_dev.log
+*_report.md
+final_report.json

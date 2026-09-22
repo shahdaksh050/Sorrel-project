@@ -1579,3 +1579,129 @@ def describe_chart(clean: dict[str, Any]) -> str:
         return (f"{head}." + (f" Issues: {'; '.join(hints)}." if hints else ""))[:_DESCRIBE_MAX]
     except Exception:
         return ""
+
+
+def chart_spec_to_plotly_dict(clean: dict[str, Any]) -> dict[str, Any]:
+    """
+    Translate a validated declarative chart spec into an interactive Plotly figure dict
+    {"data": [...], "layout": {...}}.
+
+    Avoids static image rasterization on disk; can be passed directly to
+    st.plotly_chart() or serialized as JSON.
+    """
+    rows = clean.get("data", [])
+    kind = str(clean.get("type", "bar"))
+    x_col = clean.get("x")
+    y_col = clean.get("y")
+    color_col = clean.get("color") or clean.get("series")
+    title = clean.get("title", "")
+    x_title = clean.get("x_title") or str(x_col or "")
+    y_title = clean.get("y_title") or str(y_col or "")
+
+    traces: list[dict[str, Any]] = []
+
+    if not rows:
+        return {"data": [], "layout": {"title": {"text": title}}}
+
+    if kind == "heatmap":
+        # Long-format heatmap: x, y, and value in color_col or y_col
+        val_col = color_col or y_col
+        xs = sorted({r.get(x_col) for r in rows if r.get(x_col) is not None})
+        ys = sorted({r.get(y_col) for r in rows if r.get(y_col) is not None})
+        grid_lookup = {(r.get(x_col), r.get(y_col)): r.get(val_col) for r in rows}
+        z_grid = [[grid_lookup.get((x_val, y_val)) for x_val in xs] for y_val in ys]
+        traces.append({
+            "type": "heatmap",
+            "x": xs,
+            "y": ys,
+            "z": z_grid,
+            "colorscale": "Viridis",
+        })
+    elif kind == "histogram":
+        x_vals = [r.get(x_col) for r in rows if r.get(x_col) is not None]
+        traces.append({
+            "type": "histogram",
+            "x": x_vals,
+            "name": x_title,
+        })
+    elif color_col and any(r.get(str(color_col)) is not None for r in rows):
+        # Grouped by color series
+        c_key = str(color_col)
+        groups: dict[Any, list[dict[str, Any]]] = {}
+        for r in rows:
+            g = r.get(c_key, "Other")
+            groups.setdefault(g, []).append(r)
+
+        x_key = str(x_col or "x")
+        y_key = str(y_col or "y")
+
+        for g_name, g_rows in groups.items():
+            xs = [r.get(x_key) for r in g_rows]
+            ys_opt: list[Any] | None = [r.get(y_key) for r in g_rows] if y_col else None
+            trace: dict[str, Any] = {"name": str(g_name)}
+            if kind in ("line", "area"):
+                trace["type"] = "scatter"
+                trace["mode"] = "lines+markers"
+                trace["x"] = xs
+                trace["y"] = ys_opt
+                if kind == "area":
+                    trace["fill"] = "tozeroy"
+            elif kind == "scatter":
+                trace["type"] = "scatter"
+                trace["mode"] = "markers"
+                trace["x"] = xs
+                trace["y"] = ys_opt
+            elif kind == "boxplot":
+                trace["type"] = "box"
+                trace["x"] = xs
+                trace["y"] = ys_opt
+            else:  # default bar
+                trace["type"] = "bar"
+                trace["x"] = xs
+                trace["y"] = ys_opt
+            traces.append(trace)
+    else:
+        # Single trace
+        x_key = str(x_col or "x")
+        y_key = str(y_col or "y")
+        xs = [r.get(x_key) for r in rows]
+        ys_opt_single: list[Any] | None = [r.get(y_key) for r in rows] if y_col else None
+        trace = {"name": y_title or x_title}
+        if kind in ("line", "area"):
+            trace["type"] = "scatter"
+            trace["mode"] = "lines+markers"
+            trace["x"] = xs
+            trace["y"] = ys_opt_single
+            if kind == "area":
+                trace["fill"] = "tozeroy"
+        elif kind == "scatter":
+            trace["type"] = "scatter"
+            trace["mode"] = "markers"
+            trace["x"] = xs
+            trace["y"] = ys_opt_single
+        elif kind == "boxplot":
+            trace["type"] = "box"
+            trace["x"] = xs
+            trace["y"] = ys_opt_single
+        else:
+            trace["type"] = "bar"
+            trace["x"] = xs
+            trace["y"] = ys_opt_single
+        traces.append(trace)
+
+    layout: dict[str, Any] = {
+        "title": {"text": title},
+        "xaxis": {"title": {"text": x_title}},
+        "yaxis": {"title": {"text": y_title}},
+        "template": "plotly_white",
+        "margin": {"l": 50, "r": 30, "t": 50, "b": 50},
+    }
+    if kind == "stacked_bar":
+        layout["barmode"] = "stack"
+    elif kind == "grouped_bar":
+        layout["barmode"] = "group"
+    if clean.get("log_y"):
+        layout["yaxis"]["type"] = "log"
+
+    return {"data": traces, "layout": layout}
+

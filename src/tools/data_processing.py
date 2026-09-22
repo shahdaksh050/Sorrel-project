@@ -355,7 +355,7 @@ class CleanDataTool(BaseTool):
     uses_cleaned_file = False  # this IS the tool that produces cleaned_file_path
     output_subdir = "data"
 
-    STRATEGIES = frozenset({"none", "mean", "median", "mode", "drop", "drop_rows", "forward_fill"})
+    STRATEGIES = frozenset({"none", "mean", "median", "mode", "drop", "drop_rows", "forward_fill", "mice", "knn"})
 
     def execute(  # type: ignore[override]
         self,
@@ -413,6 +413,43 @@ class CleanDataTool(BaseTool):
                 )
         elif strategy == "forward_fill":
             subset = subset.ffill()
+        elif strategy == "mice":
+            try:
+                from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+                from sklearn.impute import IterativeImputer
+                num_cols = subset.select_dtypes(include="number").columns
+                if len(num_cols) > 0 and subset[num_cols].isnull().any().any():
+                    imputer = IterativeImputer(random_state=42, max_iter=10)
+                    subset[num_cols] = pd.DataFrame(
+                        imputer.fit_transform(subset[num_cols]),
+                        columns=num_cols,
+                        index=subset.index,
+                    )
+                non_num = subset.select_dtypes(exclude="number").columns
+                if len(non_num) > 0 and subset[non_num].isnull().any().any():
+                    modes = subset[non_num].mode()
+                    if not modes.empty:
+                        subset[non_num] = subset[non_num].fillna(modes.iloc[0])
+            except Exception:
+                subset = subset.fillna(subset.median(numeric_only=True))
+        elif strategy == "knn":
+            try:
+                from sklearn.impute import KNNImputer
+                num_cols = subset.select_dtypes(include="number").columns
+                if len(num_cols) > 0 and subset[num_cols].isnull().any().any():
+                    imputer = KNNImputer(n_neighbors=min(5, max(1, len(subset) - 1)))
+                    subset[num_cols] = pd.DataFrame(
+                        imputer.fit_transform(subset[num_cols]),
+                        columns=num_cols,
+                        index=subset.index,
+                    )
+                non_num = subset.select_dtypes(exclude="number").columns
+                if len(non_num) > 0 and subset[non_num].isnull().any().any():
+                    modes = subset[non_num].mode()
+                    if not modes.empty:
+                        subset[non_num] = subset[non_num].fillna(modes.iloc[0])
+            except Exception:
+                subset = subset.fillna(subset.median(numeric_only=True))
 
         if strategy != "drop_rows":
             df[cols_to_clean] = subset
@@ -506,7 +543,7 @@ class CleanDataTool(BaseTool):
                 "type": "string",
                 "description": (
                     "Missing-value handling: none (default — leave NaN; analysis tools "
-                    "use complete cases) | mean | median | mode | drop | forward_fill."
+                    "use complete cases) | mean | median | mode | drop | forward_fill | mice | knn."
                 ),
                 "required": False,
             },

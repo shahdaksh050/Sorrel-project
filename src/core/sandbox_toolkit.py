@@ -892,3 +892,14 @@ class Toolkit:
         rows["_order"] = rows["change"].abs()
         rows = rows.sort_values([period_col, "_order"], ascending=[True, False]).drop(columns="_order")
         return rows.reset_index(drop=True)
+
+    @staticmethod
+    def query_sql(sql: str, **tables: pd.DataFrame) -> pd.DataFrame:
+        """Execute in-memory vectorized SQL via DuckDB/Polars across registered DataFrames.
+        Disallows file I/O, network access, or disk modifications.
+        Example:
+            dsa.query_sql("SELECT category, AVG(price) as avg_p FROM df GROUP BY category", df=df)
+        """
+        from src.core.duckdb_engine import query_dataframe
+        return query_dataframe(sql, tables)
+

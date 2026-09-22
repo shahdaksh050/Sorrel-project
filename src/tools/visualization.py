@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
-from src.core.chart_spec import validate_chart_spec
+from src.core.chart_spec import chart_spec_to_plotly_dict, validate_chart_spec
 from src.core.chart_theme import humanize_label
 from src.core.dashboard import CORRELATION_HEATMAP_TITLE, correlation_heatmap
 from src.core.io import DatasetReadError, read_any
@@ -134,10 +134,16 @@ class GenerateVisualizationsTool(BaseTool):
                 f"Unknown chart_type '{chart_type}'. "
                 "Valid: ['correlation_heatmap', 'feature_importance', 'distributions']"
             )
+        plotly_specs = [
+            chart_spec_to_plotly_dict(c)
+            for c in charts
+            if c.get("type") != "vega_lite"
+        ]
         return {
             "summary": f"Built {len(charts)} '{chart_type}' chart(s) for the dashboard.",
             "chart_type": chart_type,
             "charts": charts,
+            "plotly_specs": plotly_specs,
         }
 
     # ------------------------------------------------------------------

@@ -32,6 +32,24 @@ class ToolExecutionError(Exception):
     pass
 
 
+class ToolInterruptSignal(Exception):  # noqa: N818
+    """
+    Raised by a tool when a statistical precondition or critical assumption is broken,
+    signaling to the controller that the current linear execution plan should halt and pivot.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        recommended_pivot: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.recommended_pivot = recommended_pivot
+        self.details = details or {}
+
+
 #: A prior tool output whose JSON exceeds this is cut down to its small
 #: values before being shipped into the sandbox as PRIOR_RESULTS.
 PRIOR_RESULT_CAP_CHARS = 20_000
@@ -264,6 +282,20 @@ class BaseTool(ABC):
                 tool_name=self.name,
                 status="success",
                 output=output,
+                execution_time_ms=elapsed,
+            )
+        except ToolInterruptSignal as sig:
+            elapsed = (time.monotonic() - start) * 1000
+            return ToolResult(
+                tool_name=self.name,
+                status="interrupt",
+                output={
+                    "summary": f"Tool interrupt signaled by {self.name}: {sig.reason}",
+                    "interrupt_reason": sig.reason,
+                    "recommended_pivot": sig.recommended_pivot,
+                    "details": sig.details,
+                },
+                error_message=sig.reason,
                 execution_time_ms=elapsed,
             )
         except ToolExecutionError as exc:

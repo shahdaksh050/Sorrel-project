@@ -20,6 +20,7 @@ import contextlib
 import csv
 import gzip
 import io
+import json
 import os
 import re
 import tempfile
@@ -151,6 +152,7 @@ class ReadReport:
     subtotals_excluded: int = 0
     reshaped_from_wide: bool = False
     wide_time_vars: list[str] = field(default_factory=list)
+    extra_tables: dict[str, Any] = field(default_factory=dict)
 
 
 class DatasetReadError(Exception):
@@ -517,10 +519,58 @@ def _read_delimited(
 
 def _read_excel(path: Path, format_: str) -> tuple[pd.DataFrame, ReadReport]:
     engine = "openpyxl" if format_ == "xlsx" else "xlrd"
+    notes: list[str] = []
+    extra_tables: dict[str, Any] = {}
     try:
-        df = pd.read_excel(path, engine=engine)
+        xl = pd.ExcelFile(path, engine=engine)
+        sheet_names = xl.sheet_names
+        if not sheet_names:
+            raise DatasetReadError(f"'{path.name}' contains no sheets.")
+        if len(sheet_names) == 1:
+            df = xl.parse(sheet_names[0])
+        else:
+            sheets: dict[str, pd.DataFrame] = {}
+            for s in sheet_names:
+                try:
+                    s_df = xl.parse(s)
+                    if not s_df.empty:
+                        sheets[s] = s_df
+                except Exception:
+                    continue
+            if not sheets:
+                raise DatasetReadError(f"'{path.name}' sheets are all empty.")
+
+            cols_list = [set(map(str, s_df.columns)) for s_df in sheets.values()]
+            first_cols = cols_list[0]
+            matching_schemas = all(
+                cols == first_cols or (len(cols & first_cols) / max(1, len(cols | first_cols)) >= 0.7)
+                for cols in cols_list
+            )
+            if matching_schemas:
+                concat_list: list[pd.DataFrame] = []
+                for s_name, s_df in sheets.items():
+                    s_copy = s_df.copy()
+                    s_copy["_sheet_name"] = s_name
+                    concat_list.append(s_copy)
+                df = pd.concat(concat_list, ignore_index=True)
+                notes.append(
+                    f"Auto-concatenated {len(sheets)} sheets with matching schemas "
+                    f"({', '.join(sheets.keys())}) adding '_sheet_name' column."
+                )
+            else:
+                primary_name = max(sheets.keys(), key=lambda k: len(sheets[k]))
+                df = sheets[primary_name]
+                extra_tables = {k: v for k, v in sheets.items() if k != primary_name}
+                notes.append(
+                    f"Detected multi-tab Excel with {len(sheet_names)} distinct sheets "
+                    f"({', '.join(sheet_names)}). Primary sheet '{primary_name}' loaded "
+                    f"({len(df)} rows); {len(extra_tables)} additional tables preserved."
+                )
+    except DatasetReadError:
+        raise
     except Exception as exc:
         raise DatasetReadError(f"'{path.name}' could not be read as {format_}: {exc}") from exc
+
     report = ReadReport(
         path=str(path),
         format=format_,
@@ -528,6 +578,8 @@ def _read_excel(path: Path, format_: str) -> tuple[pd.DataFrame, ReadReport]:
         encoding_confident=True,
         delimiter=None,
         delimiter_sniffed=False,
+        notes=notes,
+        extra_tables=extra_tables,
     )
     return df, report
 
@@ -538,21 +590,46 @@ def _is_nested(value: object) -> bool:
 
 def _read_json(path: Path, format_: str) -> tuple[pd.DataFrame, ReadReport]:
     notes: list[str] = []
+    flattened = False
+    flattened_columns: int | None = None
+    df: pd.DataFrame
     try:
-        df = pd.read_json(path, lines=(format_ == "jsonl"))
-    except (ValueError, OSError) as exc:
+        if format_ == "jsonl":
+            df = pd.read_json(path, lines=True)
+        else:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                raw = json.load(f)
+            if isinstance(raw, list):
+                df = pd.json_normalize(raw, max_level=JSON_FLATTEN_MAX_DEPTH, sep=".")
+                flattened = True
+                flattened_columns = len(df.columns)
+            elif isinstance(raw, dict):
+                record_key = next((k for k in ("data", "items", "records", "results", "rows", "values") if isinstance(raw.get(k), list)), None)
+                if record_key is not None and isinstance(raw[record_key], list):
+                    meta_keys = [k for k in raw.keys() if k != record_key and not isinstance(raw[k], (list, dict))]
+                    df = pd.json_normalize(
+                        raw[record_key],
+                        meta=meta_keys if meta_keys else None,
+                        max_level=JSON_FLATTEN_MAX_DEPTH,
+                        sep=".",
+                    )
+                    flattened = True
+                    flattened_columns = len(df.columns)
+                    notes.append(f"Unpacked nested records list from key '{record_key}' with {len(df)} records.")
+                else:
+                    df = pd.json_normalize(raw, max_level=JSON_FLATTEN_MAX_DEPTH, sep=".")
+                    flattened = True
+                    flattened_columns = len(df.columns)
+            else:
+                df = pd.read_json(path)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
         raise DatasetReadError(f"'{path.name}' could not be parsed as {format_}: {exc}") from exc
     if df.empty:
         raise DatasetReadError(f"'{path.name}' contains no records.")
 
     nested_cols = [c for c in df.columns if df[c].map(_is_nested).any()]
-    flattened = False
-    flattened_columns: int | None = None
-    if nested_cols:
+    if nested_cols and not flattened:
         cols_before = len(df.columns)
-        # Depth-capped: a record nested deeper than JSON_FLATTEN_MAX_DEPTH
-        # keeps its remaining structure as a dict/list cell value rather
-        # than exploding into unbounded dotted columns.
         df = pd.json_normalize(
             df.to_dict(orient="records"), max_level=JSON_FLATTEN_MAX_DEPTH, sep="."
         )

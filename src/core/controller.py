@@ -67,6 +67,7 @@ from src.core.governance import (
     local_only,
     max_llm_tokens_per_run,
 )
+from src.core.hypothesis import HypothesisTree, generate_counterfactual_probes
 from src.core.integrity import evaluate_data_integrity
 from src.core.io import get_max_rows, read_any
 from src.core.joins import join_related
@@ -235,6 +236,8 @@ class AgentController:
         self.objective = (objective or os.getenv("USER_OBJECTIVE") or "").strip()
         self.deliverable_contract = parse_deliverable_contract(self.objective)
         self.question_routing = route_question(self.objective)
+        self.hypothesis_tree = HypothesisTree(primary_objective=self.objective)
+        self.memory.set_context("hypothesis_tree", self.hypothesis_tree.to_dict())
         if self.objective:
             self.memory.set_context("user_objective", self.objective)
             self.memory.set_context("question_routing", {
@@ -2050,6 +2053,20 @@ class AgentController:
                         if note not in finding.caveats:
                             finding.caveats.append(note)
                 self.memory.add_findings(new_findings)
+                col_names = [c.name for c in self.last_profile.columns] if self.last_profile else []
+                for f in new_findings:
+                    m = f.measure or ""
+                    d = f.dimension or ""
+                    confounders = [c for c in col_names if c not in (m, d)][:3]
+                    cf_probes = generate_counterfactual_probes(m, d, confounders) if (m and d) else []
+                    self.hypothesis_tree.add_hypothesis(
+                        statement=f"{f.headline or f.detail}",
+                        parent_id=None,
+                        status="supported",
+                        rationale=f"Observed in step {step.step_number} ({step.tool_name})",
+                        counterfactuals=cf_probes,
+                    )
+                self.memory.set_context("hypothesis_tree", self.hypothesis_tree.to_dict())
                 if any(f.p_value is not None for f in new_findings):
                     try:
                         adjust_findings_run_level(self.memory.findings)
@@ -2139,6 +2156,22 @@ class AgentController:
                 self.memory.set_context("split_strategy", trained_split_strategy)
                 self.memory.set_context("split_time_column", result.output.get("time_column"))
                 self.memory.set_context("split_group_column", result.output.get("group_column"))
+
+        if result.status == "interrupt":
+            self.memory.set_context("interrupt_signal", result.output)
+            reason = result.error_message or "Execution interrupted by tool precondition violation."
+            pivot = result.output.get("recommended_pivot")
+            self.hypothesis_tree.add_hypothesis(
+                statement=f"Precondition check for {step.tool_name}",
+                parent_id=None,
+                status="refuted",
+                rationale=reason,
+                counterfactuals=[f"Pivot recommendation: {pivot}"] if pivot else [],
+            )
+            self.memory.set_context("hypothesis_tree", self.hypothesis_tree.to_dict())
+            console.print(f"  [red bold]⚡ Step {step.step_number}: {step.tool_name} triggered INTERRUPT:[/] {reason}")
+            if self.on_step_callback:
+                self.on_step_callback(step.tool_name, "interrupt", f"Halted by interrupt: {reason[:80]}")
 
         if step.tool_name == "clean_data" and result.status == "success":
             cleaned_path = result.output.get("cleaned_file_path")
@@ -2277,10 +2310,11 @@ class AgentController:
             summary = str(result.output.get("summary", ""))[:80]
             self.on_step_callback(step.tool_name, "success", f"{prepared.idx}/{total_steps} done — {summary}")
 
-    def _run_batch(self, batch: list[tuple[int, AnalysisStep]], total_steps: int) -> None:
+    def _run_batch(self, batch: list[tuple[int, AnalysisStep]], total_steps: int) -> bool:
         """Prepare and execute consecutive steps; a batch of two or more
         uncached steps runs concurrently, and results are recorded in plan
-        order either way so findings and ids stay deterministic."""
+        order either way so findings and ids stay deterministic. Returns True
+        if an interrupt signal was encountered."""
         prepared = [p for idx, step in batch if (p := self._prepare_step(idx, step, total_steps)) is not None]
         to_run = [p for p in prepared if p.cached is None]
         results: dict[int, ToolResult] = {}
@@ -2298,12 +2332,17 @@ class AgentController:
             else:
                 result = results[p.idx] if p.idx in results else p.tool.run(**p.params)
                 self._process_step_result(p, result, total_steps)
+                if result.status == "interrupt":
+                    return True
+        return False
 
     def _execute_steps(self, steps: list[AnalysisStep]) -> None:
         """
         Stage 3 — execute the plan with retry budgets. clean_data goes first
         (later steps read the cleaned file); runs of independent read-only
         analytical tools execute concurrently, everything else sequentially.
+        If any tool raises a ToolInterruptSignal, execution of the remaining
+        steps is halted so the agent can replan.
         """
         ordered = sorted(steps, key=lambda s: s.tool_name != "clean_data")
         total_steps = len(ordered)
@@ -2312,10 +2351,13 @@ class AgentController:
             if step.tool_name in self._CONCURRENT_SAFE_TOOLS:
                 batch.append((idx, step))
                 continue
-            self._run_batch(batch, total_steps)
+            if batch and self._run_batch(batch, total_steps):
+                return
             batch = []
-            self._run_batch([(idx, step)], total_steps)
-        self._run_batch(batch, total_steps)
+            if self._run_batch([(idx, step)], total_steps):
+                return
+        if batch:
+            self._run_batch(batch, total_steps)
 
     def _maybe_register_generated_tool(self, result: ToolResult) -> None:
         """

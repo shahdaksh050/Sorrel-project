@@ -717,6 +717,39 @@ class PromptManager:
             )
         return "\n".join(lines) + "\n"
 
+    def _interrupt_block(self) -> str:
+        """Surfaces critical precondition violation or interrupt signal that halted prior plan."""
+        interrupt = self.memory.get_context("interrupt_signal")
+        if not interrupt or not isinstance(interrupt, dict):
+            return ""
+        reason = interrupt.get("interrupt_reason", "")
+        pivot = interrupt.get("recommended_pivot", "")
+        lines = [
+            "\n## CRITICAL PRECONDITION VIOLATION / INTERRUPT DETECTED",
+            f"A tool signaled an execution interrupt: {reason}",
+        ]
+        if pivot:
+            lines.append(f"Recommended pivot: {pivot}")
+        lines.append("You MUST adjust your plan to address this violation before proceeding with downstream dependent analyses.\n")
+        return "\n".join(lines)
+
+    def _hypotheses_block(self) -> str:
+        """Surfaces current hypothesis tree and counterfactual verification probes."""
+        htree = self.memory.get_context("hypothesis_tree")
+        if not htree or not isinstance(htree, dict):
+            return ""
+        nodes = htree.get("nodes", {})
+        if not nodes:
+            return ""
+        lines = ["\n## Active Hypotheses & Counterfactual Checks"]
+        for nid, n in list(nodes.items())[:6]:
+            status = n.get("status", "untested")
+            statement = n.get("statement", "")
+            lines.append(f"- [{nid}] ({status}): {statement}")
+            for cq in (n.get("counterfactual_queries") or [])[:2]:
+                lines.append(f"    * Test probe: {cq}")
+        return "\n".join(lines) + "\n"
+
     def _rlm_block(self) -> str:
         """
         Stage 6 sub-task findings, fed back into later reasoning cycles so the
@@ -786,7 +819,12 @@ class PromptManager:
 
     def get_iteration_user_prompt(self) -> str:
         def render(level: int) -> str:
-            extras = self._derived_block() + self._generated_tools_block()
+            extras = (
+                self._derived_block()
+                + self._generated_tools_block()
+                + self._interrupt_block()
+                + self._hypotheses_block()
+            )
             if level < 3:
                 extras += self._rlm_block()
             return ITERATION_PROMPT.format(

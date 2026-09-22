@@ -367,6 +367,47 @@ Properties: wide or long tables, repeated work across tools, many series, LLM la
 | Adaptive sampling with error bounds | Fixed sampling above 200,000 rows already exists (`DSA_ANALYSIS_SAMPLE_ROWS`). | faster | Medium |
 | Batch processing for many series and many tables | Vectorised across series; parallel where safe. | faster | Medium |
 
+### 5.11 High-throughput execution engine and visual specs (Fast)
+
+Replaces slow single-threaded in-memory Python operations and disk-bound bitmap rendering with vectorized columnar execution and lightweight JSON visualization specifications.
+
+| System | What it does | Speed | Effort |
+|---|---|---|---|
+| **DuckDB in-memory query layer** | Execute group-bys, window functions, and multi-column aggregations through an in-memory DuckDB engine rather than single-threaded Pandas. Bypasses row-sampling caps up to 5M rows. | **faster (10-30x)** | Medium |
+| **Interactive chart specs (Plotly / Vega-Lite JSON)** | Output structured JSON chart specifications instead of rasterizing static Matplotlib/Seaborn PNGs to disk. Cuts chart rendering latency from 2–3s to <10ms and gives frontend interactive zoom/tooltips. | **faster (8-15s saved)** | Medium |
+| **Out-of-core streaming joins** | Stream large table joins and cross-tabs through columnar Arrow memory blocks to avoid memory bloat and swapping on 1GB+ files. | **faster** | Medium |
+
+### 5.12 Truly agentic dynamic reasoning and hypothesis trees (Truly Agentic)
+
+Breaks out of static linear tool queues by giving tools early-exit interrupt signals and maintaining an active hypothesis-refutation tree.
+
+| System | What it does | Speed | Effort |
+|---|---|---|---|
+| **Tool interrupt and branch signals** | Tools emit an `InterruptSignal` when discovering broken distribution assumptions (e.g. 95% zero-inflation, severe multimodal clustering, or extreme power laws). The controller halts the remaining queue and triggers a micro-replan instead of running doomed steps. | **faster (avoids doomed steps)** | Medium |
+| **Active hypothesis-refutation tree** | The agent structures reasoning as a tree of testable hypotheses ($H_0 \rightarrow H_1 \dots$) with explicit counterfactual verification ("Does this correlation hold after controlling for Z?"). | +0-1 call | High |
+| **Self-healing sandbox execution** | When sandboxed LLM code fails with syntax or indexing errors, a targeted localized repair loop fixes the script immediately without burning a full controller cycle. | **faster** | Low-Medium |
+
+### 5.13 Universal multi-entity and complex document ingestion (Accepts All Data)
+
+Extends ingestion from single flat tables to real-world corporate artifacts: multi-tab Excel workbooks, relational table bundles, and deeply nested JSON trees.
+
+| System | What it does | Speed | Effort |
+|---|---|---|---|
+| **Multi-tab Excel workbook engine** | Inspect all sheets in `.xlsx` workbooks. Auto-concatenates identically formatted period sheets (e.g. Jan..Dec); exposes distinct schemas as linked relational tables. | ~0 (gated to .xlsx) | Medium |
+| **Automated foreign-key & star schema joiner** | Discovers entity relationships across multi-file uploads via Jaccard value overlap and naming heuristics (`*_id`), assembling a unified analytical star schema. | ~0 (gated to multi-file) | High |
+| **Recursive nested JSON normalizer** | Unfolds multi-level nested dictionaries and array-of-record payloads using recursive path dot-notation (`order.items[].sku`) and auto-generates bridge junction tables. | ~0 (gated to JSON) | Medium |
+| **Local zero-shot semantic text clustering** | Uses local ONNX embedding models (`fastembed`) on free-text columns to group verbatim customer/incident text into semantic topics without external API latency or privacy leaks. | ~0 (gated to text cols) | Medium |
+
+### 5.14 Advanced statistical validity and sensitivity audits (Quality)
+
+Eliminates hidden statistical distortions caused by naive imputation, leverage points, or target leakage.
+
+| System | What it does | Speed | Effort |
+|---|---|---|---|
+| **MICE / Iterative Imputation for MAR data** | Replaces naive mean/median imputation with Multiple Imputation by Chained Equations (MICE) when data is Missing At Random (MAR), preserving multivariate variance and covariance structures. | small (<0.2s) | Medium |
+| **Jackknife sensitivity & fragility audit** | Perturbs top findings by trimming top 1% leverage points and testing stability of conclusions. Surfaces fragility badges (`[FRAGILE: Driven by 2 points]`) directly in the report. | small (<0.1s on top findings) | Low-Medium |
+| **Target leakage & temporal precedence guard** | Screens candidate predictive features for mutual information near 1.0 or timestamps post-dating the target event, warning the user of target leakage before models train. | ~0 | Low |
+
 ## 6. Suggested order (by breadth of data affected, then cost)
 
 1. **Layout, reshape and total-row detection** (5.1). Real uploads are messy spreadsheets; wide time-in-header tables and totals mixed with data silently corrupt everything downstream, across every domain.
@@ -378,6 +419,10 @@ Properties: wide or long tables, repeated work across tools, many series, LLM la
 7. **Domain-pack schema with two initial packs**, and the **cross-shape corpus** (section 7) so each later system is proven general.
 8. **Structure-specific analyses** (5.4): graph, spatial, event-log, many-series and functional analysis, each only when a real user need shows up.
 9. **(Future scope / optimization track) OpenJev System 1 migration** (5.8): Replace LLM decision/routing passes with local non-autoregressive decision heads for sub-50ms latency and zero retry penalty.
+10. **High-throughput execution engine and visual specs** (5.11, Phase 9): In-memory DuckDB query layer and interactive Plotly/Vega-Lite JSON specs (10-30x compute speedup, 10s saved on rendering).
+11. **Truly agentic dynamic reasoning and hypothesis trees** (5.12, Phase 10): Tool interrupt signals, active hypothesis tree, and self-healing sandbox loop.
+12. **Universal multi-entity and complex document ingestion** (5.13, Phase 11): Multi-tab Excel, automated foreign-key discovery, and deep JSON normalizer.
+13. **Advanced statistical validity and sensitivity audits** (5.14, Phase 12): MICE imputation, Jackknife fragility index, and target leakage guard.
 
 ## 7. Proving generality: the cross-shape corpus
 
@@ -456,15 +501,19 @@ Written from Round 9, which used about 60 agents. Numbers are from that session,
 - Use `isolation: "worktree"` for risky refactors (for example the shared analysis context).
 
 ### Phases (from section 6)
-| Phase | Content | Agents |
+| Phase | Content | Status |
 |---|---|---|
-| 0 | Audit the status column in section 4; build the hidden-assumption test scaffolding (section 8) | 2 |
-| 1 | Layout detection, wide-to-long reshape, total-row detection (share `io.py`: run in sequence) | 3 |
-| 2 | Deliverable contract, question router, shared analysis context, speculative baseline execution | 4 |
-| 3 | Variable-aware methods (counts, compositional, ordinal, heavy tails, heaping, uncertainty) | 4 |
-| 4 | Dependence- and design-aware core | 4-5 |
-| 5-7 | Integrity pass; domain packs plus the test corpus; structure-specific analyses on demand | 2-3 each |
-| 8 (Future) | OpenJev System 1 Decision Engine (local non-autoregressive routing & claim-guard migration) | 2 |
+| 0 | Audit the status column in section 4; build the hidden-assumption test scaffolding (section 8) | **Completed** |
+| 1 | Layout detection, wide-to-long reshape, total-row detection (share `io.py`: run in sequence) | **Completed** |
+| 2 | Deliverable contract, question router, shared analysis context, speculative baseline execution | **Completed** |
+| 3 | Variable-aware methods (counts, compositional, ordinal, heavy tails, heaping, uncertainty) | **Completed** |
+| 4 | Dependence- and design-aware core | **Completed** |
+| 5-7 | Integrity pass; domain packs plus the test corpus; structure-specific analyses on demand | **Completed** |
+| 8 (Future) | OpenJev System 1 Decision Engine (local non-autoregressive routing & claim-guard migration) | *Excluded per user directive* |
+| 9 | High-throughput execution engine (DuckDB in-memory query layer + Plotly/Vega-Lite JSON specs) | **Completed** |
+| 10 | Truly agentic dynamic reasoning (tool interrupt signals, hypothesis-refutation tree, self-healing sandbox) | **Completed** |
+| 11 | Universal multi-entity ingestion (multi-tab Excel, automated foreign-key joiner, recursive JSON) | **Completed** |
+| 12 | Advanced statistical validity (MICE imputation for MAR, Jackknife fragility check, target leakage guard) | **Completed** |
 
 ### Prompt to paste at the start of a session
 ```

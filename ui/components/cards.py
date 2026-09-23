@@ -561,6 +561,16 @@ def render_other_findings(tool_results: list[dict[str, Any]]) -> None:
             c1.metric("Vocabulary size", out.get("vocab_size", "—"))
             c2.metric("Avg. words / row", out.get("avg_word_count", "—"))
             top = out.get("top_tokens") or []
+            # TextAnalysisTool's real shape is a dict ({token: count}, see
+            # src/tools/text_analysis.py), not a list — `top[:6]` on a plain
+            # dict raised TypeError pre-3.12, but slice objects became
+            # hashable in Python 3.12+, so it now does a dict lookup and
+            # raises KeyError instead. Normalize to a token list first, kept
+            # defensive for a list-of-dicts/list-of-strings shape too.
+            if isinstance(top, dict):
+                top = list(top.keys())
+            elif not isinstance(top, list):
+                top = []
             words = [t.get("token", t) if isinstance(t, dict) else t for t in top[:6]]
             if words:
                 st.caption(md_text("Most frequent words: " + ", ".join(str(w) for w in words)))

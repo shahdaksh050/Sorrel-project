@@ -51,9 +51,302 @@ live plan; "Still open from Round 7" (just above "Carried-forward open items")
 lists what Round 7 deliberately left for later (7.12–7.14, parts of
 7.18–7.20/7.22) so none of it got lost in the comment-out pass.
 
-**Reading order.** Round 8 is the live plan. The carried-forward items below
-it keep their original numbering (`6.x`, `U1.x`, `P1.x`…) so older notes,
-commits and conversations still resolve.
+**Reading order.** Round 10 (immediately below) is the live plan. Round 9 is
+its baseline (all green, see its own status note). The carried-forward items
+below both keep their original numbering (`6.x`, `U1.x`, `P1.x`…) so older
+notes, commits and conversations still resolve.
+
+---
+
+---
+
+# Round 10 — Close the orphan-wiring gap, harden performance, make cost measurable
+
+**Directive (2026-09-23/24, via `/goal` then `/advisor`):** the user asked for
+a full quality/correctness pass over everything merged since Round 9 —
+FutureScope Phases 0–7 (`31e29f1`) plus Phases 9–12, which existed on an
+unmerged branch (`daksh/updatesv2`, commit `d11c115`) and have now been
+fast-forward merged into `master` — followed by an `/advisor`-guided plan for
+further quality and speed. This section is that plan. Executed via 8 parallel
+review forks (one per phase-cluster, disjoint files) plus the lead handling
+`controller.py` (the contention point, per every prior round's own lesson).
+
+## Baseline (verified this session, 2026-09-23/24)
+
+- `ruff check .` / `mypy src/`: clean, 84 source files.
+- `pytest tests/ -q`: 1339 passed (one, `test_survival.py::test_large_frame_is_fast`,
+  is a 6s wall-clock budget assertion that flakes under concurrent system
+  load — passed standalone in 2.14s both times it was checked; not a code
+  regression, see D7 below).
+- `scripts/validate.py` 68/68, `scripts/dry_run.py` 40/40.
+- A **real, exploitable sandbox vulnerability** was found and closed:
+  `src/core/duckdb_engine.py`'s SQL-safety check was a regex denylist with a
+  word-boundary bug (`\bread_csv\b` doesn't match `read_csv_auto`) plus no
+  engine-level lock, letting sandboxed/LLM-authored code read arbitrary host
+  files (`SELECT * FROM read_csv_auto('C:/secret.txt')`, even a bare
+  `SELECT * FROM 'C:/secret.csv'`). Fixed with DuckDB's own
+  `enable_external_access=false` + `lock_configuration=true` on every
+  connection — the actual authoritative boundary now, regex is defense in
+  depth only. Regression tests added (`test_duckdb_regex_evasions_rejected`,
+  `test_duckdb_engine_level_lock_holds_even_without_regex` — the latter
+  bypasses the regex entirely and confirms the engine-level lock still
+  holds).
+- **Nine correctness bugs found and fixed** across the review forks (each
+  with a planted + null regression test, `ruff`/`mypy` clean):
+  `domain_packs.py`'s WHO/EU limit regexes never matched AirQualityUCI's own
+  real column names (`CO(GT)` — the `(` breaks a `\b` boundary; 100% miss
+  rate on the project's own reference dataset, contradicting Phase 5's exit
+  gate); `graph_analysis.py` false-positived on ordinary business tables with
+  `marketing_source`/`sales_target` columns; `causal_guard.py`'s
+  `classify_study_design` misclassified an observational medical dataset as
+  a randomized experiment purely because it had a column named `treatment`
+  (silently disabling the causal-language guard on real data); a
+  false-positive "missing deliverable" in `deliverable_contract.py` on
+  generic phrasing like "explain what happened here"; a dead/backwards
+  profile-informed forecast boost in `question_router.py`; dead code with
+  five hardcoded hex colors left in `app.py` after the UI extraction (the
+  project's Q1 work was supposed to have a single color source of truth);
+  and three bugs of my own introduced while wiring `dependence.py` (below) —
+  overwriting `final_result["findings"]` with the raw, unranked list
+  (silently defeated the no-skill-driver suppression in
+  `findings.rank_findings`), `check_missingness_mechanism` skipping `r=±1`
+  (the single strongest possible MAR signal) as if it were a degenerate
+  case, and a Simpson's-paradox finding headline that claimed "reverses
+  within every stratum" when the underlying check fires on a majority, not
+  unanimity.
+- **Three real performance bugs found and fixed**, all in code that runs on
+  every dataset load with no gate to skip it:
+  - `src/core/io.py`'s `detect_and_exclude_subtotals` used `df.iterrows()` —
+    profiled at **114 of 118 seconds** reading a 500k-row CSV. Vectorized
+    with `.str.strip().str.lower()` + `.isin()`/`.str.endswith()`; confirmed
+    correct against the io-fork's own "Allison Corp must not be excluded"
+    test. **~10-13s → ~1.1s** on the same file.
+  - `src/core/integrity.py`'s `discover_logical_constraints` ran a full
+    `i != j` sweep over every numeric-column pair, each paying for a
+    `dropna()` + diff + sum — unbounded on a wide table (300 columns ≈
+    90,000 pairs). Fixed by checking the (free) name-hint regex first and
+    only paying for the dataframe work on a hinted pair, or when the table
+    is under a bounded column-count cap; also replaced the pandas-level
+    per-pair overhead with numpy indexing on one pre-extracted matrix
+    (same O(rows) per pair, far less overhead — profiled at 0.455 of 0.541s
+    on a 15-column, 9.5k-row table before this half of the fix).
+  - Same file's `check_missingness_mechanism` ran one
+    `scipy.stats.pointbiserialr` Python call per (missing_col, other_col)
+    pair with no multiple-testing correction (25.7% false "systematic bias"
+    rate on genuinely MCAR 30-column data, empirically measured) — the io
+    fork fixed the correction (Benjamini-Hochberg, → 1.3%) and vectorized
+    the pairwise scan with `DataFrame.corrwith()`, capped at
+    `_MAX_OTHER_COLS_FOR_MISSINGNESS` for wide tables.
+- `scripts/bench.py --check` is **not independently confirmed green this
+  session** — every re-run after the first (which showed exactly one
+  regression, `airquality.total` at +36%/0.6s absolute, since fixed) got
+  progressively *worse* across code paths nobody touched (`train_model`,
+  `find_relations`, `profile_dataframe`…), which cannot be a code effect;
+  Windows Defender (`MsMpEng.exe`, ~4.3GB resident) was confirmed actively
+  churning, almost certainly scanning the ~13 skill packages installed
+  mid-session. **10.0 below is re-running it clean.** The four fixes above
+  are each independently confirmed via isolated, reproducible before/after
+  timing on the actual function, immune to this noise — that evidence
+  stands regardless of what a noisy full-suite run shows.
+
+## Design decisions (resolved via `/advisor`)
+
+- **D1 — The defect class, not the individual bugs, is the finding.** Every
+  phase-0-12 correctness bug this session was either "code that's written
+  and unit-tested but nothing in the pipeline calls it" (`dependence.py` —
+  fixed this session; `sensitivity.py`'s two functions; `question_router`'s
+  output; `relational_joiner.py`; `ReadReport.extra_tables`; the Phase 10
+  interrupt signal that nothing raises; `variable_methods.py`'s discarded
+  CLR transform) or a regex/threshold that never got run against the
+  project's own real data. A per-item fix doesn't prevent the next one.
+  10.1/10.2 below are the structural guards; everything else is the current
+  backlog of specific instances.
+- **D2 — Wiring an orphan into `controller.py` is Ask-First, not a default
+  yes.** AGENTS.md flags `controller.py` and `MemorySystem` schema changes
+  explicitly. The user pre-cleared exactly one instance this session
+  (`dependence.py`) after being shown the gap. The rest (10.4-10.8) are
+  listed as **Open questions**, not committed work — don't wire them without
+  asking, even though the pattern and the fix are now well understood.
+- **D3 — Consolidate the post-hoc audit passes, don't add a fifth one.**
+  `controller.py`'s end-of-run block already has three independent
+  "re-read the dataframe, run a check, reassign
+  `final_result["findings"]`" audits (Deliverable Contract, Dependence &
+  Confounding, Causal Claim Guard) — that duplication is exactly what
+  produced the raw-findings bug above (one of the three blocks bypassed
+  `ranked_findings()`). Any new audit (sensitivity, a consolidated
+  leakage check) joins this pass, not a new one.
+- **D4 — Make "~0 cost when absent" a bench stage, not a claim.**
+  `scripts/bench.py` already reports per-tool and some per-stage timings
+  (`stage.profile_dataframe`, `stage.find_relations`,
+  `stage.build_dashboard`…) but the Phase 0-7/9-12 per-load systems
+  (`evaluate_data_integrity`, `detect_domain_pack`, `classify_study_design`,
+  `route_question`, `SharedAnalysisContext`, the dependence audit) aren't
+  individually broken out — their cost is invisible, bundled into whichever
+  tool happens to run near them. Every phase's Generality Rule claim is
+  unverifiable until it has its own line in the bench table.
+- **D5 — DuckDB for built-in tools is profile-gated, not a rollout.** Pandas
+  groupby is already C-level; `dsa.query_sql` exists for LLM-authored code,
+  not as a mandate to rewrite existing tools. Only take this up once D4's
+  bench stages point at a specific hot spot DuckDB would actually help.
+- **D6 — `relational_joiner.py` vs `joins.py`: one system, not two.**
+  `joins.py` (Round 9) is already wired end-to-end (`controller.py`'s
+  `_join_related_files`, the UI's join-review step). `relational_joiner.py`
+  (Phase 11) is a second, unconnected foreign-key-discovery/star-schema
+  implementation that duplicates it. The actual gap Phase 11 was meant to
+  close — `ReadReport.extra_tables` (extra sheets in a multi-tab Excel
+  upload) is silently dropped, never reaching `joins.py` either — should be
+  closed by routing `extra_tables` through the *existing* wired system, not
+  by wiring the second one. Deleting `relational_joiner.py` is Ask-First
+  (AGENTS.md: deleting existing source files).
+- **D7 — Bench noise from background load is a real operational risk, not
+  just today's bad luck.** A session that installs anything (`pip install`,
+  a skill package, even a large `git checkout`) right before running
+  `bench --check` will see exactly what happened tonight. `10.0` covers
+  today's re-run; a longer-term fix (a system-load sanity check bench.py
+  runs before measuring, or a median-of-N mode) is left to the user's
+  judgment in Open Questions, not implemented speculatively.
+
+## Work items
+
+### Batch A — offline, no LLM (do first)
+
+- **10.0 Bench re-verification.** Re-run `scripts/bench.py --check` with no
+  other heavy process running (confirm via `tasklist`/`wmic cpu get
+  loadpercentage` first). *Exit:* 0 regressions, or any real one is
+  root-caused the same way 10.0's predecessor items were (isolate the
+  specific function, profile it, fix it, verify in isolation before
+  trusting the full-suite number again).
+- **10.1 AST reachability check.** Extend `tests/test_architecture.py`
+  (same no-execution AST-walk pattern already there) with a check: every
+  public function/class defined in `src/core/*.py` must be referenced
+  somewhere outside its own file and outside `tests/`, or be in an explicit
+  allowlist (for genuine standalone exports — types, constants meant for
+  external re-import). This is the mechanical version of D1 — it would have
+  caught `dependence.py`, `sensitivity.py`'s two functions, and
+  `relational_joiner.py` on the day they were written, not one session
+  later. *Exit:* the check runs clean against the current tree once the
+  Open Questions below are resolved one way or the other (wired, or
+  explicitly allowlisted with a one-line reason).
+- **10.2 Consolidate the post-hoc audit passes (D3).** One ordered pass in
+  `controller.py`: load the dataframe once, run
+  dependence → (sensitivity, if 10.4 is approved) → deliverable contract →
+  causal claim guard last (it rewrites `Finding` text in place, so it must
+  see the final set), then project `final_result["findings"]` through
+  `ranked_findings()` exactly once at the end. *Exit:* the raw-findings bug
+  class is structurally impossible, not just fixed at today's three call
+  sites.
+- **10.3 Bench stages for D4.** Add explicit timed stages to
+  `scripts/bench.py` for `evaluate_data_integrity`, `detect_domain_pack` +
+  `evaluate_domain_pack`, `classify_study_design`, `route_question`,
+  `SharedAnalysisContext` construction, and the dependence audit — mirroring
+  the existing `stage.*` pattern. *Exit:* every Phase 0-7/9-12 per-load
+  system has its own line in the bench table; `bench_baseline.json` updated
+  once 10.0 is clean.
+
+### Batch A — gated on Open Questions (each is Ask-First; see below)
+
+- **10.4 Wire `sensitivity.py`.** `audit_finding_sensitivity` (jackknife
+  fragility — verified correct, empirically matches an independent
+  `scipy.stats.pearsonr` recomputation) as a post-hoc pass over the top
+  ranked findings within 10.2's consolidated audit; `detect_target_leakage`
+  early, alongside target detection — it catches semantic/naming leaks
+  (`_POST_OUTCOME_PREFIXES`, a column literally derived from the target
+  name) that the pre-existing `ml_pipeline.py::_detect_target_leakage`
+  cannot (that one only sees already-encoded `X`/`y` at training time via a
+  purity/group-determinism test) — the two are complementary, not
+  duplicates; keep both.
+- **10.5 Route `extra_tables` through `joins.py` (D6).** Read
+  `read_report.extra_tables` in `controller.py` (currently captured, never
+  consumed — confirmed empirically: a real 2-sheet Excel upload silently
+  analyzes only the first sheet) and hand it to the already-wired
+  `join_related`/`preview_joins` path instead of building a second join
+  engine. Decide `relational_joiner.py`'s fate as part of the same
+  question — delete it (its useful ideas, if any, fold into `joins.py`), or
+  leave it deliberately unwired with a comment explaining why it exists
+  (an AST-reachability allowlist entry either way, per 10.1).
+- **10.6 Give the Phase 10 interrupt a trigger.** `ToolInterruptSignal` +
+  the halt/hypothesis-tree/prompt-injection pipeline are fully wired and
+  integration-tested (`tests/test_dynamic_interrupts.py` drives it through
+  the real `tool_registry`) — but zero built-in tools ever raise it.
+  `stats_utils.py` already computes `is_zero_inflated` (zero_prop > 0.25)
+  and only uses it to pick a model *name*; have the tool that reads that
+  recommendation raise the interrupt instead of silently switching models
+  when the inflation is severe, matching FutureScope's own example.
+- **10.7 Wire `question_router.py`'s output.** `route_question()` is called
+  and stored (`self.question_routing` / `memory.set_context`) but nothing
+  reads it back — confirmed distinct from `agenda.py` (agenda answers "what
+  should we ask of this *data*", the router answers "what is the user's
+  objective *asking for*" and recommends tools) and from
+  `ground_objective_column` (grounds a column name, not a tool list) — not
+  redundant, genuinely unwired. Let `recommended_tools` influence the
+  deterministic fallback plan's step ordering.
+- **10.8 Wire the discarded CLR transform.** `variable_methods.py` computes
+  a correct compositional centered-log-ratio transform and then only reads
+  the resulting column *names*, never the transformed values — no
+  correlation anywhere in the codebase is compositional-aware, so Phase 3's
+  own exit-gate claim ("compositional shares do not produce spurious
+  negative Pearson correlations") is unverified in practice. Wire the CLR
+  values into `statistical_analysis.py`'s correlation path when the
+  compositional flag is set.
+
+### Batch B — one live LLM run, after Batch A is green
+
+- **10.9 Verify Round 9's queued LLM-robustness items actually landed.**
+  Grepped this session: none of them did — no circuit breaker after
+  repeated unusable replies, `max_retries=2` still set on the Anthropic
+  client (SDK auto-retries a timeout instead of one controlled retry), no
+  "Here's a thinking process" prose-prefix stripping. Every prior live-LLM
+  run in this project's history (Round 9's Batch B, twice) produced no
+  usable plan for exactly these reasons. Implement them before spending
+  another live run on anything else.
+- **10.10 One live run exercising 10.4-10.8** (whichever were approved),
+  end to end, on a real dataset with a real objective — the same pattern
+  every prior round used to validate wiring, not just unit tests of the
+  pure functions.
+
+### Batch C — features (gated on the user; not started speculatively)
+
+- **10.11 DuckDB for built-in tools (D5).** Only after 10.3's bench stages
+  point at a specific hot spot pandas' own C-level groupby doesn't already
+  cover — no blind adoption.
+
+## Verification
+
+Batch A: 10.0-10.3 are script/pytest-checkable directly. 10.4-10.8 each ship
+with a planted-case + null-case test the same way `dependence.py`'s wiring
+did this session (a real `AgentController.analyze(use_llm=False)` run, not
+just a call to the standalone function) — that distinction is *the* lesson
+of this round. Batch B: judged by whether a real model's plan reaches the
+newly-wired tools and produces findings whose numbers trace back to them.
+Batch C: ships with before/after bench numbers on the specific hot spot that
+justified it.
+
+## Sequencing
+
+10.0 → 10.1 ‖ 10.3 (independent) → **user decides Open Questions** →
+10.2 (needs to know which audits it's consolidating) → 10.4 ‖ 10.5 ‖ 10.6 ‖
+10.7 ‖ 10.8 (disjoint files, parallelizable) → 10.9 → 10.10 → (further user
+decision) → 10.11.
+
+## Open questions for the user
+
+1. **10.4** — wire `sensitivity.py` (jackknife fragility + semantic target
+   leakage)? Touches `controller.py` and (for the leakage check) the target
+   auto-detection call site.
+2. **10.5** — route `extra_tables` through `joins.py`, and delete
+   `relational_joiner.py` or leave it explicitly unwired? Touches
+   `controller.py`; deletion is Ask-First on its own.
+3. **10.6** — raise `ToolInterruptSignal` on severe zero-inflation instead of
+   silently switching models? Touches whichever tool consumes
+   `stats_utils`'s model recommendation (not yet identified precisely —
+   `regression.py` or `statistical_analysis.py`).
+4. **10.7** — wire `question_router`'s `recommended_tools` into the
+   deterministic plan? Touches `controller.py`'s plan-building path.
+5. **10.8** — wire the CLR transform into `statistical_analysis.py`'s
+   correlation logic?
+6. **Priority** — Batch A structural/perf items (10.0-10.3, no controller.py
+   risk) first as recommended, or go straight to whichever of 10.4-10.8 the
+   user cares most about?
 
 ---
 

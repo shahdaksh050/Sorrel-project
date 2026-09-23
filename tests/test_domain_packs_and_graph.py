@@ -34,6 +34,42 @@ def test_air_quality_domain_pack_exceedance() -> None:
     assert f.evidence["exceedance_rate"] == 0.4
 
 
+def test_air_quality_domain_pack_matches_real_world_column_names() -> None:
+    """Regression: the limit-key regexes originally required the pollutant
+    token to be immediately followed by "_" or end-of-string, so they never
+    matched the project's own reference dataset's real column names, which
+    carry a method suffix in parentheses with no underscore
+    ("CO(GT)", "NO2(GT)", "C6H6(GT)" — see AirQualityUCI.csv). This is the
+    Phase 5 exit gate itself ("air quality analysis automatically cites WHO
+    limit exceedances"), so it must pass against those exact names."""
+    df = pd.DataFrame({
+        "CO(GT)": [2.0, 4.0, 8.0, 11.5, 12.0],  # 2 of 5 exceed 10.0 mg/m3
+        "NO2(GT)": [50.0, 80.0, 120.0, 150.0, 180.0],  # none exceed 200.0
+        "C6H6(GT)": [1.0, 2.0, 3.0, 6.0, 7.0],  # 2 of 5 exceed 5.0
+    })
+    findings = evaluate_domain_pack(df, pack=_AIR_QUALITY_PACK)
+    flagged_cols = {f.evidence["column"] for f in findings}
+    assert flagged_cols == {"CO(GT)", "C6H6(GT)"}
+    co_finding = next(f for f in findings if f.evidence["column"] == "CO(GT)")
+    assert co_finding.evidence["exceedance_rate"] == 0.4
+
+
+def test_air_quality_domain_pack_ignores_sensor_response_columns() -> None:
+    """Null case: AirQualityUCI also carries raw tin-oxide sensor response
+    columns named "PT08.S1(CO)" / "PT08.S4(NO2)" right next to the real
+    ground-truth concentration columns. These are unitless sensor readings
+    in the hundreds/thousands, not CO/NO2 concentrations on the mg/m3 or
+    ug/m3 scale the limits assume — matching them would fabricate a bogus
+    exceedance claim against the wrong unit, so they must be excluded even
+    though the pollutant token appears as a substring."""
+    df = pd.DataFrame({
+        "PT08.S1(CO)": [1000.0, 1100.0, 1200.0, 1300.0, 1400.0],
+        "PT08.S4(NO2)": [1500.0, 1600.0, 1700.0, 1800.0, 1900.0],
+    })
+    findings = evaluate_domain_pack(df, pack=_AIR_QUALITY_PACK)
+    assert findings == []
+
+
 def test_healthcare_domain_pack_exceedance() -> None:
     df = pd.DataFrame({
         "systolic": [115, 120, 145, 150],  # 2 exceed 140
@@ -109,3 +145,25 @@ def test_graph_analysis_schema_and_applies() -> None:
     schema = tool.get_schema()
     assert "source_column" in schema
     assert "target_column" in schema
+
+
+def test_graph_analysis_ignores_ordinary_business_columns() -> None:
+    """Null case (regression): the original unanchored loose patterns
+    matched "source"/"target" as a substring anywhere in a column name, so
+    an ordinary customer/order table with "marketing_source" and
+    "sales_target" columns — no graph structure at all — scored
+    applies_to=0.85, "very likely a network". The two columns also differ
+    in kind (categorical vs numeric), which a real edge list's source/target
+    columns never do."""
+    from src.core.profiler import profile_dataframe
+
+    df = pd.DataFrame({
+        "customer_id": list(range(50)),
+        "marketing_source": (["Facebook", "Google", "Email", "Referral"] * 13)[:50],
+        "sales_target": [1000.0 + i * 10 for i in range(50)],
+        "revenue": [900.0 + i * 9 for i in range(50)],
+    })
+    profile = profile_dataframe(df)
+    tool = GraphAnalysisTool()
+    assert tool.applies_to(profile, None) < 0.2
+    assert tool.default_params(profile, None) == {}

@@ -24,17 +24,33 @@ class DuckDBQueryError(RuntimeError):
 
 
 #: SQL keywords / functions disallowed to prevent disk I/O, installation, or privilege escalation.
+#: This is defense-in-depth only — the authoritative boundary is DuckDB's own
+#: `enable_external_access=false` + `lock_configuration=true`, set on every connection
+#: in `_execute_duckdb` below, since any regex denylist over a full SQL dialect is
+#: gameable (e.g. `read_csv` doesn't match `read_csv_auto`; DuckDB also allows a bare
+#: quoted path as a table reference with no function name at all: `FROM 'x.csv'`).
+#: The Polars fallback has no equivalent engine-level lock, so these patterns are its
+#: only protection — kept broad (prefix match, not `\b...\b`) for that reason.
 _DISALLOWED_SQL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bATTACH\b", re.IGNORECASE),
     re.compile(r"\bDETACH\b", re.IGNORECASE),
     re.compile(r"\bINSTALL\b", re.IGNORECASE),
     re.compile(r"\bLOAD\b", re.IGNORECASE),
+    re.compile(r"\bEXPORT\b", re.IGNORECASE),
+    re.compile(r"\bIMPORT\b", re.IGNORECASE),
+    re.compile(r"\bPRAGMA\b", re.IGNORECASE),
     re.compile(r"\bCOPY\s+.*?\s+TO\b", re.IGNORECASE),
-    re.compile(r"\bread_csv\b", re.IGNORECASE),
-    re.compile(r"\bread_parquet\b", re.IGNORECASE),
-    re.compile(r"\bread_json\b", re.IGNORECASE),
-    re.compile(r"\bscan_\b", re.IGNORECASE),
-    re.compile(r"\bparquet_scan\b", re.IGNORECASE),
+    re.compile(r"\bread_csv\w*", re.IGNORECASE),
+    re.compile(r"\bread_parquet\w*", re.IGNORECASE),
+    re.compile(r"\bread_json\w*", re.IGNORECASE),
+    re.compile(r"\bread_ndjson\w*", re.IGNORECASE),
+    re.compile(r"\bread_text\w*", re.IGNORECASE),
+    re.compile(r"\bread_blob\w*", re.IGNORECASE),
+    re.compile(r"\bscan_\w*", re.IGNORECASE),
+    re.compile(r"\bparquet_scan\w*", re.IGNORECASE),
+    re.compile(r"\bglob\s*\(", re.IGNORECASE),
+    re.compile(r"\bsniff_csv\w*", re.IGNORECASE),
+    re.compile(r"""FROM\s+['"]""", re.IGNORECASE),  # bare quoted-path table reference
 )
 
 
@@ -130,6 +146,13 @@ class HighThroughputQueryEngine:
     ) -> pd.DataFrame:
         con = self._duckdb.connect(":memory:")
         try:
+            # Authoritative safety boundary (not the regex denylist above): disables all
+            # file-system and network access at the engine level, then locks the setting
+            # so the query itself cannot re-enable it via `SET enable_external_access=true`.
+            con.execute("SET enable_external_access=false")
+            con.execute("SET autoinstall_known_extensions=false")
+            con.execute("SET autoload_known_extensions=false")
+            con.execute("SET lock_configuration=true")
             for name, df in tables.items():
                 con.register(name, df)
             res = con.execute(sql).fetchdf()

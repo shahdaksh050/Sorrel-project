@@ -39,47 +39,70 @@ class DomainPack:
 # Built-in Domain Packs
 # ---------------------------------------------------------------------------
 
+#: Word-boundary helper for limit-key regexes. `\b` alone is unreliable here
+#: because real-world sensor column names carry unit/method suffixes in
+#: parentheses with no underscore separator — e.g. the project's own
+#: reference dataset (AirQualityUCI.csv) names its columns "CO(GT)",
+#: "NO2(GT)", "C6H6(GT)". A boundary of "start/end or a literal underscore"
+#: (the original pattern) requires the token to be immediately followed by
+#: "_" or end-of-string, so it never matches "CO(GT)" at all — silently
+#: disabling every air-quality limit on the exact dataset this feature was
+#: built to demonstrate.
+#:
+#: The fix is asymmetric on purpose: the token may be *followed* by any
+#: non-alphanumeric character (so "CO(GT)" matches), but may only be
+#: *preceded* by start-of-string, "_", space or "-" — never "(". That
+#: excludes columns where the token is a parenthetical qualifier on a
+#: different base name, which AirQualityUCI also has right next to the real
+#: ones: "PT08.S1(CO)" and "PT08.S4(NO2)" are tin-oxide sensor responses
+#: (unitless resistance-ish values in the hundreds/thousands), not CO/NO2
+#: concentrations on the mg/m3 or ug/m3 scale these limits assume — matching
+#: them would produce a fabricated exceedance claim against the wrong unit.
+def _bounded(token: str) -> str:
+    return rf"(?:^|[_\s-]){token}(?:$|[^a-z0-9])"
+
+
 _AIR_QUALITY_PACK = DomainPack(
     name="air_quality",
     display_name="Air Quality & Environmental Health",
     activation_keywords=["pollut", "air", "quality", "co", "no2", "nox", "pm2.5", "pm10", "o3", "benzene", "c6h6"],
     limits={
-        r"(?:^|_)co(?:$|_)": LimitSpec(
+        _bounded("co"): LimitSpec(
             threshold=10.0,
             direction="max",
             unit="mg/m³",
             standard_name="WHO Air Quality Guideline (8-hour)",
             description="Carbon Monoxide exceedance above health guideline",
         ),
-        r"(?:^|_)no2(?:$|_)": LimitSpec(
+        _bounded("no2"): LimitSpec(
             threshold=200.0,
             direction="max",
             unit="µg/m³",
             standard_name="WHO Air Quality Guideline (1-hour)",
             description="Nitrogen Dioxide exceedance above health guideline",
         ),
-        r"(?:^|_)c6h6(?:$|_)|benzene": LimitSpec(
+        _bounded(r"c6h6") + "|benzene": LimitSpec(
             threshold=5.0,
             direction="max",
             unit="µg/m³",
             standard_name="EU Annual Air Quality Standard",
             description="Benzene exceedance above annual exposure target",
         ),
-        r"(?:^|_)pm2\.?5(?:$|_)": LimitSpec(
+        _bounded(r"pm2\.?5"): LimitSpec(
             threshold=15.0,
             direction="max",
             unit="µg/m³",
             standard_name="WHO Air Quality Guideline (24-hour)",
             description="Fine particulate matter exceedance",
         ),
-        r"(?:^|_)pm10(?:$|_)": LimitSpec(
+        _bounded("pm10"): LimitSpec(
             threshold=45.0,
             direction="max",
             unit="µg/m³",
             standard_name="WHO Air Quality Guideline (24-hour)",
             description="Coarse particulate matter exceedance",
         ),
-        r"(?:^|_)o3(?:$|_)|ozone": LimitSpec(
+        _bounded("o3") + "|ozone": LimitSpec(
             threshold=100.0,
             direction="max",
             unit="µg/m³",
@@ -104,28 +127,28 @@ _HEALTHCARE_PACK = DomainPack(
         "diastolic", "bmi", "cholesterol", "heart_rate", "clinical", "hypertension",
     ],
     limits={
-        r"systolic": LimitSpec(
+        _bounded("systolic"): LimitSpec(
             threshold=140.0,
             direction="max",
             unit="mmHg",
             standard_name="AHA/ACC Hypertension Stage 2",
             description="Systolic blood pressure above hypertension threshold",
         ),
-        r"diastolic": LimitSpec(
+        _bounded("diastolic"): LimitSpec(
             threshold=90.0,
             direction="max",
             unit="mmHg",
             standard_name="AHA/ACC Hypertension Stage 2",
             description="Diastolic blood pressure above hypertension threshold",
         ),
-        r"glucose": LimitSpec(
+        _bounded("glucose"): LimitSpec(
             threshold=126.0,
             direction="max",
             unit="mg/dL",
             standard_name="ADA Fasting Glucose Diagnostic Threshold",
             description="Fasting blood glucose above diabetic threshold",
         ),
-        r"bmi": LimitSpec(
+        _bounded("bmi"): LimitSpec(
             threshold=30.0,
             direction="max",
             unit="kg/m²",

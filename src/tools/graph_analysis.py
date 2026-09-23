@@ -24,13 +24,22 @@ if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
     from src.core.profiler import DatasetProfile
 
+#: The loose fallback patterns originally matched "source"/"target" as an
+#: unanchored substring — which also matches ordinary business columns like
+#: "marketing_source" and "sales_target" (a real false positive: an
+#: ordinary customer/order table with those two columns and zero graph
+#: structure scored applies_to=0.85, "very likely a network"). Bare
+#: "source"/"target" now live only in the exact-full-name strict patterns
+#: below; the loose fallback keeps only compound "*_id"-style tokens, which
+#: are far less likely to appear in non-graph tabular data, bounded to a
+#: whole underscore-delimited token so "source_data" doesn't match either.
 _SRC_PATTERNS = (
     re.compile(r"^(?:source|src|from|sender|parent|origin|caller|user1|node1)$", re.I),
-    re.compile(r"(?:source|from_id|sender_id)", re.I),
+    re.compile(r"(?:^|_)(?:from_id|sender_id)(?:$|_)", re.I),
 )
 _DST_PATTERNS = (
     re.compile(r"^(?:target|dst|to|receiver|recipient|child|dest|destination|callee|user2|node2)$", re.I),
-    re.compile(r"(?:target|to_id|recipient_id)", re.I),
+    re.compile(r"(?:^|_)(?:to_id|recipient_id)(?:$|_)", re.I),
 )
 
 
@@ -48,6 +57,25 @@ def _detect_edge_columns(columns: list[str]) -> tuple[str, str] | None:
     return None
 
 
+def _detect_edge_columns_from_profile(profile: DatasetProfile) -> tuple[str, str] | None:
+    """Name-based detection, then a same-kind sanity gate: a genuine edge
+    list's source and target columns hold the same *kind* of value (both
+    categorical node IDs, or both identifiers). A numeric measure that
+    happens to be named "...target" paired by name alone with an unrelated
+    categorical "...source" column is not a graph — it just has column
+    names that collide with edge-list vocabulary. This uses only the
+    profile (already computed), so it stays ~0 extra cost."""
+    col_names = [c.name for c in profile.columns]
+    detected = _detect_edge_columns(col_names)
+    if detected is None:
+        return None
+    src_col, dst_col = detected
+    kind_by_name = {c.name: c.kind for c in profile.columns}
+    if kind_by_name.get(src_col) != kind_by_name.get(dst_col):
+        return None
+    return detected
+
+
 class GraphAnalysisTool(BaseTool):
     """Network graph structure and centrality analysis from edge list data."""
 
@@ -60,8 +88,7 @@ class GraphAnalysisTool(BaseTool):
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
         if profile is None or profile.row_count < 5:
             return 0.0
-        col_names = [c.name for c in profile.columns]
-        edge_cols = _detect_edge_columns(col_names)
+        edge_cols = _detect_edge_columns_from_profile(profile)
         return 0.85 if edge_cols is not None else 0.1
 
     def default_params(
@@ -69,8 +96,7 @@ class GraphAnalysisTool(BaseTool):
     ) -> dict[str, Any]:
         if profile is None:
             return {}
-        col_names = [c.name for c in profile.columns]
-        edge_cols = _detect_edge_columns(col_names)
+        edge_cols = _detect_edge_columns_from_profile(profile)
         if edge_cols:
             return {"source_column": edge_cols[0], "target_column": edge_cols[1]}
         return {}

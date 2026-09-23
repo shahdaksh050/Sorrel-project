@@ -56,6 +56,7 @@ from src.core.dashboard import (
 )
 from src.core.degradations import collect_degradations
 from src.core.deliverable_contract import audit_deliverables, parse_deliverable_contract
+from src.core.dependence import check_simpsons_paradox, intraclass_correlation
 from src.core.domain_packs import detect_domain_pack, evaluate_domain_pack
 from src.core.domains import infer_domains
 from src.core.findings import Finding, score_objective_fit
@@ -87,6 +88,7 @@ from src.core.prompt_manager import (
 from src.core.question_router import route_question
 from src.core.security import sanitize_for_prompt
 from src.core.shared_context import SharedAnalysisContext
+from src.core.stats_utils import repeated_entity
 from src.core.step_validation import _COLUMN_PARAM_NAMES as _COLUMN_PARAM_NAMES
 from src.core.step_validation import columns_for, is_column_param, validate_step
 from src.core.tool_registry import _INJECTED_PARAMS as _INJECTED_PARAMS
@@ -1127,6 +1129,25 @@ class AgentController:
                     f"{', '.join(audit_rep.repaired)}[/]"
                 )
 
+        # ---- Dependence & Confounding Audit (Phase 4) ----
+        try:
+            from src.tools.data_processing import _read_df
+            dep_path = self.memory.get_context("cleaned_file_path") or getattr(self.memory.dataset_metadata, "file_path", None)
+            dep_df = _read_df(str(dep_path)) if dep_path else None
+        except Exception:
+            dep_df = None
+        if dep_df is not None:
+            try:
+                self._audit_dependence_structure(dep_df)
+            except Exception:
+                pass
+            # Re-derive from ranked_findings(), not the raw list — the raw
+            # list bypasses _drop_unskilled_drivers/is_trivial suppression,
+            # which would resurrect noise-level "driver" findings on every
+            # run that reaches this point (this block used to overwrite with
+            # raw findings unconditionally and broke that suppression).
+            final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
+
         # ---- Causal Claim Guard (Phase 4) ----
         study_design = getattr(self, "study_design", "observational")
         causal_warns = audit_findings_causal_language(self.memory.findings, study_design=study_design)
@@ -1135,7 +1156,7 @@ class AgentController:
                 f"[yellow]⚠ Causal Claim Guard: {len(causal_warns)} claim(s) downgraded to association "
                 f"due to {study_design} study design.[/]"
             )
-            final_result["findings"] = [f.to_dict() for f in self.memory.findings]
+            final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
 
         # ---- Stage 7: Report Generation ----
         self._generate_final_report(final_result)
@@ -2588,6 +2609,127 @@ class AgentController:
         """Enforce the "cite only verbatim metrics" rule — see
         `claim_verification.flag_unverified_claims`."""
         return flag_unverified_claims(self.memory, final_result)
+
+    def _audit_dependence_structure(self, df: pd.DataFrame | None) -> None:
+        """Phase 4 (FutureScope §5.3) — dependence- and design-aware
+        inference, wired as a post-hoc audit over already-collected findings
+        and the profiled dataframe, the same pattern the Causal Claim Guard
+        just below uses. Cost is ~0 when the triggering structure is absent:
+        the clustering check only runs when `repeated_entity` finds a repeat-
+        measurement column, and the Simpson's-paradox check only runs
+        against `segment_lift` findings that already exist — a dataset with
+        no lift claim to double-check pays nothing."""
+        profile = self.last_profile
+        if profile is None or df is None or df.empty:
+            return
+
+        def slug(text: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_") or "x"
+
+        # ---- Cluster/hierarchy check: rows nested in an entity (students in
+        # schools, orders per customer) are not independent; naive p-values
+        # overstate significance unless cluster-robust. ----
+        entity_col = repeated_entity(profile, df)
+        if entity_col and entity_col in df.columns:
+            measure_col = next(
+                (c.name for c in profile.measures() if c.name in df.columns and c.name != entity_col),
+                None,
+            )
+            if measure_col:
+                try:
+                    icc_res = intraclass_correlation(df, entity_col, measure_col)
+                except Exception:
+                    icc_res = {}
+                if icc_res.get("needs_cluster_robust"):
+                    icc_finding = Finding(
+                        finding_id=f"dependence_icc_{slug(entity_col)}_{slug(measure_col)}",
+                        kind="method_fit",
+                        headline=(
+                            f"'{measure_col}' is clustered by '{entity_col}' "
+                            f"(ICC={icc_res['icc']:.2f}, design effect={icc_res['deff']:.2f}) — "
+                            f"treat this as {icc_res['n_eff']:.0f} effective observations, not {icc_res['n']}."
+                        ),
+                        detail=icc_res.get("recommendation", ""),
+                        evidence=icc_res,
+                        source_tool="dependence_audit",
+                        measure=measure_col,
+                        dimension=entity_col,
+                        confidence=0.7,
+                        layer="analyst",
+                        caveats=["Rows are repeated measurements within an entity; standard-error estimates assuming independence are optimistic."],
+                    )
+                    self.memory.add_findings([icc_finding])
+                    console.print(
+                        f"[yellow]⚠ Clustering detected: '{measure_col}' rows are not independent "
+                        f"within '{entity_col}' (ICC={icc_res['icc']:.2f}); significance tests overstate "
+                        "confidence unless cluster-robust.[/]"
+                    )
+
+        # ---- Simpson's paradox: does a real segment_lift finding reverse
+        # sign once stratified by another dimension? ----
+        segment_findings = [f for f in self.memory.findings if f.kind == "segment_lift"]
+        if not segment_findings:
+            return
+        candidate_dims = [
+            c.name for c in profile.dimensions()
+            if c.kind == "categorical" and 2 <= c.nunique <= 12 and c.name in df.columns
+        ]
+        if not candidate_dims:
+            return
+
+        checked_pairs: set[tuple[str, str, str]] = set()
+        top_findings = sorted(segment_findings, key=lambda f: -abs(f.effect or 0.0))[:5]
+        for sfinding in top_findings:
+            if not sfinding.measure or not sfinding.dimension or sfinding.level is None:
+                continue
+            if sfinding.measure not in df.columns or sfinding.dimension not in df.columns:
+                continue
+            confounders = [c for c in candidate_dims if c != sfinding.dimension][:2]
+            for confounder in confounders:
+                key = (sfinding.measure, sfinding.dimension, confounder)
+                if key in checked_pairs:
+                    continue
+                checked_pairs.add(key)
+                level_str = str(sfinding.level)
+                try:
+                    sub = df[[sfinding.measure, sfinding.dimension, confounder]].copy()
+                    dim_as_str = sub[sfinding.dimension].astype(str)
+                    sub["_dep_group"] = dim_as_str.where(dim_as_str == level_str, other="rest")
+                    res = check_simpsons_paradox(sub, sfinding.measure, "_dep_group", confounder)
+                except Exception:
+                    continue
+                if not res.get("paradox_detected"):
+                    continue
+                n_level = int((df[sfinding.dimension].astype(str) == level_str).sum())
+                opposing = res.get("opposing_strata_count", 0)
+                valid_strata = res.get("valid_strata_count", 0)
+                para_finding = Finding(
+                    finding_id=f"dependence_simpsons_{slug(sfinding.measure)}_{slug(sfinding.dimension)}_{slug(confounder)}",
+                    kind="method_fit",
+                    headline=(
+                        f"The '{sfinding.level}' vs rest difference in '{sfinding.measure}' reverses direction "
+                        f"in {opposing} of {valid_strata} strata of '{confounder}' — possible confounding; "
+                        "treat the unstratified effect with caution."
+                    ),
+                    detail=res.get("explanation", ""),
+                    evidence={**res, "n_level": n_level},
+                    source_tool="dependence_audit",
+                    measure=sfinding.measure,
+                    dimension=sfinding.dimension,
+                    level=sfinding.level,
+                    confidence=0.6,
+                    layer="analyst",
+                    caveats=["Simpson's paradox: the aggregate and stratified effects disagree in sign."],
+                )
+                sfinding.caveats.append(
+                    f"Possible Simpson's paradox when stratified by '{confounder}' — see the dependence audit finding."
+                )
+                self.memory.add_findings([para_finding])
+                console.print(
+                    f"[yellow]⚠ Simpson's paradox: '{sfinding.level}' vs rest on '{sfinding.measure}' "
+                    f"reverses when stratified by '{confounder}'.[/]"
+                )
+                break
 
     def _generate_final_report(self, llm_final: dict[str, Any]) -> None:
         """

@@ -72,6 +72,57 @@ def test_missingness_mechanism_systematic_mar() -> None:
     assert res["income"]["correlated_covariates"][0]["column"] == "age"
 
 
+def test_missingness_perfect_correlation_still_flagged() -> None:
+    """Planted case: missingness in 'discount_amount' is *perfectly*
+    determined by 'has_discount' (r = -1 exactly) — the strongest possible
+    MAR signal, not a corner case to skip. A prior version of the vectorized
+    pairwise scan had `if abs(r) >= 1.0: continue`, which silently
+    reclassified this as MCAR_likely — the worst possible miss."""
+    rng = np.random.default_rng(7)
+    n = 200
+    has_discount = rng.integers(0, 2, size=n)
+    discount_amount = rng.normal(10.0, 2.0, size=n)
+    discount_amount = np.where(has_discount == 0, np.nan, discount_amount)
+
+    df = pd.DataFrame({
+        "has_discount": has_discount.astype(float),
+        "discount_amount": discount_amount,
+        "noise": rng.normal(size=n),
+    })
+    res = check_missingness_mechanism(df)
+
+    assert "discount_amount" in res
+    assert res["discount_amount"]["mechanism"] == "MAR_systematic"
+    covariate_names = {c["column"] for c in res["discount_amount"]["correlated_covariates"]}
+    assert "has_discount" in covariate_names
+
+
+def test_missingness_mcar_wide_table_no_false_positive() -> None:
+    """Null case / regression: a wide table (30 independent numeric columns)
+    with genuinely MCAR missingness must not report MAR_systematic just
+    because it runs many pairwise tests. Before Benjamini-Hochberg
+    correction was added, this fired on ~25% of trials (p<0.01 alone,
+    uncorrected, across ~29 tests per missing column); it must now stay
+    near the nominal 5% FDR rate."""
+    false_positive_runs = 0
+    n_trials = 40
+    for trial in range(n_trials):
+        rng = np.random.default_rng(trial + 5000)
+        n = 200
+        data = {f"col_{i}": rng.normal(size=n) for i in range(30)}
+        df = pd.DataFrame(data)
+        miss_mask = rng.random(n) < 0.25
+        df.loc[miss_mask, "col_0"] = np.nan
+        res = check_missingness_mechanism(df)
+        if res.get("col_0", {}).get("mechanism") == "MAR_systematic":
+            false_positive_runs += 1
+
+    assert false_positive_runs <= 6, (
+        f"{false_positive_runs}/{n_trials} false MAR_systematic verdicts on MCAR data "
+        "(expected close to the 5% FDR rate, not the ~25% seen without BH correction)"
+    )
+
+
 def test_missingness_block_dropout() -> None:
     # 25 consecutive NaNs (sensor blackout)
     vals = [10.0] * 100

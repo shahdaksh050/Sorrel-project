@@ -116,13 +116,13 @@ def route_question(
         if score > 0:
             matches.append((family, score))
 
-    # Profile-informed adjustments
-    if profile is not None:
-        if getattr(profile, "is_time_series", False):
-            if any(f == "forecast" for f, _ in matches):
-                matches.append(("forecast", 2))
-        if getattr(profile, "has_geo", lambda: False)():
-            pass
+    # Profile-informed adjustments. Previously this only boosted "forecast"
+    # when a forecast keyword had *already* matched (i.e. it boosted a
+    # signal that was already the strongest one, doing nothing useful) —
+    # the point of a profile-informed adjustment is to add forecast as a
+    # candidate even when the objective never used the word.
+    if profile is not None and getattr(profile, "is_time_series", False):
+        matches.append(("forecast", 1))
 
     primary: QuestionFamily
     secondary: list[QuestionFamily]

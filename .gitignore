@@ -42,6 +42,12 @@ beautiful-3d-frontend/
 3d-ui-skill/
 *.zip
 
+# Locally installed agent/skill packages (npx skills add ...) - machine-local,
+# not project source
+.agents/
+.claude/skills/
+skills-lock.json
+
 # Runtime logs & scratch reports
 *.log
 streamlit_dev.log

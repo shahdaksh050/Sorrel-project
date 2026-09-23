@@ -354,19 +354,21 @@ def detect_and_exclude_subtotals(df: pd.DataFrame) -> tuple[pd.DataFrame, list[i
     if df.empty or len(df) <= 2:
         return df, [], []
 
-    subtotal_indices: list[int] = []
-
+    # Vectorized, not a per-row `df.iterrows()` loop: iterrows() constructs a
+    # new pandas Series per row, which turns this into the dominant cost of
+    # every dataset load at a few hundred thousand rows (measured: 114s of a
+    # 118s read on a 500k-row file, before this fix — every tool re-reading
+    # the same file paid it again on a read-cache miss).
     text_cols = [c for c in df.columns if df[c].dtype == object or pd.api.types.is_string_dtype(df[c])]
-    for idx, row in df.iterrows():
-        row_idx = int(idx)
-        is_subtotal = False
-        for c in text_cols:
-            val = str(row[c]).strip().lower()
-            if val in _SUBTOTAL_EXACT_KEYWORDS or val.endswith(" total") or val.endswith(" subtotal"):
-                is_subtotal = True
-                break
-        if is_subtotal:
-            subtotal_indices.append(row_idx)
+    if text_cols:
+        normalized = df[text_cols].astype(str).apply(lambda s: s.str.strip().str.lower())
+        is_subtotal_row = (
+            normalized.isin(_SUBTOTAL_EXACT_KEYWORDS)
+            | normalized.apply(lambda s: s.str.endswith((" total", " subtotal")))
+        ).any(axis=1)
+        subtotal_indices: list[int] = [int(i) for i in df.index[is_subtotal_row]]
+    else:
+        subtotal_indices = []
 
     # Check if bottom row is a mathematical sum of the remaining rows
     if not (subtotal_indices and subtotal_indices[-1] == len(df) - 1):

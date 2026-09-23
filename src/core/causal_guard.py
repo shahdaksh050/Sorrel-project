@@ -58,7 +58,17 @@ def classify_study_design(df: pd.DataFrame | None = None, objective: str = "") -
     if df is not None:
         for col in df.columns:
             for pat in _EXPERIMENTAL_COL_PATTERNS:
-                if pat.search(str(col)):
+                # A column *named* "treatment"/"arm"/"group_assigned" only
+                # implies random assignment when it actually looks like one
+                # (few, repeated levels — an arm label or a 0/1 flag). An
+                # observational medical dataset with a "treatment" column
+                # naming the actual drug/procedure given (many distinct
+                # values, one per patient's real-world care) is not an RCT
+                # just because the column has that name — without this
+                # check it would be misclassified as randomized_experiment,
+                # silently disabling the causal-language guard on
+                # observational data.
+                if pat.search(str(col)) and 2 <= df[col].nunique(dropna=True) <= 4:
                     return "randomized_experiment"
             for pat in _QUASI_EXPERIMENTAL_PATTERNS:
                 if pat.search(str(col)):

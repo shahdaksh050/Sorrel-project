@@ -10,6 +10,7 @@ import pytest
 
 from src.core.duckdb_engine import (
     DuckDBQueryError,
+    HighThroughputQueryEngine,
     get_query_engine,
     query_dataframe,
 )
@@ -78,6 +79,35 @@ def test_duckdb_unsafe_patterns_rejected(sample_sales_df: pd.DataFrame) -> None:
     for q in unsafe_queries:
         with pytest.raises(DuckDBQueryError):
             query_dataframe(q, {"sales": sample_sales_df})
+
+
+def test_duckdb_regex_evasions_rejected(sample_sales_df: pd.DataFrame, tmp_path: object) -> None:
+    """`_auto`-suffixed table functions and bare quoted paths used to evade the
+    word-boundary regex denylist entirely (`\\bread_csv\\b` does not match
+    `read_csv_auto`). These must be rejected."""
+    evasions = [
+        "SELECT * FROM read_csv_auto('requirements.txt')",
+        "SELECT * FROM read_json_auto('requirements.txt')",
+        "SELECT * FROM read_parquet_auto('requirements.txt')",
+        "SELECT * FROM 'requirements.txt'",
+        "SELECT * FROM glob('*')",
+        "SET enable_external_access=true",
+    ]
+    for q in evasions:
+        with pytest.raises(DuckDBQueryError):
+            query_dataframe(q, {"sales": sample_sales_df})
+
+
+def test_duckdb_engine_level_lock_holds_even_without_regex(sample_sales_df: pd.DataFrame) -> None:
+    """The regex denylist is defense-in-depth only. Bypass it entirely by calling
+    the private executor directly and confirm DuckDB's own
+    enable_external_access=false + lock_configuration=true still blocks file access —
+    this is the actual security boundary the sandbox relies on."""
+    engine = HighThroughputQueryEngine()
+    with pytest.raises(DuckDBQueryError):
+        engine._execute_duckdb(
+            "SELECT * FROM read_csv_auto('requirements.txt')", {"sales": sample_sales_df}
+        )
 
 
 def test_dsa_query_sql_toolkit(sample_sales_df: pd.DataFrame) -> None:

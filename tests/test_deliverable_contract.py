@@ -34,6 +34,33 @@ def test_parse_deliverable_contract_forecast_and_compare() -> None:
     assert contract.requires_forecast is True
 
 
+def test_parse_deliverable_contract_ignores_generic_explain_phrasing() -> None:
+    """Null case: a rhetorical "explain"/"what drives" with no real column
+    reference must not manufacture a driver target that can never be
+    satisfied (previously "Explain the findings from this analysis" ->
+    required_driver_targets == ["the findings from this analysis"], which
+    audit_deliverables would then report MISSING on every single run)."""
+    for objective in (
+        "Explain the findings from this analysis",
+        "Please explain what happened here",
+        "Explain the relationship",
+    ):
+        contract = parse_deliverable_contract(objective)
+        assert contract.required_driver_targets == [], (objective, contract.required_driver_targets)
+        assert contract.is_empty()
+
+
+def test_parse_deliverable_contract_still_extracts_real_targets() -> None:
+    """Planted case: real, specific targets in the same phrasings must still
+    be extracted — the generic-phrase guard must not overcorrect."""
+    assert parse_deliverable_contract("What drives customer churn?").required_driver_targets == ["customer churn"]
+    assert parse_deliverable_contract("What are the drivers of monthly revenue?").required_driver_targets == ["monthly revenue"]
+    contract = parse_deliverable_contract(
+        "Show a heatmap of monthly average per pollutant and tell me what drives CO levels"
+    )
+    assert any("co" in t.lower() for t in contract.required_driver_targets)
+
+
 def test_audit_deliverables_complete() -> None:
     contract = parse_deliverable_contract("Show a heatmap and what drives CO")
     final_result = {

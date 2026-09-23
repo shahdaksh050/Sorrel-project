@@ -48,6 +48,25 @@ _DRIVER_PATTERNS = (
     re.compile(r"factors affecting\s+([a-zA-Z0-9_\(\)\s]+?)(?:\?|$|,|\.)", re.IGNORECASE),
 )
 
+#: A captured driver-pattern group starting with one of these words is almost
+#: never a real column/measure reference — it means the regex caught the tail
+#: of a generic sentence ("explain the findings from this analysis", "explain
+#: what happened here") rather than a target name, and would otherwise create
+#: a "missing deliverable" that can never be satisfied (see test_deliverable_contract.py).
+_GENERIC_TARGET_LEAD_WORDS = frozenset((
+    "the", "a", "an", "this", "that", "these", "those", "it", "what", "why",
+    "how", "your", "my", "our", "here", "there", "everything", "things",
+))
+_MAX_TARGET_WORDS = 6
+
+
+def _looks_like_a_real_target(candidate: str) -> bool:
+    words = candidate.split()
+    if not words or len(words) > _MAX_TARGET_WORDS:
+        return False
+    return words[0].lower().strip("'\".,") not in _GENERIC_TARGET_LEAD_WORDS
+
+
 _RELATIONSHIP_PATTERNS = (
     re.compile(r"which\s+([a-zA-Z0-9_\s]+)\s+move together", re.IGNORECASE),
     re.compile(r"correlated|correlation|relationships? between", re.IGNORECASE),
@@ -103,7 +122,11 @@ def parse_deliverable_contract(objective: str) -> DeliverableContract:
             target = m.group(1).strip()
             # Remove trailing words like "levels", "rate", "scores" if generic
             cleaned_target = re.sub(r"\s+(?:levels|rates?|scores?|values?)$", "", target, flags=re.IGNORECASE).strip()
-            if cleaned_target and cleaned_target.lower() not in ("the", "it"):
+            if (
+                cleaned_target
+                and cleaned_target.lower() not in ("the", "it")
+                and _looks_like_a_real_target(cleaned_target)
+            ):
                 required_targets.append(cleaned_target)
 
     requires_relationship = any(pat.search(objective) for pat in _RELATIONSHIP_PATTERNS)

@@ -175,15 +175,6 @@ for _k, _v in _DEFAULTS.items():
 _inject_theme_css()
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-PLOT_INK = "#3a2b1e"
-PLOT_GRAPHITE = "#8a7660"
-PLOT_RULE = "#e4d4bc"
-PEN_BLUE = "#a34f20"
-PEN_RED = "#a33526"
-VEGA_PLOT_CONFIG = _get_vega_config()
-
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _reset_pipeline() -> None:

@@ -69,6 +69,10 @@ def _select_cluster_features(
     near-unique-integer identifier check either way.
     """
     roles = {c.name: c.semantic_role for c in profile.columns} if profile else {}
+    # profile_dataframe already computed each column's exact nunique(dropna=True)
+    # once; reuse it instead of paying for a second full pass per candidate
+    # column here (matters when there are hundreds of numeric columns).
+    nunique_by_name = {c.name: c.nunique for c in profile.columns} if profile else {}
     geo = {profile.geo_lat_col, profile.geo_lon_col} if profile else set()
     keep: list[str] = []
     n = max(len(df), 1)
@@ -85,7 +89,9 @@ def _select_cluster_features(
             continue
         if _NON_FEATURE_NAME_TOKENS & set(re.split(r"[^a-z]+", name_l)):
             continue
-        nunique = series.nunique(dropna=True)
+        nunique = nunique_by_name.get(str(col))
+        if nunique is None:
+            nunique = series.nunique(dropna=True)
         if nunique <= 2:
             continue  # constant or flag
         if pd.api.types.is_integer_dtype(series) and nunique / n >= 0.98:
@@ -182,9 +188,15 @@ class ClusterDataTool(BaseTool):
         filled = features.fillna(features.median(numeric_only=True))
         # A heavy right tail (income, spend) otherwise dominates the
         # Euclidean distance and KMeans just splits off the outliers.
+        # Vectorised across all columns at once (one DataFrame.min()/.skew()
+        # call each) instead of a Python loop calling .min()/.skew() per
+        # column — with a few hundred numeric columns that per-column
+        # dispatch overhead was measurable; the values are identical.
+        col_mins = filled.min()
+        col_skews = filled.skew()
         log_features = [
             c for c in filled.columns
-            if float(filled[c].min()) >= 0 and float(filled[c].skew()) >= SEVERE_SKEW_THRESHOLD
+            if float(col_mins[c]) >= 0 and float(col_skews[c]) >= SEVERE_SKEW_THRESHOLD
         ]
         model_input = filled.copy()
         model_input[log_features] = np.log1p(model_input[log_features])
@@ -208,7 +220,7 @@ class ClusterDataTool(BaseTool):
             upper = min(max(2, int(max_k)), len(features) - 1)
             candidates = list(range(2, upper + 1))
 
-        best_k, best_score, best_model = -1, -2.0, None
+        best_k, best_score, best_model, best_labels = -1, -2.0, None, None
         for k in candidates:
             model = KMeans(n_clusters=k, random_state=42, n_init="auto")
             labels = model.fit_predict(X)
@@ -217,12 +229,16 @@ class ClusterDataTool(BaseTool):
             score = float(silhouette_score(X[sil_idx], labels[sil_idx]))
             k_scores[k] = round(score, 4)
             if score > best_score:
-                best_k, best_score, best_model = k, score, model
+                best_k, best_score, best_model, best_labels = k, score, model, labels
 
-        if best_model is None:
+        if best_model is None or best_labels is None:
             raise ToolExecutionError("KMeans failed to produce 2+ distinct clusters.")
 
-        labels = best_model.predict(X)
+        # `labels` from the winning fit_predict() call is already exactly
+        # what predict(X) would return (fit_predict's labels_ is the final
+        # E-step assignment against the converged centers) — reuse it
+        # instead of paying for a second full pass over X.
+        labels = best_labels
         sizes = pd.Series(labels).value_counts().sort_index()
         cluster_sizes = {f"cluster_{int(c)}": int(v) for c, v in sizes.items()}
 

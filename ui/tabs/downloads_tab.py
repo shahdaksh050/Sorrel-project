@@ -9,6 +9,8 @@ from typing import Any
 
 import streamlit as st
 
+from ui.components.cards import md_text
+
 
 def render_downloads_tab(
     report: dict[str, Any],
@@ -118,7 +120,44 @@ def render_downloads_tab(
         if mds:
             st.markdown(mds[0].read_text(encoding="utf-8"))
         else:
-            st.json(report)
+            # No Markdown file on disk. Two different reasons look identical
+            # to a user staring at a blank Downloads tab, so tell them which
+            # one happened instead of dumping the raw final_result dict:
+            # (1) GenerateReportTool actually failed — surface its real
+            # error_message, recorded on the tool_results list; (2) it never
+            # ran / hasn't reached this point yet — render a readable preview
+            # from `report` itself instead of a raw JSON tree either way.
+            failed = next(
+                (
+                    r for r in tool_results
+                    if r.get("tool_name") == "generate_report" and r.get("status") != "success"
+                ),
+                None,
+            )
+            if failed:
+                st.error(
+                    "Markdown report generation failed: "
+                    + str(failed.get("error") or "no error message recorded.")
+                )
+            else:
+                st.caption("No Markdown file was found on disk for this run — showing the raw result instead.")
+
+            reasoning = report.get("reasoning")
+            if reasoning:
+                st.markdown(md_text(str(reasoning)))
+            insights = report.get("insights") or []
+            if insights:
+                st.markdown("**Insights**")
+                for item in insights:
+                    text = item.get("headline", item) if isinstance(item, dict) else item
+                    st.markdown(f"- {md_text(str(text))}")
+            recs = report.get("recommendations") or []
+            if recs:
+                st.markdown("**Recommendations**")
+                for item in recs:
+                    st.markdown(f"- {md_text(str(item))}")
+            with st.expander("Raw result (JSON)", expanded=False):
+                st.json(report)
 
         with st.expander("Full Technical Log", expanded=False):
             st.json(tool_results)

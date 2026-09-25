@@ -532,13 +532,19 @@ def _read_excel(path: Path, format_: str) -> tuple[pd.DataFrame, ReadReport]:
             df = xl.parse(sheet_names[0])
         else:
             sheets: dict[str, pd.DataFrame] = {}
+            skipped: list[str] = []
             for s in sheet_names:
                 try:
                     s_df = xl.parse(s)
                     if not s_df.empty:
                         sheets[s] = s_df
-                except Exception:
+                except Exception as exc:
+                    skipped.append(f"'{s}' ({exc})")
                     continue
+            if skipped:
+                notes.append(
+                    f"Skipped {len(skipped)} sheet(s) that failed to parse: {', '.join(skipped)}."
+                )
             if not sheets:
                 raise DatasetReadError(f"'{path.name}' sheets are all empty.")
 
@@ -624,7 +630,7 @@ def _read_json(path: Path, format_: str) -> tuple[pd.DataFrame, ReadReport]:
                     flattened_columns = len(df.columns)
             else:
                 df = pd.read_json(path)
-    except (ValueError, OSError, json.JSONDecodeError) as exc:
+    except (ValueError, TypeError, OSError, json.JSONDecodeError) as exc:
         raise DatasetReadError(f"'{path.name}' could not be parsed as {format_}: {exc}") from exc
     if df.empty:
         raise DatasetReadError(f"'{path.name}' contains no records.")

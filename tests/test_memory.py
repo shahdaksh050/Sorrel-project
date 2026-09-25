@@ -172,6 +172,16 @@ class TestMemorySystem:
         memory.set_context("b", 2)
         assert set(memory.list_context_keys()) == {"a", "b"}
 
+    def test_clear_context_removes_key(self, memory: MemorySystem) -> None:
+        memory.set_context("interrupt_signal", {"interrupt_reason": "x"})
+        memory.clear_context("interrupt_signal")
+        assert memory.get_context("interrupt_signal") is None
+        assert "interrupt_signal" not in memory.list_context_keys()
+
+    def test_clear_context_missing_key_is_a_no_op(self, memory: MemorySystem) -> None:
+        memory.clear_context("never_set")
+        assert memory.get_context("never_set") is None
+
     def test_save_skips_when_no_persist_path(self, memory: MemorySystem) -> None:
         # Should not raise even without a persist path
         memory.save()

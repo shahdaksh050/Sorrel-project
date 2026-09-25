@@ -240,6 +240,14 @@ class AgentController:
         self.question_routing = route_question(self.objective)
         self.hypothesis_tree = HypothesisTree(primary_objective=self.objective)
         self.memory.set_context("hypothesis_tree", self.hypothesis_tree.to_dict())
+        # Deterministic parent-lookup for hypothesis-tree nesting: the first
+        # hypothesis recorded about a given (measure, dimension) pair, and the
+        # most recent one sourced from a given tool — so a later counterfactual
+        # or a precondition refutation about the same relationship attaches
+        # under it instead of flattening the tree. Exact-key match only; no
+        # fuzzy relationship-guessing.
+        self._hypothesis_parent_by_key: dict[tuple[str, str], str] = {}
+        self._hypothesis_parent_by_tool: dict[str, str] = {}
         if self.objective:
             self.memory.set_context("user_objective", self.objective)
             self.memory.set_context("question_routing", {
@@ -1102,17 +1110,22 @@ class AgentController:
                 f"final synthesis — see memory context 'unverified_claims'.[/]"
             )
 
+        # ---- Shared cleaned-dataset read for the post-hoc audits below
+        # (Deliverable Contract, Dependence/Confounding, Target Leakage,
+        # Finding Fragility) — one read, reused, instead of reading the same
+        # path twice. ----
+        audit_df: pd.DataFrame | None = None
+        try:
+            from src.tools.data_processing import _read_df
+            audit_path = self.memory.get_context("cleaned_file_path") or getattr(self.memory.dataset_metadata, "file_path", None)
+            if audit_path:
+                audit_df = _read_df(str(audit_path))
+        except Exception:
+            audit_df = None
+
         # ---- Deliverable Contract Audit (Phase 2) ----
-        if hasattr(self, "deliverable_contract") and not self.deliverable_contract.is_empty():
-            df_for_audit = None
-            try:
-                from src.tools.data_processing import _read_df
-                c_path = self.memory.get_context("cleaned_file_path") or getattr(self.memory.dataset_metadata, "file_path", None)
-                if c_path:
-                    df_for_audit = _read_df(str(c_path))
-            except Exception:
-                df_for_audit = None
-            audit_rep = audit_deliverables(self.deliverable_contract, final_result, df=df_for_audit)
+        if not self.deliverable_contract.is_empty():
+            audit_rep = audit_deliverables(self.deliverable_contract, final_result, df=audit_df)
             self.memory.set_context("deliverable_audit", {
                 "delivered": audit_rep.delivered,
                 "missing": audit_rep.missing,
@@ -1130,23 +1143,50 @@ class AgentController:
                 )
 
         # ---- Dependence & Confounding Audit (Phase 4) ----
-        try:
-            from src.tools.data_processing import _read_df
-            dep_path = self.memory.get_context("cleaned_file_path") or getattr(self.memory.dataset_metadata, "file_path", None)
-            dep_df = _read_df(str(dep_path)) if dep_path else None
-        except Exception:
-            dep_df = None
+        dep_df = audit_df
         if dep_df is not None:
             try:
                 self._audit_dependence_structure(dep_df)
-            except Exception:
-                pass
+            except Exception as exc:
+                console.print(f"  [yellow]⚠ Dependence/Simpson's-paradox audit skipped (non-fatal): {exc}[/]")
             # Re-derive from ranked_findings(), not the raw list — the raw
             # list bypasses _drop_unskilled_drivers/is_trivial suppression,
             # which would resurrect noise-level "driver" findings on every
             # run that reaches this point (this block used to overwrite with
             # raw findings unconditionally and broke that suppression).
             final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
+
+        # ---- Target Leakage & Finding Fragility Audit (sensitivity.py) ----
+        target_col = getattr(self.memory.dataset_metadata, "target_column", None)
+        if dep_df is not None and target_col:
+            try:
+                from src.core.sensitivity import detect_target_leakage
+                leakage_alerts = detect_target_leakage(dep_df, target_col)
+            except Exception as exc:
+                leakage_alerts = []
+                console.print(f"  [yellow]⚠ Target leakage audit skipped (non-fatal): {exc}[/]")
+            if leakage_alerts:
+                self.memory.set_context("target_leakage_alerts", leakage_alerts)
+                critical = [a for a in leakage_alerts if a.get("severity") == "critical"]
+                console.print(
+                    f"  [red]⚡ Target Leakage Audit: {len(leakage_alerts)} alert(s), "
+                    f"{len(critical)} critical — {', '.join(a['column'] for a in leakage_alerts[:5])}[/]"
+                )
+
+        if dep_df is not None:
+            try:
+                from src.core.sensitivity import audit_finding_sensitivity
+                # Bounded to the top-ranked findings — a jackknife pass
+                # recomputes the effect once per finding, which is too
+                # costly to run over every finding on a long analysis.
+                for f in self.memory.ranked_findings()[:8]:
+                    if f.measure and f.effect is not None:
+                        report = audit_finding_sensitivity(dep_df, f)
+                        if report.get("is_fragile"):
+                            f.caveats.append(report["diagnosis"])
+                final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
+            except Exception as exc:
+                console.print(f"  [yellow]⚠ Finding fragility audit skipped (non-fatal): {exc}[/]")
 
         # ---- Causal Claim Guard (Phase 4) ----
         study_design = getattr(self, "study_design", "observational")
@@ -2080,13 +2120,23 @@ class AgentController:
                     d = f.dimension or ""
                     confounders = [c for c in col_names if c not in (m, d)][:3]
                     cf_probes = generate_counterfactual_probes(m, d, confounders) if (m and d) else []
-                    self.hypothesis_tree.add_hypothesis(
+                    key = (m, d) if (m and d) else None
+                    # Nest under the first hypothesis already recorded about
+                    # this exact (measure, dimension) pair — a later finding
+                    # on the same relationship is a refinement/counterfactual
+                    # of it, not an unrelated top-level hypothesis. Exact-key
+                    # match only, so unrelated findings stay flat siblings.
+                    parent_id = self._hypothesis_parent_by_key.get(key) if key else None
+                    node = self.hypothesis_tree.add_hypothesis(
                         statement=f"{f.headline or f.detail}",
-                        parent_id=None,
+                        parent_id=parent_id,
                         status="supported",
                         rationale=f"Observed in step {step.step_number} ({step.tool_name})",
                         counterfactuals=cf_probes,
                     )
+                    if key and key not in self._hypothesis_parent_by_key:
+                        self._hypothesis_parent_by_key[key] = node.id
+                    self._hypothesis_parent_by_tool[step.tool_name] = node.id
                 self.memory.set_context("hypothesis_tree", self.hypothesis_tree.to_dict())
                 if any(f.p_value is not None for f in new_findings):
                     try:
@@ -2110,6 +2160,12 @@ class AgentController:
         # to "error", and an error must never be served from the cache.
         if result.status == "success":
             self._step_cache[prepared.cache_key] = result
+            # A prior interrupt's CRITICAL PRECONDITION VIOLATION block would
+            # otherwise keep re-injecting into every subsequent prompt for
+            # the rest of the run — a later step succeeding means the agent
+            # has already pivoted past it.
+            if self.memory.get_context("interrupt_signal") is not None:
+                self.memory.clear_context("interrupt_signal")
 
         rationales = self.memory.get_context("plan_rationales") or []
         rationales.append({
@@ -2182,9 +2238,14 @@ class AgentController:
             self.memory.set_context("interrupt_signal", result.output)
             reason = result.error_message or "Execution interrupted by tool precondition violation."
             pivot = result.output.get("recommended_pivot")
+            # A precondition violation for a tool that already produced
+            # findings is a refutation of *that* hypothesis, not a new
+            # unrelated top-level one — nest it under the most recent
+            # hypothesis this same tool contributed.
+            parent_id = self._hypothesis_parent_by_tool.get(step.tool_name)
             self.hypothesis_tree.add_hypothesis(
                 statement=f"Precondition check for {step.tool_name}",
-                parent_id=None,
+                parent_id=parent_id,
                 status="refuted",
                 rationale=reason,
                 counterfactuals=[f"Pivot recommendation: {pivot}"] if pivot else [],

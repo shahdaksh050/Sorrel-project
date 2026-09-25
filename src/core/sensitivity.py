@@ -20,6 +20,12 @@ if TYPE_CHECKING:
 _POST_OUTCOME_PREFIXES = ("post_", "after_", "resolved_", "exit_", "outcome_")
 _POST_OUTCOME_SUFFIXES = ("_after", "_resolved", "_outcome", "_date", "_reason")
 
+#: Below this many distinct feature values relative to row count, the
+#: "determines the target" test is vacuous — a near-unique ID or timestamp
+#: column trivially has one target value per group. Mirrors
+#: `_LEAKAGE_MIN_GROUP_RATIO` in src/tools/ml_pipeline.py.
+_LEAKAGE_MIN_GROUP_RATIO = 0.5
+
 
 def audit_finding_sensitivity(
     df: pd.DataFrame,
@@ -175,7 +181,8 @@ def detect_target_leakage(df: pd.DataFrame, target_col: str) -> list[dict[str, A
         # 3. Exact categorical mapping (target uniquely determined by feature)
         elif not pd.api.types.is_numeric_dtype(target_s):
             sub = df[[col, target_col]].dropna()
-            if len(sub) >= 10 and sub[col].nunique() > 1:
+            n_groups = sub[col].nunique()
+            if len(sub) >= 10 and 1 < n_groups <= len(sub) * _LEAKAGE_MIN_GROUP_RATIO:
                 grouped = sub.groupby(col)[target_col].nunique()
                 if (grouped == 1).all():
                     alerts.append({

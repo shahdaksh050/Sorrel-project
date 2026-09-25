@@ -172,7 +172,13 @@ def _level_and_rest(
     """Measure values inside `level` and in the rest of the data — one value
     per entity on each side when rows repeat per entity. An entity present
     on both sides contributes to both, so the two samples are then only
-    approximately independent."""
+    approximately independent.
+
+    Used by `_stratify` (a handful of calls per run, on an already-small
+    stratum) — the main per-level sweep in `_compare_one` uses the
+    vectorised `_entity_level_values`/code-mask paths below instead, since
+    calling this once per level there means one full aggregate_to_entity
+    groupby (or boolean mask) per level, per (measure, dimension) pair."""
     mask = work[dimension] == level
     if entity_col is None:
         return work.loc[mask, measure], work.loc[~mask, measure]
@@ -180,6 +186,77 @@ def _level_and_rest(
         aggregate_to_entity(work[mask], entity_col, measure, agg)[measure],
         aggregate_to_entity(work[~mask], entity_col, measure, agg)[measure],
     )
+
+
+def _entity_level_values(
+    work: pd.DataFrame,
+    measure: str,
+    dimension: str,
+    entity: str,
+    agg: str,
+    levels: list[Any],
+) -> dict[Any, tuple[pd.Series, pd.Series]]:
+    """(level_vals, rest_vals) per entity, for every tested level, from ONE
+    pass over `work` — replacing what used to be two full aggregate_to_entity
+    groupbys (level rows, then the ~mask complement) per level, i.e. up to
+    2 * len(levels) full-frame groupbys per (measure, dimension) pair.
+
+    Exact: 'rest' for a level is every entity's aggregate over every OTHER
+    level (not just the levels tested here) minus that entity's own
+    contribution to this level — precisely what
+    `aggregate_to_entity(work[~mask], entity, measure, agg)` computes from
+    the masked-out rows directly, since `total - level == rest` regardless
+    of how many other levels exist or are tested.
+
+    Grouping by [dimension, entity] (dimension outer) keeps the per-level
+    lookup a cheap slice on a lexsorted MultiIndex rather than a dense
+    entity x level matrix — the dimension can be high-cardinality when the
+    caller passes one explicitly (only the top _MAX_LEVELS_TESTED are
+    tested, but every level's rows still count toward every other level's
+    'rest')."""
+    by_level = work.groupby([dimension, entity], observed=True)[measure].agg(["sum", "count"])
+    total = work.groupby(entity, observed=True)[measure].agg(["sum", "count"])
+    present_levels = set(by_level.index.get_level_values(0))
+
+    out: dict[Any, tuple[pd.Series, pd.Series]] = {}
+    for level in levels:
+        if level in present_levels:
+            sub = by_level.loc[level].reindex(total.index, fill_value=0)
+        else:
+            sub = pd.DataFrame(0, index=total.index, columns=["sum", "count"])
+        rest = total - sub
+
+        lvl_keep = sub["count"] > 0
+        rest_keep = rest["count"] > 0
+        if agg == "sum":
+            level_vals = sub.loc[lvl_keep, "sum"]
+            rest_vals = rest.loc[rest_keep, "sum"]
+        else:
+            level_vals = sub.loc[lvl_keep, "sum"] / sub.loc[lvl_keep, "count"]
+            rest_vals = rest.loc[rest_keep, "sum"] / rest.loc[rest_keep, "count"]
+        out[level] = (level_vals.reset_index(drop=True), rest_vals.reset_index(drop=True))
+    return out
+
+
+def _row_level_values(
+    work: pd.DataFrame, measure: str, dimension: str, levels: list[Any]
+) -> dict[Any, tuple[pd.Series, pd.Series]]:
+    """(level_vals, rest_vals) per row, for every tested level, from ONE
+    factorisation of `dimension` instead of one string equality scan
+    (`work[dimension] == level`) per level."""
+    codes, uniques = pd.factorize(work[dimension], sort=False)
+    code_of = {v: i for i, v in enumerate(uniques)}
+    values = work[measure].to_numpy(dtype=float)
+
+    out: dict[Any, tuple[pd.Series, pd.Series]] = {}
+    for level in levels:
+        code = code_of.get(level)
+        if code is None:
+            out[level] = (pd.Series(dtype=float), pd.Series(dtype=float))
+            continue
+        mask = codes == code
+        out[level] = (pd.Series(values[mask]), pd.Series(values[~mask]))
+    return out
 
 
 def _effect(level_vals: pd.Series, rest_vals: pd.Series, by_difference: bool) -> float | None:
@@ -339,11 +416,18 @@ class SegmentComparisonTool(BaseTool):
                 (dimension_column, str(lvl)) for lvl in counts[counts < k].index
             )
 
+        # One pass over `work` for every level tested, instead of one
+        # boolean-mask scan (or, with a repeated entity, one full
+        # aggregate_to_entity groupby) per level.
+        level_values = (
+            _entity_level_values(work, measure_column, dimension_column, entity, agg, levels)
+            if entity
+            else _row_level_values(work, measure_column, dimension_column, levels)
+        )
+
         out: list[dict[str, Any]] = []
         for level in levels:
-            level_vals, rest_vals = _level_and_rest(
-                work, measure_column, dimension_column, level, entity, agg
-            )
+            level_vals, rest_vals = level_values[level]
             n, n_rest = len(level_vals), len(rest_vals)
             if n < k:
                 if suppressed is not None:

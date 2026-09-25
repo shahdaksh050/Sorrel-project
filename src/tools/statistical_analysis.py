@@ -25,11 +25,11 @@ import pandas as pd
 from scipy import stats
 
 from src.core.findings import Finding
-from src.core.io import DatasetReadError, read_any
 from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.profiler import is_identifier_like, profile_dataframe
 from src.core.stats_utils import aggregate_to_entity, measure_aggregation, repeated_entity
 from src.tools.base import BaseTool, ToolExecutionError
+from src.tools.data_processing import _read_df
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
@@ -98,15 +98,6 @@ _FINDING_P_THRESHOLD = 0.05
 
 #: Post-hoc pairs reported after a significant k>2 test (k=20 has 190).
 _MAX_POST_HOC_PAIRS = 10
-
-
-def _read_df(file_path: str) -> pd.DataFrame:
-    """Read a dataset via the unified reader (src.core.io.read_any)."""
-    try:
-        df, _report = read_any(file_path)
-    except DatasetReadError as exc:
-        raise ToolExecutionError(str(exc)) from exc
-    return df
 
 
 def _seeded_sample(values: np.ndarray, max_n: int = 5000) -> np.ndarray:
@@ -616,10 +607,10 @@ class SelectStatisticalTestTool(BaseTool):
             df_clean = aggregate_to_entity(df_clean, entity_col, feature_column, agg, by=group_column)
             unit_of_analysis = entity_col
 
-        groups = df_clean.groupby(group_column, observed=True)[feature_column].apply(list)
-        group_arrays_raw = [pd.array(g) for g in groups]
-        group_sizes = [len(g) for g in group_arrays_raw]
-        n_groups = len(group_arrays_raw)
+        # Cheap enough to decide group count before building any arrays —
+        # nunique() is one vectorised pass, matching groupby(observed=True)'s
+        # own (dropna=True) notion of "a group".
+        n_groups = int(df_clean[group_column].nunique(dropna=True))
 
         if n_groups < 2:
             raise ToolExecutionError("At least 2 groups are required for hypothesis testing.")
@@ -631,10 +622,23 @@ class SelectStatisticalTestTool(BaseTool):
 
         # Categorical feature → Chi-Square / Fisher's exact
         # (is_numeric_dtype, not `dtype == object`: pandas 3 strings are `str` dtype)
+        # Checked before building any per-group arrays: the categorical path
+        # (_chi_square) never uses them, and family mode calls this once per
+        # candidate dimension, so skipping the numeric-only work below on
+        # every categorical candidate matters on a wide dataset.
         if not pd.api.types.is_numeric_dtype(df_clean[feature_column]):
             return self._chi_square(df_clean, feature_column, group_column, alpha)
 
-        group_arrays = [np.asarray(g, dtype=float) for g in group_arrays_raw]
+        # One `.to_numpy(dtype=float)` per group, not
+        # `.apply(list)` -> `pd.array()` -> `np.asarray()` — the old path
+        # materialised every value three times (Python list, pandas array,
+        # numpy array) per group, per dimension tested.
+        group_labels: list[Any] = []
+        group_arrays: list[np.ndarray] = []
+        for label, s in df_clean.groupby(group_column, observed=True)[feature_column]:
+            group_labels.append(label)
+            group_arrays.append(s.to_numpy(dtype=float))
+        group_sizes = [len(g) for g in group_arrays]
 
         # Normality (Shapiro-Wilk, seeded sub-sample for large groups). Shapiro
         # requires n>=3 and raises otherwise; a group smaller than that can't
@@ -687,7 +691,7 @@ class SelectStatisticalTestTool(BaseTool):
         post_hoc: list[dict[str, Any]] | None = None
         if n_groups > 2 and significant:
             try:
-                post_hoc = _post_hoc([str(k) for k in groups.index], group_arrays, is_normal, alpha)
+                post_hoc = _post_hoc([str(k) for k in group_labels], group_arrays, is_normal, alpha)
             except ValueError:
                 post_hoc = None  # degenerate groups; the omnibus result stands
         practical = abs(effect_value) >= threshold

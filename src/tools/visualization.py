@@ -23,8 +23,8 @@ import pandas as pd
 from src.core.chart_spec import chart_spec_to_plotly_dict, validate_chart_spec
 from src.core.chart_theme import humanize_label
 from src.core.dashboard import CORRELATION_HEATMAP_TITLE, correlation_heatmap
-from src.core.io import DatasetReadError, read_any
 from src.tools.base import BaseTool, ToolExecutionError
+from src.tools.data_processing import _read_df
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata, MemorySystem
@@ -42,15 +42,6 @@ HIST_BINS = 20
 #: Chart types that used to be drawn here on training rows; now answered by
 #: evaluate_model's held-out results.
 _EVALUATION_CHARTS = ("roc_curve", "confusion_matrix")
-
-
-def _read_df(file_path: str) -> pd.DataFrame:
-    """Read a dataset via the unified reader (src.core.io.read_any)."""
-    try:
-        df, _report = read_any(file_path)
-    except DatasetReadError as exc:
-        raise ToolExecutionError(str(exc)) from exc
-    return df
 
 
 def _validated(spec: dict[str, Any]) -> dict[str, Any]:

@@ -129,6 +129,62 @@ class TestEvaluateModelTool:
         assert eval_result.status == "success"
         assert "accuracy" in eval_result.output
 
+    def test_negative_train_test_gap_is_not_flagged_as_overfitting(self) -> None:
+        # A negative gap means test scored higher than train — the opposite
+        # of overfitting — and must not raise a "possible overfitting"
+        # finding just because abs() was applied to the sign.
+        found = EvaluateModelTool().findings(
+            {"train_test_gap": -0.15, "task_type": "classification", "summary": "s"},
+            profile=None,
+            metadata=None,
+        )
+        assert not any(f.kind == "method_fit" for f in found)
+
+    def test_positive_train_test_gap_over_threshold_is_flagged(self) -> None:
+        found = EvaluateModelTool().findings(
+            {"train_test_gap": 0.15, "task_type": "classification", "summary": "s"},
+            profile=None,
+            metadata=None,
+        )
+        assert any(f.kind == "method_fit" for f in found)
+
+    def test_model_path_outside_output_root_is_rejected(self, tmp_path: pytest.TempPathFactory) -> None:
+        # execute() unpickles model_path unsandboxed — a planner-supplied
+        # path that exists but sits outside the run's output_root must be
+        # replaced with the trusted best_model_path, never used as-is.
+        from src.core.memory import MemorySystem
+
+        output_root = tmp_path / "run"
+        trusted = output_root / "models" / "trusted.pkl"
+        trusted.parent.mkdir(parents=True)
+        trusted.write_bytes(b"not a real pickle")
+        outside = tmp_path / "outside.pkl"
+        outside.write_bytes(b"not a real pickle")
+
+        memory = MemorySystem()
+        memory.set_context("best_model_path", str(trusted))
+        params = EvaluateModelTool().prepare_params(
+            {"model_path": str(outside), "file_path": "x.csv", "target_column": "label"},
+            memory,
+            str(output_root),
+        )
+        assert params["model_path"] == str(trusted)
+
+    def test_model_path_outside_output_root_with_no_fallback_is_blanked(self, tmp_path: pytest.TempPathFactory) -> None:
+        from src.core.memory import MemorySystem
+
+        output_root = tmp_path / "run"
+        outside = tmp_path / "outside.pkl"
+        outside.write_bytes(b"not a real pickle")
+
+        memory = MemorySystem()
+        params = EvaluateModelTool().prepare_params(
+            {"model_path": str(outside), "file_path": "x.csv", "target_column": "label"},
+            memory,
+            str(output_root),
+        )
+        assert params["model_path"] == ""
+
 
 @pytest.fixture
 def string_target_csv(tmp_path: pytest.TempPathFactory) -> str:

@@ -206,9 +206,12 @@ def _choose_value_column_and_aggregation(
 
 
 def _choose_grain_candidates(dates: pd.Series) -> list[str]:
-    """Coarsest-appropriate-first candidate list, from the observed span."""
-    ordered = dates.dropna().sort_values()
-    span_days = float((ordered.iloc[-1] - ordered.iloc[0]).days) if len(ordered) > 1 else 0.0
+    """Coarsest-appropriate-first candidate list, from the observed span.
+
+    `dates` is the caller's already-sorted, already-NaN-free `working["_date"]`
+    (execute() sorts it before this call), so the span only needs the first
+    and last value — not another dropna() + sort_values() over every row."""
+    span_days = float((dates.iloc[-1] - dates.iloc[0]).days) if len(dates) > 1 else 0.0
     if span_days >= _GRAIN_MONTHLY_SPAN_DAYS:
         return ["monthly", "weekly", "daily"]
     if span_days >= _GRAIN_WEEKLY_SPAN_DAYS:
@@ -303,8 +306,8 @@ def _seasonal_decomposition(filled: pd.Series, grain: str) -> dict[str, Any] | N
 
 def _panel_trends(
     df: pd.DataFrame,
-    date_column: str,
-    value_column: str,
+    dates: pd.Series,
+    raw_values: pd.Series,
     entity: str,
     grain: str,
     aggregation: str,
@@ -313,11 +316,15 @@ def _panel_trends(
     """Mann-Kendall per entity for the _PANEL_MAX_ENTITIES entities with the
     most rows, each resampled on the aggregate's grain and calendar range so
     their trends are comparable. Shares are of entities with a computable
-    test (>= 4 observed periods)."""
+    test (>= 4 observed periods).
+
+    `dates`/`raw_values` are execute()'s already-parsed date/value columns
+    (same index as `df`) — reused instead of re-running `pd.to_datetime`
+    (format="mixed") and `pd.to_numeric` over every row a second time."""
     frame = pd.DataFrame({
         "_entity": df[entity],
-        "_date": pd.to_datetime(df[date_column], errors="coerce", format="mixed"),
-        "_value": pd.to_numeric(df[value_column], errors="coerce"),
+        "_date": dates,
+        "_value": raw_values,
     }).dropna()
     top = frame["_entity"].value_counts().head(_PANEL_MAX_ENTITIES).index
     rows: list[dict[str, Any]] = []
@@ -488,14 +495,20 @@ def _tod_charts(name: str, hours: dict[int, float], weekdays: dict[str, float] |
 
 
 def _measure_tod_profile(
-    name: str, values: pd.Series, dates: pd.Series
+    name: str, values: pd.Series, date_ok: np.ndarray, all_hour: np.ndarray, all_dow: np.ndarray
 ) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
     """(diurnal, weekly_profile) for one measure, or None when there is no
-    real hour-of-day cycle (eta^2 / ANOVA gate) or too few observations."""
-    ok = values.notna().to_numpy() & dates.notna().to_numpy()
+    real hour-of-day cycle (eta^2 / ANOVA gate) or too few observations.
+
+    `date_ok`/`all_hour`/`all_dow` are the caller's date-validity mask and
+    full-length hour-of-day/day-of-week arrays, computed once regardless of
+    how many measures are screened — this measure's own NaN pattern just
+    slices them, instead of re-parsing `pd.DatetimeIndex(dates[ok]).hour`
+    (and `.dayofweek`) from scratch per candidate measure. Values are
+    undefined (never read) at positions where `date_ok` is False."""
+    ok = values.notna().to_numpy() & date_ok
     v = values.to_numpy(dtype=float)[ok]
-    ts = pd.DatetimeIndex(dates[ok])
-    hour = np.asarray(ts.hour)
+    hour = all_hour[ok]
     by_hour = pd.DataFrame({"h": hour, "v": v}).groupby("h")["v"].agg(["mean", "count"])
     by_hour = by_hour[by_hour["count"] >= _TOD_MIN_OBS_PER_HOUR]
     if len(by_hour) < _TOD_MIN_HOURS:
@@ -520,7 +533,7 @@ def _measure_tod_profile(
     hours = {int(h): round(float(m), 4) for h, m in means.items()}
 
     weekly: dict[str, Any] | None = None
-    dow = np.asarray(ts.dayofweek)
+    dow = all_dow[ok]
     by_dow = pd.DataFrame({"d": dow, "v": v}).groupby("d")["v"].agg(["mean", "count"])
     if len(by_dow) == 7 and int(by_dow["count"].min()) >= _TOD_MIN_OBS_PER_WEEKDAY:
         weekday_mean, weekend_mean = float(v[dow < 5].mean()), float(v[dow >= 5].mean())
@@ -573,9 +586,17 @@ def _time_of_day_profile(
     others = [c for c in dict.fromkeys(names) if c not in (date_column, value_column) and c in df.columns]
     frame = df[others[:_TOD_MAX_CANDIDATES]].apply(pd.to_numeric, errors="coerce")
     valid = dates.notna().to_numpy()
+    # Hour/day-of-week computed once for every row with a usable date, not
+    # once per candidate measure (up to 1 + _TOD_MAX_EXTRA times below) —
+    # each measure's own NaN pattern is just a boolean slice of these.
+    ts_valid = pd.DatetimeIndex(dates[valid])
+    all_hour = np.zeros(len(dates), dtype=np.int64)
+    all_dow = np.zeros(len(dates), dtype=np.int64)
+    all_hour[valid] = ts_valid.hour
+    all_dow[valid] = ts_valid.dayofweek
     extras: list[str] = []
     if frame.shape[1]:
-        eta = _hour_eta_squared(frame[valid], np.asarray(pd.DatetimeIndex(dates[valid]).hour))
+        eta = _hour_eta_squared(frame[valid], all_hour[valid])
         # ~1.0 is a clock field in disguise, not a measured quantity.
         complete = frame[valid].notna().mean()
         eta = eta[complete.reindex(eta.index).fillna(0.0) >= _TOD_MIN_COMPLETENESS]
@@ -584,7 +605,7 @@ def _time_of_day_profile(
     weekly: dict[str, Any] = {}
     for i, col in enumerate([value_column, *extras]):
         values = pd.to_numeric(df[col], errors="coerce")
-        got = _measure_tod_profile(col, values, dates)
+        got = _measure_tod_profile(col, values, valid, all_hour, all_dow)
         if got is None:
             continue
         diurnal[col] = {**got[0], "is_primary": i == 0}
@@ -759,7 +780,7 @@ class TimeSeriesAnalysisTool(BaseTool):
         entity = repeated_entity(profile, df)
         if entity and profile is not None and entity in profile.panel_group_cols:
             panel = _panel_trends(
-                df, date_column, value_column, entity, grain, aggregation,
+                df, dates, raw_values, entity, grain, aggregation,
                 pd.DatetimeIndex(aligned.index),
             )
         day_of_week_factors: dict[str, float] = {}

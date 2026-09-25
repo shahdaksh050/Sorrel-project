@@ -214,9 +214,18 @@ class DefineAnalysisToolTool(BaseTool):
                 ),
             }
 
+        # file_path is declared required in get_schema() — a missing or
+        # nonexistent path must not be treated as "no smoke test needed",
+        # or a tool with a real runtime bug (bad column name, bad
+        # aggregation) enters the tool library having only passed the
+        # static check, never actually executed.
+        hint = (
+            "file_path was not provided." if not file_path
+            else f"file_path does not exist: {file_path}"
+        )
         return {
-            "summary": f"'{tool_name}' passed static validation (no smoke test run) — ready to be created.",
-            "status": "ready",
+            "summary": f"'{tool_name}' is not ready: no dataset was available to smoke-test the code against.",
+            "status": "error",
             "spec": spec,
-            "hint": None,
+            "hint": hint,
         }

@@ -134,15 +134,17 @@ class TestSmokeTest:
         )
         assert output["status"] == "ready"
 
-    def test_no_file_path_skips_smoke_test_but_still_ready(self) -> None:
+    def test_no_file_path_is_not_ready(self) -> None:
+        # file_path is declared required in get_schema() — a missing path
+        # must not silently register a never-executed tool as "ready".
         tool = DefineAnalysisToolTool()
         output = tool.execute(
             tool_name="row_counter", description="x", params_schema={}, code="RESULT = 1\n",
         )
-        assert output["status"] == "ready"
-        assert "no smoke test run" in output["summary"]
+        assert output["status"] == "error"
+        assert "not provided" in output["hint"]
 
-    def test_nonexistent_file_path_skips_smoke_test_but_still_ready(self, tmp_path: Path) -> None:
+    def test_nonexistent_file_path_is_not_ready(self, tmp_path: Path) -> None:
         tool = DefineAnalysisToolTool()
         output = tool.execute(
             tool_name="row_counter",
@@ -151,7 +153,8 @@ class TestSmokeTest:
             code="RESULT = 1\n",
             file_path=str(tmp_path / "does_not_exist.csv"),
         )
-        assert output["status"] == "ready"
+        assert output["status"] == "error"
+        assert "does not exist" in output["hint"]
 
 
 class TestPurity:

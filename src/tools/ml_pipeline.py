@@ -26,21 +26,21 @@ import pandas as pd
 from sklearn.base import BaseEstimator, OneToOneFeatureMixin, TransformerMixin
 
 from src.core.findings import Finding
-from src.core.io import DatasetReadError, read_any
 from src.tools.base import BaseTool, ToolExecutionError
+from src.tools.data_processing import (
+    _read_df as _read_df,  # re-exported: src.tools.clustering imports it from here
+)
 
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata, MemorySystem
     from src.core.profiler import DatasetProfile
 
-
-def _read_df(file_path: str) -> pd.DataFrame:
-    """Read a dataset via the unified reader (src.core.io.read_any)."""
-    try:
-        df, _report = read_any(file_path)
-    except DatasetReadError as exc:
-        raise ToolExecutionError(str(exc)) from exc
-    return df
+# _read_df (src.tools.data_processing) applies coerce_types (so "$1,234.56" /
+# "45%" strings become numeric before a model ever sees them) and caches the
+# coerced frame per file, so train_model/evaluate_model/clustering re-reading
+# the same dataset in one run don't each pay the coercion cost again. Local
+# re-implementation removed (2026 perf pass) — every other tool module already
+# imports this same helper instead of calling read_any directly.
 
 # Overfitting warning threshold: gap between train and test accuracy
 OVERFIT_THRESHOLD = 0.10
@@ -473,6 +473,48 @@ def _split_train_test(
     return X_train, X_test, y_train, y_test, cv, groups_train
 
 
+def _cap_train_rows(
+    X_train: pd.DataFrame,
+    y_train: pd.Series[Any],
+    groups_train: pd.Series[Any] | None,
+    split_strategy: str,
+    task_type: str,
+) -> tuple[pd.DataFrame, pd.Series[Any], pd.Series[Any] | None, int | None]:
+    """
+    Apply MAX_TRAIN_SAMPLES (env, default 50,000) to the training split.
+
+    Shared by TrainModelTool (which fits on the result) and EvaluateModelTool
+    (which must score the train side on the *same* rows to report an honest
+    train_test_gap) — same env var, same seed, same selection rule per
+    split_strategy, so the two tools can never disagree about which rows were
+    actually "training" rows for a given saved model.
+
+    Returns (X_train, y_train, groups_train, orig_rows); ``orig_rows`` is the
+    pre-cap row count, or None when the cap didn't trigger (len(X_train) is
+    already <= the cap, or MAX_TRAIN_SAMPLES <= 0 disables it).
+    """
+    max_train_samples = int(os.getenv("MAX_TRAIN_SAMPLES", "50000"))
+    if max_train_samples <= 0 or len(X_train) <= max_train_samples:
+        return X_train, y_train, groups_train, None
+    orig_train_len = len(X_train)
+    if split_strategy == "time_series":
+        X_train = X_train.iloc[-max_train_samples:]
+        y_train = y_train.iloc[-max_train_samples:]
+    elif task_type == "classification" and y_train.nunique() > 1:
+        from sklearn.model_selection import train_test_split as _tts
+        X_train, _, y_train, _ = _tts(
+            X_train, y_train, train_size=max_train_samples,
+            stratify=y_train, random_state=42
+        )
+    else:
+        sample_idx = X_train.sample(n=max_train_samples, random_state=42).index
+        X_train = X_train.loc[sample_idx]
+        y_train = y_train.loc[sample_idx]
+    if groups_train is not None:
+        groups_train = groups_train.loc[X_train.index]
+    return X_train, y_train, groups_train, orig_train_len
+
+
 #: A feature explaining at least this much of the target is reported as
 #: leakage rather than as a finding. Set just below 1.0 because the cases
 #: that matter are near-deterministic, not merely strong. For classification
@@ -892,26 +934,12 @@ class TrainModelTool(BaseTool):
             X_train, X_test, y_train, y_test, cv, groups_train = _split_train_test(
                 X, y, df, split_strategy, group_column, task_type, test_size, n_cv_folds
             )
-            max_train_samples = int(os.getenv("MAX_TRAIN_SAMPLES", "50000"))
-            if max_train_samples > 0 and len(X_train) > max_train_samples:
-                orig_train_len = len(X_train)
-                if split_strategy == "time_series":
-                    X_train = X_train.iloc[-max_train_samples:]
-                    y_train = y_train.iloc[-max_train_samples:]
-                elif task_type == "classification" and y_train.nunique() > 1:
-                    from sklearn.model_selection import train_test_split as _tts
-                    X_train, _, y_train, _ = _tts(
-                        X_train, y_train, train_size=max_train_samples,
-                        stratify=y_train, random_state=42
-                    )
-                else:
-                    sample_idx = X_train.sample(n=max_train_samples, random_state=42).index
-                    X_train = X_train.loc[sample_idx]
-                    y_train = y_train.loc[sample_idx]
-                if groups_train is not None:
-                    groups_train = groups_train.loc[X_train.index]
+            X_train, y_train, groups_train, orig_train_len = _cap_train_rows(
+                X_train, y_train, groups_train, split_strategy, task_type
+            )
+            if orig_train_len is not None:
                 treatments.append(
-                    f"Subsampled training set to {max_train_samples:,} rows (from {orig_train_len:,}) "
+                    f"Subsampled training set to {len(X_train):,} rows (from {orig_train_len:,}) "
                     "for fast, memory-bounded model training."
                 )
             scoring = "f1_weighted" if task_type == "classification" else "r2"
@@ -1322,17 +1350,29 @@ class TrainModelTool(BaseTool):
             r2_score,
             roc_auc_score,
         )
-        y_pred = model.predict(X)
-        if task_type == "classification":
+        # predict() on every classifier used here (RF, XGBoost,
+        # LogisticRegression) is exactly classes_[argmax(predict_proba(X))] —
+        # calling both separately ran the whole Pipeline (preprocessing +
+        # model) twice per _evaluate() call. Deriving y_pred from the one
+        # predict_proba() pass halves that cost with an identical result;
+        # only a classifier without predict_proba falls back to predict().
+        if task_type == "classification" and hasattr(model, "predict_proba"):
+            y_prob = model.predict_proba(X)
+            y_pred = model.classes_[np.argmax(y_prob, axis=1)]
             metrics: dict[str, float] = {
                 "accuracy": round(float(accuracy_score(y, y_pred)), 4),
                 "f1_score": round(float(f1_score(y, y_pred, average="weighted", zero_division=0)), 4),
             }
-            if hasattr(model, "predict_proba"):
-                y_prob = model.predict_proba(X)
-                if y_prob.shape[1] == 2:
-                    metrics["roc_auc"] = round(float(roc_auc_score(y, y_prob[:, 1])), 4)
+            if y_prob.shape[1] == 2:
+                metrics["roc_auc"] = round(float(roc_auc_score(y, y_prob[:, 1])), 4)
+        elif task_type == "classification":
+            y_pred = model.predict(X)
+            metrics = {
+                "accuracy": round(float(accuracy_score(y, y_pred)), 4),
+                "f1_score": round(float(f1_score(y, y_pred, average="weighted", zero_division=0)), 4),
+            }
         else:
+            y_pred = model.predict(X)
             metrics = {
                 "rmse": round(float(np.sqrt(mean_squared_error(y, y_pred))), 4),
                 "mae": round(float(mean_absolute_error(y, y_pred)), 4),
@@ -1445,6 +1485,18 @@ class EvaluateModelTool(BaseTool):
             raw_mp = params.get("model_path", "")
             if not raw_mp or not Path(raw_mp).exists():
                 params["model_path"] = best_path
+        # Pin model_path under the run's output directory before it reaches
+        # execute()'s unsandboxed pickle.load() — a planner step naming any
+        # other existing file path (e.g. from prompt-injected dataset
+        # content) must not be honoured as-is; fall back to the trusted
+        # best_model_path, or fail closed via a path execute() will reject.
+        from src.core.security import UploadValidationError, resolve_output_path
+        raw_mp = params.get("model_path", "")
+        if raw_mp:
+            try:
+                params["model_path"] = str(resolve_output_path(output_root, raw_mp))
+            except UploadValidationError:
+                params["model_path"] = best_path or ""
         # evaluate_model's whole purpose is to recreate train_model's exact
         # split ("held-out data only") — a different test_size, or a
         # different split_strategy/time_column/group_column, produces a
@@ -1525,7 +1577,7 @@ class EvaluateModelTool(BaseTool):
                 )
 
         gap = output.get("train_test_gap")
-        if isinstance(gap, (int, float)) and abs(gap) > OVERFIT_THRESHOLD:
+        if isinstance(gap, (int, float)) and gap > OVERFIT_THRESHOLD:
             found.append(
                 Finding(
                     finding_id=f"{self.name}_overfit_gap",
@@ -1577,10 +1629,29 @@ class EvaluateModelTool(BaseTool):
 
         # Recreate train_model's exact split so evaluation runs on rows the
         # model never trained on, whichever strategy produced them.
-        X_train, X_test, y_train, y_test, _cv, _groups_train = _split_train_test(
+        X_train, X_test, y_train, y_test, _cv, groups_train = _split_train_test(
             X, y, df, split_strategy, group_column, task_type, test_size
         )
-        y_pred_test = model.predict(X_test)
+        # Reapply the identical MAX_TRAIN_SAMPLES cap train_model applied
+        # before fitting (same helper, same seed/ordering) — the persisted
+        # model was fit on this subset, not the full pre-cap train split, so
+        # the train-side score below must be measured on the same rows or
+        # train_test_gap silently understates overfitting.
+        X_train, y_train, _groups_train, cap_orig_len = _cap_train_rows(
+            X_train, y_train, groups_train, split_strategy, task_type
+        )
+        # One predict_proba() pass on X_test serves three consumers below
+        # (y_pred_test, _held_out_curves' ROC curve, _explain_drivers'
+        # baseline outcome) instead of each calling predict()/predict_proba()
+        # on the full held-out split separately — same Pipeline transform,
+        # computed once. predict() == classes_[argmax(predict_proba())] for
+        # every classifier this file trains (RF, XGBoost, LogisticRegression).
+        y_prob_test: np.ndarray | None = None
+        if task_type == "classification" and hasattr(model, "predict_proba"):
+            y_prob_test = model.predict_proba(X_test)
+            y_pred_test = model.classes_[np.argmax(y_prob_test, axis=1)]
+        else:
+            y_pred_test = model.predict(X_test)
         n_train_full = len(X_train)
         train_rows = _seeded_rows(n_train_full, _EVAL_TRAIN_MAX_ROWS)
         if train_rows is not None:
@@ -1593,12 +1664,35 @@ class EvaluateModelTool(BaseTool):
             X_test if perm_rows is None else X_test.iloc[perm_rows],
             y_test if perm_rows is None else y_test.iloc[perm_rows],
             task_type, target_column, class_labels,
+            precomputed_proba=(
+                y_prob_test if perm_rows is None or y_prob_test is None else y_prob_test[perm_rows]
+            ),
         )
         sampling: dict[str, Any] = {}
         caveats = []
+        # train_sample_from/to describe what the train-side score above was
+        # actually computed on, so the caveat stays accurate whether that was
+        # the model's full fit set, a MAX_TRAIN_SAMPLES-capped subset of it,
+        # or (rarely, when the cap is raised/disabled) a further seeded
+        # sample of a still-huge fit set.
+        train_sample_from: int | None = None
+        train_sample_to: int | None = None
         if train_rows is not None:
+            train_sample_from, train_sample_to = n_train_full, len(X_train)
             caveats.append(
-                f"train score computed on a random sample of {len(X_train):,} of {n_train_full:,} training rows"
+                f"train score computed on a random sample of {train_sample_to:,} of "
+                f"{train_sample_from:,} rows actually used to fit the model"
+                + (
+                    f" (itself capped from {cap_orig_len:,} by MAX_TRAIN_SAMPLES)"
+                    if cap_orig_len is not None
+                    else ""
+                )
+            )
+        elif cap_orig_len is not None:
+            train_sample_from, train_sample_to = cap_orig_len, n_train_full
+            caveats.append(
+                f"train score computed on the {n_train_full:,} rows actually used to fit the "
+                f"model (capped from {cap_orig_len:,} by MAX_TRAIN_SAMPLES)"
             )
         if perm_rows is not None:
             caveats.append(
@@ -1606,8 +1700,8 @@ class EvaluateModelTool(BaseTool):
             )
         if caveats:
             sampling = {
-                "sampled_from": n_train_full if train_rows is not None else len(X_test),
-                "sampled_to": len(X_train) if train_rows is not None else _PERMUTATION_MAX_ROWS,
+                "sampled_from": train_sample_from if train_sample_from is not None else len(X_test),
+                "sampled_to": train_sample_to if train_sample_to is not None else _PERMUTATION_MAX_ROWS,
                 "sample_caveat": "; ".join(caveats),
             }
 
@@ -1638,7 +1732,7 @@ class EvaluateModelTool(BaseTool):
                 "top_drivers": drivers,
                 "driver_narrative": driver_narrative,
                 **sampling,
-                **self._held_out_curves(model, X_test, y_test, y_pred_test, class_labels),
+                **self._held_out_curves(model, X_test, y_test, y_pred_test, class_labels, y_prob_test),
             }
         else:
             from sklearn.metrics import mean_squared_error, r2_score
@@ -1674,10 +1768,17 @@ class EvaluateModelTool(BaseTool):
         y_test: pd.Series,
         y_pred_test: Any,
         class_labels: list[str],
+        y_prob_test: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """Confusion matrix (rows = actual, columns = predicted, ordered like
         `class_labels`) and, for a binary target, ROC points + AUC — all on the
-        held-out split. Never fails evaluation."""
+        held-out split. Never fails evaluation.
+
+        ``y_prob_test`` is the caller's already-computed `predict_proba(X_test)`
+        (execute() needs it anyway for y_pred_test) — reused here instead of
+        transforming/predicting X_test a second time; falls back to computing
+        it when the caller didn't have one (e.g. a model without predict_proba).
+        """
         from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve
 
         out: dict[str, Any] = {}
@@ -1687,8 +1788,8 @@ class EvaluateModelTool(BaseTool):
         except Exception:
             pass
         try:
-            if hasattr(model, "predict_proba") and pd.Series(y_test).nunique() == 2:
-                proba = model.predict_proba(X_test)[:, 1]
+            if pd.Series(y_test).nunique() == 2 and (y_prob_test is not None or hasattr(model, "predict_proba")):
+                proba = y_prob_test[:, 1] if y_prob_test is not None else model.predict_proba(X_test)[:, 1]
                 positive = sorted(pd.Series(y_test).unique())[-1]
                 fpr, tpr, _ = roc_curve(y_test, proba, pos_label=positive)
                 if len(fpr) > cls._MAX_ROC_POINTS:
@@ -1709,6 +1810,7 @@ class EvaluateModelTool(BaseTool):
         task_type: str,
         target_column: str,
         class_labels: list[str],
+        precomputed_proba: np.ndarray | None = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         """
         Model-agnostic explainability: permutation importance on the held-out
@@ -1728,6 +1830,10 @@ class EvaluateModelTool(BaseTool):
         X_test carries raw (post-P0.1) columns, including string categoricals
         for a Pipeline-wrapped model, which is what makes the per-level
         groupby possible here without re-deriving the encoding.
+
+        ``precomputed_proba`` is the caller's `predict_proba(X_test)` (already
+        row-aligned to this X_test), reused for the baseline/outcome instead
+        of transforming and predicting X_test again inside this method.
 
         Failure here must never fail evaluation — returns empty results instead.
         """
@@ -1751,10 +1857,13 @@ class EvaluateModelTool(BaseTool):
             # constant, reused for every driver rather than recomputed.
             outcome = pd.Series(y_test).astype(float)
             is_rate = False
-            if task_type == "classification" and hasattr(model, "predict_proba"):
+            if task_type == "classification" and (precomputed_proba is not None or hasattr(model, "predict_proba")):
                 try:
-                    proba = model.predict_proba(X_test)
-                    if proba.shape[1] == 2:
+                    proba = (
+                        precomputed_proba if precomputed_proba is not None
+                        else model.predict_proba(X_test)
+                    )
+                    if proba.shape[1] == 2 and len(proba) == len(X_test):
                         outcome = pd.Series(proba[:, 1], index=X_test.index)
                         is_rate = True
                 except Exception:

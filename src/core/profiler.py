@@ -845,17 +845,25 @@ def has_identifier_name_hint(name: str) -> bool:
     return tokens[-1] in ROLE_TOKENS["id"]
 
 
-def is_identifier_like(name: str, series: pd.Series, row_count: int) -> bool:
+def is_identifier_like(
+    name: str, series: pd.Series, row_count: int, nunique: int | None = None
+) -> bool:
     """Heuristic: near-unique column whose name hints at an identifier, or a
     fully-unique non-float column that is a string or a sequential run. A
     sorted *float* measurement or a unique integer measure (300 distinct
     `revenue` values) does NOT qualify — only a genuine key does. Public:
     reused by src.tools.statistical_analysis instead of a duplicate local
     heuristic.
+
+    `nunique` lets a caller that already computed `series.nunique(dropna=True)`
+    (namely `_profile_column`) pass it in instead of paying for a second full
+    pass over the column — every other caller omits it and gets the same
+    count computed here, as before.
     """
     if row_count == 0:
         return False
-    nunique = int(series.nunique(dropna=True))
+    if nunique is None:
+        nunique = int(series.nunique(dropna=True))
     uniqueness = nunique / row_count
     if uniqueness >= 0.98 and has_identifier_name_hint(name):
         return True
@@ -908,7 +916,7 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
         kind = "text"
         flags.append("free_text")
         stats["avg_word_count"] = round(free_text_avg_words, 2)
-    elif is_identifier_like(name, series, row_count):
+    elif is_identifier_like(name, series, row_count, nunique):
         kind = "identifier"
         flags.append("id_like")
     elif pd.api.types.is_numeric_dtype(series):

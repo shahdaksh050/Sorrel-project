@@ -75,6 +75,16 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+#: Set by `record_llm_call` when the append itself fails (disk full,
+#: permissions, ...) so `CodeGovernor.summary()` can surface it — an audit
+#: log that silently stops growing is a governance gap, not a cosmetic one.
+#: Keyed by the same `audit_dir` string the caller passes in (controller.py
+#: sets `llm_client.audit_dir` to the same `<output_dir>/audit` path
+#: `CodeGovernor.audit_path` is derived from), since this free function has
+#: no CodeGovernor instance of its own to record onto.
+_llm_audit_write_failures: dict[str, int] = {}
+
+
 def record_llm_call(
     audit_dir: str | Path,
     *,
@@ -113,7 +123,8 @@ def record_llm_call(
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, default=str) + "\n")
     except OSError:
-        pass
+        key = str(audit_dir)
+        _llm_audit_write_failures[key] = _llm_audit_write_failures.get(key, 0) + 1
 
 
 @dataclass
@@ -127,6 +138,8 @@ class CodeGovernor:
     refusals: int = 0
     failures: int = 0
     backends: set[str] = field(default_factory=set)
+    #: Times `record()` itself failed to append to code_executions.jsonl.
+    audit_write_failures: int = 0
 
     @property
     def audit_path(self) -> Path:
@@ -189,12 +202,14 @@ class CodeGovernor:
             with self.audit_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry, default=str) + "\n")
         except OSError:
-            pass
+            self.audit_write_failures += 1
 
     def summary(self, llm_usage: dict[str, Any] | None = None) -> dict[str, Any]:
         """`llm_usage` is RLMEngine.usage_summary() for this run, if any."""
         llm_usage = llm_usage or {}
         llm_audit = Path(self.output_dir) / AUDIT_SUBDIR / LLM_AUDIT_FILENAME
+        llm_audit_write_failures = _llm_audit_write_failures.get(str(llm_audit.parent), 0)
+        audit_integrity_ok = not self.audit_write_failures and not llm_audit_write_failures
         return {
             "llm_calls": int(llm_usage.get("call_count", 0) or 0),
             "llm_tokens": int(llm_usage.get("total_tokens", 0) or 0),
@@ -208,4 +223,7 @@ class CodeGovernor:
             "execution_budget": max_code_executions(),
             "sandbox_backends": sorted(self.backends),
             "audit_log": str(self.audit_path) if (self.executions or self.refusals) else None,
+            "audit_write_failures": self.audit_write_failures,
+            "llm_audit_write_failures": llm_audit_write_failures,
+            "audit_integrity_ok": audit_integrity_ok,
         }

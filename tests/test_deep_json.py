@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.core.io import read_any
+import pytest
+
+from src.core.io import DatasetReadError, read_any
 
 
 def test_deep_nested_json_unwrapping(tmp_path: Path) -> None:
@@ -34,3 +36,15 @@ def test_deep_nested_json_unwrapping(tmp_path: Path) -> None:
     assert "metrics.login_count" in df.columns
     assert report.flattened is True
     assert any("Unpacked nested records list" in n for n in report.notes)
+
+
+def test_record_list_of_scalars_raises_clean_read_error(tmp_path: Path) -> None:
+    # pd.json_normalize raises TypeError (not ValueError) when the record
+    # list holds scalars instead of dicts — this must surface as a clean
+    # DatasetReadError, not an uncaught TypeError.
+    json_path = tmp_path / "scalar_records.json"
+    payload = {"data": [1, 2, 3], "meta": {"source": "test"}}
+    json_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(DatasetReadError):
+        read_any(str(json_path))

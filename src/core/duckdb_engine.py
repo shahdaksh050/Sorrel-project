@@ -40,12 +40,12 @@ _DISALLOWED_SQL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bIMPORT\b", re.IGNORECASE),
     re.compile(r"\bPRAGMA\b", re.IGNORECASE),
     re.compile(r"\bCOPY\s+.*?\s+TO\b", re.IGNORECASE),
-    re.compile(r"\bread_csv\w*", re.IGNORECASE),
-    re.compile(r"\bread_parquet\w*", re.IGNORECASE),
-    re.compile(r"\bread_json\w*", re.IGNORECASE),
-    re.compile(r"\bread_ndjson\w*", re.IGNORECASE),
-    re.compile(r"\bread_text\w*", re.IGNORECASE),
-    re.compile(r"\bread_blob\w*", re.IGNORECASE),
+    # Catch-all for every `read_*` table function (read_csv, read_parquet, read_json,
+    # read_ndjson, read_text, read_blob, read_ipc, read_avro, read_excel, read_database,
+    # and any future/undocumented one) instead of enumerating each name individually —
+    # the enumeration previously missed read_ipc/read_avro/read_excel/read_database,
+    # which the Polars SQLContext fallback still executes as real filesystem reads.
+    re.compile(r"\bread_\w*", re.IGNORECASE),
     re.compile(r"\bscan_\w*", re.IGNORECASE),
     re.compile(r"\bparquet_scan\w*", re.IGNORECASE),
     re.compile(r"\bglob\s*\(", re.IGNORECASE),

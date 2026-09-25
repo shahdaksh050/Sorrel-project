@@ -6,7 +6,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.core.sensitivity import audit_finding_sensitivity
+from src.core.sensitivity import audit_finding_sensitivity, detect_target_leakage
 
 
 def test_sensitivity_robust_finding() -> None:
@@ -49,3 +49,34 @@ def test_sensitivity_fragile_finding_with_extreme_outlier() -> None:
     assert report["is_fragile"] is True
     assert report["effect_shift_pct"] > 30.0
     assert "Fragile finding" in report["diagnosis"]
+
+
+def test_leakage_ignores_near_unique_identifier_column() -> None:
+    # A transaction id (or timestamp) is unique per row, so it trivially
+    # "determines" a categorical target — that isn't leakage, it's an
+    # identifier, and must not be flagged (mirrors the same guard already
+    # applied in src/tools/ml_pipeline.py's _detect_target_leakage).
+    n = 100
+    df = pd.DataFrame({
+        "transaction_id": [f"tx_{i}" for i in range(n)],
+        "region": np.random.RandomState(0).choice(["north", "south"], n),
+        "outcome": np.random.RandomState(1).choice(["yes", "no"], n),
+    })
+
+    alerts = detect_target_leakage(df, "outcome")
+    assert not any(a["column"] == "transaction_id" for a in alerts)
+
+
+def test_leakage_flags_genuine_deterministic_mapping() -> None:
+    # A low-cardinality feature that perfectly determines the target class
+    # is real leakage and must still be caught.
+    n = 100
+    plan = np.random.RandomState(0).choice(["basic", "premium"], n)
+    outcome = np.where(plan == "premium", "churn", "retain")
+    df = pd.DataFrame({"plan_tier": plan, "outcome": outcome})
+
+    alerts = detect_target_leakage(df, "outcome")
+    assert any(
+        a["column"] == "plan_tier" and a["leakage_type"] == "deterministic_mapping"
+        for a in alerts
+    )

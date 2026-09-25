@@ -98,6 +98,23 @@ def test_duckdb_regex_evasions_rejected(sample_sales_df: pd.DataFrame, tmp_path:
             query_dataframe(q, {"sales": sample_sales_df})
 
 
+def test_duckdb_read_star_functions_all_rejected(sample_sales_df: pd.DataFrame) -> None:
+    """The denylist previously enumerated individual `read_*` function names
+    and missed several real ones (read_ipc, read_avro, read_excel,
+    read_database) — on the Polars SQLContext fallback (used whenever the
+    duckdb package is unavailable) these are real, unblocked filesystem
+    reads. A single catch-all `read_\\w*` pattern must reject all of them."""
+    evasions = [
+        "SELECT * FROM read_ipc('requirements.txt')",
+        "SELECT * FROM read_avro('requirements.txt')",
+        "SELECT * FROM read_excel('requirements.txt')",
+        "SELECT * FROM read_database('requirements.txt')",
+    ]
+    for q in evasions:
+        with pytest.raises(DuckDBQueryError):
+            query_dataframe(q, {"sales": sample_sales_df})
+
+
 def test_duckdb_engine_level_lock_holds_even_without_regex(sample_sales_df: pd.DataFrame) -> None:
     """The regex denylist is defense-in-depth only. Bypass it entirely by calling
     the private executor directly and confirm DuckDB's own

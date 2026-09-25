@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import threading
+import warnings
 from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -164,6 +165,20 @@ def pearson_matrix(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out, index=df.columns, columns=df.columns)
 
 
+def _spearman_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """Exact Spearman correlation matrix. `df.corr(method="spearman")` ranks
+    each pair's overlapping rows in a pairwise-complete loop (Cython, but
+    still O(k^2) pairs) — expensive on a wide frame. When nothing in `df` is
+    missing, that pairwise rank-dropping is a no-op, so ranking every column
+    once and reusing `pearson_matrix`'s fast path (Spearman r is just
+    Pearson r of the ranks) gives the identical matrix in one vectorised
+    pass. Any missing value falls back to pandas exactly, since a NaN in one
+    column of a pair can shift the other column's ranks pair by pair."""
+    if bool(np.isnan(df.to_numpy(dtype=float)).any()):
+        return df.corr(method="spearman")
+    return pearson_matrix(df.rank(method="average"))
+
+
 def _read_df(file_path: str) -> pd.DataFrame:
     """
     Read a dataset ready for analysis: unified reader + type coercion.
@@ -263,14 +278,13 @@ class IngestDatasetTool(BaseTool):
             class_balance = df[target_column].value_counts().to_dict()
             class_balance = {str(k): int(v) for k, v in class_balance.items()}
 
-        # Unique value counts for all columns (used by target-detection confidence scoring)
-        column_nunique = {col: int(df[col].nunique()) for col in df.columns}
+        # Unique value counts for all columns (used by target-detection
+        # confidence scoring). One bulk call, reused below for high-cardinality
+        # detection instead of recomputing nunique() per categorical column.
+        column_nunique = {col: int(n) for col, n in df.nunique(dropna=True).items()}
 
         # High-cardinality detection (>50 unique values in a categorical col)
-        high_card = [
-            c for c in categorical_cols
-            if df[c].nunique() > 50
-        ]
+        high_card = [c for c in categorical_cols if column_nunique[c] > 50]
 
         metadata_dict: dict[str, Any] = {
             "file_path": str(path.resolve()),
@@ -377,16 +391,24 @@ class CleanDataTool(BaseTool):
         if strategy == "drop":
             strategy = "drop_rows"
         original_shape = df.shape
-        missing_before = int(df.isnull().sum().sum())
-        missing_by_column = {str(c): int(n) for c, n in df.isnull().sum().items() if n > 0}
+        n_rows = len(df)
+        # One bulk pass over the whole frame, reused for both the total and
+        # the per-column breakdown (was two separate full-frame isnull().sum() scans).
+        missing_per_col = df.isnull().sum()
+        missing_before = int(missing_per_col.sum())
+        missing_by_column = {str(c): int(n) for c, n in missing_per_col.items() if n > 0}
         duplicate_rows = int(df.duplicated().sum())
-        constant_columns = [str(c) for c in df.columns if df[c].nunique(dropna=True) <= 1]
+        # One bulk nunique() call across all columns instead of a Python-level
+        # loop calling df[c].nunique() (and re-touching the block manager) per column.
+        constant_columns = [str(c) for c, n in df.nunique(dropna=True).items() if n <= 1]
         # Numeric columns mostly empty (all-null ones were dropped at read).
+        numeric_cols = df.select_dtypes(include="number").columns
+        numeric_missing = missing_per_col[numeric_cols] if len(numeric_cols) else missing_per_col
         sparse_columns: list[dict[str, Any]] = sorted(
             (
-                {"column": str(c), "missing": n, "usable": len(df) - n, "pct_missing": round(100 * n / len(df), 1)}
-                for c in df.select_dtypes(include="number").columns
-                if (n := int(df[c].isnull().sum())) < len(df) and n > _COVERAGE_GAP_SHARE * len(df)
+                {"column": str(c), "missing": n, "usable": n_rows - n, "pct_missing": round(100 * n / n_rows, 1)}
+                for c, raw_n in numeric_missing.items()
+                if (n := int(raw_n)) < n_rows and n > _COVERAGE_GAP_SHARE * n_rows
             ),
             key=lambda d: int(d["missing"]), reverse=True,
         )
@@ -616,6 +638,47 @@ def _column_outlier_mask(
     return mask, used
 
 
+def _bulk_iqr_mask(num_df: pd.DataFrame) -> dict[str, pd.Series]:
+    """Vectorised IQR flagging for every (non-skewed) column in `num_df` at
+    once. `_column_outlier_mask(..., method="iqr")` computes `Series.quantile`
+    twice per column — on a wide frame that is hundreds of separate pandas
+    calls. `np.nanpercentile` ignores NaN exactly as `Series.dropna().quantile()`
+    does (same order statistic, same linear interpolation), so running it
+    once with `axis=0` over the whole 2D array gives identical bounds and
+    identical flags in a single vectorised pass. Callers must exclude
+    skewed columns first — those need the log/MAD branch, not this one."""
+    if num_df.empty:
+        return {}
+    arr = num_df.to_numpy(dtype=float)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)  # all-NaN column, if any slips through
+        q1, q3 = np.nanpercentile(arr, [25, 75], axis=0)
+    iqr = q3 - q1
+    lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    with np.errstate(invalid="ignore"):
+        flags = (arr < lower) | (arr > upper)  # NaN cells compare False, same as dropna leaving them unflagged
+    return {str(col): pd.Series(flags[:, i], index=num_df.index) for i, col in enumerate(num_df.columns)}
+
+
+def _bulk_zscore_mask(num_df: pd.DataFrame, threshold: float) -> dict[str, pd.Series]:
+    """Vectorised z-score flagging for every (non-skewed) column in `num_df`
+    at once. `np.nanmean` / `np.nanstd` (ddof=0) over the full column
+    reproduce `scipy.stats.zscore(series.dropna())` exactly — a NaN cell
+    produces a NaN z-score, and `NaN > threshold` is False, matching the
+    per-column path leaving NaN rows unflagged. Callers must exclude skewed
+    columns first — those need the log/MAD branch, not this one."""
+    if num_df.empty:
+        return {}
+    arr = num_df.to_numpy(dtype=float)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)  # all-NaN or zero-variance column, if any slips through
+        mean = np.nanmean(arr, axis=0)
+        std = np.nanstd(arr, axis=0, ddof=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        flags = np.abs((arr - mean) / std) > threshold
+    return {str(col): pd.Series(flags[:, i], index=num_df.index) for i, col in enumerate(num_df.columns)}
+
+
 # ============================================================
 # Tool 3: Outlier Detection — Stage 3
 # ============================================================
@@ -714,10 +777,25 @@ class DetectOutliersTool(BaseTool):
 
         if method in ("iqr", "zscore"):
             mask = pd.Series(False, index=df.index)
-            for col in num_df.columns:
-                col_mask, used = _column_outlier_mask(
-                    num_df[col], method, threshold, col in skewed_cols
+            # Non-skewed columns are flagged in one vectorised bulk pass;
+            # skewed columns still go through the per-column log/MAD path
+            # (_column_outlier_mask), since they need distribution-aware handling.
+            plain_cols = [c for c in num_df.columns if c not in skewed_cols]
+            bulk_masks: dict[str, pd.Series] = {}
+            if plain_cols:
+                plain_df = num_df[plain_cols]
+                bulk_masks = (
+                    _bulk_iqr_mask(plain_df) if method == "iqr"
+                    else _bulk_zscore_mask(plain_df, threshold)
                 )
+            for col in num_df.columns:
+                bulk = bulk_masks.get(str(col))
+                if bulk is not None:
+                    col_mask, used = bulk, method
+                else:
+                    col_mask, used = _column_outlier_mask(
+                        num_df[col], method, threshold, col in skewed_cols
+                    )
                 mask = mask | col_mask
                 n_flagged = int(col_mask.sum())
                 pct_flagged = round(n_flagged / max(row_count, 1) * 100, 2)
@@ -1046,12 +1124,16 @@ class CorrelationAnalysisTool(BaseTool):
             }
             corr = pearson_matrix(num_df)
             if skewed:
-                spearman = num_df.corr(method="spearman")
+                spearman = _spearman_matrix(num_df)
                 use_rank = np.array([[a in skewed or b in skewed for b in corr.columns] for a in corr.columns])
                 corr = corr.where(~use_rank, spearman)
         else:
             skewed = set()
-            corr = pearson_matrix(num_df) if method == "pearson" else num_df.corr(method=method)
+            corr = (
+                pearson_matrix(num_df) if method == "pearson"
+                else _spearman_matrix(num_df) if method == "spearman"
+                else num_df.corr(method=method)
+            )
 
         def _pair_method(a: str, b: str) -> str:
             if method != "auto":

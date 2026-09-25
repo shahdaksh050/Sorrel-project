@@ -94,3 +94,21 @@ def test_audit_deliverables_repair_fallback() -> None:
     # Confirm chart was added to final_result
     assert len(final_result["charts"]) == 1
     assert final_result["charts"][0]["chart_type"] == "heatmap"
+
+
+def test_audit_deliverables_bar_repair_finds_pandas3_str_dtype_column() -> None:
+    # pandas 3.0 gives plain text columns dtype `str`, not `object` — the
+    # bar-chart fallback must still find them as the categorical axis.
+    contract = parse_deliverable_contract("Show a bar chart of sales by region")
+    final_result: dict[str, Any] = {"charts": [], "findings": [], "insights": []}
+    df = pd.DataFrame({
+        "region": pd.Series(["north", "south", "north", "south"], dtype="str"),
+        "sales": [10.0, 20.0, 30.0, 40.0],
+    })
+    assert df["region"].dtype == "str"
+
+    report = audit_deliverables(contract, final_result, df=df)
+
+    assert any("synthesized fallback" in r for r in report.repaired)
+    assert len(final_result["charts"]) == 1
+    assert final_result["charts"][0]["chart_type"] == "bar"

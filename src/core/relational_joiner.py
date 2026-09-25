@@ -191,24 +191,52 @@ def assemble_star_schema(
             continue
 
         parent_df = tables[r.parent_table]
-        # Avoid column name collision
-        cols_to_rename = {
-            c: f"{r.parent_table}_{c}"
-            for c in parent_df.columns
-            if c != r.parent_key and c in joined_df.columns
-        }
-        p_df_renamed = parent_df.rename(columns=cols_to_rename)
+
+        # Guard against merge fan-out: `discover_foreign_keys` scores a
+        # parent key as "unique" at a >=0.95 threshold, not exact uniqueness,
+        # so a left-join on it can still silently multiply fact rows for any
+        # duplicated key value. Collapse duplicates deterministically (keep
+        # the first row per key) before joining, and note it so the fan-out
+        # is visible rather than a silent row-count change.
+        dup_count = int(parent_df[r.parent_key].duplicated().sum())
+        if dup_count:
+            parent_df = parent_df.drop_duplicates(subset=[r.parent_key], keep="first")
+            notes.append(
+                f"'{r.parent_table}.{r.parent_key}' had {dup_count} duplicate key value(s); "
+                f"kept the first row per key before joining '{fact_table_name}' to prevent fan-out."
+            )
+
+        # Explicit, meaningful suffixes for any surviving overlapping columns
+        # (other than the join keys themselves) instead of pandas' default
+        # _x/_y, which gives no clue which table a colliding column came from.
+        suffix_fact = f"_{fact_table_name}"
+        suffix_parent = f"_{r.parent_table}"
+        overlapping = (set(parent_df.columns) & set(joined_df.columns)) - {r.child_key, r.parent_key}
+
         try:
             joined_df = joined_df.merge(
-                p_df_renamed,
+                parent_df,
                 left_on=r.child_key,
                 right_on=r.parent_key,
                 how="left",
+                suffixes=(suffix_fact, suffix_parent),
+                validate="many_to_one",
             )
             joined_parents.add(r.parent_table)
-            notes.append(
+            note = (
                 f"Joined dimension '{r.parent_table}' on {r.child_key}={r.parent_key} "
                 f"({r.cardinality}, confidence {r.confidence:.2f})."
+            )
+            if overlapping:
+                note += (
+                    f" Overlapping column(s) suffixed {suffix_fact}/{suffix_parent}: "
+                    f"{', '.join(sorted(overlapping))}."
+                )
+            notes.append(note)
+        except pd.errors.MergeError as exc:
+            notes.append(
+                f"Refused to join '{r.parent_table}': cardinality check failed after "
+                f"de-duplication ({exc})."
             )
         except Exception as exc:
             notes.append(f"Failed to join '{r.parent_table}': {exc}")

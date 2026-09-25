@@ -629,6 +629,10 @@ class MemorySystem:
     def list_context_keys(self) -> list[str]:
         return list(self._ctx.keys())
 
+    def clear_context(self, key: str) -> None:
+        """Remove a context key, if present. No-op if it was never set."""
+        self._ctx.pop(key, None)
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------

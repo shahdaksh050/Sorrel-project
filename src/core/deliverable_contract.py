@@ -262,8 +262,11 @@ def _repair_missing_chart(
             return True
 
     elif chart_type in ("bar", "bar chart"):
-        cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+        # pandas 3.0 gives plain text columns dtype `str`, not `object` —
+        # select_dtypes(include=["object", "category"]) silently misses them,
+        # so exclude numeric instead of including specific text dtypes.
         num_cols = df.select_dtypes(include="number").columns.tolist()
+        cat_cols = [c for c in df.columns if c not in num_cols]
         if cat_cols and num_cols:
             x_col, y_col = cat_cols[0], num_cols[0]
             summary = df.groupby(x_col)[y_col].mean().reset_index().head(15)

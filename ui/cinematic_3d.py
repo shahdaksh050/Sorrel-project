@@ -11,11 +11,14 @@ viewport or standalone exportable presentation file.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
 import streamlit.components.v1 as components
+
+from src.core import design_tokens
 
 __all__ = [
     "CINEMATIC_PALETTES",
@@ -27,43 +30,36 @@ __all__ = [
 
 _ASSETS = Path(__file__).parent / "assets"
 
-#: Luxury Ledger Palettes for Day and Night modes
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    """A token hex as `rgba(...)`, so glow/card overlays track the token instead of drifting from it."""
+    r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+#: pen_glow/card_bg/card_border alpha per mode — the only genuinely local part of
+#: this palette; everything else comes straight from `design_tokens`.
+_PEN_GLOW_ALPHA: dict[str, float] = {"day": 0.35, "night": 0.45}
+_CARD_BG_ALPHA: dict[str, float] = {"day": 0.88, "night": 0.82}
+_CARD_BORDER_ALPHA: dict[str, float] = {"day": 0.22, "night": 0.25}
+
+#: Luxury Ledger Palettes for Day and Night modes. This file's "grid" key
+#: predates `design_tokens`' "rule" naming, so it is mapped explicitly.
 CINEMATIC_PALETTES: dict[str, dict[str, str]] = {
-    "day": {
-        "stock": "#f7eedd",
-        "sheet": "#fffbf2",
-        "sheet_alt": "#f1e4cb",
-        "ink": "#3a2b1e",
-        "graphite": "#8a7660",
-        "pen": "#a34f20",
-        "pen_glow": "rgba(163, 79, 32, 0.35)",
-        "risk": "#a33526",
-        "positive": "#5b8c5a",
-        "accent": "#e08a3e",
-        "grid": "#e4d4bc",
-        "card_bg": "rgba(255, 251, 242, 0.88)",
-        "card_border": "rgba(163, 79, 32, 0.22)",
-    },
-    "night": {
-        "stock": "#241c14",
-        "sheet": "#1c1610",
-        "sheet_alt": "#282017",
-        "ink": "#f6eedf",
-        "graphite": "#bdae97",
-        "pen": "#f0a24a",
-        "pen_glow": "rgba(240, 162, 74, 0.45)",
-        "risk": "#e2685a",
-        "positive": "#7fb77e",
-        "accent": "#4fc3f7",
-        "grid": "#4a3c28",
-        "card_bg": "rgba(28, 22, 16, 0.82)",
-        "card_border": "rgba(240, 162, 74, 0.25)",
-    },
+    mode: {
+        **palette,
+        "grid": palette["rule"],
+        "pen_glow": _rgba(palette["pen"], _PEN_GLOW_ALPHA[mode]),
+        "card_bg": _rgba(palette["sheet"], _CARD_BG_ALPHA[mode]),
+        "card_border": _rgba(palette["pen"], _CARD_BORDER_ALPHA[mode]),
+    }
+    for mode, palette in design_tokens.PALETTES.items()
 }
 
 
+@lru_cache(maxsize=2)
 def _read_asset(filename: str) -> str:
-    """Read bundled HTML or JS asset with UTF-8 encoding."""
+    """Read bundled HTML or JS asset with UTF-8 encoding, once per process (matches `pipeline_3d.py`'s `_asset`)."""
     return (_ASSETS / filename).read_text(encoding="utf-8")
 
 

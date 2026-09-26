@@ -5,46 +5,26 @@ from __future__ import annotations
 
 import streamlit as st
 
+from src.core import design_tokens
+
 
 def inject_theme_css() -> None:
     """Inject dynamic Ledger CSS supporting Day and Night modes via Python state."""
-    theme = st.session_state.get("theme", "night")
+    theme = st.session_state.get("theme", "day")
 
-    if theme == "dark" or theme == "night":
-        theme_vars = """
-        --stock:       #241c14;
-        --sheet:       #2f251a;
-        --sheet-alt:   #3a2e1f;
-        --ink:         #f3e9d8;
-        --graphite:    #d0c2a8;
-        --pen:         #f0a24a;
-        --pen-hover:   #ffb86b;
-        --risk:        #e2685a;
-        --accent:      #d99a4e;
-        --positive:    #7fb77e;
-        --rule:        #4a3c28;
-        --rule-faint:  #3a2e1f;
+    mode: design_tokens.Mode = "night" if theme in ("dark", "night") else "day"
+
+    # --lift/--lift-sm are styles.py-local (shadow blur tuned per mode, not part of
+    # the shared palette) so they stay hand-typed alongside the imported token lines.
+    if mode == "night":
+        theme_vars = design_tokens.css_root_block(mode) + """
         --lift:        0 4px 18px rgba(0,0,0,.35);
         --lift-sm:     0 2px 8px rgba(0,0,0,.3);
-        --code-bg:     #2a2015;
         """
     else:
-        theme_vars = """
-        --stock:       #f7eedd;
-        --sheet:       #fffbf2;
-        --sheet-alt:   #f1e4cb;
-        --ink:         #3a2b1e;
-        --graphite:    #8a7660;
-        --pen:         #a34f20;
-        --pen-hover:   #7e3d18;
-        --risk:        #a33526;
-        --accent:      #e08a3e;
-        --positive:    #5b8c5a;
-        --rule:        #e4d4bc;
-        --rule-faint:  #eee3cb;
-        --lift:        0 4px 14px rgba(58,43,30,.14);
-        --lift-sm:     0 2px 8px rgba(58,43,30,.10);
-        --code-bg:     #f1e4cb;
+        theme_vars = design_tokens.css_root_block(mode) + """
+        --lift:        0 4px 14px color-mix(in srgb, var(--ink) 14%, transparent);
+        --lift-sm:     0 2px 8px color-mix(in srgb, var(--ink) 10%, transparent);
         """
 
     st.markdown(f"""
@@ -121,8 +101,8 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 
 /* ── Quick Facts bar ── */
 .datum {{ display: flex; align-items: stretch; flex-wrap: wrap;
-         background: var(--sheet); border: 1px solid var(--rule);
-         border-radius: var(--radius); box-shadow: var(--lift-sm);
+         background: var(--sheet); border-radius: var(--radius);
+         border-bottom: 1px solid var(--rule-faint);
          margin: 0 0 1.5rem; overflow: hidden; }}
 .datum .cell {{ padding: .7rem 1.2rem; margin-right: 0;
                border-right: 1px solid var(--rule-faint); }}
@@ -159,7 +139,16 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 @media (prefers-reduced-motion: reduce) {{ .hero h1 {{ animation: none; }} }}
 
 .st-key-plate {{ padding-left: 16px; margin-right: -2.8rem; }}
-@media (max-width: 900px) {{ .st-key-plate {{ margin-right: 0; padding-left: 0; }} }}
+@media (max-width: 900px) {{
+    .st-key-plate {{ margin-right: 0; padding-left: 0; }}
+    [data-testid="stHorizontalBlock"]:has(.st-key-plate) {{ flex-wrap: wrap !important; }}
+    [data-testid="stHorizontalBlock"]:has(.st-key-plate) > [data-testid="stColumn"] {{
+        min-width: 100% !important; flex: 1 1 100% !important;
+    }}
+    .datum .cell {{ flex: 1 1 45%; }}
+    .stTabs [role="tab"] {{ min-height: 44px; }}
+    .stButton button, .stDownloadButton button {{ min-height: 44px; }}
+}}
 
 /* ── Sidebar masthead & Theme controls ── */
 .side-brand {{ margin: .1rem 0 .8rem; }}
@@ -226,16 +215,13 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .stTabs [data-testid="stTabsContent"] {{ padding-top: 1.5rem; }}
 
 /* ── 3D & Viewport Enhancements ── */
+/* The plate (FrontendPlan.md 2.8 keeps this one's elevation permanently) — no
+   hover-lift, since the iframe is not a link or a Streamlit callback target. */
 iframe {{
     border-radius: var(--radius);
     border: 1px solid var(--rule) !important;
     background: transparent !important;
     box-shadow: var(--lift-sm);
-    transition: box-shadow 0.3s ease, border-color 0.3s ease;
-}}
-iframe:hover {{
-    border-color: var(--pen) !important;
-    box-shadow: var(--lift);
 }}
 
 /* ── Inputs ── */
@@ -260,8 +246,8 @@ iframe:hover {{
 .stTextInput input:focus, .stTextArea textarea:focus {{ border-color: var(--pen) !important; }}
 
 /* ── Stat tile ── */
-.gauge {{ background: var(--sheet); border: 1px solid var(--rule);
-         border-radius: var(--radius); box-shadow: var(--lift-sm);
+.gauge {{ background: var(--sheet); border: 1px solid transparent;
+         border-radius: var(--radius);
          padding: 1rem 1.1rem; height: 100%; min-height: 96px; position: relative; }}
 .gauge .v {{ font-family: var(--heading); font-size: 26px; font-weight: 700;
             line-height: 1.1; letter-spacing: -.01em; color: var(--ink);
@@ -316,9 +302,9 @@ iframe:hover {{
 
 /* ── Finding cards (Answers tab, IMPROVEMENTS.md 7.15) ── */
 .finding-card {{
-    background: var(--sheet); border: 1px solid var(--rule);
+    background: var(--sheet);
     border-left: 4px solid var(--pen); border-radius: var(--radius);
-    box-shadow: var(--lift-sm); padding: 1rem 1.3rem; margin: 0 0 .9rem;
+    padding: 1rem 1.3rem; margin: 0 0 .9rem;
 }}
 .finding-headline {{
     font-family: var(--heading); font-size: 17px; font-weight: 700;
@@ -328,8 +314,8 @@ iframe:hover {{
 /* ── Trust strip (Answers tab) ── */
 .trust-strip {{ display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }}
 .trust-cell {{
-    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
-    box-shadow: var(--lift-sm); padding: .9rem 1.2rem; flex: 1; min-width: 160px;
+    background: var(--sheet); border-radius: var(--radius);
+    padding: .9rem 1.2rem; flex: 1; min-width: 160px;
 }}
 .trust-cell .k {{ font-size: 12px; color: var(--graphite); font-weight: 600;
                   text-transform: uppercase; letter-spacing: .5px; }}
@@ -338,8 +324,8 @@ iframe:hover {{
 
 /* ── How the agent read the data (Answers tab) ── */
 .du {{
-    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
-    box-shadow: var(--lift-sm); padding: .9rem 1.2rem; margin: 0 0 1.5rem;
+    background: var(--sheet); border-radius: var(--radius);
+    padding: .9rem 1.2rem; margin: 0 0 1.5rem;
     font-size: 14.5px; line-height: 1.6; color: var(--ink); max-width: 74ch;
 }}
 .du .k {{ font-size: 12px; color: var(--graphite); font-weight: 600;
@@ -358,7 +344,7 @@ iframe:hover {{
    ~35 lines of inline style= per tile (IMPROVEMENTS.md 7.22) ── */
 .kpi-row {{ display: flex; gap: 1.5rem; margin-bottom: 1.2rem; flex-wrap: wrap; }}
 .kpi-gauge-card {{
-    background: var(--sheet); padding: 1.5rem; border-radius: var(--radius); box-shadow: var(--lift-sm);
+    background: var(--sheet); padding: 1.5rem; border-radius: var(--radius);
     flex: 1; min-width: 250px; display: flex; flex-direction: column; align-items: center;
     justify-content: center; position: relative; overflow: hidden;
 }}
@@ -375,7 +361,7 @@ iframe:hover {{
 .kpi-tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
               gap: 1rem; flex: 2; min-width: 300px; }}
 .kpi-tile {{ background: var(--sheet); padding: 1.5rem; border-radius: var(--radius);
-             box-shadow: var(--lift-sm); display: flex; flex-direction: column; justify-content: center; }}
+             display: flex; flex-direction: column; justify-content: center; }}
 .kpi-tile.flagged {{ border: 1px solid var(--risk); }}
 .kpi-tile .k {{ font-size: 12px; color: var(--graphite); font-weight: 600;
                text-transform: uppercase; letter-spacing: .5px; }}
@@ -394,11 +380,12 @@ iframe:hover {{
 }}
 .agent-card {{
     background: var(--sheet);
-    border: 1px solid var(--rule);
+    border: 1px solid transparent;
     border-radius: var(--radius);
-    box-shadow: var(--lift-sm);
     transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
 }}
+/* Each card is a <details>/<summary> disclosure (render_agent_grid, cards.py) —
+   genuinely clickable, so the hover lift stays (FrontendPlan.md 2.8). */
 .agent-card:hover {{
     transform: translateY(-2px);
     box-shadow: var(--lift);
@@ -410,9 +397,9 @@ iframe:hover {{
     animation: pulseActive 2s infinite cubic-bezier(0.4, 0, 0.2, 1);
 }}
 @keyframes pulseActive {{
-    0% {{ box-shadow: 0 0 0 0 rgba(240, 162, 74, 0.4); }}
-    70% {{ box-shadow: 0 0 0 10px rgba(240, 162, 74, 0); }}
-    100% {{ box-shadow: 0 0 0 0 rgba(240, 162, 74, 0); }}
+    0%   {{ box-shadow: 0 0 0 0 color-mix(in srgb, var(--pen) 40%, transparent); }}
+    70%  {{ box-shadow: 0 0 0 10px color-mix(in srgb, var(--pen) 0%, transparent); }}
+    100% {{ box-shadow: 0 0 0 0 color-mix(in srgb, var(--pen) 0%, transparent); }}
 }}
 .agent-card.agent-flagged {{
     border-color: var(--risk);
@@ -479,14 +466,8 @@ iframe:hover {{
 }}
 .bento-card {{
     background: var(--sheet);
-    border: 1px solid var(--rule);
     border-radius: var(--radius);
-    box-shadow: var(--lift-sm);
     padding: 1.2rem;
-    transition: box-shadow 0.2s ease;
-}}
-.bento-card:hover {{
-    box-shadow: var(--lift);
 }}
 .bento-card.full-width {{
     grid-column: 1 / -1;
@@ -544,10 +525,8 @@ iframe:hover {{
 /* ── Executive Directive ── */
 .exec-directive {{
     background: var(--sheet);
-    border: 1px solid var(--rule);
     border-left: 4px solid var(--pen);
     border-radius: var(--radius);
-    box-shadow: var(--lift-sm);
     padding: 1.3rem 1.5rem;
     margin-bottom: 1.5rem;
 }}
@@ -591,7 +570,7 @@ iframe:hover {{
     border-left-color: var(--risk); color: var(--risk) !important;
 }}
 [data-testid="stDataFrame"], [data-testid="stTable"] {{
-    border-radius: var(--radius); box-shadow: var(--lift-sm); overflow: hidden;
+    border-radius: var(--radius); overflow: hidden;
 }}
 
 /* ── Steps list ── */
@@ -631,8 +610,8 @@ iframe:hover {{
 .rc .mk {{ color: var(--pen); }}
 .wc .mk {{ color: var(--risk); }}
 
-.reason {{ background: var(--sheet); border: 1px solid var(--rule);
-          border-radius: var(--radius); box-shadow: var(--lift-sm); padding: 1.3rem 1.5rem;
+.reason {{ background: var(--sheet);
+          border-radius: var(--radius); padding: 1.3rem 1.5rem;
           font-size: 15.5px; color: var(--ink); line-height: 1.72; max-width: 72ch; }}
 
 .run-banner {{ border-radius: var(--radius);
@@ -659,5 +638,25 @@ iframe:hover {{
     .agent-grid {{ grid-template-columns: 1fr; }}
     .side-head {{ margin: 1.2rem 0 .5rem; }}
 }}
+
+/* ── Audited-entry check row (FrontendPlan.md section 5) ── */
+.check-row {{ display: flex; flex-wrap: wrap; gap: .9rem; margin-top: .6rem; }}
+.check {{ font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }}
+.check.ok {{ color: var(--positive); }}
+.check.risk {{ color: var(--risk); }}
+.check.note {{ color: var(--graphite); font-weight: 500; }}
+@media (prefers-reduced-motion: no-preference) {{
+  .check-row.animate .check {{
+    opacity: 0; transform: translateY(2px);
+    animation: checkIn 240ms cubic-bezier(.16,1,.3,1) forwards;
+  }}
+  .check-row.animate .check:nth-child(1) {{ animation-delay: 0ms; }}
+  .check-row.animate .check:nth-child(2) {{ animation-delay: 60ms; }}
+  .check-row.animate .check:nth-child(3) {{ animation-delay: 120ms; }}
+  .check-row.animate .check:nth-child(4) {{ animation-delay: 180ms; }}
+  .check-row.animate .check:nth-child(5) {{ animation-delay: 240ms; }}
+  .check-row.animate .check:nth-child(6) {{ animation-delay: 300ms; }}
+}}
+@keyframes checkIn {{ to {{ opacity: 1; transform: translateY(0); }} }}
 </style>
 """, unsafe_allow_html=True)

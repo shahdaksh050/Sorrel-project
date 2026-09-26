@@ -36,7 +36,11 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from src.core.agenda import Question, build_agenda, coverage_report
-from src.core.causal_guard import audit_findings_causal_language, classify_study_design
+from src.core.causal_guard import (
+    CAVEAT_OBSERVATIONAL,
+    audit_findings_causal_language,
+    classify_study_design,
+)
 from src.core.chart_designer import design_from_reply
 from src.core.claim_verification import _CANON_PRECISIONS as _CANON_PRECISIONS
 from src.core.claim_verification import _KEYWORD_TOOL_MAP as _KEYWORD_TOOL_MAP
@@ -59,7 +63,7 @@ from src.core.deliverable_contract import audit_deliverables, parse_deliverable_
 from src.core.dependence import check_simpsons_paradox, intraclass_correlation
 from src.core.domain_packs import detect_domain_pack, evaluate_domain_pack
 from src.core.domains import infer_domains
-from src.core.findings import Finding, score_objective_fit
+from src.core.findings import Finding, attach_finding_checks, score_objective_fit
 from src.core.governance import (
     AUDIT_SUBDIR,
     LOCAL_PROVIDERS,
@@ -1157,13 +1161,13 @@ class AgentController:
             final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
 
         # ---- Target Leakage & Finding Fragility Audit (sensitivity.py) ----
+        leakage_alerts: list[dict[str, Any]] = []
         target_col = getattr(self.memory.dataset_metadata, "target_column", None)
         if dep_df is not None and target_col:
             try:
                 from src.core.sensitivity import detect_target_leakage
                 leakage_alerts = detect_target_leakage(dep_df, target_col)
             except Exception as exc:
-                leakage_alerts = []
                 console.print(f"  [yellow]⚠ Target leakage audit skipped (non-fatal): {exc}[/]")
             if leakage_alerts:
                 self.memory.set_context("target_leakage_alerts", leakage_alerts)
@@ -1172,7 +1176,9 @@ class AgentController:
                     f"  [red]⚡ Target Leakage Audit: {len(leakage_alerts)} alert(s), "
                     f"{len(critical)} critical — {', '.join(a['column'] for a in leakage_alerts[:5])}[/]"
                 )
+        final_result["target_leakage_alerts"] = leakage_alerts
 
+        fragility_by_id: dict[str, bool] = {}
         if dep_df is not None:
             try:
                 from src.core.sensitivity import audit_finding_sensitivity
@@ -1182,7 +1188,9 @@ class AgentController:
                 for f in self.memory.ranked_findings()[:8]:
                     if f.measure and f.effect is not None:
                         report = audit_finding_sensitivity(dep_df, f)
-                        if report.get("is_fragile"):
+                        is_fragile = bool(report.get("is_fragile"))
+                        fragility_by_id[f.finding_id] = is_fragile
+                        if is_fragile:
                             f.caveats.append(report["diagnosis"])
                 final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
             except Exception as exc:
@@ -1196,7 +1204,22 @@ class AgentController:
                 f"[yellow]⚠ Causal Claim Guard: {len(causal_warns)} claim(s) downgraded to association "
                 f"due to {study_design} study design.[/]"
             )
-            final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
+
+        # ---- Audited-entry check marks (FrontendPlan.md section 5) ----
+        # Runs after every audit above has had a chance to write onto
+        # self.memory.findings, so evidence["checks"] reflects the same run
+        # the Markdown/HTML reports and the dashboard are about to read.
+        causal_flagged_ids = {
+            f.finding_id for f in self.memory.findings
+            if CAVEAT_OBSERVATIONAL in f.caveats
+        }
+        attach_finding_checks(
+            self.memory.findings,
+            leakage_alerts=leakage_alerts,
+            fragility_by_id=fragility_by_id,
+            causal_flagged_ids=causal_flagged_ids,
+        )
+        final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
 
         # ---- Stage 7: Report Generation ----
         self._generate_final_report(final_result)

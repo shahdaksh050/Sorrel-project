@@ -21,7 +21,9 @@
   <meta name="twitter:title" content="DSA Agent // Autonomous Data Analysis">
   <meta name="twitter:description" content="Stop debugging hallucinated math. Run certified autonomous data science in an isolated REPL runtime.">
 
-  <!-- JSON-LD Structured Data Schema (SoftwareApplication + FAQPage) -->
+  <!-- JSON-LD Structured Data Schema (SoftwareApplication). The FAQPage entity was
+       dropped along with the FAQ accordion section (FrontendPlan.md 3.7) — a schema
+       node describing markup the page no longer has would be stale, not just unused. -->
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -37,78 +39,50 @@
           "priceCurrency": "USD"
         },
         "description": "Autonomous 7-stage recursive statistical analysis system with sandboxed REPL execution and certified generalization bounds."
-      },
-      {
-        "@type": "FAQPage",
-        "mainEntity": [
-          {
-            "@type": "Question",
-            "name": "How does DSA Agent prevent AI hallucinations in data analysis?",
-            "acceptedAnswer": {
-              "@type": "Answer",
-              "text": "DSA Agent strictly isolates LLM reasoning from mathematical computation. The LLM never computes numbers in its prompt context. Instead, it writes deterministic Python code that executes inside an isolated REPL sandbox, returning verified statistical outputs."
-            }
-          },
-          {
-            "@type": "Question",
-            "name": "Is my proprietary data ever uploaded to external cloud servers?",
-            "acceptedAnswer": {
-              "@type": "Answer",
-              "text": "No. DSA Agent runs 100% locally. Raw data rows never leave your machine and are never injected into LLM context windows; only compact metadata and statistical summaries are analyzed."
-            }
-          },
-          {
-            "@type": "Question",
-            "name": "How does the Anti-Overfitting Guard protect machine learning models?",
-            "acceptedAnswer": {
-              "@type": "Answer",
-              "text": "Every model is evaluated using 5-Fold Stratified Cross-Validation by default. The system continuously tracks the train/test performance gap. If the gap exceeds 10%, L2 regularization is automatically escalated and tree depths are clamped."
-            }
-          }
-        ]
       }
     ]
   }
   </script>
 
-  <!-- Google Fonts: Baloo 2 (Headings), Mukta (Body/UI), JetBrains Mono (Code/Metrics) -->
+  <!-- Google Fonts: Baloo 2 (Headings), Mukta (Body/UI). No mono anywhere on this page (DESIGN.md: mono is reserved for literal <code>/<pre> blocks, never a label or number). -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Mukta:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Mukta:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
   <style>
     /* ==========================================================================
-       DESIGN SYSTEM TOKENS — WARM LEDGER IDENTITY (DESIGN.md)
-       Keep in sync with DESIGN.md's "Tokens — ink" table and with
-       ui/landing.py's LEDGER_TOKENS_DAY / LEDGER_TOKENS_NIGHT (this file is a
-       static asset served by the Streamlit component and cannot import that
-       Python constant directly — hand-check hex values against it).
+       DESIGN SYSTEM TOKENS — "LEDGER PAPER" IDENTITY (decision A2)
+       Keep in sync with src/core/design_tokens.py (the Python source of truth)
+       and with ui/landing.py's LEDGER_TOKENS_DAY / LEDGER_TOKENS_NIGHT, which
+       now read from it. This file is a static asset served by the Streamlit
+       component and cannot import that Python constant directly — hand-check
+       hex values against it.
        ========================================================================== */
     :root {
-      /* Night Palette — ink values mirror the console's night tokens in app.py (_inject_theme_css) */
-      --stock: #241c14;
-      --sheet: #2f251a;
-      --sheet-alt: #3a2e1f;
-      --ink: #f3e9d8;
-      --graphite: #b8a688;
+      /* Night Palette — "Ledger paper" (decision A2, src/core/design_tokens.py): pale
+         buff-green stock and a faint blue rule replace the old warm-cream/brown copy. */
+      --stock: #1c211a;
+      --sheet: #242a20;
+      --sheet-alt: #2a3024;
+      --ink: #eef0e4;
+      --graphite: #a8ad98;
       --pen: #f0a24a;
       --pen-hover: #ffb86b;
       --pen-glow: rgba(240, 162, 74, 0.40);
       --risk: #e2685a;
       --positive: #7fb77e;
       --accent: #d99a4e;
-      --grid: #4a3c28;
-      --card-bg: rgba(47, 37, 26, 0.94);
+      --grid: #3d4a52;
+      --card-bg: rgba(36, 42, 32, 0.94);
       --card-border: rgba(240, 162, 74, 0.22);
       --rule: rgba(240, 162, 74, 0.12);
-      --header-bg: rgba(36, 28, 20, 0.72);
-      --bar-bg: rgba(36, 28, 20, 0.82);
+      --header-bg: rgba(28, 33, 26, 0.72);
+      --bar-bg: rgba(28, 33, 26, 0.82);
       --lift: 0 16px 40px rgba(0, 0, 0, 0.45);
       --lift-sm: 0 6px 20px rgba(0, 0, 0, 0.30);
 
       --sans: 'Mukta', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
       --heading: 'Baloo 2', 'Mukta', sans-serif;
-      --mono: 'JetBrains Mono', Consolas, ui-monospace, monospace;
 
       --radius: 14px;
       --radius-sm: 8px;
@@ -121,26 +95,27 @@
     }
 
     html.theme-day, body.theme-day {
-      /* Day Palette (default) — ink values mirror the console's day tokens in app.py (_inject_theme_css) */
-      --stock: #f7eedd;
-      --sheet: #fffbf2;
-      --sheet-alt: #f1e4cb;
-      --ink: #3a2b1e;
-      --graphite: #8a7660;
+      /* Day Palette (default) — "Ledger paper" (decision A2): buff-green stock, a
+         faint blue rule, ink/graphite darkened to hold contrast on the greener stock. */
+      --stock: #eef1e0;
+      --sheet: #f7f8ef;
+      --sheet-alt: #e6e9d6;
+      --ink: #33362a;
+      --graphite: #5f6850;
       --pen: #a34f20;
       --pen-hover: #7e3d18;
       --pen-glow: rgba(163, 79, 32, 0.25);
       --risk: #a33526;
-      --positive: #5b8c5a;
+      --positive: #3f7a44;
       --accent: #e08a3e;
-      --grid: #e4d4bc;
-      --card-bg: rgba(255, 251, 242, 0.94);
-      --card-border: rgba(138, 118, 96, 0.26);
-      --rule: rgba(138, 118, 96, 0.16);
-      --header-bg: rgba(247, 238, 221, 0.75);
-      --bar-bg: rgba(247, 238, 221, 0.82);
-      --lift: 0 14px 32px rgba(58, 43, 30, 0.10);
-      --lift-sm: 0 4px 14px rgba(58, 43, 30, 0.08);
+      --grid: #a9bfd1;
+      --card-bg: rgba(247, 248, 239, 0.94);
+      --card-border: rgba(95, 104, 80, 0.26);
+      --rule: rgba(95, 104, 80, 0.16);
+      --header-bg: rgba(238, 241, 224, 0.75);
+      --bar-bg: rgba(238, 241, 224, 0.82);
+      --lift: 0 14px 32px rgba(51, 54, 42, 0.10);
+      --lift-sm: 0 4px 14px rgba(51, 54, 42, 0.08);
     }
 
     /* CSS Reset */
@@ -280,10 +255,11 @@
     }
 
     .stat-lbl {
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 11px;
       color: var(--graphite);
-      text-transform: uppercase;
+      /* No text-transform: uppercase (DESIGN.md bans ALL-CAPS styling); the source text below
+         is already sentence-cased, unlike the original pre-A2 markup. */
       letter-spacing: 0.05em;
       margin-top: 2px;
     }
@@ -373,7 +349,7 @@
       box-shadow: 0 4px 18px var(--pen-glow);
       backdrop-filter: blur(10px);
       -webkit-backdrop-filter: blur(10px);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 11px;
       font-weight: 600;
       letter-spacing: 0.05em;
@@ -433,7 +409,7 @@
       border-radius: var(--radius-pill);
       background: var(--sheet-alt);
       border: 1px solid var(--card-border);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 10px;
       color: var(--pen);
       font-weight: 600;
@@ -469,7 +445,7 @@
       background: var(--sheet-alt);
       border: 1px solid var(--card-border);
       color: var(--ink);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 12px;
       font-weight: 500;
       cursor: pointer;
@@ -490,7 +466,7 @@
     .stage-pill-item {
       padding: 5px 12px;
       border-radius: var(--radius-pill);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 11px;
       font-weight: 500;
       background: var(--sheet-alt);
@@ -511,7 +487,11 @@
       box-shadow: 0 0 10px var(--pen-glow);
     }
 
-    /* RIGHT FLOATING STAGE DOTS */
+    /* RIGHT FLOATING STAGE DOTS. Hidden by default (opacity 0, no pointer events): the pinned
+       track sits below the hero now rather than opening the page, so this chrome has nothing to
+       show until calculateScrollProgress() reveals it once the track is actually in view; without
+       this default it would flash over the hero on load and stay stuck there if the module script
+       (which fetches three.js from a CDN) is slow or fails. */
     .floating-stage-dots {
       position: fixed;
       right: 24px;
@@ -521,7 +501,8 @@
       display: flex;
       flex-direction: column;
       gap: 16px;
-      pointer-events: auto;
+      opacity: 0;
+      pointer-events: none;
       transition: opacity 0.4s ease;
     }
     .stage-dot {
@@ -555,7 +536,7 @@
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       color: var(--ink);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 11px;
       white-space: nowrap;
       opacity: 0;
@@ -567,7 +548,9 @@
       opacity: 1;
     }
 
-    /* BOTTOM STAGE TELEMETRY BAR */
+    /* BOTTOM STAGE TELEMETRY BAR. Off-screen by default (translateY(100%)) for the same reason the
+       floating dots start hidden: the track no longer opens the page, so this bar has nothing to
+       report until calculateScrollProgress() slides it in once the track is in view. */
     .stage-telemetry-bar {
       position: fixed;
       bottom: 0;
@@ -583,10 +566,11 @@
       backdrop-filter: blur(10px);
       -webkit-backdrop-filter: blur(10px);
       border-top: 1px solid var(--rule);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 12px;
       color: var(--graphite);
       pointer-events: auto;
+      transform: translateY(100%);
       transition: transform 0.45s var(--ease-out);
     }
     .telemetry-info {
@@ -624,7 +608,7 @@
       background: var(--sheet-alt);
       border: 1px solid var(--card-border);
       color: var(--ink);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 11px;
       font-weight: 600;
       cursor: pointer;
@@ -699,7 +683,7 @@
       border-radius: var(--radius-pill);
       background: var(--sheet-alt);
       border: 1px solid var(--card-border);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 11px;
       font-weight: 600;
       letter-spacing: 0.08em;
@@ -724,6 +708,13 @@
       position: relative;
       padding-top: 40px;
       padding-bottom: 60px;
+    }
+    /* A flex item with no explicit width shrinks to its content and the auto
+       margins on .section-container then center it — needed when .hero-grid
+       filled the row (old 2-column layout); the new single-column hero needs
+       this to keep its left edge flush with every other section. */
+    .hero-section > .section-container {
+      width: 100%;
     }
     .hero-grid {
       display: grid;
@@ -766,7 +757,7 @@
       gap: 8px;
       padding-top: 20px;
       border-top: 1px solid var(--rule);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 12px;
       color: var(--graphite);
     }
@@ -778,6 +769,60 @@
     .trust-check {
       color: var(--positive);
       font-weight: 700;
+    }
+
+    /* ==========================================================================
+       AUDITED ENTRY PREVIEW (FrontendPlan.md section 5 / item 3.7)
+       A real, static component, not a screenshot — same check-row markup and the
+       same ok/risk/note -> --positive/--risk/--graphite mapping as the Streamlit
+       console's finding cards and the shareable HTML report (src/core/html_report.py),
+       so all three surfaces read as one product.
+       ========================================================================== */
+    .audited-entry-section {
+      padding: 100px 0;
+      background: var(--sheet);
+      border-top: 1px solid var(--rule);
+      border-bottom: 1px solid var(--rule);
+    }
+    .audited-entry-card {
+      max-width: 720px;
+      margin: 0 auto 20px auto;
+      padding: 24px 28px;
+      border-radius: var(--radius);
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      box-shadow: var(--lift-sm);
+    }
+    .audited-entry-headline {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    .check-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+    }
+    .check {
+      font-size: 0.92rem;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .check.ok { color: var(--positive); }
+    .check.risk { color: var(--risk); }
+    .check.note { color: var(--graphite); font-weight: 500; }
+    .audited-entry-verdict {
+      max-width: 720px;
+      margin: 28px auto 0 auto;
+      padding: 18px 24px;
+      border-radius: var(--radius);
+      border-left: 4px solid var(--pen);
+      background: var(--card-bg);
+      box-shadow: var(--lift-sm);
+      font-weight: 700;
+      text-align: center;
     }
 
     /* ==========================================================================
@@ -823,7 +868,7 @@
     }
     .step-badge {
       display: inline-block;
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 11px;
       font-weight: 700;
       color: var(--pen);
@@ -849,7 +894,7 @@
       border-radius: var(--radius-pill);
       background: var(--sheet-alt);
       border: 1px solid var(--rule);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 11px;
       color: var(--ink);
     }
@@ -912,7 +957,7 @@
       font-size: 1.4rem;
     }
     .compare-badge {
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 11px;
       font-weight: 700;
       padding: 3px 10px;
@@ -976,7 +1021,7 @@
       margin-bottom: 24px;
     }
     .feature-stage-tag {
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 11px;
       font-weight: 600;
       color: var(--pen);
@@ -998,7 +1043,7 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      font-family: var(--mono);
+      font-family: var(--sans);
     }
     .metric-value {
       font-size: 1.15rem;
@@ -1025,7 +1070,7 @@
       justify-content: center;
       gap: 16px;
       margin-bottom: 50px;
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 13px;
     }
     .toggle-switch {
@@ -1089,7 +1134,7 @@
       transform: translateX(-50%);
       background: var(--pen);
       color: var(--sheet);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 10px;
       font-weight: 800;
       padding: 3px 14px;
@@ -1119,7 +1164,7 @@
     }
     .plan-period {
       color: var(--graphite);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 12px;
     }
     .plan-features-list {
@@ -1170,7 +1215,7 @@
       gap: 16px;
     }
     .faq-toggle-icon {
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 1.4rem;
       color: var(--pen);
       transition: transform var(--dur-ui) ease;
@@ -1198,27 +1243,14 @@
       padding: 100px 0;
     }
     .cta-banner {
+      /* Flat fill, no gradient (DESIGN.md: "no gradients anywhere in this system") */
       padding: 60px 48px;
       border-radius: var(--radius);
-      background: linear-gradient(145deg, var(--sheet-alt), var(--sheet));
+      background: var(--sheet);
       border: 1px solid var(--card-border);
       box-shadow: var(--lift);
       text-align: center;
       position: relative;
-      overflow: hidden;
-    }
-    .cta-banner::before {
-      content: "";
-      position: absolute;
-      top: -100px;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 400px;
-      height: 400px;
-      background: var(--pen-glow);
-      border-radius: 50%;
-      filter: blur(100px);
-      pointer-events: none;
     }
     .cta-banner h2 {
       font-size: clamp(2.2rem, 4vw, 3.4rem);
@@ -1243,7 +1275,7 @@
       z-index: 1;
     }
     .guarantee-subtext {
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 12px;
       color: var(--graphite);
       position: relative;
@@ -1294,7 +1326,7 @@
       justify-content: space-between;
       padding-top: 32px;
       border-top: 1px solid var(--rule);
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 12px;
     }
     .system-status-indicator {
@@ -1320,12 +1352,6 @@
       }
       .hero-content {
         max-width: 100%;
-      }
-      .hero-cta-group {
-        justify-content: center;
-      }
-      .trust-strip {
-        align-items: center;
       }
       .journey-cards-column {
         max-width: 100%;
@@ -1377,7 +1403,11 @@
     })();
   </script>
 
-  <!-- LAYER 0: Fixed 3D WebGL Canvas (Three.js 720 Instanced Tokens) -->
+  <!-- LAYER 0: Fixed 3D WebGL Canvas (Three.js 720 Instanced Tokens). Restored alongside the new
+       hero/audited-entry sections (product decision: run the pinned scrollytelling track alongside
+       the new content, not instead of it; see #stages-pin-track below). The canvas sits behind
+       the hero as an ambient backdrop (formation 0, raw stream) while the page is at rest above the
+       track, then the track itself drives the morph through the pipeline stages on scroll. -->
   <div id="webgl-stage">
     <canvas id="webgl-canvas"></canvas>
   </div>
@@ -1386,7 +1416,7 @@
   <div id="hud-layer">
     <canvas id="leader-lines-canvas"></canvas>
     <div id="hud-pin">
-      <div class="hud-card" id="hud-tag">RAW DATASET // UNSTRUCTURED TABULAR STREAM</div>
+      <div class="hud-card" id="hud-tag">Raw dataset // unstructured tabular stream</div>
     </div>
   </div>
 
@@ -1400,11 +1430,14 @@
       </div>
     </div>
 
-    <div class="stage-nav-pills" id="stage-nav-pills" aria-label="3D Stages">
-      <button class="stage-pill-item active" data-stage="0">01 RAW</button>
-      <button class="stage-pill-item" data-stage="1">02 PROFILE</button>
-      <button class="stage-pill-item" data-stage="2">03 REASON</button>
-      <button class="stage-pill-item" data-stage="3">04 DEPLOY</button>
+    <!-- No pill starts .active: the track sits below the hero now, not at page top, so nothing is
+         "current" until calculateScrollProgress() runs and the user has actually scrolled into the
+         track (isBeforeTrack gating below). -->
+    <div class="stage-nav-pills" id="stage-nav-pills" aria-label="3D stages">
+      <button class="stage-pill-item" data-stage="0">01 Raw</button>
+      <button class="stage-pill-item" data-stage="1">02 Profile</button>
+      <button class="stage-pill-item" data-stage="2">03 Reason</button>
+      <button class="stage-pill-item" data-stage="3">04 Deploy</button>
     </div>
 
     <nav aria-label="Main Navigation">
@@ -1412,161 +1445,243 @@
         <li><a href="#workflow" class="nav-link">Workflow</a></li>
         <li><a href="#comparison" class="nav-link">Why DSA</a></li>
         <li><a href="#features" class="nav-link">Features</a></li>
-        <li><a href="#pricing" class="nav-link">Pricing</a></li>
-        <li><a href="#faq" class="nav-link">FAQ</a></li>
+        <li><a href="#audited-entry" class="nav-link">How it checks itself</a></li>
       </ul>
     </nav>
 
     <div class="header-actions">
-      <button class="theme-toggle-btn" id="btn-theme-toggle" aria-label="Toggle Warm Ledger Day or Night Mode">
+      <button class="theme-toggle-btn" id="btn-theme-toggle" aria-label="Toggle Ledger day or night mode">
         <span id="theme-icon">◑</span>
-        <span id="theme-label">NIGHT MODE</span>
+        <span id="theme-label">Night mode</span>
       </button>
-      <a href="#cta" class="btn-cta" id="nav-launch-btn">Launch Sandbox →</a>
+      <a href="#cta" class="btn-cta" id="nav-launch-btn">Launch the sandbox →</a>
     </div>
   </header>
 
-  <!-- Floating 3D Stage Indicator Dots (Right Rail) -->
-  <aside class="floating-stage-dots" id="floating-stage-dots" aria-label="3D Stage Progress">
-    <button class="stage-dot active" data-stage="0" title="Stage 01: Raw Tabular Stream"><span class="dot-label">01 Raw Stream</span></button>
-    <button class="stage-dot" data-stage="1" title="Stage 02: Profiling &amp; Outliers"><span class="dot-label">02 Profiling</span></button>
-    <button class="stage-dot" data-stage="2" title="Stage 03: Multi-Agent Reasoning"><span class="dot-label">03 Reasoning</span></button>
-    <button class="stage-dot" data-stage="3" title="Stage 04: Certified Generalization Guard"><span class="dot-label">04 Deployment</span></button>
+  <!-- Floating 3D stage indicator dots (right rail). Starts hidden via CSS (the track is no longer
+       page-top content) and revealed by calculateScrollProgress() once the track is in view; no dot
+       starts .active for the same reason the nav pills don't. -->
+  <aside class="floating-stage-dots" id="floating-stage-dots" aria-label="3D stage progress">
+    <button class="stage-dot" data-stage="0" title="Stage 01: raw tabular stream"><span class="dot-label">01 Raw stream</span></button>
+    <button class="stage-dot" data-stage="1" title="Stage 02: profiling and outliers"><span class="dot-label">02 Profiling</span></button>
+    <button class="stage-dot" data-stage="2" title="Stage 03: multi-agent reasoning"><span class="dot-label">03 Reasoning</span></button>
+    <button class="stage-dot" data-stage="3" title="Stage 04: certified generalization guard"><span class="dot-label">04 Deployment</span></button>
   </aside>
 
-  <!-- Bottom Interactive Stage Telemetry Bar -->
+  <!-- Bottom interactive stage telemetry bar -->
   <div class="stage-telemetry-bar" id="stage-telemetry-bar">
     <div class="telemetry-info">
       <span class="telemetry-pulse"></span>
-      <span class="telemetry-title" id="telemetry-stage-text">STAGE 01 // RAW DATASET STREAM</span>
+      <span class="telemetry-title" id="telemetry-stage-text">Stage 01 // raw dataset stream</span>
       <span class="telemetry-divider">·</span>
-      <span class="telemetry-sub" id="telemetry-stage-sub">Scroll mouse wheel or click stages to morph 3D tokens</span>
+      <span class="telemetry-sub" id="telemetry-stage-sub">Scroll or click a stage to morph the 3D tokens</span>
     </div>
     <div class="telemetry-buttons">
-      <button class="telemetry-btn" id="btn-prev-stage" title="Previous Stage (ArrowUp)">↑ PREV</button>
-      <button class="telemetry-btn" id="btn-next-stage" title="Next Stage (ArrowDown)">NEXT ↓</button>
+      <button class="telemetry-btn" id="btn-prev-stage" title="Previous stage (ArrowUp)">↑ Prev</button>
+      <button class="telemetry-btn" id="btn-next-stage" title="Next stage (ArrowDown)">Next ↓</button>
     </div>
   </div>
 
   <!-- LAYER 2: SCROLLING CONTENT WRAPPER -->
   <div class="content-wrapper">
 
+    <!-- HERO (item 3.7). Plain and static, not pinned or scroll-hijacked. The pinned 3D track
+         (#stages-pin-track, restored below, right after this section) now carries the pipeline
+         narrative that used to open with its own hero panel; that duplicate hero content was
+         dropped from stage 0 so this is the page's only hero moment. The WebGL canvas still shows
+         through behind this section (formation 0, raw stream) as an ambient backdrop. -->
+    <section class="hero-section" id="hero">
+      <div class="section-container">
+        <div class="hero-content">
+          <div class="eyebrow-pill">
+            <span class="eyebrow-dot"></span>
+            An autonomous data analyst
+          </div>
+          <h1 class="hero-title">
+            We check every <span class="highlight">answer</span> twice.
+          </h1>
+          <p class="hero-lead">
+            Give it a dataset and a question in plain English. It plans the analysis, runs the tests, trains the models, and tells you where it might have fooled itself.
+          </p>
+          <div class="hero-cta-group">
+            <button class="btn-cta lg" id="hero-enter-btn">Launch the sandbox →</button>
+            <a href="#audited-entry" class="btn-cta secondary lg" id="hero-explore-btn">See how it checks itself ↓</a>
+          </div>
+          <div class="trust-list trust-strip">
+            <span class="trust-pill"><span class="trust-check">✓</span> Runs entirely on your machine, your data never leaves it</span>
+            <span class="trust-pill"><span class="trust-check">✓</span> Every model checked with 5-fold cross-validation</span>
+            <span class="trust-pill"><span class="trust-check">✓</span> Every finding shows the checks it passed, not just the answer</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ==========================================================================
-         PINNED 3D SCROLLYTELLING TRACK (Anime.js Eased & 100% Reversible)
+         PINNED 3D SCROLLYTELLING TRACK (Anime.js eased & 100% reversible). Restored
+         alongside the new hero and audited-entry sections (product decision: run it
+         alongside, not instead of them). Stage 0's old hero panel (headline, CTA,
+         trust pills) was dropped so the page has exactly one hero moment, the
+         section above; stage 0 here instead covers the raw-ingestion narrative that
+         the "01 Raw" nav pill / floating dot / HUD tag already describe, keeping
+         data-stage="0" meaningful rather than dangling. Stages 1-3 are otherwise the
+         original profiling / reasoning / certified-ledger narrative.
          ========================================================================== -->
     <div class="stages-pin-container" id="stages-pin-track">
       <div class="stages-sticky-wrapper">
         <div class="section-container stages-inner-grid">
 
-          <!-- Dynamic Narrative Column: Transitioning Stage Panels -->
+          <!-- Dynamic narrative column: transitioning stage panels -->
           <div class="stage-narrative-col">
 
-            <!-- Stage 0 Panel: Hero & Raw Stream (AIDA Attention) -->
-            <div class="stage-panel active" data-stage="0" id="hero">
+            <!-- Stage 0 panel: raw dataset ingestion (no hero content here, see comment above) -->
+            <div class="stage-panel active" data-stage="0" id="stage-panel-0">
               <div class="eyebrow-pill">
                 <span class="eyebrow-dot"></span>
-                AUTONOMOUS STATISTICAL ENGINE // RLM v2.4
+                Stage 01 // dataset ingestion
               </div>
-              <h1 class="hero-title">
-                Stop debugging <span class="highlight">hallucinated math.</span> Run certified data science.
-              </h1>
-              <p class="hero-lead">
-                Decompose complex tabular datasets across an isolated 7-stage Python REPL. Automated column profiling, hypothesis verification, and cross-validated ML certified with anti-overfit bounds.
+              <h2 class="stage-panel-title">
+                Unparsed tabular matrix <span class="highlight">undulation</span>
+              </h2>
+              <p class="stage-panel-desc">
+                Every dataset streams into the sandboxed REPL as raw tokens first. The engine computes memory footprint, row cardinality, and compression ratio before a single number reaches an answer.
               </p>
-              <div class="hero-cta-group">
-                <button class="btn-cta lg" id="hero-enter-btn">Launch Free Sandbox →</button>
-                <a href="#workflow" class="btn-cta secondary lg" id="hero-explore-btn">Explore 7 Stages ↓</a>
+              <div class="stage-stats-row">
+                <div class="stat-pill"><span class="stat-val">0</span><span class="stat-lbl">Cloud transmissions</span></div>
+                <div class="stat-pill"><span class="stat-val">100%</span><span class="stat-lbl">Local storage</span></div>
+                <div class="stat-pill"><span class="stat-val">1</span><span class="stat-lbl">Isolated REPL</span></div>
               </div>
-              <div class="trust-list trust-strip">
-                <span class="trust-pill"><span class="trust-check">✓</span> 100% Local REPL Sandbox (Zero Cloud Data Leakage)</span>
-                <span class="trust-pill"><span class="trust-check">✓</span> 5-Fold Stratified Cross-Validation by Default</span>
-                <span class="trust-pill"><span class="trust-check">✓</span> Sealed Executive Ledger with &lt;10% Generalization Guard</span>
+              <div class="step-tags">
+                <span class="pill-tag pen">Stream telemetry</span>
+                <span class="pill-tag">Memory profiling</span>
+                <span class="pill-tag positive">100% local storage</span>
               </div>
             </div>
 
-            <!-- Stage 1 Panel: Profiling & Anomaly Bounds -->
+            <!-- Stage 1 panel: profiling and anomaly bounds -->
             <div class="stage-panel" data-stage="1" id="stage-panel-1">
               <div class="eyebrow-pill">
                 <span class="eyebrow-dot"></span>
-                STAGE 02 // PROFILING &amp; ANOMALY BOUNDS
+                Stage 02 // profiling &amp; anomaly bounds
               </div>
               <h2 class="stage-panel-title">
-                Feature Histograms &amp; <span class="highlight">IQR 1.5× Outliers</span>
+                Feature histograms and <span class="highlight">IQR 1.5&times; outliers</span>
               </h2>
               <p class="stage-panel-desc">
-                The 3D data tokens automatically restructure into 5 continuous feature distribution bars. Extreme anomalies are clamped via Tukey's IQR 1.5× fences and demarcated in Risk Red.
+                The 3D data tokens restructure into 5 continuous feature distribution bars. Extreme anomalies are clamped via Tukey's IQR 1.5&times; fences and demarcated in risk red.
               </p>
               <div class="stage-stats-row">
                 <div class="stat-pill"><span class="stat-val">5</span><span class="stat-lbl">Histograms</span></div>
-                <div class="stat-pill"><span class="stat-val">1.5×</span><span class="stat-lbl">IQR Bounds</span></div>
-                <div class="stat-pill"><span class="stat-val">0%</span><span class="stat-lbl">Data Leakage</span></div>
+                <div class="stat-pill"><span class="stat-val">1.5&times;</span><span class="stat-lbl">IQR bounds</span></div>
+                <div class="stat-pill"><span class="stat-val">0%</span><span class="stat-lbl">Data leakage</span></div>
               </div>
               <div class="step-tags">
-                <span class="pill-tag risk">IQR 1.5× Fences</span>
-                <span class="pill-tag">Skewness Isolation</span>
-                <span class="pill-tag positive">Deterministic Imputation</span>
+                <span class="pill-tag risk">IQR 1.5&times; fences</span>
+                <span class="pill-tag">Skewness isolation</span>
+                <span class="pill-tag positive">Deterministic imputation</span>
               </div>
             </div>
 
-            <!-- Stage 2 Panel: Multi-Agent Orchestration -->
+            <!-- Stage 2 panel: multi-agent orchestration -->
             <div class="stage-panel" data-stage="2" id="stage-panel-2">
               <div class="eyebrow-pill">
                 <span class="eyebrow-dot"></span>
-                STAGE 03 // MULTI-AGENT ORCHESTRATION
+                Stage 03 // multi-agent orchestration
               </div>
               <h2 class="stage-panel-title">
-                Central Reasoning Hub &amp; <span class="highlight">Swarm Synapses</span>
+                Central reasoning hub and <span class="highlight">swarm synapses</span>
               </h2>
               <p class="stage-panel-desc">
                 The RLM engine recursively routes subtasks across specialized Python execution tools. Dynamic synapse vectors pulse in real time as statistical models train in the isolated REPL.
               </p>
               <div class="stage-stats-row">
-                <div class="stat-pill"><span class="stat-val">5</span><span class="stat-lbl">Agent Hubs</span></div>
-                <div class="stat-pill"><span class="stat-val">7</span><span class="stat-lbl">Tool Domains</span></div>
+                <div class="stat-pill"><span class="stat-val">5</span><span class="stat-lbl">Agent hubs</span></div>
+                <div class="stat-pill"><span class="stat-val">7</span><span class="stat-lbl">Tool domains</span></div>
                 <div class="stat-pill"><span class="stat-val">100%</span><span class="stat-lbl">Sandboxed</span></div>
               </div>
               <div class="step-tags">
-                <span class="pill-tag accent">Sub-Agent Graph</span>
-                <span class="pill-tag pen">Dynamic REPL Invocations</span>
-                <span class="pill-tag">Trace Logging</span>
+                <span class="pill-tag accent">Sub-agent graph</span>
+                <span class="pill-tag pen">Dynamic REPL invocations</span>
+                <span class="pill-tag">Trace logging</span>
               </div>
             </div>
 
-            <!-- Stage 3 Panel: Certified Ledger & Generalization Guard -->
+            <!-- Stage 3 panel: certified ledger and generalization guard -->
             <div class="stage-panel" data-stage="3" id="stage-panel-3">
               <div class="eyebrow-pill">
                 <span class="eyebrow-dot"></span>
-                STAGE 04-07 // CERTIFIED LEDGER
+                Stage 04-07 // certified ledger
               </div>
               <h2 class="stage-panel-title">
-                Concentric Manifold &amp; <span class="highlight">Generalization Guard</span>
+                Concentric manifold and <span class="highlight">generalization guard</span>
               </h2>
               <p class="stage-panel-desc">
-                5-Fold Stratified Cross-Validation forms concentric decision boundaries. A positive safety ring seals the envelope ensuring the train-test gap strictly remains &lt; 0.10.
+                5-fold stratified cross-validation forms concentric decision boundaries. A positive safety ring seals the envelope, ensuring the train-test gap strictly remains under 0.10.
               </p>
               <div class="stage-stats-row">
-                <div class="stat-pill"><span class="stat-val">&lt; 10%</span><span class="stat-lbl">Train-Test Gap</span></div>
-                <div class="stat-pill"><span class="stat-val">5-Fold</span><span class="stat-lbl">Stratified CV</span></div>
-                <div class="stat-pill"><span class="stat-val">100%</span><span class="stat-lbl">Anti-Overfit</span></div>
+                <div class="stat-pill"><span class="stat-val">&lt; 10%</span><span class="stat-lbl">Train-test gap</span></div>
+                <div class="stat-pill"><span class="stat-val">5-fold</span><span class="stat-lbl">Stratified CV</span></div>
+                <div class="stat-pill"><span class="stat-val">100%</span><span class="stat-lbl">Anti-overfit</span></div>
               </div>
               <div class="step-tags">
-                <span class="pill-tag positive">Guard Status: SECURE</span>
-                <span class="pill-tag pen">Train-Test Gap &lt; 10%</span>
-                <span class="pill-tag">Executive Synthesis</span>
+                <span class="pill-tag positive">Guard status: secure</span>
+                <span class="pill-tag pen">Train-test gap &lt; 10%</span>
+                <span class="pill-tag">Executive synthesis</span>
               </div>
               <div class="hero-cta-group" style="margin-top: 24px;">
-                <button class="btn-cta lg" id="enter-btn">Enter Workspace Now →</button>
-                <a href="#workflow" class="btn-cta secondary lg" id="btn-continue-workflow">Scroll to Detailed Workflow ↓</a>
+                <a href="#audited-entry" class="btn-cta secondary lg" id="btn-continue-audited">See how it checks itself ↓</a>
               </div>
             </div>
 
           </div>
 
-          <!-- Right side reserved for the 3D Stage (Desktop) -->
+          <!-- Right side reserved for the 3D stage (desktop) -->
           <div class="hero-3d-spacer" aria-hidden="true"></div>
         </div>
       </div>
     </div>
+
+    <!-- AUDITED ENTRY PREVIEW (item 3.7): one prominent, static section — a real check-row
+         component built from HTML/CSS, not a screenshot, showing sample content from the
+         section 5 mockup: one finding that holds up and one that doesn't. -->
+    <section class="audited-entry-section" id="audited-entry">
+      <div class="section-container">
+        <div class="section-title-center">
+          <div class="eyebrow-pill">
+            <span class="eyebrow-dot"></span>
+            The signature: the audited entry
+          </div>
+          <h2>Every answer comes with its own checks</h2>
+          <p>
+            Not a black box, and not a technical tab you have to go looking for. Each finding is a plain sentence, followed by the tests it actually passed or failed.
+          </p>
+        </div>
+
+        <div class="audited-entry-card">
+          <p class="audited-entry-headline">Weekend sales fell 18% after the price change.</p>
+          <div class="check-row">
+            <span class="check ok">✓ Not luck</span>
+            <span class="check ok">✓ 2,340 records</span>
+            <span class="check ok">✓ Holds without extreme rows</span>
+            <span class="check note">○ Pattern, not proof of cause</span>
+          </div>
+        </div>
+
+        <div class="audited-entry-card">
+          <p class="audited-entry-headline">North region customers spend 31% more per visit.</p>
+          <div class="check-row">
+            <span class="check ok">✓ Not luck</span>
+            <span class="check risk">! Only 42 records</span>
+            <span class="check ok">✓ Holds without extreme rows</span>
+          </div>
+        </div>
+
+        <div class="audited-entry-verdict">4 of 5 findings held up. 1 needs more data.</div>
+
+        <div class="hero-cta-group" style="justify-content: center; margin-top: 28px;">
+          <button class="btn-cta lg" id="enter-btn">Enter the workspace →</button>
+        </div>
+      </div>
+    </section>
 
     <!-- ==========================================================================
          DETAILED 7-STAGE ARCHITECTURE & TOOLS (Reached on continued scroll!)
@@ -1576,68 +1691,68 @@
         <div class="journey-header">
           <div class="eyebrow-pill">
             <span class="eyebrow-dot"></span>
-            THE 7-STAGE RECURSIVE JOURNEY
+            The seven-stage pipeline
           </div>
-          <h2>Interactive 3D Pipeline Synchronisation</h2>
+          <h2>How the pipeline works, stage by stage</h2>
           <p>
-            Scroll down to inspect the physical transformation of data tokens in the 3D stage. Every stage executes inside an external REPL memory environment.
+            Every stage below runs inside an isolated Python sandbox, in order, the same way every time.
           </p>
         </div>
 
         <div class="workflow-cards-grid">
           <!-- Step 1 (Stage 0: Raw Tabular Stream) -->
           <div class="step-card" data-stage="0">
-            <span class="step-badge">STAGE 01 // DATASET INGESTION</span>
-            <h3 class="step-title">Unparsed Tabular Matrix Undulation</h3>
+            <span class="step-badge">Stage 01 // dataset ingestion</span>
+            <h3 class="step-title">Unparsed tabular matrix undulation</h3>
             <p class="step-desc">
               Streams raw CSV/Parquet memory buffers directly into the sandboxed REPL. Computes memory footprint, row cardinality, and compression ratios with zero cloud transmission.
             </p>
             <div class="step-tags">
-              <span class="pill-tag pen">Stream Telemetry</span>
-              <span class="pill-tag">Memory Profiling</span>
-              <span class="pill-tag positive">100% Local Storage</span>
+              <span class="pill-tag pen">Stream telemetry</span>
+              <span class="pill-tag">Memory profiling</span>
+              <span class="pill-tag positive">100% local storage</span>
             </div>
           </div>
 
           <!-- Step 2 (Stage 1: Profile & Clean) -->
           <div class="step-card" data-stage="1">
-            <span class="step-badge">STAGE 02 // PROFILING &amp; ANOMALY BOUNDS</span>
-            <h3 class="step-title">Feature Histograms &amp; IQR 1.5× Outlier Demarcation</h3>
+            <span class="step-badge">Stage 02 // profiling &amp; anomaly bounds</span>
+            <h3 class="step-title">Feature histograms and IQR 1.5&times; outlier demarcation</h3>
             <p class="step-desc">
-              The 3D tokens restructure into 5 feature distribution bars. Extreme outliers are highlighted in Risk Red and clamped via Tukey's IQR and robust Z-score fences.
+              The tokens restructure into 5 feature distribution bars. Extreme outliers are highlighted in risk red and clamped via Tukey's IQR and robust Z-score fences.
             </p>
             <div class="step-tags">
-              <span class="pill-tag risk">IQR 1.5× Fences</span>
-              <span class="pill-tag">Skewness Isolation</span>
-              <span class="pill-tag positive">Deterministic Imputation</span>
+              <span class="pill-tag risk">IQR 1.5&times; fences</span>
+              <span class="pill-tag">Skewness isolation</span>
+              <span class="pill-tag positive">Deterministic imputation</span>
             </div>
           </div>
 
           <!-- Step 3 (Stage 2: Recursive Multi-Agent Reasoning) -->
           <div class="step-card" data-stage="2">
-            <span class="step-badge">STAGE 03 // MULTI-AGENT ORCHESTRATION</span>
-            <h3 class="step-title">Central Reasoning Hub &amp; Swarm Synapses</h3>
+            <span class="step-badge">Stage 03 // multi-agent orchestration</span>
+            <h3 class="step-title">Central reasoning hub and swarm synapses</h3>
             <p class="step-desc">
-              The RLM engine dynamically routes tasks between specialized tools (Ingestion, Statistics, ML Training, Evaluation). Live synapses track tool invocations.
+              The RLM engine dynamically routes tasks between specialized tools (ingestion, statistics, ML training, evaluation). Live synapses track tool invocations.
             </p>
             <div class="step-tags">
-              <span class="pill-tag accent">Sub-Agent Graph</span>
-              <span class="pill-tag pen">Dynamic REPL Invocations</span>
-              <span class="pill-tag">Trace Logging</span>
+              <span class="pill-tag accent">Sub-agent graph</span>
+              <span class="pill-tag pen">Dynamic REPL invocations</span>
+              <span class="pill-tag">Trace logging</span>
             </div>
           </div>
 
           <!-- Step 4 (Stage 3: Certified Model & Generalization Guard) -->
           <div class="step-card" data-stage="3">
-            <span class="step-badge">STAGE 04-07 // CERTIFIED LEDGER</span>
-            <h3 class="step-title">Concentric Generalization Envelope &amp; Guard Ring</h3>
+            <span class="step-badge">Stage 04-07 // certified ledger</span>
+            <h3 class="step-title">Concentric generalization envelope and guard ring</h3>
             <p class="step-desc">
-              5-Fold Stratified Cross-Validation forms concentric decision manifolds. A positive guard ring seals the envelope ensuring the train-test gap strictly remains &lt; 0.10.
+              5-fold stratified cross-validation forms concentric decision manifolds. A positive guard ring seals the envelope, ensuring the train-test gap strictly remains under 0.10.
             </p>
             <div class="step-tags">
-              <span class="pill-tag positive">Guard Status: SECURE</span>
-              <span class="pill-tag pen">Train-Test Gap &lt; 10%</span>
-              <span class="pill-tag">Executive Synthesis</span>
+              <span class="pill-tag positive">Guard status: secure</span>
+              <span class="pill-tag pen">Train-test gap &lt; 10%</span>
+              <span class="pill-tag">Executive synthesis</span>
             </div>
           </div>
         </div>
@@ -1650,9 +1765,9 @@
         <div class="section-title-center">
           <div class="eyebrow-pill">
             <span class="eyebrow-dot"></span>
-            WHY TEAMS CHOOSE DSA AGENT
+            Why teams choose DSA Agent
           </div>
-          <h2>The Difference Between Guessing and Proof</h2>
+          <h2>The difference between guessing and proof</h2>
           <p>
             Generic chat LLMs hallucinate calculations and spreadsheets leave silent errors unflagged. DSA Agent enforces formal mathematical verification.
           </p>
@@ -1661,7 +1776,7 @@
         <div class="comparison-grid">
           <div class="compare-card problem">
             <div class="compare-header">
-              <h3 class="compare-heading">Chat LLMs &amp; Spreadsheets</h3>
+              <h3 class="compare-heading">Chat LLMs and spreadsheets</h3>
               <span class="compare-badge risk">HIGH RISK</span>
             </div>
             <ul class="compare-list">
@@ -1686,7 +1801,7 @@
 
           <div class="compare-card solution">
             <div class="compare-header">
-              <h3 class="compare-heading">DSA Agent Autonomous Engine</h3>
+              <h3 class="compare-heading">DSA Agent's autonomous engine</h3>
               <span class="compare-badge positive">CERTIFIED SAFE</span>
             </div>
             <ul class="compare-list">
@@ -1718,9 +1833,9 @@
         <div class="section-title-center">
           <div class="eyebrow-pill">
             <span class="eyebrow-dot"></span>
-            PRODUCTION-GRADE CAPABILITIES
+            Production-grade capabilities
           </div>
-          <h2>Everything Needed to Trust Your Data</h2>
+          <h2>Everything you need to trust your data</h2>
           <p>
             An end-to-end data science laboratory packaged into a clean, autonomous console.
           </p>
@@ -1731,7 +1846,7 @@
           <div class="feature-box">
             <div class="feature-top">
               <span class="feature-stage-tag">STAGE 01 // MEMORY ENGINE</span>
-              <h3 class="feature-title">Zero-Leakage Dataset Ingestion</h3>
+              <h3 class="feature-title">Zero-leakage dataset ingestion</h3>
               <p class="feature-desc">
                 Streams tabular files into memory. Automatically profiles missingness topology, cardinality splits, and schema typing without leaking raw rows.
               </p>
@@ -1746,7 +1861,7 @@
           <div class="feature-box">
             <div class="feature-top">
               <span class="feature-stage-tag">STAGE 02 // PROFILING</span>
-              <h3 class="feature-title">Tukey 1.5× Outlier Demarcation</h3>
+              <h3 class="feature-title">Tukey 1.5&times; outlier demarcation</h3>
               <p class="feature-desc">
                 Automated IQR bounds and modified Z-scores detect severe anomalies before statistical hypotheses are formulated.
               </p>
@@ -1761,7 +1876,7 @@
           <div class="feature-box">
             <div class="feature-top">
               <span class="feature-stage-tag">STAGE 03 // REASONING</span>
-              <h3 class="feature-title">Recursive Multi-Agent Orchestrator</h3>
+              <h3 class="feature-title">Recursive multi-agent orchestrator</h3>
               <p class="feature-desc">
                 Mathematical task decomposition breaks vague questions into atomic, executable tool calls executed in the sandboxed Python REPL.
               </p>
@@ -1776,7 +1891,7 @@
           <div class="feature-box">
             <div class="feature-top">
               <span class="feature-stage-tag">STAGE 04 // MACHINE LEARNING</span>
-              <h3 class="feature-title">Stratified 5-Fold Cross-Validation</h3>
+              <h3 class="feature-title">Stratified 5-fold cross-validation</h3>
               <p class="feature-desc">
                 Ensemble learning with strict partitioning. Never ranks models on training accuracy; ranks exclusively on mean cross-validation folds.
               </p>
@@ -1791,7 +1906,7 @@
           <div class="feature-box">
             <div class="feature-top">
               <span class="feature-stage-tag">STAGE 05 // SAFETY GUARD</span>
-              <h3 class="feature-title">Anti-Overfit Generalization Envelope</h3>
+              <h3 class="feature-title">Anti-overfit generalization envelope</h3>
               <p class="feature-desc">
                 Monitors `train_score - test_score`. When gap &gt; 0.10, L2 penalty is escalated, tree depth clamped to 6, and warnings emitted.
               </p>
@@ -1806,7 +1921,7 @@
           <div class="feature-box">
             <div class="feature-top">
               <span class="feature-stage-tag">STAGE 07 // SYNTHESIS</span>
-              <h3 class="feature-title">Sealed Executive Ledger Report</h3>
+              <h3 class="feature-title">Sealed executive ledger report</h3>
               <p class="feature-desc">
                 Exports production Markdown reports, publication-grade figures, and JSON execution logs for formal peer and compliance audit.
               </p>
@@ -1820,160 +1935,13 @@
       </div>
     </section>
 
-    <!-- PRICING & DEPLOYMENT TIERS SECTION -->
-    <section class="pricing-section" id="pricing">
-      <div class="section-container">
-        <div class="section-title-center">
-          <div class="eyebrow-pill">
-            <span class="eyebrow-dot"></span>
-            TRANSPARENT DEPLOYMENT TIERS
-          </div>
-          <h2>Choose Your Analytical Infrastructure</h2>
-          <p>
-            Deploy locally for total privacy, or scale across your engineering and risk teams.
-          </p>
-        </div>
-
-        <div class="pricing-toggle-wrap">
-          <span>Monthly Billing</span>
-          <div class="toggle-switch" id="pricing-toggle" role="button" aria-label="Toggle Annual or Monthly Billing">
-            <div class="toggle-thumb"></div>
-          </div>
-          <span>Annual Billing <span class="discount-pill">SAVE 20%</span></span>
-        </div>
-
-        <div class="pricing-grid">
-          <!-- Community Tier -->
-          <div class="pricing-card">
-            <div>
-              <h3 class="plan-name">Community</h3>
-              <p class="plan-desc">For individual data scientists, students, and open-source researchers.</p>
-              <div class="plan-price-box">
-                <span class="plan-price">$0</span>
-                <span class="plan-period">/ forever</span>
-              </div>
-              <ul class="plan-features-list">
-                <li class="feature-item"><span class="check-icon">✓</span> 100% Local REPL Sandbox</li>
-                <li class="feature-item"><span class="check-icon">✓</span> Full 7-Stage Autonomous Pipeline</li>
-                <li class="feature-item"><span class="check-icon">✓</span> 5-Fold Stratified Cross-Validation</li>
-                <li class="feature-item"><span class="check-icon">✓</span> Streamlit Console &amp; 3D Visualizer</li>
-                <li class="feature-item"><span class="check-icon">✓</span> Markdown &amp; JSON Report Export</li>
-              </ul>
-            </div>
-            <a href="#cta" class="btn-cta secondary">Get Started Free</a>
-          </div>
-
-          <!-- Team / Workgroup Tier (Featured) -->
-          <div class="pricing-card featured">
-            <div class="popular-flag">RECOMMENDED</div>
-            <div>
-              <h3 class="plan-name">Workgroup</h3>
-              <p class="plan-desc">For high-velocity data teams requiring persistent state and collaborative memory.</p>
-              <div class="plan-price-box">
-                <span class="plan-price" id="workgroup-price">$49</span>
-                <span class="plan-period" id="workgroup-period">/ user / mo</span>
-              </div>
-              <ul class="plan-features-list">
-                <li class="feature-item"><span class="check-icon">✓</span> Everything in Community</li>
-                <li class="feature-item"><span class="check-icon">✓</span> Multi-Dataset Parallel Sub-Agents</li>
-                <li class="feature-item"><span class="check-icon">✓</span> Team Shared MemorySystem Store</li>
-                <li class="feature-item"><span class="check-icon">✓</span> Automated Executive PDF Delivery</li>
-                <li class="feature-item"><span class="check-icon">✓</span> Priority Slack &amp; GitHub Support</li>
-              </ul>
-            </div>
-            <a href="#cta" class="btn-cta">Start 14-Day Free Trial</a>
-          </div>
-
-          <!-- Enterprise Tier -->
-          <div class="pricing-card">
-            <div>
-              <h3 class="plan-name">Enterprise</h3>
-              <p class="plan-desc">For regulated institutions requiring air-gapped VPCs, custom LLMs, and compliance audits.</p>
-              <div class="plan-price-box">
-                <span class="plan-price">Custom</span>
-                <span class="plan-period">/ dedicated</span>
-              </div>
-              <ul class="plan-features-list">
-                <li class="feature-item"><span class="check-icon">✓</span> Everything in Workgroup</li>
-                <li class="feature-item"><span class="check-icon">✓</span> Air-Gapped / On-Premise VPC Deploy</li>
-                <li class="feature-item"><span class="check-icon">✓</span> Private LLM Gateway (vLLM / Ollama)</li>
-                <li class="feature-item"><span class="check-icon">✓</span> SOC2 &amp; HIPAA Audit Verification</li>
-                <li class="feature-item"><span class="check-icon">✓</span> Custom Domain Tools &amp; 99.9% SLA</li>
-              </ul>
-            </div>
-            <a href="#cta" class="btn-cta secondary">Contact Architecture Team</a>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- FAQ ACCORDION SECTION -->
-    <section class="faq-section" id="faq">
-      <div class="section-container">
-        <div class="section-title-center">
-          <div class="eyebrow-pill">
-            <span class="eyebrow-dot"></span>
-            FREQUENTLY ASKED QUESTIONS
-          </div>
-          <h2>Everything You Need to Know</h2>
-          <p>
-            Clear answers about architecture, security, and statistical methodology.
-          </p>
-        </div>
-
-        <div class="faq-container">
-          <div class="faq-item open">
-            <button class="faq-button" aria-expanded="true">
-              <span>How does DSA Agent prevent AI hallucinations in data analysis?</span>
-              <span class="faq-toggle-icon">+</span>
-            </button>
-            <div class="faq-answer">
-              DSA Agent enforces an architectural wall between reasoning and execution. Large Language Models never perform mathematical calculations in prompt tokens. Instead, the model writes clean, audited Python code that runs inside a local REPL sandbox (Pandas, SciPy, Scikit-Learn), guaranteeing 100% verified arithmetic.
-            </div>
-          </div>
-
-          <div class="faq-item">
-            <button class="faq-button" aria-expanded="false">
-              <span>Is my proprietary tabular data uploaded to external cloud servers?</span>
-              <span class="faq-toggle-icon">+</span>
-            </button>
-            <div class="faq-answer">
-              No. Raw data rows never leave your local machine or VPC. The controller only supplies high-level column metadata and statistical summaries (type, missingness, quantile bounds) to the reasoning engine, keeping your proprietary dataset completely air-gapped.
-            </div>
-          </div>
-
-          <div class="faq-item">
-            <button class="faq-button" aria-expanded="false">
-              <span>How does the Anti-Overfitting Guard protect machine learning models?</span>
-              <span class="faq-toggle-icon">+</span>
-            </button>
-            <div class="faq-answer">
-              By default, all models are evaluated with 5-Fold Stratified Cross-Validation. The system continuously tracks the delta between train score and cross-validation score. If this generalization gap exceeds 10%, L2 regularization penalties are automatically raised and tree depths are clamped to prevent memorization.
-            </div>
-          </div>
-
-          <div class="faq-item">
-            <button class="faq-button" aria-expanded="false">
-              <span>What tabular file formats are supported?</span>
-              <span class="faq-toggle-icon">+</span>
-            </button>
-            <div class="faq-answer">
-              DSA Agent supports CSV, TSV, Parquet, and Excel (.xlsx) files out of the box, with automatic delimiter inference, multi-encoding detection (UTF-8, Latin-1), and type casting.
-            </div>
-          </div>
-
-          <div class="faq-item">
-            <button class="faq-button" aria-expanded="false">
-              <span>What is the Recursive Language Modeling (RLM) paradigm?</span>
-              <span class="faq-toggle-icon">+</span>
-            </button>
-            <div class="faq-answer">
-              RLM is an autonomous workflow architecture where complex, multi-variable analytical objectives are recursively decomposed into atomic execution steps. An external REPL memory environment tracks all intermediate variables, logs, and chart objects across all 7 stages.
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
+    <!-- Pricing tiers and FAQ accordion removed (FrontendPlan.md 3.7 / 4.7: "SaaS
+         template structure" — this was a generic pricing/FAQ pattern borrowed
+         from a marketing template, not something the product actually needs).
+         Their JS listeners (pricing-toggle click handler, faq-button accordion)
+         were self-contained blocks with no effect on anything else in the
+         module script, so they were removed along with the markup rather than
+         left inert. -->
 
     <!-- CLOSING CONVERSION CTA BANNER -->
     <section class="cta-banner-section" id="cta">
@@ -1981,17 +1949,17 @@
         <div class="cta-banner">
           <div class="eyebrow-pill">
             <span class="eyebrow-dot"></span>
-            START IN SECONDS
+            Start in seconds
           </div>
-          <h2>Turn Raw Spreadsheets into Verified Decisions</h2>
+          <h2>Turn raw spreadsheets into verified decisions</h2>
           <p>
-            Drop your CSV in, let the 7-stage engine decompose the problem, and receive an audited executive report with zero hallucinated math.
+            Drop your file in, ask your question in plain English, and get back an audited report with every number traceable to a real Python calculation.
           </p>
           <div class="cta-btn-wrap">
-            <button class="btn-cta lg" id="cta-launch-btn">Launch Streamlit Workspace →</button>
-            <a href="https://github.com/shahdaksh050/agentic-data-analysis" target="_blank" rel="noopener noreferrer" class="btn-cta secondary lg">View Source on GitHub</a>
+            <button class="btn-cta lg" id="cta-launch-btn">Launch the workspace →</button>
+            <a href="https://github.com/shahdaksh050/agentic-data-analysis" target="_blank" rel="noopener noreferrer" class="btn-cta secondary lg">View source on GitHub</a>
           </div>
-          <p class="guarantee-subtext">No credit card required · 100% Local Sandboxed Execution · Open Source Core</p>
+          <p class="guarantee-subtext">No credit card required · Runs entirely on your machine · Open source core</p>
         </div>
       </div>
     </section>
@@ -2021,10 +1989,9 @@
           <div class="footer-col">
             <h4>Resources</h4>
             <ul>
-              <li><a href="#faq">Documentation</a></li>
-              <li><a href="#pricing">Deployment Tiers</a></li>
-              <li><a href="https://github.com/shahdaksh050/agentic-data-analysis" target="_blank" rel="noopener noreferrer">GitHub Repository</a></li>
-              <li><a href="#faq">FAQ</a></li>
+              <li><a href="https://github.com/shahdaksh050/agentic-data-analysis" target="_blank" rel="noopener noreferrer">Documentation</a></li>
+              <li><a href="#audited-entry">How it checks itself</a></li>
+              <li><a href="https://github.com/shahdaksh050/agentic-data-analysis" target="_blank" rel="noopener noreferrer">GitHub repository</a></li>
             </ul>
           </div>
           <div class="footer-col">
@@ -2042,7 +2009,7 @@
           <span>&copy; 2026 DSA Agent Project. Distributed under the MIT License.</span>
           <div class="system-status-indicator">
             <span class="status-dot"></span>
-            <span>REPL SANDBOX: OPERATIONAL</span>
+            <span>REPL sandbox: operational</span>
           </div>
         </div>
       </div>
@@ -2065,31 +2032,35 @@
 
     // 3D inks share the page tokens (stock, pen, accent, positive, risk, graphite; `sheet` here is
     // the page's --sheet-alt, the faint "paper" token colour) so the scene never drifts from the CSS.
-    // Keep in sync with the :root/.theme-day custom properties above (and DESIGN.md / ui/landing.py's
-    // LEDGER_TOKENS) — this object is hand-duplicated, not generated from the CSS.
+    // Keep in sync with the :root/.theme-day custom properties above (and src/core/design_tokens.py /
+    // ui/landing.py's LEDGER_TOKENS) — this object is hand-duplicated, not generated from the CSS.
+    // "Ledger paper" (decision A2): kept in sync with the CSS custom properties above so the 3D
+    // scene never drifts from the page tokens, whether the canvas is showing the raw-stream
+    // formation behind the hero, morphing through #stages-pin-track, or settled into the ambient
+    // ledger behind the sections after it.
     const PALETTES = {
       night: {
-        stock: '#241c14',
+        stock: '#1c211a',
         pen: '#f0a24a',
         accent: '#d99a4e',
         positive: '#7fb77e',
         risk: '#e2685a',
-        graphite: '#b8a688',
-        sheet: '#3a2e1f',
-        grid: '#4a3c28',
+        graphite: '#a8ad98',
+        sheet: '#2a3024',
+        grid: '#3d4a52',
         fogDensity: 0.016,
         exposure: 1.15,
         gridOpacity: 0.12,
       },
       day: {
-        stock: '#f7eedd',
+        stock: '#eef1e0',
         pen: '#a34f20',
         accent: '#e08a3e',
-        positive: '#5b8c5a',
+        positive: '#3f7a44',
         risk: '#a33526',
-        graphite: '#8a7660',
-        sheet: '#f1e4cb',
-        grid: '#e4d4bc',
+        graphite: '#5f6850',
+        sheet: '#e6e9d6',
+        grid: '#a9bfd1',
         fogDensity: 0.014,
         exposure: 1.0,
         gridOpacity: 0.10,
@@ -2425,14 +2396,17 @@
 
     /* Leader Canvas & HUD Overlay */
     const HUD_TITLES = [
-      'RAW DATASET // UNSTRUCTURED TABULAR STREAM',
-      'FEATURE DISTRIBUTIONS // PROFILE & OUTLIER BOUNDS',
-      'MULTI-AGENT GRAPH // RECURSIVE REASONING NETWORK',
-      'CERTIFIED LEDGER // SEALED GENERALIZATION BOUND',
+      'Raw dataset // unstructured tabular stream',
+      'Feature distributions // profile and outlier bounds',
+      'Multi-agent graph // recursive reasoning network',
+      'Certified ledger // sealed generalization bound',
     ];
     const tempVec = new THREE.Vector3();
     // True once the pinned stage track has scrolled away; the HUD must stay hidden over page sections
     let isPastTrack = false;
+    // True while still above the track (e.g. scrolling the hero): the HUD/telemetry/nav chrome for
+    // a specific stage shouldn't show before the track that stage belongs to has actually arrived.
+    let isBeforeTrack = true;
 
     function resizeLeaderCanvas() {
       if (!leaderCanvas || !leaderCtx) return;
@@ -2449,7 +2423,7 @@
       parallaxGroup.localToWorld(tempVec);
       tempVec.project(camera);
 
-      if (isPastTrack || tempVec.z > 1.0) {
+      if (isPastTrack || isBeforeTrack || tempVec.z > 1.0) {
         hudPin.style.opacity = '0';
         if (leaderCtx) leaderCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
         return;
@@ -2530,10 +2504,10 @@
     const floatingDots = document.getElementById('floating-stage-dots');
 
     const STAGE_SUMMARIES = [
-      { tag: 'STAGE 01 // RAW DATASET STREAM', sub: 'Unparsed CSV tabular matrix undulating in 3D space' },
-      { tag: 'STAGE 02 // PROFILING & ANOMALY BOUNDS', sub: '5 feature histograms with IQR 1.5× outliers flagged in Risk Red' },
-      { tag: 'STAGE 03 // MULTI-AGENT REASONING GRAPH', sub: 'Central orchestrator hub routing tasks across dynamic tool synapses' },
-      { tag: 'STAGE 04 // CERTIFIED GENERALIZATION LEDGER', sub: 'Stratified cross-validation with sealed <10% train-test safety ring' },
+      { tag: 'Stage 01 // raw dataset stream', sub: 'Unparsed CSV tabular matrix streaming into the sandboxed REPL' },
+      { tag: 'Stage 02 // profiling and anomaly bounds', sub: '5 feature histograms with IQR 1.5× outliers flagged in risk red' },
+      { tag: 'Stage 03 // multi-agent reasoning graph', sub: 'Central orchestrator hub routing tasks across dynamic tool synapses' },
+      { tag: 'Stage 04 // certified generalization ledger', sub: 'Stratified cross-validation with a sealed under-10% train-test safety ring' },
     ];
 
     /* Smooth Programmatic Scrolling via Anime.js — a single tween at a time, cancelled by user input */
@@ -2720,21 +2694,22 @@
     }
 
     function updateStageUI(stageIdx) {
-      stageIdx = Math.max(0, Math.min(3, stageIdx));
+      stageIdx = Math.max(0, Math.min(STAGE_COUNT - 1, stageIdx));
 
-      // Update HUD pin text
+      // Update HUD pin text (updateHudPin() also writes this every frame from the formation
+      // scalar; this keeps it correct on the frames before the render loop's first tick)
       if (hudTag) hudTag.textContent = HUD_TITLES[stageIdx] || '';
 
       // Update Header Stage Pills
       document.querySelectorAll('.stage-pill-item').forEach((pill) => {
         const pStage = parseInt(pill.getAttribute('data-stage') || '0', 10);
-        pill.classList.toggle('active', pStage === stageIdx && !isPastTrack);
+        pill.classList.toggle('active', pStage === stageIdx && !isPastTrack && !isBeforeTrack);
       });
 
       // Update Floating Stage Dots
       document.querySelectorAll('.stage-dot').forEach((dot) => {
         const dStage = parseInt(dot.getAttribute('data-stage') || '0', 10);
-        dot.classList.toggle('active', dStage === stageIdx);
+        dot.classList.toggle('active', dStage === stageIdx && !isBeforeTrack);
       });
 
       // Transition Stage Panels
@@ -2772,21 +2747,31 @@
       }
 
       isPastTrack = pastTrackPx > 60;
+      // Still above the track (e.g. reading the hero): hold the raw-stream formation as an ambient
+      // backdrop, but keep every piece of stage chrome (telemetry bar, dots, nav pills, HUD pin)
+      // off, since none of it applies until the track itself has scrolled into view.
+      isBeforeTrack = window.scrollY < start - 10;
       updateStageUI(stageIndexWithHysteresis(progress));
 
-      // Once the pinned stages scroll away, hide the HUD and stage chrome and soften the 3D canvas
-      // so Workflow, Why DSA, Features, Pricing and FAQ read cleanly over the ledger.
+      // Once the pinned stages scroll away, soften the 3D canvas so Workflow, Why DSA, Features and
+      // the audited-entry preview (which now follows the track) read cleanly over the ledger.
       if (isPastTrack) {
         if (hudPin) hudPin.style.opacity = '0';
         if (leaderCtx) leaderCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
         if (webglStage) webglStage.style.opacity = String(isNight ? LEDGER_CANVAS_OPACITY.night : LEDGER_CANVAS_OPACITY.day);
+      } else if (webglStage) {
+        webglStage.style.opacity = '1';
+      }
+
+      // The telemetry bar and floating dots belong to the track alone: hidden before it (over the
+      // hero) and after it (over the ledger sections), visible only while it's actually in play.
+      if (isPastTrack || isBeforeTrack) {
         if (telemetryBar) telemetryBar.style.transform = 'translateY(100%)';
         if (floatingDots) {
           floatingDots.style.opacity = '0';
           floatingDots.style.pointerEvents = 'none';
         }
       } else {
-        if (webglStage) webglStage.style.opacity = '1';
         if (telemetryBar) telemetryBar.style.transform = 'translateY(0)';
         if (floatingDots) {
           floatingDots.style.opacity = '1';
@@ -2797,12 +2782,13 @@
     window.addEventListener('scroll', calculateScrollProgress, { passive: true });
     calculateScrollProgress();
 
-    /* Helper: Glide to a stage — the middle of its hold zone (stage 0 is the top of the page) */
+    /* Helper: glide to a stage, the middle of its hold zone. The track no longer opens the page
+       (the hero does), so even stage 0 is somewhere inside the track, not page y=0. */
     function scrollToStage(stageIdx) {
       if (!track) return;
       const idx = Math.max(0, Math.min(STAGE_COUNT - 1, stageIdx));
       const { start, length } = trackMetrics();
-      const targetY = idx === 0 ? 0 : start + (length * (idx + 0.5)) / STAGE_COUNT;
+      const targetY = start + (length * (idx + 0.5)) / STAGE_COUNT;
       animeScrollTo(targetY, 750);
       pendingStageIdx = idx;
     }
@@ -2836,13 +2822,14 @@
         if (currentPanelIdx < STAGE_COUNT - 1) {
           scrollToStage(currentPanelIdx + 1);
         } else {
-          const wf = document.getElementById('workflow');
-          if (wf) animeScrollTo(pageTop(wf) - 72, 800);
+          // The track is now followed by the audited-entry preview, not the workflow section
+          const next = document.getElementById('audited-entry');
+          if (next) animeScrollTo(pageTop(next) - 72, 800);
         }
       });
     }
 
-    // Anchor links smooth navigation (Workflow, Why DSA, Features, Pricing, FAQ)
+    // Anchor links smooth navigation (Workflow, Why DSA, Features, audited entry, CTA)
     document.querySelectorAll('a[href^="#"]').forEach((link) => {
       link.addEventListener('click', (e) => {
         const targetId = link.getAttribute('href');
@@ -2858,12 +2845,14 @@
     });
 
     // Keyboard Navigation: inside the pinned track, arrows / PageUp / PageDown step one stage at a
-    // time; past stage 04 (or below the track) the keys fall through to native page scrolling.
+    // time; above the track (the hero) or past it (stage 04 onward) the keys fall through to
+    // native page scrolling.
     window.addEventListener('keydown', (e) => {
       const activeTag = document.activeElement ? document.activeElement.tagName : '';
       if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || !track) return;
 
-      const inTrack = window.scrollY <= trackMetrics().end + 10;
+      const trackBounds = trackMetrics();
+      const inTrack = window.scrollY >= trackBounds.start - 10 && window.scrollY <= trackBounds.end + 10;
       const baseIdx = pendingStageIdx !== null ? pendingStageIdx : currentPanelIdx;
 
       if ((e.code === 'ArrowDown' || e.code === 'PageDown') && inTrack && baseIdx < STAGE_COUNT - 1) {
@@ -3034,7 +3023,7 @@
       document.documentElement.classList.toggle('theme-day', !isNight);
       document.body.classList.toggle('theme-day', !isNight);
 
-      if (themeLabel) themeLabel.textContent = isNight ? 'DAY MODE' : 'NIGHT MODE';
+      if (themeLabel) themeLabel.textContent = isNight ? 'Day mode' : 'Night mode';
       if (themeIcon) themeIcon.textContent = isNight ? '◐' : '◑';
 
       const p = getPalette();
@@ -3065,31 +3054,6 @@
         applyTheme(isNight ? 'day' : 'night');
         // Persist the choice in the console session so the workspace opens in the same theme
         setComponentValue({ enter: false, theme: currentTheme });
-      });
-    }
-
-    /* FAQ Accordion Interaction */
-    document.querySelectorAll('.faq-button').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const item = btn.closest('.faq-item');
-        const isOpen = item.classList.contains('open');
-        document.querySelectorAll('.faq-item').forEach((i) => i.classList.remove('open'));
-        if (!isOpen) item.classList.add('open');
-      });
-    });
-
-    /* Pricing Annual Toggle */
-    const pricingToggle = document.getElementById('pricing-toggle');
-    const workgroupPrice = document.getElementById('workgroup-price');
-    const workgroupPeriod = document.getElementById('workgroup-period');
-    let isAnnual = false;
-
-    if (pricingToggle) {
-      pricingToggle.addEventListener('click', () => {
-        isAnnual = !isAnnual;
-        pricingToggle.classList.toggle('annual', isAnnual);
-        if (workgroupPrice) workgroupPrice.textContent = isAnnual ? '$39' : '$49';
-        if (workgroupPeriod) workgroupPeriod.textContent = isAnnual ? '/ user / mo (billed yearly)' : '/ user / mo';
       });
     }
 

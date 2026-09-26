@@ -9,6 +9,7 @@ from typing import Any
 
 import streamlit as st
 
+from src.core.audited_entry import audited_checks
 from src.core.plain_language import plainify
 from ui.components.cards import (
     find_chart_by_id,
@@ -38,22 +39,20 @@ def render_answers_tab(
     train_out = find_tool(tool_results, "train_model")
     corr_out = find_tool(tool_results, "correlation_analysis")
 
-    # Case Heading
+    # Case Heading: the objective itself is the heading, not a labelled eyebrow above it.
     user_obj = os.environ.get("USER_OBJECTIVE") or objective.strip()
     if user_obj and report.get("reasoning"):
         st.markdown(
-            '<div class="exec-directive" style="border-left: 4px solid var(--pen); padding-left: 1rem; margin-bottom: 2rem; background: var(--sheet); border-radius: var(--radius); padding: 1.5rem; box-shadow: var(--lift-sm);">'
-            '<h2 style="font-size: 1.2rem; color: var(--graphite); text-transform: uppercase; letter-spacing: 1px; margin: 0 0 0.5rem 0;">Case Brief</h2>'
-            f'<div style="font-size: 1.4rem; font-weight:700; margin-bottom:1rem; color:var(--ink);">Objective: {html.escape(user_obj)}</div>'
-            f'<div class="dir-content" style="font-size: 1.1rem; line-height: 1.6; color: var(--ink);">{html.escape(plainify(str(report["reasoning"])))}</div>'
+            '<div class="exec-directive">'
+            f'<h2>You asked: {html.escape(user_obj)}</h2>'
+            f'<p class="dir-content">{html.escape(plainify(str(report["reasoning"])))}</p>'
             '</div>',
             unsafe_allow_html=True,
         )
     elif report.get("reasoning"):
         st.markdown(
-            '<div class="exec-directive" style="border-left: 4px solid var(--pen); padding-left: 1rem; margin-bottom: 2rem; background: var(--sheet); border-radius: var(--radius); padding: 1.5rem; box-shadow: var(--lift-sm);">'
-            '<h2 style="font-size: 1.2rem; color: var(--graphite); text-transform: uppercase; letter-spacing: 1px; margin: 0 0 0.5rem 0;">Case Brief</h2>'
-            f'<div class="dir-content" style="font-size: 1.1rem; line-height: 1.6; color: var(--ink);">{html.escape(plainify(str(report["reasoning"])))}</div>'
+            '<div class="exec-directive">'
+            f'<p class="dir-content">{html.escape(plainify(str(report["reasoning"])))}</p>'
             '</div>',
             unsafe_allow_html=True,
         )
@@ -79,8 +78,8 @@ def render_answers_tab(
 
     task_type = (
         (train_out.get("task_type") if train_out else None)
-        or (meta.task_type if meta else "—")
-        or "—"
+        or (meta.task_type if meta else "N/A")
+        or "N/A"
     )
 
     prof = prof or {}
@@ -99,7 +98,7 @@ def render_answers_tab(
             st.info(f"**What we found:** {dominant['summary']}")
 
     all_findings: list[dict[str, Any]] = report.get("findings") or []
-    dash_finding_ids = {c.get("finding_id") for c in (dash or []) if c.get("finding_id")}
+    dash_finding_ids: set[str] = {str(c["finding_id"]) for c in (dash or []) if c.get("finding_id")}
     card_findings = [
         f
         for f in all_findings
@@ -107,21 +106,49 @@ def render_answers_tab(
         and f.get("kind") not in ("method_fit", "coverage_gap")
     ][:5]
 
+    # Run-level verdict (FrontendPlan.md section 5): only shown when at least
+    # one finding's audits actually ran this run, since a fake "0 of 0" would
+    # betray the "we check every answer twice" promise. M = findings that
+    # were audited at all, N = how many of those held up (no failed check).
+    audited = [(f, audited_checks(f.get("evidence"))) for f in card_findings]
+    audited = [(f, marks) for f, marks in audited if marks]
+    m_count = len(audited)
+    if m_count > 0:
+        held_up = sum(1 for _, marks in audited if not any(mk.state == "fail" for mk in marks))
+        needs_more = m_count - held_up
+        sub_lines = []
+        if needs_more > 0:
+            sub_lines.append(f"{needs_more} need{'s' if needs_more == 1 else ''} more data.")
+        if gap_val is not None:
+            sub_lines.append(
+                "The model held up on new data."
+                if not gap_is_risky(gap_val)
+                else "The model may have memorised examples, see below."
+            )
+        st.markdown(
+            f'<div class="run-banner">{held_up} of {m_count} finding{"s" if m_count != 1 else ""} held up.'
+            + "".join(f'<span class="sub">{html.escape(s)}</span>' for s in sub_lines)
+            + '</div>',
+            unsafe_allow_html=True,
+        )
+    if gap_val is not None:
+        st.markdown(render_defect_stamp(gap_val), unsafe_allow_html=True)
+
     st.markdown("#### What we found")
     if card_findings:
         for f in card_findings:
             st.markdown(render_finding_card(f, dash_finding_ids), unsafe_allow_html=True)
     elif all_findings:
         st.caption(
-            "No headline-worthy findings cleared the bar for this run — "
-            "see the Details tab for the full finding list."
+            "No headline-worthy findings cleared the bar for this run. "
+            "See the Details tab for the full finding list."
         )
     else:
         ins_list = report.get("insights", [])
         if ins_list:
-            for i, ins in enumerate(ins_list, start=1):
+            for ins in ins_list:
                 st.markdown(
-                    f'<div class="ic"><span class="mk">{i:02d}</span>{html.escape(plainify(str(ins)))}</div>',
+                    f'<div class="ic"><span class="mk">Insight</span>{html.escape(plainify(str(ins)))}</div>',
                     unsafe_allow_html=True,
                 )
         else:
@@ -152,7 +179,7 @@ def render_answers_tab(
 
     trust_cells = [
         ("Data quality", f"{q}/100"),
-        ("Rows analyzed", f"{row_count:,}" if isinstance(row_count, int) else "—"),
+        ("Rows analyzed", f"{row_count:,}" if isinstance(row_count, int) else "N/A"),
         ("Caveats flagged", str(caveat_count)),
     ]
     st.markdown(
@@ -184,11 +211,11 @@ def render_answers_tab(
 
     render_run_compare()
 
-    # Ask follow-up question
-    st.markdown("#### Ask a follow-up question")
+    # Search these findings: a keyword search over headlines, not free-form Q&A.
+    st.markdown("#### Search these findings")
     ask_q = st.text_input(
-        "Ask a follow-up question",
-        placeholder="e.g. does tenure affect churn?",
+        "Search these findings",
+        placeholder="e.g. tenure churn",
         label_visibility="collapsed",
         key="ask_data_q",
     )
@@ -199,7 +226,7 @@ def render_answers_tab(
                 st.success(f"Based on what was found: {plainify(str(m.get('headline', '')))}")
         else:
             st.info(
-                "Nothing in this analysis directly answers that — try rephrasing, "
+                "Nothing in this analysis directly answers that. Try rephrasing, "
                 "or check the Details tab for full coverage."
             )
 
@@ -244,9 +271,6 @@ def render_answers_tab(
 </div>""",
             unsafe_allow_html=True,
         )
-
-        if gap_val is not None:
-            st.markdown(render_defect_stamp(gap_val), unsafe_allow_html=True)
 
         for w in train_out.get("overfit_warnings", []) if train_out else []:
             st.markdown(

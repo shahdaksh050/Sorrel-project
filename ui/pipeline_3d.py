@@ -24,6 +24,8 @@ from typing import Any, Literal
 import streamlit as st
 import streamlit.components.v1 as components
 
+from src.core import design_tokens
+
 __all__ = [
     "PALETTE",
     "PALETTES",
@@ -42,28 +44,12 @@ _ASSETS = Path(__file__).parent / "assets"
 #: Matches the status vocabulary ``app.py`` already writes into ``stage_log``.
 StageStatus = Literal["pending", "active", "done", "skipped", "error"]
 
-#: Day / Night palettes for the warm ledger theme.
+#: Day / Night palettes for the warm ledger theme, sourced from the shared token
+#: module. The scene's "grid" key predates `design_tokens`' "rule" naming, so it
+#: is mapped explicitly rather than left missing by a plain dict spread.
 PALETTES: dict[str, dict[str, str]] = {
-    "day": {
-        "stock": "#f7eedd",
-        "sheet": "#fffbf2",
-        "ink": "#3a2b1e",
-        "graphite": "#8a7660",
-        "pen": "#a34f20",
-        "risk": "#a33526",
-        "accent": "#e08a3e",
-        "grid": "#e4d4bc",
-    },
-    "night": {
-        "stock": "#241c14",
-        "sheet": "#2f251a",
-        "ink": "#f3e9d8",
-        "graphite": "#b8a688",
-        "pen": "#f0a24a",
-        "risk": "#e2685a",
-        "accent": "#d99a4e",
-        "grid": "#4a3c28",
-    },
+    mode: {**palette, "grid": palette["rule"]}
+    for mode, palette in design_tokens.PALETTES.items()
 }
 
 #: Default palette for backwards compatibility

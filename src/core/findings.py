@@ -55,6 +55,14 @@ _EFFECT_BENCHMARKS: dict[str, float] = {
 _SAMPLE_SIZE_KEYS = ("n", "n_level", "sample_size", "n_segment", "n_obs")
 _SMALL_N = 30
 
+#: Mirrors `src.tools.ml_pipeline.OVERFIT_THRESHOLD`. Not imported directly —
+#: `tools/*` may depend on `core` (AGENTS.md), never the reverse. Only the
+#: `..._overfit_gap` synthetic Finding ever carries `train_test_gap` in its
+#: evidence, and only once that gap already exceeds this threshold, so this
+#: check can only ever fail; there is no Finding for the passing case to
+#: attach a tick to.
+_OVERFIT_GAP_THRESHOLD = 0.10
+
 _STOPWORDS = frozenset(
     "a an the of in on for to and or by with what which who how why is are was were "
     "do does did be been it its this that these those from at as vs versus than per "
@@ -183,6 +191,66 @@ class Finding:
             "chart_hint": self.chart_hint,
             "layer": self.layer,
         }
+
+
+def attach_finding_checks(
+    findings: list[Finding],
+    *,
+    leakage_alerts: list[dict[str, Any]] | None = None,
+    fragility_by_id: dict[str, bool] | None = None,
+    causal_flagged_ids: set[str] | None = None,
+) -> None:
+    """Write the audited-entry check marks (FrontendPlan.md section 5) into
+    each finding's `evidence["checks"]`, in place.
+
+    Every check is derived only from data the finding, or a caller-supplied
+    per-run audit result, already carries — nothing here re-runs a test or
+    invents a verdict. A check that did not run for a given finding is left
+    out of its `checks` dict entirely; the UI must render "nothing", never a
+    fake tick, for a key that is absent (see FrontendPlan.md risk #2).
+
+    Callers pass the per-finding results of audits that already ran
+    elsewhere in the pipeline (`detect_target_leakage`, `audit_finding_sensitivity`,
+    `audit_findings_causal_language` — see `AgentController`), because those
+    audits key off dataframes and study design this module has no access to.
+    """
+    leaked_columns = {
+        str(alert["column"]) for alert in (leakage_alerts or []) if alert.get("column")
+    }
+    fragility_by_id = fragility_by_id or {}
+    causal_flagged_ids = causal_flagged_ids or set()
+
+    for f in findings:
+        checks: dict[str, Any] = {}
+
+        p = f.p_adjusted if f.p_adjusted is not None else f.p_value
+        if p is not None:
+            checks["not_luck"] = p < 0.05
+
+        evidence = f.evidence if isinstance(f.evidence, dict) else {}
+        sizes = [
+            v for k in _SAMPLE_SIZE_KEYS
+            if isinstance(v := evidence.get(k), (int, float)) and not isinstance(v, bool)
+        ]
+        if sizes:
+            checks["records"] = min(sizes) >= _SMALL_N
+
+        if f.finding_id in fragility_by_id:
+            checks["robust"] = not fragility_by_id[f.finding_id]
+
+        if leaked_columns and ({f.dimension, f.measure} & leaked_columns):
+            checks["leakage"] = True
+
+        if f.finding_id in causal_flagged_ids:
+            checks["cause"] = "neutral"
+
+        gap = evidence.get("train_test_gap")
+        if isinstance(gap, (int, float)) and not isinstance(gap, bool):
+            checks["model_gap"] = gap <= _OVERFIT_GAP_THRESHOLD
+
+        if checks:
+            evidence["checks"] = checks
+            f.evidence = evidence
 
 
 def is_trivial(finding: Finding) -> bool:

@@ -146,9 +146,14 @@ from ui.tabs import (
     render_downloads_tab,
 )
 
+# A fresh session opens on the OS/browser theme; the sidebar toggle then owns
+# it for the rest of the session (st.context.theme is best-effort — it can be
+# None before the browser reports back, so "day" stays the fallback).
+_os_theme = "night" if st.context.theme.type == "dark" else "day"
+
 # ── Session-state initialisation ──────────────────────────────────────────────
 _DEFAULTS: dict[str, Any] = {
-    "theme":          "day",
+    "theme":          _os_theme,
     "preview_df":     None,   # pd.DataFrame
     "preview_name":   "",     # sanitised filename (safe for filesystem)
     "orig_name":      "",     # exact name as uploaded (change detection)
@@ -610,7 +615,7 @@ with st.sidebar:
     )
 
     if uploaded is None and st.session_state["preview_df"] is None:
-        if st.button("📂 Try a sample dataset", width='stretch'):
+        if st.button("Try a sample dataset", width='stretch'):
             sample_path = ROOT / "data" / "sample_customer_churn.csv"
             if sample_path.exists():
                 st.session_state["preview_df"], _ = read_any(str(sample_path))
@@ -712,7 +717,7 @@ with st.sidebar:
             value="http://localhost:11434/v1",
             help="Works with Ollama, LM Studio, vLLM, llama.cpp server, "
                  "text-generation-webui, etc. Must be reachable from this "
-                 "machine — no data leaves it.",
+                 "machine. No data leaves it.",
         )
 
     _key_label = {
@@ -756,7 +761,7 @@ with st.sidebar:
     if free_models and paid_models:
         tier_choice = st.radio(
             "Pricing Tier",
-            [f"🆓 Free Models ({len(free_models)})", f"💳 Paid Models ({len(paid_models)})", f"All ({len(_dyn_models)})"],
+            [f"Free Models ({len(free_models)})", f"Paid Models ({len(paid_models)})", f"All ({len(_dyn_models)})"],
             horizontal=True,
             index=0,
             key=f"tier_filter_{provider}",
@@ -771,10 +776,10 @@ with st.sidebar:
                 key=lambda m: (not m.get("is_free", False), m["model"]),
             )
     elif free_models and not paid_models:
-        st.caption("🟢 All models listed below are Free Tier eligible.")
+        st.caption("All models listed below are Free Tier eligible.")
         active_dyn_models = free_models
     else:
-        st.caption("💳 Paid API billing applies per token.")
+        st.caption("Paid API billing applies per token.")
         active_dyn_models = paid_models
 
     model_options = [m["model"] for m in active_dyn_models]
@@ -811,7 +816,7 @@ with st.sidebar:
         ["Adaptive (Recommended)", "Fast (Low Reasoning)", "Deep (High Reasoning)"],
         index=0,
         help=(
-            "Adaptive: dynamically scales reasoning effort — low during routine exploratory steps, "
+            "Adaptive: dynamically scales reasoning effort, low during routine exploratory steps, "
             "higher when anomalies or statistical conflicts occur, and thorough for final synthesis.\n"
             "Fast: forces minimal reasoning effort across all cycles for maximum execution speed.\n"
             "Deep: uses full reasoning depth across all cycles."
@@ -834,7 +839,7 @@ with st.sidebar:
         value=True,
         help=(
             "On: the LLM plans the analysis and writes the narrative.\n"
-            "Off: fully deterministic — the plan comes from the data profile "
+            "Off: fully deterministic, the plan comes from the data profile "
             "and domain detection, and the report is built from tool output. "
             "No network calls, no API key needed, and much faster."
         ),
@@ -846,15 +851,15 @@ with st.sidebar:
             "On: trains models, clusters, and runs PCA.\n"
             "Off: skips every model-fitting step. Statistical tests, "
             "correlations and the domain analyses still run. This is the "
-            "single biggest speed-up available — training dominates runtime."
+            "single biggest speed-up available: training dominates runtime."
         ),
     )
     if not use_llm and not use_ml:
-        st.caption("⚡ Fully deterministic, statistics-only mode — fastest.")
+        st.caption("Fully deterministic, statistics-only mode, fastest.")
     elif not use_llm:
-        st.caption("🔌 Deterministic planning, ML still on.")
+        st.caption("Deterministic planning, ML still on.")
     elif not use_ml:
-        st.caption("⚡ AI narrative on, no models fitted.")
+        st.caption("AI narrative on, no models fitted.")
     tune_hyperparameters = False
     max_depth = 6
     test_pct = 20
@@ -870,18 +875,18 @@ with st.sidebar:
             "Thorough tuning (slower)",
             value=False,
             help=(
-                "Off (default): models train with their default hyperparameters — fast.\n"
+                "Off (default): models train with their default hyperparameters, fast.\n"
                 "On: searches hyperparameters per model before picking the best "
-                "one — meaningfully slower (measured: ~20s extra at 20k rows) "
+                "one, meaningfully slower (measured: ~20s extra at 20k rows) "
                 "but can improve accuracy."
             ),
         )
         tune_hyperparameters = thorough
 
         if _cuda_available():
-            st.caption("🚀 **GPU Acceleration**: CUDA detected! XGBoost models will train on GPU (`device='cuda'`).")
+            st.caption("**GPU acceleration**: CUDA detected. XGBoost models will train on GPU (`device='cuda'`).")
         else:
-            st.caption("💻 **Compute**: CPU mode (multi-core parallel training).")
+            st.caption("**Compute**: CPU mode (multi-core parallel training).")
 
         with st.expander("Advanced model settings"):
             max_depth = st.slider("Max tree depth (Random Forest / XGBoost)", 2, 15, 6)
@@ -929,9 +934,25 @@ with st.sidebar:
 
     # ── Analysis Settings ─────────────────────────────────────────────────────
     st.markdown('<div class="side-head">Analysis Settings</div>', unsafe_allow_html=True)
-    min_iter   = st.slider("Min iterations", 1, 5, 1, help="Number of iterative discovery cycles. 1 is fast and recommended for quick analysis; increase for deeper multi-cycle discovery.")
-    max_iter   = st.slider("Max iterations", 1, 25, 5)
-    enable_rlm = st.toggle("Enable recursive decomposition (Stage 6)", value=False, help="Recursively breaks complex tasks into sub-problems. Turn on for deep exploration; keep off for fastest runtime.")
+    # "Thorough" reproduces the previous default (min=1, max=5); Quick and Deep
+    # scale the same min/max iteration knobs the controller already takes.
+    thoroughness = st.radio(
+        "How thorough",
+        ["Quick", "Thorough", "Deep"],
+        index=1,
+        horizontal=True,
+        help="Quick finds the headline answer fast. Thorough double-checks it. Deep explores more before settling.",
+    )
+    min_iter, max_iter = {
+        "Quick":    (1, 2),
+        "Thorough": (1, 5),
+        "Deep":     (2, 15),
+    }[thoroughness]
+    enable_rlm = st.toggle(
+        "Break hard questions into smaller ones",
+        value=False,
+        help="Splits a complex question into smaller sub-questions it can tackle one at a time. Turn on for deep exploration; keep off for the fastest runtime.",
+    )
 
     st.divider()
 
@@ -951,17 +972,8 @@ with st.sidebar:
             _reset_pipeline()
             st.rerun()
 
-    demo_clicked = st.button(
-        "⚡ See a Sample Report (Demo)",
-        width='stretch',
-        help="Instantly load sample data and see what a finished report looks like.",
-    )
-    if demo_clicked:
-        _load_teamwork_preview()
-        st.rerun()
-
     if not has_file:
-        st.caption("Upload a CSV/Excel file or click \"See a Sample Report\" above.")
+        st.caption("Upload a CSV/Excel file or try it with sample data in the main panel.")
     elif not has_key:
         st.caption("Add your API key to enable the run.")
 
@@ -976,13 +988,13 @@ with hero_text:
     st.markdown(
         '<div class="hero">'
         '<h1>We check every answer twice.</h1>'
-        '<p class="hero-sub">Upload any spreadsheet — sales, survey, sports, science, '
+        '<p class="hero-sub">Upload any spreadsheet: sales, survey, sports, science, '
         'whatever you\'ve got. Your assistant studies it, tests its own conclusions, '
-        'and tells you which patterns are real — and which are just luck.</p></div>',
+        'and tells you which patterns are real, and which are just luck.</p></div>',
         unsafe_allow_html=True,
     )
     _hero_cinema_on = st.session_state.get("show_cinematic_hero", False)
-    _hero_btn_txt = "🔬 Standard 3D Plate" if _hero_cinema_on else "🎬 3D Cinematic Showcase"
+    _hero_btn_txt = "Standard 3D Plate" if _hero_cinema_on else "3D Cinematic Showcase"
     if st.button(_hero_btn_txt, key="btn_toggle_hero_cinema"):
         st.session_state["show_cinematic_hero"] = not _hero_cinema_on
         st.rerun()
@@ -1214,23 +1226,23 @@ if run_clicked:
             if tool_name == "train_model":
                 _spinner_ph.markdown(
                     '<div class="run-banner">Running the analysis'
-                    '<span class="sub">Still working — training models can take a few minutes depending on the data size...</span></div>',
+                    '<span class="sub">Still working. Training models can take a few minutes depending on the data size...</span></div>',
                     unsafe_allow_html=True,
                 )
 
         def _on_iter(iteration: int, stage: str) -> None:
             if "stage2" in stage:
-                _set_stage("2", "active", f"iter {iteration} — LLM reasoning…")
+                _set_stage("2", "active", f"iter {iteration}: LLM reasoning…")
                 _progress_lines.append(f"[run ] Iteration {iteration}: model reasoning")
             elif "stage4" in stage or "stage5" in stage:
-                _set_stage("4", "active", f"iter {iteration} — interpreting results…")
-                _set_stage("5", "active", f"iter {iteration} — refining plan…")
+                _set_stage("4", "active", f"iter {iteration}: interpreting results…")
+                _set_stage("5", "active", f"iter {iteration}: refining plan…")
                 _progress_lines.append(f"[run ] Iteration {iteration}: interpreting and refining")
             _upd_live_ui()
             if iteration > 1:
                 _spinner_ph.markdown(
                     '<div class="run-banner">Running the analysis'
-                    '<span class="sub">Still working — refining answers can take a few minutes...</span></div>',
+                    '<span class="sub">Still working. Refining answers can take a few minutes...</span></div>',
                     unsafe_allow_html=True,
                 )
 
@@ -1293,7 +1305,7 @@ if run_clicked:
         st.error(
             "Something went wrong during the run and it couldn't finish. "
             "This usually means a step in the analysis hit an unexpected "
-            "problem with this specific file — see the technical details "
+            "problem with this specific file. See the technical details "
             "below if you want to know exactly what happened."
         )
         with st.expander("Technical details"):
@@ -1319,19 +1331,17 @@ else:
     stages_3d = _draw_pipeline_rig(pipeline_slot)
 
 # The datum line: the same run state as the drawing, in words and figures.
-_errored = any(s == "error" for _, s, _ in st.session_state["stage_log"])
-_running = any(s == "active" for _, s, _ in st.session_state["stage_log"])
+_error_step = next((n for n, s, _ in st.session_state["stage_log"] if s == "error"), None)
+_active_step = next((n for n, s, _ in st.session_state["stage_log"] if s == "active"), None)
 _status_str = (
-    "FAILED" if _errored else
-    "RUNNING" if _running else
-    f"{_done}/7 COMPLETE" if _done > 0 else
-    "IDLE"
+    f"Stopped at step {_error_step}" if _error_step else
+    "Done" if st.session_state.get("analysis_done") else
+    f"Working on step {_active_step} of 7" if _active_step else
+    "Ready"
 )
 
-_cur_theme_name = "Day Mode" if st.session_state.get("theme", "day") == "day" else "Night Mode"
 _cells = [
     ("State", _status_str),
-    ("Theme", _cur_theme_name),
     ("File", st.session_state.get("preview_name") or "None loaded"),
     ("Model", final_model if "final_model" in locals() else "N/A"),
 ]
@@ -1419,17 +1429,13 @@ if (preview_df is None
         '<p>Add a CSV or Excel file in the sidebar, tell us what you\'d like to know, '
         'and enter your API key. Your helpers will study it, test their answers, '
         'and double-check everything before showing you the results.</p>'
-        '<div class="steps">'
-        '<div>1. Read</div><div>2. Understand</div><div>3. Run</div>'
-        '<div>4. Explain</div><div>5. Check</div><div>6. Solve</div>'
-        '<div>7. Report</div>'
-        '</div></div>',
+        '</div>',
         unsafe_allow_html=True,
     )
     st.markdown("#### Meet Your Helpers")
     st.markdown(_render_agent_grid([]), unsafe_allow_html=True)
     st.write("")
-    if st.button("▶ See a Sample Report (Demo)", type="primary"):
+    if st.button("Try it with sample data", type="primary"):
         _load_teamwork_preview()
         st.rerun()
 

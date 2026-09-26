@@ -1,7 +1,7 @@
 import streamlit.components.v1 as components
 
 
-def inject_micro_interactions():
+def inject_micro_interactions() -> None:
     """
     Injects Anime.js micro-interactions into the Streamlit parent DOM.
     Designed to be robust against Streamlit's frequent re-renders by tracking
@@ -146,11 +146,17 @@ def inject_micro_interactions():
             runAnimations();
         }
 
-        // Attach observer unconditionally so it always catches DOM updates (e.g., on theme change)
-        const observer = new MutationObserver(() => {
+        // components.html mounts this script in a fresh iframe on every Streamlit
+        // rerun, but pWin/pDoc are the parent window/document, which persist across
+        // reruns — so the observer must be stored there too, and the previous one
+        // disconnected first, or each rerun leaks another MutationObserver onto body.
+        if (pWin.__anime_observer) {
+            pWin.__anime_observer.disconnect();
+        }
+        pWin.__anime_observer = new MutationObserver(() => {
             runAnimations();
         });
-        observer.observe(pDoc.body, { childList: true, subtree: true });
+        pWin.__anime_observer.observe(pDoc.body, { childList: true, subtree: true });
     </script>
     """
     components.html(js_code, height=0)

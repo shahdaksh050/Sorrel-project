@@ -11,6 +11,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from src.core.audited_entry import GLYPH, audited_checks
 from src.core.plain_language import describe_uncertainty, plainify
 from ui.components.icons import (
     ICON_CHART,
@@ -115,8 +116,12 @@ def render_datum(cells: list[tuple[str, str]]) -> str:
     return f'<div class="datum">{body}</div>'
 
 
+#: CheckMark.state -> the CSS class the audited-entry check row uses for it.
+_CHECK_CSS: dict[str, str] = {"pass": "ok", "fail": "risk", "neutral": "note"}
+
+
 def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str]) -> str:
-    """One full-width sentence card for a top-ranked Finding."""
+    """One full-width sentence card for a top-ranked Finding, with its audited-entry check row."""
     headline = html.escape(plainify(str(finding.get("headline", ""))))
     detail = finding.get("detail")
     caveats = finding.get("caveats") or []
@@ -135,10 +140,18 @@ def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str]) ->
     xref = ""
     if finding.get("finding_id") and finding["finding_id"] in chart_finding_ids:
         xref = '<div style="font-size:12px;color:var(--pen);margin-top:6px;font-weight:600;">→ see chart in the Charts tab</div>'
+    checks = audited_checks(finding.get("evidence"))
+    check_html = ""
+    if checks:
+        marks = "".join(
+            f'<span class="check {_CHECK_CSS[c.state]}">{GLYPH[c.state]} {html.escape(c.label)}</span>'
+            for c in checks
+        )
+        check_html = f'<div class="check-row animate">{marks}</div>'
     return (
         '<div class="finding-card">'
         f'<div class="finding-headline">{headline}</div>'
-        f'{sub_html}{xref}'
+        f'{sub_html}{xref}{check_html}'
         '</div>'
     )
 
@@ -167,22 +180,22 @@ def render_defect_stamp(gap_val: float | None) -> str:
     if gap_is_risky(gap_val):
         return f"""
         <div class="defect-stamp">
-            <span class="stamp-tag">⚠ Heads up — this might not hold up</span>
-            <div class="stamp-title">THE MODEL MEMORISED THE EXAMPLES ({gap_val*100:.1f}% GAP)</div>
+            <span class="stamp-tag">⚠ Heads up: this might not hold up</span>
+            <div class="stamp-title">The model memorised the examples ({gap_val*100:.1f}% gap)</div>
             <div class="stamp-desc">
-                It did noticeably better on the data it trained on than on data it hadn't seen —
-                a sign it memorised quirks rather than learning the real pattern.
+                It did noticeably better on the data it trained on than on data it hadn't seen.
+                A sign it memorised quirks rather than learning the real pattern.
                 We've ranked it lower because of this.
             </div>
         </div>
         """
     return f"""
     <div class="cert-stamp">
-        <span class="stamp-tag">✓ Good news — this should hold up</span>
-        <div class="stamp-title">THE MODEL PERFORMED CONSISTENTLY ({gap_val*100:.1f}% GAP)</div>
+        <span class="stamp-tag">✓ Good news: this should hold up</span>
+        <div class="stamp-title">The model performed consistently ({gap_val*100:.1f}% gap)</div>
         <div class="stamp-desc">
-            It did about as well on new data as on the data it trained on —
-            a good sign the pattern it found is real, not a fluke.
+            It did about as well on new data as on the data it trained on.
+            A good sign the pattern it found is real, not a fluke.
         </div>
     </div>
     """
@@ -290,7 +303,7 @@ def render_agent_grid(
             agent_output = report.get("reasoning", "Waiting for a plan.")
         elif ag["name"] == "File Checker":
             _prof = st.session_state.get("profile") or {}
-            agent_output = f"Health score {_prof.get('quality_score', '—')}/100. Cleaned up any issues found."
+            agent_output = f"Health score {_prof.get('quality_score', 'N/A')}/100. Cleaned up any issues found."
         elif ag["name"] == "Fact-Checker":
             agent_output = "Tests complete: checked which columns move together and whether the differences are real."
         elif ag["name"] == "Model Builder":
@@ -298,7 +311,7 @@ def render_agent_grid(
         elif ag["name"] == "Reality-Checker":
             agent_output = "Checked every model for memorisation. Applied a penalty to any that didn't hold up."
         elif ag["name"] == "Double-Checker":
-            agent_output = "Finished reviewing — went back for more passes where needed."
+            agent_output = "Finished reviewing. Went back for more passes where needed."
         elif ag["name"] == "Detail Handler":
             agent_output = f"{len(report.get('rlm_sub_results', []))} smaller questions solved separately and combined."
         elif ag["name"] == "Report Writer":
@@ -389,8 +402,8 @@ def render_agent_deep_dive(
     """Render structured details for an inspected agent persona."""
     details = {
         "🧭 Planner": {
-            "mission": "Reads your question and turns it into a step-by-step plan — what to check first, what to try next, and when the plan needs adjusting.",
-            "directive": "Only works from summaries and statistics, never your raw data rows — the way a manager works from a report rather than the raw ledger.",
+            "mission": "Reads your question and turns it into a step-by-step plan: what to check first, what to try next, and when the plan needs adjusting.",
+            "directive": "Only works from summaries and statistics, never your raw data rows, the way a manager works from a report rather than the raw ledger.",
             "tools": "Reasoning and planning",
             "output": report.get("reasoning", "Waiting for a plan."),
         },
@@ -398,11 +411,11 @@ def render_agent_deep_dive(
             "mission": "Checks your file is safe to open, figures out what each column means, and gives your data a health score.",
             "directive": "Scores your data 0–100 based on missing values, duplicate rows, and anything that looks off.",
             "tools": "File safety checks, data profiling",
-            "output": f"Health score {st.session_state.get('profile', {}).get('quality_score', '—')}/100. Cleaned up any issues found.",
+            "output": f"Health score {st.session_state.get('profile', {}).get('quality_score', 'N/A')}/100. Cleaned up any issues found.",
         },
         "📐 Fact-Checker": {
             "mission": "Runs statistical tests to check whether a pattern in your data is real, or could just be chance.",
-            "directive": "Checks how your data is shaped before picking which test is fair to use — the right test depends on the shape.",
+            "directive": "Checks how your data is shaped before picking which test is fair to use: the right test depends on the shape.",
             "tools": "Statistical tests, correlation checks",
             "output": "Tests complete: checked which columns move together and whether the differences are real.",
         },
@@ -414,7 +427,7 @@ def render_agent_deep_dive(
         },
         "🔍 Reality-Checker": {
             "mission": "Compares how each model performs on data it trained on versus data it's never seen.",
-            "directive": "If a model does noticeably better on familiar data than new data, it's flagged as having memorised rather than learned — and marked down.",
+            "directive": "If a model does noticeably better on familiar data than new data, it's flagged as having memorised rather than learned, and marked down.",
             "tools": "Model checking",
             "output": "Checked every model for memorisation. Applied a penalty to any that didn't hold up.",
         },
@@ -422,7 +435,7 @@ def render_agent_deep_dive(
             "mission": "Looks at what's been found so far and decides whether your question has really been answered.",
             "directive": "Sends the work back for another pass if things haven't settled down yet, up to a set limit of tries.",
             "tools": "Review and another pass",
-            "output": "Finished reviewing — went back for more passes where needed.",
+            "output": "Finished reviewing. Went back for more passes where needed.",
         },
         "🌐 Detail Handler": {
             "mission": "Splits a big, many-part question into smaller pieces, solves each on its own, then brings the answers back together.",
@@ -547,19 +560,19 @@ def render_other_findings(tool_results: list[dict[str, Any]]) -> None:
 
         if name == "cluster_data":
             c1, c2, c3 = st.columns(3)
-            c1.metric("Clusters found", out.get("n_clusters", "—"))
-            c2.metric("Silhouette score", out.get("silhouette_score", "—"))
-            c3.metric("Separation", out.get("separation_quality", "—"))
+            c1.metric("Clusters found", out.get("n_clusters", "N/A"))
+            c2.metric("Silhouette score", out.get("silhouette_score", "N/A"))
+            c3.metric("Separation", out.get("separation_quality", "N/A"))
         elif name == "time_series_analysis":
             c1, c2, c3 = st.columns(3)
-            c1.metric("Trend", str(out.get("trend_direction", "—")).title())
+            c1.metric("Trend", str(out.get("trend_direction", "N/A")).title())
             c2.metric("Stationary?", "Yes" if out.get("is_stationary") else "No")
             lags = out.get("seasonal_lags_detected") or []
             c3.metric("Seasonal lag(s)", ", ".join(str(x) for x in lags) or "None found")
         elif name == "text_analysis":
             c1, c2, c3 = st.columns(3)
-            c1.metric("Vocabulary size", out.get("vocab_size", "—"))
-            c2.metric("Avg. words / row", out.get("avg_word_count", "—"))
+            c1.metric("Vocabulary size", out.get("vocab_size", "N/A"))
+            c2.metric("Avg. words / row", out.get("avg_word_count", "N/A"))
             top = out.get("top_tokens") or []
             # TextAnalysisTool's real shape is a dict ({token: count}, see
             # src/tools/text_analysis.py), not a list — `top[:6]` on a plain
@@ -576,17 +589,17 @@ def render_other_findings(tool_results: list[dict[str, Any]]) -> None:
                 st.caption(md_text("Most frequent words: " + ", ".join(str(w) for w in words)))
         elif name == "geospatial_analysis":
             c1, c2 = st.columns(2)
-            c1.metric("Points mapped", out.get("n_points", "—"))
+            c1.metric("Points mapped", out.get("n_points", "N/A"))
             centroid = out.get("centroid") or {}
             if centroid:
-                c2.metric("Centroid", f"{centroid.get('lat', '—')}, {centroid.get('lon', '—')}")
+                c2.metric("Centroid", f"{centroid.get('lat', 'N/A')}, {centroid.get('lon', 'N/A')}")
         elif name == "dimensionality_analysis":
             c1, c2, c3 = st.columns(3)
-            c1.metric("Numeric features", out.get("n_features", "—"))
+            c1.metric("Numeric features", out.get("n_features", "N/A"))
             threshold = out.get("variance_threshold")
             c2.metric(
                 f"Components for {threshold:.0%} variance" if threshold else "Components needed",
-                out.get("n_components_for_threshold", "—"),
+                out.get("n_components_for_threshold", "N/A"),
             )
             pairs = out.get("high_correlation_pairs") or []
             c3.metric("Highly correlated pairs", len(pairs))
@@ -636,7 +649,7 @@ def render_governance(gov: dict[str, Any]) -> None:
         st.caption("AI-written code was switched off for this run.")
     backends = [b for b in gov.get("sandbox_backends") or [] if b != "refused"]
     if "subprocess" in backends:
-        note = " — some runs used Docker" if "docker" in backends else ""
+        note = ", some runs used Docker" if "docker" in backends else ""
         st.markdown(
             '<span class="iso-badge warn">Process-level isolation only (subprocess)'
             f'{note}</span>',
@@ -655,16 +668,16 @@ def render_governance(gov: dict[str, Any]) -> None:
         return
 
     def _ms(value: Any) -> str:
-        return f"{value:,.0f}" if isinstance(value, (int, float)) else "—"
+        return f"{value:,.0f}" if isinstance(value, (int, float)) else "N/A"
 
-    with st.expander(f"Audit log — {len(entries)} entr{'y' if len(entries) == 1 else 'ies'}"):
+    with st.expander(f"Audit log: {len(entries)} entr{'y' if len(entries) == 1 else 'ies'}"):
         st.dataframe(safe_df(pd.DataFrame([{
             "Time": str(e.get("timestamp") or "")[:19].replace("T", " "),
             "Tool": e.get("tool_name"),
             "Status": e.get("status"),
-            "Backend": e.get("backend") or "—",
+            "Backend": e.get("backend") or "N/A",
             "Duration (ms)": _ms(e.get("duration_ms")),
-            "SHA-256": (e.get("code_sha256") or "")[:12] or "—",
+            "SHA-256": (e.get("code_sha256") or "")[:12] or "N/A",
         } for e in entries])), width='stretch')
         st.caption(f"Full record: {gov.get('audit_log')}")
 

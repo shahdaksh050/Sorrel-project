@@ -457,3 +457,4 @@ After changing the palette and ramps, run the validator again: categorical with 
 - **D1 (recommended): stop at Phase 2.** Overview band, sections, takeaway titles, table views, legend isolation. No filters. Every number on screen matches the checked, full-data analysis.
 - **D2: add the filter row (DB12).** Useful for exploring, but it needs the "exploring a subset" labelling, and it is the largest dashboard item.
 - **D3: add cross-filtering as well (DB13).**
+

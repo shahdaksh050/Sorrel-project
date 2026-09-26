@@ -19,7 +19,9 @@ import re
 import time
 from typing import Any
 
+from src.core.audited_entry import GLYPH, audited_checks
 from src.core.chart_theme import vega_config
+from src.core.design_tokens import css_root_block
 from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.plain_language import describe_uncertainty, format_p, plainify
 
@@ -78,36 +80,28 @@ def _model_was_trained(llm_insights: dict[str, Any], tool_results: list[dict[str
 
 # "Ledger" (DESIGN.md): warm paper, friendly ink, one terracotta pen.
 # The shared report is the same warm sheet as the console, printed.
-_CSS = """
-:root {
+# Token values come from src.core.design_tokens (FrontendPlan.md 2.1) — this
+# file used to hand-type its own fourth copy of the same hex codes; --lift
+# and color-scheme aren't palette tokens, so they stay hardcoded here.
+# Built as an f-string root block plus a plain string for the rest of the
+# rules, rather than one big f-string, so none of the CSS below needs its
+# braces doubled.
+_CSS_ROOT = f"""
+:root {{
   color-scheme: light dark;
-  --stock:       #f7eedd;
-  --sheet:       #fffbf2;
-  --sheet-alt:   #f1e4cb;
-  --ink:         #3a2b1e;
-  --graphite:    #8a7660;
-  --pen:         #a34f20;
-  --risk:        #a33526;
-  --rule:        #e4d4bc;
-  --rule-faint:  #eee3cb;
+{css_root_block("day")}
   --lift:        0 4px 14px rgba(58,43,30,.14);
-}
+}}
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --stock:       #241c14;
-    --sheet:       #2f251a;
-    --sheet-alt:   #3a2e1f;
-    --ink:         #f3e9d8;
-    --graphite:    #d0c2a8;
-    --pen:         #f0a24a;
-    --risk:        #e2685a;
-    --rule:        #4a3c28;
-    --rule-faint:  #3a2e1f;
+@media (prefers-color-scheme: dark) {{
+  :root {{
+{css_root_block("night")}
     --lift:        0 4px 18px rgba(0,0,0,.35);
-  }
-}
+  }}
+}}
+"""
 
+_CSS = _CSS_ROOT + """
 * { box-sizing: border-box; }
 body {
   background: var(--stock);
@@ -154,6 +148,18 @@ th { background: var(--sheet-alt); color: var(--ink); font-weight: 700; font-siz
          padding: .25rem .85rem; font-size: .78rem; margin: 0 .4rem .4rem 0; }
 .footer { margin-top: 4rem; border-top: 1px solid var(--rule); padding-top: .8rem;
           color: var(--graphite); font-size: .8rem; }
+.check-row { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: .5rem; }
+.check { font-size: .78rem; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+.check.ok { color: var(--positive); }
+.check.risk { color: var(--risk); }
+.check.note { color: var(--graphite); font-weight: 500; }
+
+@media print {
+  .card, .card.exec, table, .chart { box-shadow: none; }
+  .card, .chart, table { page-break-inside: avoid; }
+  .wrap { max-width: none; }
+  a[href]:after { content: " (" attr(href) ")"; font-size: .75em; color: var(--graphite); }
+}
 """
 
 _FONTS_CDN = (
@@ -225,6 +231,27 @@ def _caveat_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [f for f in findings if f.get("kind") in _CAVEAT_FINDING_KINDS]
 
 
+#: FrontendPlan.md section 5, "Design rules" — same state->CSS-class mapping
+#: as the Streamlit console's version of this component (ui/components/cards.py),
+#: so the report and the console show identical trust marks (item 3.5).
+_CHECK_STATE_CLASS: dict[str, str] = {"pass": "ok", "fail": "risk", "neutral": "note"}
+
+
+def _check_row_html(evidence: dict[str, Any] | None) -> str:
+    """`<div class="check-row">` for one finding's audited checks, or ""
+    when it got no marks at all — an unrun check must never render as if it
+    passed (FrontendPlan.md risk #2), so "no marks" means no row, not an
+    empty one."""
+    marks = audited_checks(evidence)
+    if not marks:
+        return ""
+    spans = "".join(
+        f'<span class="check {_CHECK_STATE_CLASS[m.state]}">{GLYPH[m.state]} {_esc(m.label)}</span>'
+        for m in marks
+    )
+    return f'<div class="check-row">{spans}</div>'
+
+
 def _finding_evidence_html(finding: dict[str, Any]) -> str:
     """One evidence card: headline, analyst-facing detail, and the raw
     evidence numbers (effect/p-value/confidence) traceable to a tool result."""
@@ -256,6 +283,7 @@ def _finding_evidence_html(finding: dict[str, Any]) -> str:
     source = finding.get("source_tool")
     if source:
         bits.append(f"<br><span style='color:var(--graphite);font-size:.78rem;'>source: {_esc(source)}</span>")
+    bits.append(_check_row_html(finding.get("evidence")))
     return "".join(bits)
 
 
@@ -438,15 +466,38 @@ def build_html_report(
             f"<h2>The short version</h2><div class='card exec'>{_esc(executive_summary)}</div>"
         )
 
+    # ---- 7.9 headline layer's pool, computed early because the run-level
+    # verdict (just below) counts over the same findings — matching
+    # ui/tabs/answers_tab.py's `card_findings` (layer in exec/analyst, no
+    # caveat kinds, capped at 5), so the report and the console verdict
+    # agree on M, not just on the wording. ----
+    findings = findings or []
+    top_findings = _headline_findings(findings)
+
+    # ---- 3.5 run-level verdict — mirrors ui/tabs/answers_tab.py's "N of M
+    # held up" banner so the report and the console tell the same story.
+    # Findings the audits never touched (no marks at all) don't count
+    # toward M — a run with zero checked findings renders no verdict
+    # rather than a fake one. ----
+    audited_pool = [(f, audited_checks(f.get("evidence"))) for f in top_findings]
+    audited_pool = [(f, marks) for f, marks in audited_pool if marks]
+    total_checked = len(audited_pool)
+    if total_checked > 0:
+        held_up = sum(1 for _, marks in audited_pool if not any(m.state == "fail" for m in marks))
+        verdict = f"{held_up} of {total_checked} finding{'s' if total_checked != 1 else ''} held up."
+        needing_scrutiny = total_checked - held_up
+        if needing_scrutiny > 0:
+            verdict += f" {needing_scrutiny} need{'s' if needing_scrutiny == 1 else ''} more data."
+        sections.append(f'<div class="card exec">{_esc(verdict)}</div>')
+
     # ---- 7.9 headline layer — top findings from the shared finding bus.
     # Purely additive: when `findings` is empty/None this renders nothing
     # and the report falls back to the sections above/below exactly as
     # before (the required graceful-degradation path). ----
-    findings = findings or []
-    top_findings = _headline_findings(findings)
     if top_findings:
         headline_cards = "\n".join(
-            f'<div class="card {"exec" if i == 0 else "insight"}">{_esc(plainify(str(f.get("headline", ""))))}</div>'
+            f'<div class="card {"exec" if i == 0 else "insight"}">'
+            f'{_esc(plainify(str(f.get("headline", ""))))}{_check_row_html(f.get("evidence"))}</div>'
             for i, f in enumerate(top_findings)
         )
         sections.append("<h2>Top findings</h2>" + headline_cards)

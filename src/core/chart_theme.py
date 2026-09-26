@@ -2,12 +2,12 @@
 Chart Theme — single source of truth for the Ledger palette as it applies to
 *charts* (Round 7 items 7.17 and the Vega half of Q1).
 
-The other half of Q1 — the landing-page HTML/CSS palette — is maintained
-separately (see DESIGN.md and ui/landing.py) and is out of scope here.
-
-DESIGN.md's "Tokens — ink" table is canonical; this module is a direct
-transcription of it, not an independent source. If the two ever disagree,
-DESIGN.md wins and this file is out of date.
+The page-chrome tokens (stock/sheet/ink/etc.) now live in
+`src/core/design_tokens.py`, which this module imports rather than
+retranscribing (FrontendPlan.md item 2.1). What stays local to this module is
+chart-only: the categorical/sequential/diverging ink sets DESIGN.md calls out
+as separate from the two UI pens ("Chart categories extend the two pens with
+four warm plot inks"), plus the Vega-Lite config assembly.
 
 Why this module exists: three places used to each hand-roll their own copy
 of the same handful of hex codes (`src/core/html_report.py`'s
@@ -21,10 +21,44 @@ regenerating anything.
 NOTE for a future pass: `app.py`'s `_get_vega_config()` should be changed to
 `return vega_config()` instead of hand-maintaining its own copy of this
 palette. Not done here because app.py is off-limits for this change set.
+
+FrontendPlan.md item 1.4: the previous six-slot categorical range failed the
+dataviz skill's colorblind-separation and normal-vision checks in both modes,
+and used `--risk` as slot 2 — meaning a chart series colored red meant
+"second category" while the rest of the UI reserves red for "may not hold"
+(DESIGN.md, "The rule about red"). The replacement below is validated (all
+checks PASS, no warnings) against the new A2 buff-green chart surfaces via
+the dataviz skill's `validate_palette.js`:
+    node validate_palette.js "<hexes>" --mode light --surface "#f7f8ef"
+    node validate_palette.js "<hexes>" --mode dark  --surface "#242a20"
+`--risk` no longer appears in either range — it stays a status color only.
 """
 from __future__ import annotations
 
 from typing import Any
+
+from src.core.design_tokens import (
+    ACCENT_DAY,
+    ACCENT_NIGHT,
+    GRAPHITE_DAY,
+    GRAPHITE_NIGHT,
+    INK_DAY,
+    INK_NIGHT,
+    PEN_DAY,
+    PEN_NIGHT,
+    POSITIVE_DAY,
+    POSITIVE_NIGHT,
+    RISK_DAY,
+    RISK_NIGHT,
+    RULE_DAY,
+    RULE_FAINT_DAY,
+    RULE_FAINT_NIGHT,
+    RULE_NIGHT,
+    SHEET_DAY,
+    SHEET_NIGHT,
+    STOCK_DAY,
+    STOCK_NIGHT,
+)
 
 __all__ = [
     "ACCENT_DAY",
@@ -58,53 +92,32 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# Tokens — transcribed from DESIGN.md's "Tokens — ink" table verbatim.
-# Day = light palette, Night = dark palette (`prefers-color-scheme: dark`).
+# Page-chrome tokens (stock/sheet/ink/etc.) are imported from
+# `src/core/design_tokens.py` above — this module transcribes nothing.
 # ---------------------------------------------------------------------------
 
-STOCK_DAY = "#f7eedd"
-STOCK_NIGHT = "#241c14"
-
-SHEET_DAY = "#fffbf2"
-SHEET_NIGHT = "#2f251a"
-
-INK_DAY = "#3a2b1e"
-INK_NIGHT = "#f3e9d8"
-
-GRAPHITE_DAY = "#8a7660"
-GRAPHITE_NIGHT = "#b8a688"
-
-PEN_DAY = "#a34f20"
-PEN_NIGHT = "#f0a24a"
-
-RISK_DAY = "#a33526"
-RISK_NIGHT = "#e2685a"
-
-POSITIVE_DAY = "#5b8c5a"
-POSITIVE_NIGHT = "#7fb77e"
-
-RULE_DAY = "#e4d4bc"
-RULE_NIGHT = "#4a3c28"
-
-RULE_FAINT_DAY = "#eee3cb"
-RULE_FAINT_NIGHT = "#3a2e1f"
-
-# Decorative only, per DESIGN.md.
-ACCENT_DAY = "#e08a3e"
-ACCENT_NIGHT = "#d99a4e"
-
-# "Chart categories extend the two pens with four warm plot inks" (DESIGN.md,
-# "Tokens — ink"). DESIGN.md gives the Day row verbatim:
-#   Day `#a34f20 #a33526 #c08a2e #5b8c5a #8a7660 #b5714a`
-# It does not specify a Night chart-category row. The Night list below is
-# built only from documented Night tokens (pen, risk, positive, graphite,
-# accent) plus exactly one interpolated gold, so it keeps the same six-color
-# shape as Day without inventing more palette than necessary.
+# Colorblind-safe categorical palette (FrontendPlan.md section 4.2), fixed
+# hue order, never cycled. Slot 1 is the Ledger pen in both modes except one
+# deliberate exception: Night slot 1 is NOT `PEN_NIGHT` (`#f0a24a`), which is
+# too light to read as a chart mark against the dark chart surface — chart
+# inks and UI pens are separate token sets by design. `--risk` (`RISK_DAY`/
+# `RISK_NIGHT`) is deliberately absent from both ranges; see the module
+# docstring. A 7th series folds into "Other" rather than cycling a 7th hue.
 CATEGORY_RANGE_DAY: list[str] = [
-    PEN_DAY, RISK_DAY, "#c08a2e", POSITIVE_DAY, GRAPHITE_DAY, "#b5714a",
+    PEN_DAY,     # 1. Ledger rust (the pen)
+    "#1f6aa0",   # 2. Ink blue
+    "#3f7f4a",   # 3. Leaf green
+    "#6d4a8c",   # 4. Plum
+    "#9a7418",   # 5. Ochre
+    "#c4648a",   # 6. Rose
 ]
 CATEGORY_RANGE_NIGHT: list[str] = [
-    PEN_NIGHT, RISK_NIGHT, "#d9a53e", POSITIVE_NIGHT, GRAPHITE_NIGHT, ACCENT_NIGHT,
+    "#cc7f34",   # 1. Ledger rust, chart-surface variant (not PEN_NIGHT)
+    "#4d97cf",   # 2. Ink blue
+    "#4fa46a",   # 3. Leaf green
+    "#9d7fd0",   # 4. Plum
+    "#a8892a",   # 5. Ochre
+    "#c86e92",   # 6. Rose
 ]
 
 FONT_HEADING = "Baloo 2, 'Mukta', sans-serif"
@@ -211,8 +224,8 @@ def vega_config(dark: bool = False) -> dict[str, Any]:
             "titleColor": graphite,
             "gridColor": rule,
             "gridDash": [2, 3],
-            "domainColor": ink,
-            "tickColor": ink,
+            "domainColor": rule,
+            "tickColor": rule,
             "labelFont": FONT_BODY,
             "labelFontSize": 11,
             "titleFont": FONT_HEADING,

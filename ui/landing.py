@@ -9,46 +9,32 @@ from typing import Any
 
 import streamlit.components.v1 as components
 
+from src.core.design_tokens import palette
+
 # Canonical "Ledger" design-system tokens (see DESIGN.md, "Tokens — ink").
 # This is the single Python source of truth for the two hexes this module needs
 # (the iframe/background colour shown while the static landing component loads).
-# The static HTML assets (ui/landing_component/index.html, frontend-landing/index.html,
-# and their non-Python siblings) cannot import this constant, so their inline
-# :root/.theme-day CSS custom properties are hand-kept in sync with these values
-# and with DESIGN.md — look for the "Keep in sync" comments above each :root block.
-# Ledger design-system tokens (DESIGN.md) — single source of truth. The
-# static landing HTML (ui/landing_component/index.html, frontend-landing/)
-# duplicates these as literal CSS hexes (no build step wires them together),
-# so tests assert against THIS dict rather than re-typing hex literals a
-# second time — the exact "give the palette a single source of truth and
-# have both the code and the tests import it" fix IMPROVEMENTS.md's Q1 asks
-# for. Keep in sync with DESIGN.md's ink token table if it ever changes.
-LEDGER_TOKENS_DAY: dict[str, str] = {
-    "stock": "#f7eedd",
-    "sheet": "#fffbf2",
-    "ink": "#3a2b1e",
-    "graphite": "#8a7660",
-    "pen": "#a34f20",
-}
-LEDGER_TOKENS_NIGHT: dict[str, str] = {
-    "stock": "#241c14",
-    "sheet": "#2f251a",
-    "ink": "#f3e9d8",
-    "graphite": "#b8a688",
-    "pen": "#f0a24a",
-}
+# The static HTML asset (ui/landing_component/index.html) cannot import this
+# constant, so its inline :root/.theme-day CSS custom properties are hand-kept
+# in sync with these values — look for the "Keep in sync" comment above its
+# :root block.
+# FrontendPlan.md item 2.1 — these two dicts used to hand-type a third
+# independent copy of the same hex codes (the audit that found T2/T3/T6
+# missed this file); they now pull the 5 keys this module needs out of
+# src.core.design_tokens.palette(), the single Python source of truth.
+# Names and shape (dict[str, str], these exact 5 keys) are unchanged because
+# tests/test_landing.py and tests/test_landing_v2.py import them by name.
+LEDGER_TOKENS_DAY: dict[str, str] = {k: palette("day")[k] for k in ("stock", "sheet", "ink", "graphite", "pen")}
+LEDGER_TOKENS_NIGHT: dict[str, str] = {k: palette("night")[k] for k in ("stock", "sheet", "ink", "graphite", "pen")}
 
-# Determine component directory: prefers the next-generation frontend-landing directory if present
-_LEGACY_DIR: str = os.path.join(os.path.dirname(__file__), "landing_component")
-_V2_DIR: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend-landing"))
+# landing_component is the one live implementation. This resolver used to prefer a sibling
+# directory whenever its index.html existed, which it always did — so every edit to
+# landing_component/index.html was silently rendering nothing. Fixed by dropping that preference.
+_component_dir: str = os.path.join(os.path.dirname(__file__), "landing_component")
 
 _env_override: str | None = os.environ.get("DSA_LANDING_DIR")
 if _env_override and os.path.isdir(_env_override):
-    _component_dir: str = _env_override
-elif os.path.isdir(_V2_DIR) and os.path.isfile(os.path.join(_V2_DIR, "index.html")):
-    _component_dir = _V2_DIR
-else:
-    _component_dir = _LEGACY_DIR
+    _component_dir = _env_override
 
 # Declare the component
 _landing_component: Any = components.declare_component("landing", path=_component_dir)

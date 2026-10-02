@@ -25,6 +25,7 @@ import difflib
 import json
 import os
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -289,6 +290,14 @@ class AgentController:
         self.on_step_callback: Any = None
         # Optional callback fired after each LLM iteration: (iteration, stage) -> None
         self.on_iteration_callback: Any = None
+        # Optional zero-arg callable, polled at safe checkpoints (before each
+        # LLM call, between steps, after a step batch). True asks the run to
+        # wind down: a cooperative stop, never a forced cancel, so a tool that
+        # is already running finishes first.
+        self.should_stop: Callable[[], bool] | None = None
+        # Optional callback fired with each new Finding as a step adds it.
+        self.on_finding_callback: Callable[[Finding], None] | None = None
+        self._stopped: bool = False
 
     # ------------------------------------------------------------------
     # 7.4 — Analysis-mode decision
@@ -747,6 +756,45 @@ class AgentController:
             degradations.append(note)
             self.memory.set_context("degradations", degradations)
 
+    def _stop_requested(self) -> bool:
+        """True once the caller's `should_stop` hook asks the run to end.
+
+        Sticky: after the first True the run stays stopped. The first time it
+        fires it records a degradation, so both reports say the result is
+        partial instead of presenting it as a finished analysis.
+        """
+        if self._stopped:
+            return True
+        if self.should_stop is None:
+            return False
+        try:
+            requested = bool(self.should_stop())
+        except Exception:
+            # A broken hook must never abort an analysis; treat it as "keep going".
+            return False
+        if requested:
+            self._stopped = True
+            self._add_degradation(
+                "The run was stopped before it finished, so this report covers only the "
+                "steps completed up to that point."
+            )
+        return requested
+
+    def _notify_findings(self, findings: list[Finding]) -> None:
+        """Hand each new finding to `on_finding_callback`, if one is set.
+
+        A progress display must never break the analysis, so a failing callback
+        is skipped rather than raised.
+        """
+        callback = self.on_finding_callback
+        if callback is None:
+            return
+        for finding in findings:
+            try:
+                callback(finding)
+            except Exception:  # display hook: never fatal to the run
+                continue
+
     def _llm_budget_exhausted(self) -> bool:
         """MAX_LLM_TOKENS_PER_RUN reached — no further LLM calls this run.
         Records the degradation (once) the first time it is hit."""
@@ -908,6 +956,12 @@ class AgentController:
 
                 if self.on_iteration_callback:
                     self.on_iteration_callback(iteration, stage_label)
+
+                # ---- Cooperative stop: before any LLM call or step this cycle ----
+                if self._stop_requested():
+                    console.print("[yellow]⏹ Stop requested — synthesising a report from results so far.[/]")
+                    final_result = self._deterministic_final()
+                    break
 
                 # ---- Deterministic mode: no LLM, by choice ----
                 # Distinct from the failure path below. Nothing is "degraded"
@@ -1072,6 +1126,13 @@ class AgentController:
                 progress.update(task_id, description=f"Stage 3 — Executing {len(steps)} tool(s)…")
                 self._execute_steps(steps)
 
+                # ---- Cooperative stop: after a step batch ----
+                if self._stop_requested():
+                    console.print("[yellow]⏹ Stop requested — synthesising a report from results so far.[/]")
+                    self.memory.save()
+                    final_result = self._deterministic_final()
+                    break
+
                 # ---- Stage 6: RLM Decomposition (if enabled & many features, once only) ----
                 if self.enable_rlm and not self._rlm_decomposed and self._should_decompose():
                     progress.update(task_id, description="Stage 6 — RLM task decomposition…")
@@ -1093,6 +1154,9 @@ class AgentController:
         # must not leak into the persisted report/raw JSON. The engine's
         # own running totals are the real place for this to live.
         final_result.pop("_rlm_usage", None)
+        if self._stopped:
+            # Only present on a stopped run, so a finished run's result is unchanged.
+            final_result["stopped"] = True
         if self._rlm_engine is not None:
             self.memory.set_context("llm_usage", self._rlm_engine.usage_summary())
 
@@ -2166,6 +2230,7 @@ class AgentController:
                         if note not in finding.caveats:
                             finding.caveats.append(note)
                 self.memory.add_findings(new_findings)
+                self._notify_findings(new_findings)
                 col_names = [c.name for c in self.last_profile.columns] if self.last_profile else []
                 for f in new_findings:
                     m = f.measure or ""
@@ -2483,6 +2548,8 @@ class AgentController:
         total_steps = len(ordered)
         batch: list[tuple[int, AnalysisStep]] = []
         for idx, step in enumerate(ordered, 1):
+            if self._stop_requested():
+                return  # steps not yet started, including a pending batch, are dropped
             if step.tool_name in self._CONCURRENT_SAFE_TOOLS:
                 batch.append((idx, step))
                 continue

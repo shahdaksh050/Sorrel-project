@@ -1,5 +1,10 @@
 """
 Answers Tab (Executive Briefing & Key Findings).
+
+Reading order: the question and its answer, the verdict, the evidence (finding
+cards), what to be careful about, what to do, then supporting context and the
+collapsed technical detail. Findings, verdict, coverage and recommendations
+come from the `RunView`; `tool_results` is read only for model detail.
 """
 from __future__ import annotations
 
@@ -8,8 +13,8 @@ from typing import Any
 
 import streamlit as st
 
-from src.core.audited_entry import audited_checks
 from src.core.plain_language import plainify
+from src.core.run_view import RunView, build_run_view
 from ui.components.cards import (
     find_chart_by_id,
     find_tool,
@@ -32,34 +37,15 @@ def render_answers_tab(
     prof: dict[str, Any] | None,
     preview_df: Any | None,
     vega_cfg: dict[str, Any],
-    objective: str,
+    run_view: RunView | None = None,
 ) -> None:
     """Render Tier 1: Executive Briefing & Key Discoveries."""
+    # A finished run always carries a view; the fallback only protects a session
+    # that predates it, and it shows nothing the report did not already hold.
+    view = run_view or build_run_view(report, {}, objective="", is_sample=False)
+
     train_out = find_tool(tool_results, "train_model")
     corr_out = find_tool(tool_results, "correlation_analysis")
-
-    # Case Heading: the objective itself is the heading, not a labelled eyebrow above it.
-    user_obj = objective.strip()
-    if user_obj and report.get("reasoning"):
-        st.markdown(
-            '<div class="exec-directive">'
-            f'<h2>You asked: {html.escape(user_obj)}</h2>'
-            f'<p class="dir-content">{html.escape(plainify(str(report["reasoning"])))}</p>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-    elif report.get("reasoning"):
-        st.markdown(
-            '<div class="exec-directive">'
-            f'<p class="dir-content">{html.escape(plainify(str(report["reasoning"])))}</p>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-    du_html = render_data_understanding(report.get("data_understanding") or {})
-    if du_html:
-        st.markdown("#### How we read your data")
-        st.markdown(du_html, unsafe_allow_html=True)
 
     best_model = report.get("best_model") or "N/A"
     best_cv = "0"
@@ -84,40 +70,31 @@ def render_answers_tab(
     prof = prof or {}
     q = int(prof.get("quality_score", 0))
 
-    # When there's no ML target, promote whatever analysis actually ran
-    if not train_out:
-        dominant = (
-            find_tool(tool_results, "cluster_data")
-            or find_tool(tool_results, "time_series_analysis")
-            or find_tool(tool_results, "geospatial_analysis")
-            or find_tool(tool_results, "text_analysis")
-            or find_tool(tool_results, "dimensionality_analysis")
+    # 1. The question as the heading, the answer under it.
+    answer = html.escape(plainify(view.reasoning)) if view.reasoning else ""
+    if view.objective:
+        st.markdown(
+            '<div class="exec-directive">'
+            f"<h2>You asked: {html.escape(view.objective)}</h2>"
+            + (f'<p class="dir-content">{answer}</p>' if answer else "")
+            + "</div>",
+            unsafe_allow_html=True,
         )
-        if dominant and dominant.get("summary"):
-            st.info(f"**What we found:** {dominant['summary']}")
+    elif answer:
+        st.markdown(
+            f'<div class="exec-directive"><p class="dir-content">{answer}</p></div>',
+            unsafe_allow_html=True,
+        )
 
-    all_findings: list[dict[str, Any]] = report.get("findings") or []
-    dash_finding_ids: set[str] = {str(c["finding_id"]) for c in (dash or []) if c.get("finding_id")}
-    card_findings = [
-        f
-        for f in all_findings
-        if f.get("layer") in ("exec", "analyst")
-        and f.get("kind") not in ("method_fit", "coverage_gap")
-    ][:5]
-
-    # Run-level verdict (FrontendPlan.md section 5): only shown when at least
-    # one finding's audits actually ran this run, since a fake "0 of 0" would
-    # betray the "we check every answer twice" promise. M = findings that
-    # were audited at all, N = how many of those held up (no failed check).
-    audited = [(f, audited_checks(f.get("evidence"))) for f in card_findings]
-    audited = [(f, marks) for f, marks in audited if marks]
-    m_count = len(audited)
-    if m_count > 0:
-        held_up = sum(1 for _, marks in audited if not any(mk.state == "fail" for mk in marks))
-        needs_more = m_count - held_up
+    # 2. Verdict. Only when audits actually ran: a "0 of 0" would claim a check
+    # that did not happen.
+    verdict = view.verdict
+    if verdict is not None:
         sub_lines = []
-        if needs_more > 0:
-            sub_lines.append(f"{needs_more} need{'s' if needs_more == 1 else ''} more data.")
+        if verdict.needs_more > 0:
+            sub_lines.append(
+                f"{verdict.needs_more} need{'s' if verdict.needs_more == 1 else ''} more data."
+            )
         if gap_val is not None:
             sub_lines.append(
                 "The model held up on new data."
@@ -125,45 +102,88 @@ def render_answers_tab(
                 else "The model may have memorised examples, see below."
             )
         st.markdown(
-            f'<div class="run-banner">{held_up} of {m_count} finding{"s" if m_count != 1 else ""} held up.'
+            f'<div class="run-banner">{verdict.held_up} of {verdict.audited} '
+            f'finding{"s" if verdict.audited != 1 else ""} held up.'
             + "".join(f'<span class="sub">{html.escape(s)}</span>' for s in sub_lines)
-            + '</div>',
+            + "</div>",
             unsafe_allow_html=True,
         )
-    if gap_val is not None:
-        st.markdown(render_defect_stamp(gap_val), unsafe_allow_html=True)
 
+    # 3. Evidence: the findings and their check rows.
     st.markdown("#### What we found")
-    if card_findings:
-        for f in card_findings:
+    if view.headline_findings:
+        dash_finding_ids: set[str] = {
+            str(c["finding_id"]) for c in (dash or []) if c.get("finding_id")
+        }
+        for f in view.headline_findings:
             st.markdown(render_finding_card(f, dash_finding_ids), unsafe_allow_html=True)
-    elif all_findings:
-        st.caption(
-            "No headline-worthy findings cleared the bar for this run. "
-            "See the Details tab for the full finding list."
-        )
     else:
-        ins_list = report.get("insights", [])
-        if ins_list:
-            for ins in ins_list:
+        # No cards to lead with: promote whatever analysis actually ran. With
+        # cards present this line would only repeat the first one.
+        dominant = None
+        if not train_out:
+            dominant = (
+                find_tool(tool_results, "cluster_data")
+                or find_tool(tool_results, "time_series_analysis")
+                or find_tool(tool_results, "geospatial_analysis")
+                or find_tool(tool_results, "text_analysis")
+                or find_tool(tool_results, "dimensionality_analysis")
+            )
+        has_dominant = bool(dominant and dominant.get("summary"))
+        if dominant and has_dominant:
+            st.info(f"**What we found:** {dominant['summary']}")
+        if view.findings:
+            st.caption(
+                "No headline-worthy findings cleared the bar for this run. "
+                "See the Details tab for the full finding list."
+            )
+        elif view.insights:
+            for ins in view.insights:
                 st.markdown(
-                    f'<div class="ic"><span class="mk">Insight</span>{html.escape(plainify(str(ins)))}</div>',
+                    f'<div class="ic"><span class="mk">Insight</span>{html.escape(plainify(ins))}</div>',
                     unsafe_allow_html=True,
                 )
-        else:
+        elif not has_dominant:
             st.caption("No explicit statistical discoveries recorded.")
 
+    # 4. Caveats, in one always-visible block. The model stamp is never hidden.
+    unanswered = view.coverage.get("unanswered") or []
+    small_notes = list(
+        dict.fromkeys(
+            str(c)
+            for f in view.findings
+            for c in f.get("caveats") or []
+            if "to avoid identifying individuals" in str(c)
+        )
+    )
+    du_html = render_data_understanding(report.get("data_understanding") or {})
+    if gap_val is not None or unanswered or small_notes or du_html:
+        st.markdown("#### Be careful about")
+        if gap_val is not None:
+            st.markdown(render_defect_stamp(gap_val), unsafe_allow_html=True)
+        if unanswered:
+            st.caption(f"⚠ {len(unanswered)} question(s) considered, not answered.")
+            with st.expander("What wasn't answered, and why"):
+                for u in unanswered:
+                    st.markdown(f"- {md_text(u.get('text', ''))}")
+        if small_notes:
+            st.caption("Small groups combined. " + " ".join(small_notes[:3]))
+        if du_html:
+            st.markdown("##### How we read your data")
+            st.markdown(du_html, unsafe_allow_html=True)
+
+    # 5. Next action.
     st.markdown("#### What to do")
-    rec_list = report.get("recommendations", [])
-    if rec_list:
-        for rec in rec_list:
+    if view.recommendations:
+        for rec in view.recommendations:
             st.markdown(
-                f'<div class="rc"><span class="mk">Do</span>{html.escape(plainify(str(rec)))}</div>',
+                f'<div class="rc"><span class="mk">Do</span>{html.escape(plainify(rec))}</div>',
                 unsafe_allow_html=True,
             )
     else:
         st.caption("No operational recommendations generated.")
 
+    # 6. Supporting context.
     st.markdown("#### At a glance")
     row_count = (
         (meta.row_count if meta else None)
@@ -171,11 +191,8 @@ def render_answers_tab(
         or (len(preview_df) if preview_df is not None else None)
     )
     caveat_count = sum(
-        1 for f in all_findings if f.get("kind") in ("method_fit", "coverage_gap")
+        1 for f in view.findings if f.get("kind") in ("method_fit", "coverage_gap")
     )
-    coverage = report.get("coverage") or {}
-    unanswered = coverage.get("unanswered") or []
-
     trust_cells = [
         ("Data quality", f"{q}/100"),
         ("Rows analyzed", f"{row_count:,}" if isinstance(row_count, int) else "N/A"),
@@ -188,25 +205,9 @@ def render_answers_tab(
             f'<div class="v">{html.escape(v)}</div></div>'
             for k, v in trust_cells
         )
-        + '</div>',
+        + "</div>",
         unsafe_allow_html=True,
     )
-    if unanswered:
-        st.caption(f"⚠ {len(unanswered)} question(s) considered, not answered.")
-        with st.expander("What wasn't answered, and why"):
-            for u in unanswered:
-                st.markdown(f"- {md_text(u.get('text', ''))}")
-
-    small_notes = list(
-        dict.fromkeys(
-            str(c)
-            for f in all_findings
-            for c in f.get("caveats") or []
-            if "to avoid identifying individuals" in str(c)
-        )
-    )
-    if small_notes:
-        st.caption("Small groups combined. " + " ".join(small_notes[:3]))
 
     render_run_compare()
 
@@ -219,7 +220,7 @@ def render_answers_tab(
         key="ask_data_q",
     )
     if ask_q.strip():
-        matches = search_findings(ask_q, all_findings)
+        matches = search_findings(ask_q, list(view.findings))
         if matches:
             for m in matches:
                 st.success(f"Based on what was found: {plainify(str(m.get('headline', '')))}")

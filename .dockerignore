@@ -6,7 +6,6 @@
 output
 data
 tests
-frontend-landing
 3d-ui-skill
 *.zip
 *.log

@@ -199,3 +199,31 @@ class TestChiSquareValidity:
         assert result.status == "success"
         assert result.output["test_name"] == "Fisher's Exact Test"
         assert "expected_frequency_warning" in result.output
+
+
+class TestBooleanFeaturesAreCategorical:
+    """pandas calls booleans numeric; a yes/no flag still needs a categorical test."""
+
+    def test_balanced_yes_no_feature_gets_chi_square_not_mann_whitney(self, tmp_path: Path) -> None:
+        rng = np.random.default_rng(0)
+        n = 400
+        group = rng.choice(["a", "b"], n)
+        feature = np.where(rng.random(n) < np.where(group == "a", 0.7, 0.3), "yes", "no")
+        p = tmp_path / "balanced.csv"
+        pd.DataFrame({"feature": feature, "group": group}).to_csv(p, index=False)
+        result = SelectStatisticalTestTool().run(file_path=str(p), feature_column="feature", group_column="group")
+        assert result.status == "success"
+        assert result.output["test_name"] == "Chi-Square Test of Independence"
+        assert result.output["significant"] is True  # the planted association is found
+
+    def test_a_flag_is_not_picked_as_the_default_measure(self, tmp_path: Path) -> None:
+        rng = np.random.default_rng(1)
+        n = 200
+        df = pd.DataFrame(
+            {"is_vip": rng.choice(["yes", "no"], n), "spend": rng.normal(50, 10, n), "tier": rng.choice(["a", "b"], n)}
+        )
+        p = tmp_path / "flag.csv"
+        df.to_csv(p, index=False)
+        result = SelectStatisticalTestTool().run(file_path=str(p), group_column="tier")
+        assert result.status == "success"
+        assert result.output.get("feature_column", "spend") != "is_vip"

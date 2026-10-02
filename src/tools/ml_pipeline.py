@@ -631,7 +631,9 @@ def _detect_formula_leakage(df: pd.DataFrame, target: str, features: list[str]) 
     return warnings
 
 
-def _encode_target(y: pd.Series[Any]) -> tuple[pd.Series[Any], list[str]]:
+def _encode_target(
+    y: pd.Series[Any], words: dict[str, str] | None = None
+) -> tuple[pd.Series[Any], list[str]]:
     """
     Deterministically encode classification targets to contiguous integers 0..k-1.
 
@@ -639,8 +641,20 @@ def _encode_target(y: pd.Series[Any]) -> tuple[pd.Series[Any], list[str]]:
     evaluate produce identical encodings for the same data. Numeric labels such
     as 1..5 must be encoded too: XGBoost rejects classes that do not start at 0.
     Returns (encoded_y, class_labels) with the original labels as strings.
+
+    A yes/no target that ingestion turned into a boolean column keeps the file's own
+    words (`words`, recorded by `coerce_types`), so reports say "no"/"yes" and not 0/1.
     """
     from sklearn.preprocessing import LabelEncoder
+
+    if pd.api.types.is_bool_dtype(y) and not y.isna().any():
+        present = [flag for flag in (False, True) if bool((y == flag).any())]
+        names = {False: (words or {}).get("false", "False"), True: (words or {}).get("true", "True")}
+        index = {flag: i for i, flag in enumerate(present)}
+        encoded_bool = pd.Series(
+            [index[bool(v)] for v in y], index=y.index, name=y.name, dtype="int64"
+        )
+        return encoded_bool, [names[flag] for flag in present]
 
     numeric = pd.api.types.is_numeric_dtype(y) and str(y.dtype) != "bool"
     encoder = LabelEncoder()
@@ -857,6 +871,7 @@ class TrainModelTool(BaseTool):
         from sklearn.model_selection import cross_val_score
 
         df = _read_df(file_path)
+        target_words: dict[str, str] | None = (df.attrs.get("boolean_labels") or {}).get(target_column)
 
         if target_column not in df.columns:
             raise ToolExecutionError(f"Target column '{target_column}' not in dataset.")
@@ -894,7 +909,7 @@ class TrainModelTool(BaseTool):
         balanced = False
         scale_pos_weight = 1.0
         if task_type == "classification":
-            y, class_labels = _encode_target(y)
+            y, class_labels = _encode_target(y, target_words)
             # Act on class imbalance instead of just warning about it
             counts = y.value_counts()
             if len(counts) >= 2:
@@ -1613,6 +1628,7 @@ class EvaluateModelTool(BaseTool):
             raise ToolExecutionError(f"Model file not found: {model_path}")
 
         df = _read_df(file_path)
+        target_words: dict[str, str] | None = (df.attrs.get("boolean_labels") or {}).get(target_column)
         if target_column not in df.columns:
             raise ToolExecutionError(f"Target column '{target_column}' not in dataset.")
 
@@ -1622,7 +1638,7 @@ class EvaluateModelTool(BaseTool):
         X, y, _treatments = _prepare_features(df, target_column)
         class_labels: list[str] = []
         if task_type == "classification":
-            y, class_labels = _encode_target(y)
+            y, class_labels = _encode_target(y, target_words)
 
         with open(model_path, "rb") as f:
             model = pickle.load(f)

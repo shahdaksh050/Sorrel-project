@@ -411,8 +411,8 @@ class SelectStatisticalTestTool(BaseTool):
                     return str(c.name)
         for col in df.columns:
             series = df[col]
-            if not pd.api.types.is_numeric_dtype(series):
-                continue
+            if not pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+                continue  # a yes/no flag is not a measure
             clean = series.dropna()
             if clean.nunique() <= 1:
                 continue
@@ -626,7 +626,11 @@ class SelectStatisticalTestTool(BaseTool):
         # (_chi_square) never uses them, and family mode calls this once per
         # candidate dimension, so skipping the numeric-only work below on
         # every categorical candidate matters on a wide dataset.
-        if not pd.api.types.is_numeric_dtype(df_clean[feature_column]):
+        # A yes/no flag is a category too: pandas calls booleans numeric, but Mann-Whitney
+        # on 0/1 is the wrong test for it, and a sparse 2x2 needs Fisher's exact.
+        if not pd.api.types.is_numeric_dtype(df_clean[feature_column]) or pd.api.types.is_bool_dtype(
+            df_clean[feature_column]
+        ):
             return self._chi_square(df_clean, feature_column, group_column, alpha)
 
         # One `.to_numpy(dtype=float)` per group, not

@@ -491,6 +491,16 @@ def coerce_types(df: pd.DataFrame, delimiter: str | None = None) -> tuple[pd.Dat
 
         if to_kind == "boolean":
             out[col] = new_col.astype("boolean")
+            # Keep the words the file used ("yes"/"no", "Y"/"N"...) so a model's class labels
+            # and reports can say them, instead of 0/1 or True/False.
+            is_true = parsed.map(lambda v: isinstance(v, (bool, np.bool_)) and bool(v))
+            is_false = parsed.map(lambda v: isinstance(v, (bool, np.bool_)) and not bool(v))
+            words = {}
+            if is_true.any():
+                words["true"] = str(non_null[is_true].iloc[0])
+            if is_false.any():
+                words["false"] = str(non_null[is_false].iloc[0])
+            out.attrs.setdefault("boolean_labels", {})[str(col)] = words
         else:
             out[col] = pd.to_numeric(new_col, errors="coerce")
 

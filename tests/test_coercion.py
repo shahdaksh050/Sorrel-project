@@ -232,3 +232,23 @@ class TestSentinelAtoms:
         out, coercions = coerce_types(df)
         assert out.equals(df)
         assert not [c for c in coercions if c.rule == "sentinel"]
+
+
+class TestBooleanWordsAreKept:
+    """Ingestion turns yes/no columns into booleans; the original words must survive for reports."""
+
+    def test_yes_no_words_are_recorded(self) -> None:
+        df = pd.DataFrame({"churn": ["yes", "no", "yes", "no", "no"], "x": [1, 2, 3, 4, 5]})
+        out, coercions = coerce_types(df)
+        assert str(out["churn"].dtype) == "boolean"
+        assert out.attrs["boolean_labels"]["churn"] == {"true": "yes", "false": "no"}
+        assert any(c.rule == "yes_no" for c in coercions)
+
+    def test_other_word_pairs_keep_their_own_spelling(self) -> None:
+        df = pd.DataFrame({"flag": ["Y", "N", "N", "Y", "N", "Y"]})
+        out, _ = coerce_types(df)
+        assert out.attrs["boolean_labels"]["flag"] == {"true": "Y", "false": "N"}
+
+    def test_a_column_that_stays_text_records_nothing(self) -> None:
+        out, _ = coerce_types(pd.DataFrame({"city": ["Pune", "Delhi", "Pune"]}))
+        assert "city" not in out.attrs.get("boolean_labels", {})

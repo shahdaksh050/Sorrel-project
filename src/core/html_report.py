@@ -3,7 +3,8 @@ HTML Report Builder — a single shareable artifact for the whole analysis.
 
 Produces a self-contained `report.html`: executive summary driven by the
 user's objective, key insights, model drivers, metrics, the full interactive
-dashboard (Vega-Lite via the vega-embed CDN), and the tool execution log.
+dashboard (Vega-Lite, embedded inline from static/ so it opens offline, with a
+data table behind every chart), and the tool execution log.
 
 Rules:
   - Pure string building, no I/O — the controller writes the file.
@@ -24,6 +25,7 @@ from src.core.chart_theme import vega_config
 from src.core.design_tokens import css_root_block
 from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.plain_language import describe_uncertainty, format_p, plainify
+from src.core.report_assets import report_assets
 
 # ---------------------------------------------------------------------------
 # 3a — executive summary: prefer the LLM's own `insights` over its raw
@@ -143,6 +145,9 @@ th { background: var(--sheet-alt); color: var(--ink); font-weight: 700; font-siz
             font-family: 'Baloo 2', 'Mukta', sans-serif; }
 .chart p { margin: .15rem 0 .9rem; color: var(--graphite); font-size: .85rem; max-width: 68ch; }
 .vega-holder { width: 100%; }
+.chart-data { font-size: .78rem; margin: .4rem 0; }
+.chart-data caption { text-align: left; color: var(--graphite); padding-bottom: .3rem; }
+.chart-data-details summary { cursor: pointer; font-size: .8rem; color: var(--graphite); margin-top: .5rem; }
 .badge { display: inline-block; border: 1px solid var(--pen); color: var(--pen);
          background: var(--sheet); border-radius: 999px; font-weight: 600;
          padding: .25rem .85rem; font-size: .78rem; margin: 0 .4rem .4rem 0; }
@@ -157,23 +162,11 @@ th { background: var(--sheet-alt); color: var(--ink); font-weight: 700; font-siz
 @media print {
   .card, .card.exec, table, .chart { box-shadow: none; }
   .card, .chart, table { page-break-inside: avoid; }
+  .chart-data-details { display: none; }
   .wrap { max-width: none; }
   a[href]:after { content: " (" attr(href) ")"; font-size: .75em; color: var(--graphite); }
 }
 """
-
-_FONTS_CDN = (
-    '<link rel="preconnect" href="https://fonts.googleapis.com">'
-    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-    '<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800'
-    '&family=Mukta:wght@400;500;600;700&display=swap" rel="stylesheet">'
-)
-
-_VEGA_CDN = (
-    '<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>'
-    '<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>'
-    '<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>'
-)
 
 def _esc(value: Any) -> str:
     return html.escape(str(value))
@@ -383,6 +376,71 @@ def governance_rows(llm_insights: dict[str, Any]) -> list[tuple[str, str]]:
     return rows
 
 
+#: A chart's data table is a readable fallback and an accessible alternative, not an export.
+_MAX_TABLE_ROWS = 20
+_MAX_TABLE_COLS = 8
+
+
+def _spec_rows(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """The data rows a Vega-Lite spec carries inline (top level, else its first layer)."""
+    candidates: list[Any] = [spec.get("data")]
+    candidates.extend(layer.get("data") for layer in spec.get("layer") or [] if isinstance(layer, dict))
+    for data in candidates:
+        values = data.get("values") if isinstance(data, dict) else None
+        if isinstance(values, list) and values:
+            return [row for row in values if isinstance(row, dict)]
+    return []
+
+
+def _table_cell(value: Any) -> str:
+    if isinstance(value, bool) or value is None:
+        return _esc("" if value is None else value)
+    if isinstance(value, float):
+        return _esc(f"{value:.4g}")
+    return _esc(str(value)[:60])
+
+
+def _chart_data_table(spec: dict[str, Any]) -> str:
+    """Server-rendered table of the data behind a chart; "" when the spec carries none."""
+    rows = _spec_rows(spec)
+    if not rows:
+        return ""
+    columns: list[str] = []
+    for row in rows[:_MAX_TABLE_ROWS]:
+        for key in row:
+            if key not in columns and len(columns) < _MAX_TABLE_COLS:
+                columns.append(str(key))
+    shown = rows[:_MAX_TABLE_ROWS]
+    note = (
+        f"Data behind this chart (first {len(shown)} of {len(rows)} rows)"
+        if len(rows) > len(shown)
+        else f"Data behind this chart ({len(rows)} rows)"
+    )
+    head = "".join(f"<th>{_esc(c)}</th>" for c in columns)
+    body = "".join(
+        "<tr>" + "".join(f"<td>{_table_cell(row.get(c))}</td>" for c in columns) + "</tr>"
+        for row in shown
+    )
+    return f'<table class="chart-data"><caption>{_esc(note)}</caption><tr>{head}</tr>{body}</table>'
+
+
+#: Draws each chart into a fresh node; on success the data table moves into a collapsed
+#: <details>, on failure (or no Vega) the table stays visible as the fallback.
+_CHART_SCRIPT = (
+    "if (typeof vegaEmbed !== 'undefined') { SPECS.forEach((s, i) => {"
+    "const holder = document.getElementById('chart_' + i);"
+    "const table = holder.querySelector('.chart-data');"
+    "const target = document.createElement('div');"
+    "holder.insertBefore(target, holder.firstChild);"
+    "vegaEmbed(target, Object.assign({}, s, {config: _cfg}), {actions: false}).then(() => {"
+    "if (table) { const d = document.createElement('details'); d.className = 'chart-data-details';"
+    "const m = document.createElement('summary'); m.textContent = 'Show the data behind this chart';"
+    "d.appendChild(m); d.appendChild(table); holder.appendChild(d); }"
+    "}).catch(() => { target.remove(); });"
+    "}); }"
+)
+
+
 def build_html_report(
     dataset_name: str,
     llm_insights: dict[str, Any],
@@ -559,7 +617,7 @@ def build_html_report(
             f'<div class="chart"><h3>{_esc(c.get("title", ""))}</h3>'
             + (f'<p><strong>{_esc(c["caption"])}</strong></p>' if c.get("caption") else "")
             + (f'<p>{_esc(c["description"])}</p>' if c.get("description") and c["description"] != c.get("caption") else "")
-            + f'<div class="vega-holder" id="chart_{i}"></div></div>'
+            + f'<div class="vega-holder" id="chart_{i}">{_chart_data_table(c.get("spec") or {})}</div></div>'
             for i, c in enumerate(charts)
         )
         # Colors are injected here, at render time, from the shared theme
@@ -581,7 +639,7 @@ def build_html_report(
             + f"const VEGA_CFG_NIGHT = {night_cfg_json};"
             + "const _dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);"
             + "const _cfg = _dark ? VEGA_CFG_NIGHT : VEGA_CFG_DAY;"
-            + "SPECS.forEach((s, i) => vegaEmbed('#chart_' + i, Object.assign({}, s, {config: _cfg}), {actions: false}));"
+            + _CHART_SCRIPT
             + "</script>"
         )
 
@@ -699,9 +757,10 @@ def build_html_report(
     )
 
     body = "\n".join(sections)
+    assets = report_assets(need_vega=bool(charts))
     return (
         "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
         f"<title>Analysis Report — {_esc(dataset_name)}</title>"
-        f"{_FONTS_CDN}{_VEGA_CDN}<style>{_CSS}</style></head>"
+        f"{assets.fonts_html}{assets.vega_html}<style>{_CSS}</style></head>"
         f"<body><div class='wrap'>{body}</div></body></html>"
     )

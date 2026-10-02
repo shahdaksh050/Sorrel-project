@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!-- Anime.js Animation Engine (/animejs-animation standard) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.2/anime.min.js"></script>
+  <script src="./vendor/anime.min.js"></script>
   <title>DSA Agent: data analysis that checks its own findings</title>
 
   <!-- SEO & Social OpenGraph Meta Tags (/landing-page-generator standard) -->
@@ -44,10 +44,8 @@
   }
   </script>
 
-  <!-- Google Fonts: Baloo 2 (Headings), Mukta (Body/UI). No mono anywhere on this page (DESIGN.md: mono is reserved for literal <code>/<pre> blocks, never a label or number). -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Mukta:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Fonts: Baloo 2 (Headings), Mukta (Body/UI), served locally from ./fonts. No mono anywhere on this page (DESIGN.md: mono is reserved for literal <code>/<pre> blocks, never a label or number). -->
+  <link rel="stylesheet" href="./fonts/landing-fonts.css">
 
   <style>
     /* ==========================================================================
@@ -1216,6 +1214,69 @@
     })();
   </script>
 
+  <script>
+    /* Streamlit bridge that does not depend on Three.js. The 3D scene below is an ES module that
+       imports a 1.2 MB library; if it is slow, blocked or WebGL is unavailable, Streamlit would
+       never get `componentReady` and would show its loading skeleton forever, with no way in.
+       This classic script runs first: it tells Streamlit the page is ready and keeps the enter
+       buttons, the Enter key and the theme toggle working. Once the module has bound its own
+       handlers it sets window.__dsaModuleReady and these fallbacks step aside. */
+    (function dsaBridge() {
+      var componentId = new URLSearchParams(window.location.search).get('id');
+      function send(type, data) {
+        var out = Object.assign({ isStreamlitMessage: true, type: type }, data);
+        if (componentId) out.id = componentId;
+        var origin = (window.location.origin && window.location.origin !== 'null') ? window.location.origin : '*';
+        window.parent.postMessage(out, origin);
+      }
+      function theme() { return document.documentElement.classList.contains('theme-day') ? 'day' : 'night'; }
+      function setValue(value) { send('streamlit:setComponentValue', { value: value, dataType: 'json' }); }
+      function enter() {
+        setValue({ enter: true, theme: theme() });
+        try {
+          var buttons = window.parent.document.querySelectorAll('button');
+          for (var i = 0; i < buttons.length; i++) {
+            if (buttons[i].innerText && buttons[i].innerText.indexOf('HIDDEN_ENTER') !== -1) { buttons[i].click(); return; }
+          }
+        } catch (err) { /* the component value above is enough */ }
+      }
+      function setTheme(next) {
+        var night = next === 'night';
+        document.documentElement.classList.toggle('theme-day', !night);
+        if (document.body) document.body.classList.toggle('theme-day', !night);
+        var label = document.getElementById('theme-label'), icon = document.getElementById('theme-icon');
+        if (label) label.textContent = night ? 'Day mode' : 'Night mode';
+        if (icon) icon.textContent = night ? '\u25D0' : '\u25D1';
+      }
+      window.addEventListener('DOMContentLoaded', function () {
+        ['hero-enter-btn', 'enter-btn', 'cta-launch-btn', 'nav-launch-btn'].forEach(function (id) {
+          var el = document.getElementById(id);
+          if (el) el.addEventListener('click', function (e) { if (window.__dsaModuleReady) return; e.preventDefault(); enter(); });
+        });
+        var toggle = document.getElementById('btn-theme-toggle');
+        if (toggle) toggle.addEventListener('click', function () {
+          if (window.__dsaModuleReady) return;
+          setTheme(theme() === 'day' ? 'night' : 'day');
+          setValue({ enter: false, theme: theme() });
+        });
+      });
+      window.addEventListener('keydown', function (e) {
+        if (window.__dsaModuleReady) return;
+        var a = document.activeElement;
+        if (a && a !== document.body) return;
+        if (e.code === 'Enter' || e.code === 'NumpadEnter') { e.preventDefault(); enter(); }
+      });
+      var hostThemeApplied = false;
+      window.addEventListener('message', function (event) {
+        var d = event.data;
+        if (window.__dsaModuleReady || hostThemeApplied || !d || d.type !== 'streamlit:render' || !d.args) return;
+        hostThemeApplied = true;
+        setTheme(d.args.theme === 'night' || d.args.theme === 'dark' ? 'night' : 'day');
+      });
+      send('streamlit:componentReady', { apiVersion: 1 });
+    })();
+  </script>
+
   <!-- LAYER 0: Fixed 3D WebGL Canvas (Three.js 720 Instanced Tokens). Restored alongside the new
        hero/audited-entry sections (product decision: run the pinned scrollytelling track alongside
        the new content, not instead of it; see #stages-pin-track below). The canvas sits behind
@@ -1829,7 +1890,7 @@
 
   <!-- 3D Scene Controller & Native Continuous Scroll Script -->
   <script type="module">
-    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+    import * as THREE from './vendor/three.module.js';
 
     /* ==========================================================================
        THREE.JS WEBGL ENGINE (Adhering to 3d-ui-skill 12 Invariants)
@@ -2897,6 +2958,8 @@
       sendToStreamlit('streamlit:setComponentValue', { value: value, dataType: 'json' });
     }
 
+    // Sent again on purpose: the fallback bridge announced readiness first, and Streamlit's first
+    // render message may have arrived before this module's theme listener existed.
     sendToStreamlit('streamlit:componentReady', { apiVersion: 1 });
 
     function triggerEnterWorkspace() {
@@ -2945,6 +3008,9 @@
         triggerEnterWorkspace();
       }
     });
+
+    // Every handler above is bound: the classic fallback bridge in <head> can step aside.
+    window.__dsaModuleReady = true;
   </script>
 </body>
 </html>

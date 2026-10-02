@@ -1,6 +1,7 @@
 """Tests for the Landing Page experience (ui/landing.py and ui/landing_component/index.html)."""
 from __future__ import annotations
 
+import re
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -21,8 +22,9 @@ def test_landing_index_html_exists() -> None:
 def test_landing_typography_tokens() -> None:
     content = INDEX_HTML.read_text(encoding="utf-8")
     # Must use warm Ledger typography (Baloo 2 and Mukta)
-    assert "family=Baloo+2" in content
-    assert "family=Mukta" in content
+    # Served from ./fonts beside the page, not from Google (see test_landing_works_offline).
+    assert "./fonts/landing-fonts.css" in content
+    assert "family=Baloo+2" not in content
     assert "--heading: 'Baloo 2'" in content
     assert "--sans: 'Mukta'" in content
 
@@ -207,3 +209,48 @@ def test_streamlit_bridge_is_intact() -> None:
     assert "setComponentValue({ enter: false, theme: currentTheme })" in content
     for element_id in ("hero-enter-btn", "enter-btn", "cta-launch-btn", "nav-launch-btn", "btn-theme-toggle"):
         assert f'id="{element_id}"' in content
+
+
+# ── The page must work with no network and when the 3D scene cannot start ────────────────────
+COMPONENT = INDEX_HTML.parent
+
+
+def test_landing_works_offline() -> None:
+    """Regression: the page imported Three.js from a CDN inside the same module that told Streamlit
+    it was ready, so with the CDN unreachable (an offline demo) Streamlit showed its loading
+    skeleton forever. Everything the page needs now ships beside it."""
+    content = INDEX_HTML.read_text(encoding="utf-8")
+    for host in ("cdn.jsdelivr.net", "cdnjs.cloudflare.com", "fonts.googleapis.com", "fonts.gstatic.com", "unpkg.com"):
+        assert host not in content, f"the landing page still loads from {host}"
+    assert "from './vendor/three.module.js'" in content
+    assert 'src="./vendor/anime.min.js"' in content
+
+
+def test_vendored_libraries_and_fonts_are_present_with_licenses() -> None:
+    vendor = COMPONENT / "vendor"
+    assert (vendor / "three.module.js").stat().st_size > 500_000
+    assert (vendor / "anime.min.js").stat().st_size > 10_000
+    for licence in ("LICENSE-three.txt", "LICENSE-animejs.txt"):
+        assert "MIT" in (vendor / licence).read_text(encoding="utf-8")
+    # three.module.js must be one self-contained file: a relative import would 404 in the iframe.
+    assert not re.search(r"^\s*import\s", (vendor / "three.module.js").read_text(encoding="utf-8"), re.M)
+    css = (COMPONENT / "fonts" / "landing-fonts.css").read_text(encoding="utf-8")
+    files = re.findall(r"url\('\./([^']+)'\)", css)
+    assert files and all((COMPONENT / "fonts" / name).is_file() for name in files)
+    assert "http" not in css
+
+
+def test_the_streamlit_bridge_does_not_depend_on_the_3d_module() -> None:
+    """The classic script must run before, and independent of, the ES module."""
+    content = INDEX_HTML.read_text(encoding="utf-8")
+    bridge = content.index("function dsaBridge()")
+    module = content.index('<script type="module">')
+    assert bridge < module
+    classic = content[bridge:module]
+    assert "streamlit:componentReady" in classic
+    assert "THREE" not in classic
+    for element_id in ("hero-enter-btn", "enter-btn", "cta-launch-btn", "nav-launch-btn", "btn-theme-toggle"):
+        assert element_id in classic
+    # The fallback steps aside once the module has bound its own handlers.
+    assert "window.__dsaModuleReady" in classic
+    assert content.rindex("window.__dsaModuleReady = true;") > module

@@ -63,8 +63,9 @@ def test_landing_ledger_tokens() -> None:
 
     content = INDEX_HTML.read_text(encoding="utf-8")
 
-    assert "family=Baloo+2" in content
-    assert "family=Mukta" in content
+    assert "./fonts/landing-fonts.css" in content
+    fonts = (INDEX_HTML.parent / "fonts" / "landing-fonts.css").read_text(encoding="utf-8")
+    assert "font-family: 'Baloo 2'" in fonts and "font-family: 'Mukta'" in fonts
     assert "--heading: 'Baloo 2'" in content
     assert "--sans: 'Mukta'" in content
 

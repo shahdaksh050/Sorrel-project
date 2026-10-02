@@ -134,6 +134,27 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     font-size: clamp(36px, 5.6vw, 64px);
     font-weight: 800;
     line-height: 1.04;
+/* ── Chart panels ── */
+.chart-title {{
+    font-family: var(--heading); font-size: 1.1rem !important; font-weight: 700 !important;
+    color: var(--ink); margin: 0 0 .5rem; padding: 0;
+}}
+.chart-desc {{ font-size: .9rem; color: var(--graphite); margin-top: .5rem; line-height: 1.4; }}
+
+/* ── Primary task steps (file, question, run) ── */
+.step-head {{
+    display: flex; align-items: center; gap: .55rem; margin: 1rem 0 .4rem;
+    font-family: var(--heading); font-weight: 700; font-size: 1.1rem; color: var(--ink);
+}}
+.step-head:first-child {{ margin-top: .2rem; }}
+.step-n {{
+    display: inline-grid; place-items: center; width: 1.6rem; height: 1.6rem; border-radius: 50%;
+    background: var(--pen); color: var(--sheet); font-size: .85rem; font-weight: 800;
+}}
+.file-notices {{ margin: .3rem 0 .7rem; font-size: 13px; color: var(--graphite); }}
+.file-notices summary {{ cursor: pointer; font-weight: 600; min-height: 24px; }}
+.file-notices ul {{ margin: .3rem 0 0; padding-left: 1.2rem; line-height: 1.5; }}
+
     letter-spacing: -.02em;
     margin: 0;
     max-width: 15ch;
@@ -154,8 +175,24 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     .st-key-plate {{ margin-right: 0; padding-left: 0; }}
     [data-testid="stHorizontalBlock"]:has(.st-key-plate) {{ flex-wrap: wrap !important; }}
     [data-testid="stHorizontalBlock"]:has(.st-key-plate) > [data-testid="stColumn"] {{
+.hero.compact {{ padding: .4rem 0 .6rem; }}
+.hero.compact .hero-eyebrow {{
+    font-size: 12.5px; font-weight: 700; letter-spacing: .04em; color: var(--pen); margin-bottom: .35rem;
+}}
+.hero.compact h1 {{
+    font-size: clamp(26px, 3.4vw, 40px); line-height: 1.12; max-width: none; letter-spacing: -.01em;
+    animation: none; overflow-wrap: anywhere;
+}}
+.hero.compact .hero-file {{ color: var(--graphite); font-weight: 700; }}
         min-width: 100% !important; flex: 1 1 100% !important;
     }}
+/* The 3D plate is an optional extra; on a phone it would push the inputs off the first screen.
+   The stage list beside it, and the live progress panel, carry the same information. */
+@media (max-width: 768px) {{
+    .st-key-plate {{ padding-left: 0; margin-right: 0; }}
+    .st-key-plate iframe,
+    .st-key-plate .stElementContainer:has(iframe) {{ display: none; }}
+}}
     .datum .cell {{ flex: 1 1 45%; }}
     .stTabs [role="tab"] {{ min-height: 44px; }}
     .stButton button, .stDownloadButton button {{ min-height: 44px; }}
@@ -252,7 +289,7 @@ iframe {{
     background: var(--sheet) !important; color: var(--ink) !important;
 }}
 .stTextInput input::placeholder, .stTextArea textarea::placeholder {{
-    color: var(--graphite) !important; opacity: 0.8 !important;
+    color: var(--graphite) !important; opacity: .9 !important;
 }}
 .stTextInput input:focus, .stTextArea textarea:focus {{ border-color: var(--pen) !important; }}
 
@@ -457,12 +494,11 @@ iframe {{
 }}
 .agent-badge {{
     font-family: var(--sans);
-    font-size: 10.5px;
+    font-size: 12px;
     font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: .02em;
-    padding: 3px 6px;
-    border-radius: 4px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    color: var(--graphite);
 }}
 .agent-badge.done {{ color: var(--positive); background: color-mix(in srgb, var(--positive) 15%, transparent); }}
 .agent-badge.running {{ color: var(--pen); background: color-mix(in srgb, var(--pen) 15%, transparent); }}
@@ -599,7 +635,7 @@ iframe {{
 .sc.active {{ background: color-mix(in srgb, var(--pen) 6%, transparent); border-radius: 10px; }}
 .sc.active .nm::after {{ content: " — working"; font-weight: 400;
                         color: var(--pen); font-size: 12.5px; }}
-.sc.skip  .sc-num {{ background: var(--rule); color: var(--graphite); }}
+.sc.skip  .sc-num {{ background: var(--sheet-alt); color: var(--graphite); border: 1px solid var(--rule); }}
 .sc.skip .nm {{ color: var(--graphite); font-weight: 400; }}
 .sc.err   .sc-num {{ background: var(--risk); }}
 .sc.err .nm {{ color: var(--risk); }}
@@ -670,10 +706,10 @@ iframe {{
 }}
 @keyframes checkIn {{ to {{ opacity: 1; transform: translateY(0); }} }}
 /* ── "How we got here" (Details): hairline-ruled blocks, tokens only ── */
-.how-we-got-here {{ margin: 0 0 2rem; max-width: 74ch; }}
+.how-we-got-here {{ margin: 0 0 2rem; max-width: 1100px; }}
 .how-title {{ font-family: var(--heading); margin: 0 0 .25rem; }}
 .how-lede {{ color: var(--graphite); font-size: 14.5px; line-height: 1.55; margin: 0 0 1rem; }}
-.how-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0 2rem; }}
+.how-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 2.5rem; }}
 .how-block {{ border-top: 1px solid var(--rule); padding: .9rem 0 1.1rem; min-width: 0; }}
 .how-h {{ font-size: 15px; font-weight: 700; margin: 0 0 .15rem; color: var(--ink); }}
 .how-note {{ font-size: 13px; color: var(--graphite); line-height: 1.5; margin: 0 0 .6rem; }}
@@ -696,7 +732,7 @@ iframe {{
    Streamlit's native theme is fixed (.streamlit/config.toml, Day palette), so in
    Night mode its own text colours would be dark on a dark page. These rules take
    the colour from the tokens instead; in Day they resolve to the same values. */
-[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {{ color: var(--graphite) !important; }}
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {{ color: var(--graphite) !important; opacity: 1 !important; }}
 [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] * {{ color: var(--graphite) !important; }}
 [data-testid="stCheckbox"] label *, [data-testid="stRadio"] label *,
 [data-testid="stToggle"] label * {{ color: var(--ink) !important; }}

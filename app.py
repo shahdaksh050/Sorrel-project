@@ -44,7 +44,8 @@ st.set_page_config(
     page_title="Agentic Data Analysis",
     page_icon="🧾",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # "auto": open on a desktop, collapsed on a phone, where an open sidebar covers the page.
+    initial_sidebar_state="auto",
 )
 
 # ── Landing Page (Phase 2 Narrative) ─────────────────────────────────────────
@@ -415,6 +416,24 @@ def _join_review(uploads: list[Any]) -> dict[int, dict[str, Any]]:
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
+# Where each part of the page goes. The containers are created first, in page order, and filled
+# later in the script, so the primary task (file, question, run) can sit in the main area while
+# the settings stay in the sidebar.
+_run_in_flight = st.session_state.get("_run") is not None
+_workspace_state = (
+    "running" if _run_in_flight
+    else "done" if st.session_state.get("analysis_done")
+    else "failed" if st.session_state.get("analysis_error")
+    else None
+)
+_hero_box = st.container()
+# Before a run the inputs are the page's one task; once there is a run they tuck away.
+_inputs_box = (
+    st.expander("Your file and question", expanded=False)
+    if _workspace_state
+    else st.container(border=True)
+)
+
 with st.sidebar:
     st.markdown(
         '<div class="side-brand">'
@@ -436,93 +455,95 @@ with st.sidebar:
         st.session_state["theme"] = _new_theme
         st.rerun()
 
-    # ── Upload ────────────────────────────────────────────────────────────────
-    st.markdown('<div class="side-head">Dataset</div>', unsafe_allow_html=True)
-    uploaded = st.file_uploader(
-        "CSV, TSV or Excel",
-        type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
-        label_visibility="collapsed",
-    )
+    with _inputs_box:
+        # ── Upload ────────────────────────────────────────────────────────────────
+        st.markdown('<div class="step-head"><span class="step-n">1</span> Add your file</div>', unsafe_allow_html=True)
+        uploaded = st.file_uploader(
+            "CSV, TSV or Excel",
+            type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
+            label_visibility="collapsed",
+        )
 
-    # Persist to session_state immediately on upload / clear on removal.
-    # Every upload passes through src.core.security before touching disk:
-    # extension allowlist, size ceiling, magic-byte sniffing, safe filename.
-    if uploaded is not None:
-        if uploaded.name != st.session_state.get("orig_name", ""):
-            _reset_pipeline()
-            raw_bytes = uploaded.read()
-            st.session_state["orig_name"] = uploaded.name
-            from src.core.security import UploadValidationError, validate_upload
-            try:
-                safe_name = validate_upload(uploaded.name, raw_bytes)
-            except UploadValidationError as _ve:
-                st.session_state["preview_df"]    = None
-                st.session_state["preview_bytes"] = None
-                st.session_state["preview_name"]  = ""
-                st.error(f"Upload rejected. {_ve}")
-            else:
-                st.session_state["preview_bytes"] = raw_bytes
-                st.session_state["preview_name"]  = safe_name
-                _fname = safe_name.lower()
+        # Persist to session_state immediately on upload / clear on removal.
+        # Every upload passes through src.core.security before touching disk:
+        # extension allowlist, size ceiling, magic-byte sniffing, safe filename.
+        if uploaded is not None:
+            if uploaded.name != st.session_state.get("orig_name", ""):
+                _reset_pipeline()
+                raw_bytes = uploaded.read()
+                st.session_state["orig_name"] = uploaded.name
+                from src.core.security import UploadValidationError, validate_upload
                 try:
-                    # One reader for every format/encoding/delimiter — a bare
-                    # pd.read_csv here previewed a semicolon- or cp1252-encoded
-                    # export as a single mangled column while the analysis
-                    # behind it was correct.
-                    _pdf, _prep = read_any_bytes(raw_bytes, safe_name)
-                    st.session_state["preview_df"] = _pdf
-                    st.session_state["preview_read_report"] = _prep
-                    st.session_state["preview_notes"] = list(_prep.notes)
-                except Exception as _e:
-                    st.session_state["preview_df"] = None
-                    st.session_state["preview_notes"] = []
-                    st.error(f"Could not read file: {_e}")
-                st.session_state["from_uploader"] = True
-    else:
-        if st.session_state.get("orig_name") and st.session_state.get("from_uploader"):
+                    safe_name = validate_upload(uploaded.name, raw_bytes)
+                except UploadValidationError as _ve:
+                    st.session_state["preview_df"]    = None
+                    st.session_state["preview_bytes"] = None
+                    st.session_state["preview_name"]  = ""
+                    st.error(f"Upload rejected. {_ve}")
+                else:
+                    st.session_state["preview_bytes"] = raw_bytes
+                    st.session_state["preview_name"]  = safe_name
+                    _fname = safe_name.lower()
+                    try:
+                        # One reader for every format/encoding/delimiter — a bare
+                        # pd.read_csv here previewed a semicolon- or cp1252-encoded
+                        # export as a single mangled column while the analysis
+                        # behind it was correct.
+                        _pdf, _prep = read_any_bytes(raw_bytes, safe_name)
+                        st.session_state["preview_df"] = _pdf
+                        st.session_state["preview_read_report"] = _prep
+                        st.session_state["preview_notes"] = list(_prep.notes)
+                    except Exception as _e:
+                        st.session_state["preview_df"] = None
+                        st.session_state["preview_notes"] = []
+                        st.error(f"Could not read file: {_e}")
+                    st.session_state["from_uploader"] = True
+        else:
+            if st.session_state.get("orig_name") and st.session_state.get("from_uploader"):
 
-            _stale_run = _active_run()
-            if _stale_run is not None:
-                _stale_run.discard_and_stop()  # its results belong to the removed file
-            _theme = st.session_state.get("theme", "day")
-            for _k2, _v2 in _DEFAULTS.items():
-                st.session_state[_k2] = _v2
-            st.session_state["theme"] = _theme
-            st.session_state["from_uploader"] = False
+                _stale_run = _active_run()
+                if _stale_run is not None:
+                    _stale_run.discard_and_stop()  # its results belong to the removed file
+                _theme = st.session_state.get("theme", "day")
+                for _k2, _v2 in _DEFAULTS.items():
+                    st.session_state[_k2] = _v2
+                st.session_state["theme"] = _theme
+                st.session_state["from_uploader"] = False
 
-    _notes: list[str] = st.session_state.get("preview_notes") or []
-    if _notes:
-        with st.expander(
-            f"⚠ {len(_notes)} file notice{'s' if len(_notes) > 1 else ''} (auto-repaired)",
-            expanded=False,
-        ):
-            for _note in _notes:
-                st.caption(f"• {_note}")
+        _notes: list[str] = st.session_state.get("preview_notes") or []
+        if _notes:
+            _items = "".join(f"<li>{html.escape(str(n))}</li>" for n in _notes)
+            st.markdown(
+                f'<details class="file-notices"><summary>{len(_notes)} file notice'
+                f'{"s" if len(_notes) > 1 else ""} (auto-repaired)</summary><ul>{_items}</ul></details>',
+                unsafe_allow_html=True,
+            )
 
-    st.caption("Related tables (optional): customers, products... joined automatically on shared IDs.")
-    related_uploads = st.file_uploader(
-        "Related tables",
-        type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
-        accept_multiple_files=True,
-        label_visibility="collapsed",
-    )
-    join_choices: dict[int, dict[str, Any]] = (
-        _join_review(related_uploads) if related_uploads and st.session_state.get("preview_bytes") else {}
-    )
+        st.caption("Related tables (optional): customers, products... joined automatically on shared IDs.")
+        related_uploads = st.file_uploader(
+            "Related tables",
+            type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+        )
+        join_choices: dict[int, dict[str, Any]] = (
+            _join_review(related_uploads) if related_uploads and st.session_state.get("preview_bytes") else {}
+        )
 
-    target_col = st.text_input(
-        "Target column",
-        placeholder="e.g. outcome or price (blank = auto)",
-    )
+        st.markdown('<div class="step-head"><span class="step-n">2</span> Ask your question</div>', unsafe_allow_html=True)
+        objective = st.text_area(
+            "What do you want to know? (optional, plain English)",
+            placeholder="e.g. What's driving this result? Which rows are the "
+                        "outliers, and why?",
+            height=90,
+            help="Your helpers will prioritise analyses that answer this question "
+                 "and address it directly in the final report.",
+        )
 
-    objective = st.text_area(
-        "What do you want to know? (optional, plain English)",
-        placeholder="e.g. What's driving this result? Which rows are the "
-                    "outliers, and why?",
-        height=90,
-        help="Your helpers will prioritise analyses that answer this question "
-             "and address it directly in the final report.",
-    )
+        target_col = st.text_input(
+            "Target column",
+            placeholder="e.g. outcome or price (blank = auto)",
+        )
 
     # ── LLM Provider ──────────────────────────────────────────────────────────
     st.markdown('<div class="side-head">LLM Provider</div>', unsafe_allow_html=True)
@@ -795,9 +816,6 @@ with st.sidebar:
         help="Splits a complex question into smaller sub-questions it can tackle one at a time. Turn on for deep exploration; keep off for the fastest runtime.",
     )
 
-    st.divider()
-
-    # ── Buttons ───────────────────────────────────────────────────────────────
     has_file = st.session_state["preview_df"] is not None
     # A key is only needed when the AI narrative is on: the no-AI run is fully
     # deterministic and makes no network call.
@@ -808,56 +826,70 @@ with st.sidebar:
         and _active_run() is None
     )
 
+with _inputs_box:
+    st.markdown('<div class="step-head"><span class="step-n">3</span> Run</div>', unsafe_allow_html=True)
     run_clicked = st.button(
-        "Run Analysis",
+        "Run analysis",
         disabled=not can_run,
-        width='stretch',
         type="primary",
+        key="btn_run_analysis",
     )
-    if (st.session_state["analysis_done"] or st.session_state["analysis_error"]
-            or _active_run() is not None):
-        if st.button("New Analysis", width='stretch'):
-            _reset_pipeline()
-            st.rerun()
-
     if not has_file:
-        st.caption("Upload a CSV/Excel file, or use the sample button in the main panel.")
-    elif not has_key:
-        st.caption("Add your API key to enable the run.")
+        st.caption("Add a file above, or try the bundled sample below.")
+    elif not has_key and not st.session_state["analysis_done"]:
+        st.caption(
+            "Add your API key in the settings sidebar to enable the run, or switch the AI narrative off."
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN AREA — header
 # ══════════════════════════════════════════════════════════════════════════════
-hero_text, hero_plate = st.columns([0.46, 0.54], gap="large",
-                                   vertical_alignment="center")
+with _hero_box:
+    hero_text, hero_plate = st.columns([0.46, 0.54], gap="large",
+                                       vertical_alignment="center")
 
-with hero_text:
-    st.markdown(
-        '<div class="hero">'
-        '<h1>We check every answer twice.</h1>'
-        '<p class="hero-sub">Upload any spreadsheet: sales, survey, sports, science, '
-        'whatever you\'ve got. Your assistant studies it, tests its own conclusions, '
-        'and tells you which patterns are real, and which are just luck.</p></div>',
-        unsafe_allow_html=True,
-    )
-    _hero_cinema_on = st.session_state.get("show_cinematic_hero", False)
-    _hero_btn_txt = "Standard 3D Plate" if _hero_cinema_on else "3D Cinematic Showcase"
-    if st.button(_hero_btn_txt, key="btn_toggle_hero_cinema"):
-        st.session_state["show_cinematic_hero"] = not _hero_cinema_on
-        st.rerun()
+    # Once there is a file or a run, the page is a workspace, not a landing page: the marketing
+    # headline gives way to a compact header so the answer is not pushed below the fold.
+    with hero_text:
+        if _workspace_state:
+            _file_label = html.escape(st.session_state.get("preview_name") or "your file")
+            _lead = {"running": "Analysing", "done": "Results for", "failed": "Could not finish"}[_workspace_state]
+            st.markdown(
+                '<div class="hero compact">'
+                '<div class="hero-eyebrow">Agentic Data Analysis</div>'
+                f'<h1>{_lead} <span class="hero-file">{_file_label}</span></h1></div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("New analysis", key="btn_new_analysis"):
+                _reset_pipeline()
+                st.rerun()
+        else:
+            st.markdown(
+                '<div class="hero">'
+                '<h1>We check every answer twice.</h1>'
+                '<p class="hero-sub">Upload any spreadsheet: sales, survey, sports, science, '
+                'whatever you\'ve got. Your assistant studies it, tests its own conclusions, '
+                'and tells you which patterns are real, and which are just luck.</p></div>',
+                unsafe_allow_html=True,
+            )
+        _hero_cinema_on = st.session_state.get("show_cinematic_hero", False)
+        _hero_btn_txt = "Standard 3D Plate" if _hero_cinema_on else "3D Cinematic Showcase"
+        if st.button(_hero_btn_txt, key="btn_toggle_hero_cinema"):
+            st.session_state["show_cinematic_hero"] = not _hero_cinema_on
+            st.rerun()
 
-# The plate: a live technical drawing of the run, ruled off the headline and
-# running past the container edge. The pipeline executes further down this same
-# script pass, so the drawing is filled into this placeholder afterwards — that
-# way it shows the state of the run that just happened.
-with hero_plate.container(key="plate"):
-    steps_list_slot = st.empty()
-    pipeline_slot = st.empty()
+    # The plate: a live technical drawing of the run, ruled off the headline and
+    # running past the container edge. The pipeline executes further down this same
+    # script pass, so the drawing is filled into this placeholder afterwards — that
+    # way it shows the state of the run that just happened.
+    with hero_plate.container(key="plate"):
+        steps_list_slot = st.empty()
+        pipeline_slot = st.empty()
 
-# The datum line under the hero carries the run's readings, filled at the same
-# time as the plate.
-datum_slot = st.empty()
+    # The datum line under the hero carries the run's readings, filled at the same
+    # time as the plate.
+    datum_slot = st.empty()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -865,7 +897,7 @@ datum_slot = st.empty()
 # ══════════════════════════════════════════════════════════════════════════════
 preview_df: pd.DataFrame | None = st.session_state["preview_df"]
 
-if preview_df is not None and not st.session_state["analysis_done"]:
+if preview_df is not None and not st.session_state["analysis_done"] and not _run_in_flight:
     _section("Dataset preview", st.session_state["preview_name"])
     _miss_cells = int(preview_df.isnull().sum().sum())
     c1, c2, c3, c4 = st.columns(4)
@@ -1062,10 +1094,17 @@ _status_str = (
     "Ready"
 )
 
+_view_for_cell = st.session_state.get("run_view")
+_ran_without_ai = bool(
+    (_view_for_cell is not None and _view_for_cell.how.no_ai)
+    or (_run_in_flight and (st.session_state.get("is_sample") or not use_llm))
+)
+_model_cell = "No AI (deterministic)" if _ran_without_ai else (final_model if "final_model" in locals() else "N/A")
+
 _cells = [
     ("State", _status_str),
     ("File", st.session_state.get("preview_name") or "None loaded"),
-    ("Model", final_model if "final_model" in locals() else "N/A"),
+    ("Model", _model_cell),
 ]
 datum_slot.markdown(_datum(_cells), unsafe_allow_html=True)
 
@@ -1165,9 +1204,10 @@ if (preview_df is None
     st.markdown(
         '<div class="empty">'
         '<h2>Let\'s see what your data shows.</h2>'
-        '<p>Add a CSV or Excel file in the sidebar, tell us what you\'d like to know, '
-        'and enter your API key. Your helpers will study it, test their answers, '
-        'and double-check everything before showing you the results.</p>'
+        '<p>Add a CSV or Excel file above, tell us what you\'d like to know, and run it. '
+        'Your helpers will study the data, test their answers, and double-check '
+        'everything before showing you the results. An API key is only needed for the '
+        'AI-written summary; the analysis itself runs without one.</p>'
         '</div>',
         unsafe_allow_html=True,
     )

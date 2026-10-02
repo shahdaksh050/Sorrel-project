@@ -283,19 +283,19 @@ def render_agent_grid(
         st_val = log_map.get(ag["stage"], "pending")
         if st_val == "done":
             badge_cls = "done"
-            badge_txt = "Completed"
+            badge_txt = "Done"
             card_cls = "agent-card"
         elif st_val == "active":
             badge_cls = "running"
-            badge_txt = "Executing"
+            badge_txt = "Working"
             card_cls = "agent-card agent-active"
         elif st_val == "error":
             badge_cls = "error"
-            badge_txt = "Flagged"
+            badge_txt = "Needs attention"
             card_cls = "agent-card agent-flagged"
         else:
             badge_cls = ""
-            badge_txt = "Standby"
+            badge_txt = "Waiting"
             card_cls = "agent-card"
 
         agent_output = ""
@@ -324,7 +324,7 @@ def render_agent_grid(
                 <summary style="list-style: none; display: flex; flex-direction: column; outline: none;">
                     <div class="agent-header" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
                         <span class="agent-role" style="font-weight: 700; color: var(--ink); display: flex; align-items: center; gap: 8px;">{ag['icon']} {ag['name']}</span>
-                        <span class="agent-badge {badge_cls}">[{badge_txt}]</span>
+                        <span class="agent-badge {badge_cls}">{badge_txt}</span>
                     </div>
                     <div class="agent-desc" style="margin-top: 0.5rem; color: var(--graphite); font-size: 0.95rem;">{ag['desc']}</div>
                     <div class="agent-metric" style="margin-top: 0.5rem; font-size: 0.85rem; color: var(--graphite); font-weight: 600;">Role: {ag['role']} · Tool: {ag['tool']}</div>
@@ -485,12 +485,24 @@ def find_chart_by_id(dash: list[dict[str, Any]] | None, chart_id: str) -> dict[s
     return None
 
 
+def _render_chart_data(spec: dict[str, Any]) -> None:
+    """The numbers behind a chart, as a table: a non-visual alternative to the canvas."""
+    from src.core.html_report import spec_rows
+
+    rows = spec_rows(spec)
+    if not rows:
+        return
+    shown = rows[:20]
+    note = f"first {len(shown)} of {len(rows)} rows" if len(rows) > len(shown) else f"{len(rows)} rows"
+    with st.expander(f"Data behind this chart ({note})", expanded=False):
+        st.dataframe(safe_df(pd.DataFrame(shown)), width="stretch")
+
+
 def render_dashboard_chart(ch: dict[str, Any], vega_cfg: dict[str, Any]) -> None:
     """Render one dashboard panel (title, chart, caption/description)."""
     with st.container(border=True):
         st.markdown(
-            f"<div style='font-family: var(--heading); font-size: 1.1rem; font-weight: 700; "
-            f"color: var(--ink); margin-bottom: 0.5rem;'>{html.escape(str(ch.get('title', '')))}</div>",
+            f'<h4 class="chart-title">{html.escape(str(ch.get("title", "")))}</h4>',
             unsafe_allow_html=True,
         )
         spec = dict(ch.get("spec", {}))
@@ -502,10 +514,10 @@ def render_dashboard_chart(ch: dict[str, Any], vega_cfg: dict[str, Any]) -> None
             st.caption(md_text(caption))
         elif ch.get("description"):
             st.markdown(
-                f"<div style='font-size: 0.9rem; color: var(--graphite); margin-top: 0.5rem; "
-                f"line-height: 1.4;'>{html.escape(str(ch['description']))}</div>",
+                f'<div class="chart-desc">{html.escape(str(ch["description"]))}</div>',
                 unsafe_allow_html=True,
             )
+        _render_chart_data(spec)
 
 
 def render_data_understanding(du: dict[str, Any]) -> str:

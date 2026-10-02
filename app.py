@@ -4,11 +4,11 @@ Streamlit UI — Agentic Data Analysis System.
 Run:
     streamlit run app.py
 
-Key fixes vs previous version
-------------------------------
-* NO background thread + st.rerun() loop.  The pipeline runs synchronously
-  inside st.status() so Streamlit renders live progress without fighting its
-  own execution model.
+Key design points
+-----------------
+* The analysis runs on a worker thread (ui/run.py). The script never blocks:
+  a polling fragment shows progress and Stop and folds the finished result into
+  session state. The worker never calls st.* and never reads session state.
 * Dataset preview is saved to session_state on file upload and rendered from
   there — no dependency on sidebar scope surviving a rerun.
 * OpenRouter support added (any model string, OpenAI-compatible endpoint).
@@ -16,14 +16,10 @@ Key fixes vs previous version
 from __future__ import annotations
 
 import html
-import json
 import os
-import shutil
 import sys
 import tempfile
-import traceback
 import types
-from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -145,6 +141,7 @@ from ui.components.cards import (
 from ui.components.cards import (
     section as _section,
 )
+from ui.run import RUN_DIR_PREFIX, ActiveRun, RunSpec, remove_run_dir
 from ui.styles import inject_theme_css as _inject_theme_css
 from ui.tabs import (
     render_answers_tab,
@@ -192,22 +189,27 @@ _inject_theme_css()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-#: Prefix of every per-run temp directory; `_remove_run_dir` only ever deletes
+#: Prefix of every per-run temp directory; `remove_run_dir` only ever deletes
 #: directories that carry it, directly under the system temp root.
-_RUN_DIR_PREFIX = "dsa-run-"
+_RUN_DIR_PREFIX = RUN_DIR_PREFIX
+_remove_run_dir = remove_run_dir
 
 
-def _remove_run_dir(path: str | None) -> None:
-    """Delete a finished run's temp directory (uploads, reports, models)."""
-    if not path:
-        return
-    target = Path(path).resolve()
-    if target.name.startswith(_RUN_DIR_PREFIX) and target.parent == Path(tempfile.gettempdir()).resolve():
-        shutil.rmtree(target, ignore_errors=True)
+def _active_run() -> ActiveRun | None:
+    """The run on a worker thread right now, if any."""
+    run: ActiveRun | None = st.session_state.get("_run")
+    return run
 
 
 def _reset_pipeline() -> None:
-    _remove_run_dir(st.session_state.get("tmp_dir"))
+    run = _active_run()
+    if run is not None:
+        # A run is still on its thread: signal it and let the polling fragment
+        # reset once the worker ends, so a second run can never overlap it. The
+        # worker deletes its own directory when it was discarded.
+        run.discard_and_stop()
+    else:
+        _remove_run_dir(st.session_state.get("tmp_dir"))
     st.session_state.pop("current_summary_path", None)
     for k in ("stage_log", "analysis_done", "analysis_error",
               "final_report", "tool_results", "metadata", "profile",
@@ -222,6 +224,63 @@ def _set_stage(num: str, status: str, detail: str = "") -> None:
     ]
     log.append((num, status, detail))
     st.session_state["stage_log"] = log
+
+
+def _fold_run(run: ActiveRun) -> None:
+    """Move a finished run's results into session state (script thread only)."""
+    snap = run.snapshot()
+    st.session_state["stage_log"] = list(snap.stage_log)
+    st.session_state["progress_lines"] = list(snap.progress_lines)
+    if run.metadata is not None:
+        st.session_state["metadata"] = run.metadata
+    out = run.outcome
+    if out is None:
+        st.session_state["analysis_error"] = run.error or "The run ended without a result."
+        return
+    st.session_state["tool_results"] = out.tool_results
+    st.session_state["final_report"] = out.final
+    st.session_state["profile"] = out.profile
+    st.session_state["read_report"] = out.read_report
+    st.session_state["coercions"] = out.coercions
+    st.session_state["profile_status"] = out.profile_status
+    st.session_state["dashboard"] = out.dashboard
+    st.session_state["run_view"] = out.run_view
+    st.session_state["llm_warning"] = out.llm_warning
+    if out.summary_path:
+        st.session_state["current_summary_path"] = out.summary_path
+    st.session_state["analysis_done"] = True
+
+
+@st.fragment(run_every="1s")
+def _run_progress() -> None:
+    """Poll the worker: show progress and Stop, then fold the result in and rerun."""
+    run = _active_run()
+    if run is None:
+        return
+    snap = run.snapshot()
+    if snap.state != "running":
+        st.session_state.pop("_run", None)
+        if snap.discard:
+            _reset_pipeline()
+        else:
+            _fold_run(run)
+        st.rerun()
+
+    if snap.discard:
+        sub = "Cancelling. Waiting for the step in progress to finish."
+    elif snap.stop_requested:
+        sub = "Stopping. The step in progress finishes first, then a partial report is written."
+    else:
+        sub = snap.note or "Usually 1–3 minutes, depending on the dataset and the model."
+    st.markdown(
+        f'<div class="run-banner">Running the analysis<span class="sub">{html.escape(sub)}</span></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(_render_steps_list(list(snap.stage_log)), unsafe_allow_html=True)
+    if st.button("Stop", key="stop_run", disabled=snap.stop_requested or snap.discard):
+        run.request_stop()
+        st.rerun(scope="fragment")
+    st.caption("Stop is cooperative: a step that is already running finishes before the run ends.")
 
 
 def _draw_pipeline_rig(slot: Any) -> list[Any]:
@@ -417,6 +476,9 @@ with st.sidebar:
     else:
         if st.session_state.get("orig_name") and st.session_state.get("from_uploader"):
 
+            _stale_run = _active_run()
+            if _stale_run is not None:
+                _stale_run.discard_and_stop()  # its results belong to the removed file
             _theme = st.session_state.get("theme", "day")
             for _k2, _v2 in _DEFAULTS.items():
                 st.session_state[_k2] = _v2
@@ -735,7 +797,11 @@ with st.sidebar:
     # A key is only needed when the AI narrative is on: the no-AI run is fully
     # deterministic and makes no network call.
     has_key  = bool(api_key.strip()) or provider == "local" or not use_llm
-    can_run  = has_file and has_key and not st.session_state["analysis_done"]
+    can_run  = (
+        has_file and has_key
+        and not st.session_state["analysis_done"]
+        and _active_run() is None
+    )
 
     run_clicked = st.button(
         "Run Analysis",
@@ -743,7 +809,8 @@ with st.sidebar:
         width='stretch',
         type="primary",
     )
-    if st.session_state["analysis_done"] or st.session_state["analysis_error"]:
+    if (st.session_state["analysis_done"] or st.session_state["analysis_error"]
+            or _active_run() is not None):
         if st.button("New Analysis", width='stretch'):
             _reset_pipeline()
             st.rerun()
@@ -827,12 +894,17 @@ if preview_df is not None and not st.session_state["analysis_done"]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PIPELINE — runs synchronously inside st.status() on button click
+# PIPELINE — started on button click, runs on a worker thread
 # ══════════════════════════════════════════════════════════════════════════════
+# The click builds a frozen RunSpec, checks the model is reachable, and starts
+# an ActiveRun (ui/run.py). The page stays responsive: the polling fragment
+# `_run_progress` shows progress and Stop, and folds the finished outcome into
+# session state. The worker never calls st.* and never reads session state.
+#
 # The empty-state "sample" button sets this flag and reruns, so the sample goes
 # through exactly the same run path as an uploaded file.
 _sample_run: bool = bool(st.session_state.pop("_sample_run", False))
-if run_clicked or _sample_run:
+if (run_clicked or _sample_run) and st.session_state.get("_run") is None:
     # The sample is always a no-AI run, so it needs no key and no network.
     run_llm: bool = use_llm and not _sample_run
     run_objective_text: str = "" if _sample_run else objective.strip()
@@ -868,8 +940,8 @@ if run_clicked or _sample_run:
 
     # Nothing below is published through os.environ: provider, model, key, URL,
     # objective, output directory and reasoning effort all travel with the run
-    # (RunConfig / AgentController arguments), because the environment is
-    # shared by every visitor's session.
+    # (RunConfig / RunSpec), because the environment is shared by every
+    # visitor's session.
     run_config = RunConfig(
         provider=provider,
         model=final_model,
@@ -895,51 +967,15 @@ if run_clicked or _sample_run:
         os.environ["SANDBOX_REQUIRE_ISOLATION"] = "true" if require_isolation else "false"
         os.environ["DSA_MIN_CELL_SIZE"] = str(min_cell)
 
-    # ── Spinner placeholder — replaced after run completes ───────────────
-    _spinner_ph = st.empty()
-    _spinner_ph.markdown(
-        '<div class="run-banner">Running the analysis'
-        '<span class="sub">Usually 1–3 minutes, depending on the dataset and '
-        'the model.</span></div>',
-        unsafe_allow_html=True,
-    )
-
-    # ── Collect progress lines into session state (no st.write during run) ─
-    _progress_lines: list[str] = []
-
-    def _upd_live_ui() -> None:
-        """Update the steps list in the hero placeholder during a run."""
-        steps_list_slot.markdown(_render_steps_list(st.session_state["stage_log"]), unsafe_allow_html=True)
-
-    def _upd(num: str, s: str, detail: str = "") -> None:
-        _set_stage(num, s, detail)
-        _ico = {"done": "[done]", "active": "[run ]", "error": "[fail]",
-                "skipped": "[skip]"}.get(s, "[    ]")
-        _nm  = next(n for no, n in STAGE_DEFS if no == num)
-        _progress_lines.append(f"{_ico} Stage {num}: {_nm}" + (f"  {detail}" if detail else ""))
-        _upd_live_ui()
-
-    # Initial live paint so stage progress is immediately visible upon clicking Run
-    _set_stage("1", "active", "Initializing run & preflight…")
-    _upd_live_ui()
-
-    # Set up the expander right away
-    with pipeline_slot.container():
-        with st.expander("Show how it's working", expanded=True):
-            _draw_pipeline_rig(st.empty())
-            st.markdown("#### The Team at Work")
-            st.markdown(_render_agent_grid(st.session_state["stage_log"]), unsafe_allow_html=True)
-
     # ── LLM preflight — fail fast with the REAL error instead of running
     #    the whole pipeline on the deterministic fallback ──────────────────
-    from src.core.controller import AgentController, LLMClient
+    from src.core.controller import LLMClient
 
     # In no-LLM mode there is nothing to preflight — the run is fully
     # deterministic, so requiring a reachable model (or any API key) would
     # block the very mode that exists to work without one.
     _ok, _ping_err = (True, "") if not run_llm else LLMClient(run_config).ping()
     if not _ok:
-        _spinner_ph.empty()
         _set_stage("2", "error", "LLM unreachable")
         st.session_state["analysis_error"] = _ping_err
         st.error(
@@ -954,155 +990,40 @@ if run_clicked or _sample_run:
         _draw_pipeline_rig(pipeline_slot)  # the hero slot must not stay empty
         st.stop()
 
-    try:
-        _upd("1", "active", "ingesting…")
-        agent = AgentController(
+    st.session_state["run_objective"] = run_objective_text
+    st.session_state["is_sample"] = _sample_run
+    _new_run = ActiveRun(
+        RunSpec(
+            dataset_path=dpath,
+            output_dir=outdir,
+            tmp_dir=tmp,
+            stage_names=tuple(STAGE_DEFS),
+            objective=run_objective_text,
+            target=run_target,
             min_iterations=min_iter,
             max_iterations=max_iter,
             enable_rlm=enable_rlm,
             use_llm=run_llm,
             use_ml=use_ml,
-            objective=run_objective_text,
-            output_dir=outdir,
             run_config=run_config,
-        )
-        if use_ml:
-            # IMPROVEMENTS.md 7.16 — TrainModelTool.requires_context reads
-            # these back and fills them into the real train_model call
-            # whenever the planner leaves them empty.
-            agent.memory.set_context("ui_max_depth", max_depth)
-            agent.memory.set_context("ui_test_size", test_pct / 100.0)
-            agent.memory.set_context("ui_n_cv_folds", n_cv)
-            agent.memory.set_context("ui_tune_hyperparameters", tune_hyperparameters)
-        meta = agent.load_dataset(
-            dpath,
-            target_hint=run_target,
-            interactive=False,
-            related_files=related_paths or None,
-            join_overrides=join_overrides or None,
-        )
-        st.session_state["metadata"] = meta
-        st.session_state["run_objective"] = run_objective_text
-        st.session_state["is_sample"] = _sample_run
-        _upd("1", "done",
-             f"{meta.row_count:,} rows × {meta.column_count} cols · task={meta.task_type} · target={meta.target_column}")
-
-        _upd("2", "active",
-             "calling LLM for analysis plan…" if run_llm
-             else "building deterministic plan from the data profile…")
-        _upd("3", "pending")
-        _upd("4", "pending")
-        _upd("5", "pending")
-        _upd("6", "pending" if enable_rlm else "skipped",
-             "" if enable_rlm else "disabled")
-        _upd("7", "pending")
-
-        # ── Lightweight callbacks — only update stage_log, no st.write ────
-        def _on_step(tool_name: str, status: str, detail: str) -> None:
-            _set_stage("3", "active", detail)
-            _progress_lines.append(f"       {'ok  ' if status=='success' else '... '}{detail}")
-            _upd_live_ui()
-            if tool_name == "train_model":
-                _spinner_ph.markdown(
-                    '<div class="run-banner">Running the analysis'
-                    '<span class="sub">Still working. Training models can take a few minutes depending on the data size...</span></div>',
-                    unsafe_allow_html=True,
-                )
-
-        def _on_iter(iteration: int, stage: str) -> None:
-            if "stage2" in stage:
-                _set_stage("2", "active", f"iter {iteration}: LLM reasoning…")
-                _progress_lines.append(f"[run ] Iteration {iteration}: model reasoning")
-            elif "stage4" in stage or "stage5" in stage:
-                _set_stage("4", "active", f"iter {iteration}: interpreting results…")
-                _set_stage("5", "active", f"iter {iteration}: refining plan…")
-                _progress_lines.append(f"[run ] Iteration {iteration}: interpreting and refining")
-            _upd_live_ui()
-            if iteration > 1:
-                _spinner_ph.markdown(
-                    '<div class="run-banner">Running the analysis'
-                    '<span class="sub">Still working. Refining answers can take a few minutes...</span></div>',
-                    unsafe_allow_html=True,
-                )
-
-        agent.on_step_callback      = _on_step
-        agent.on_iteration_callback = _on_iter
-
-        final = agent.analyze()
-
-        # The controller is gone after the rerun, so everything RunView needs
-        # from memory is snapshotted into a plain dict here.
-        from src.core.run_view import RUN_VIEW_CONTEXT_KEYS, build_run_view
-
-        st.session_state["run_view"] = build_run_view(
-            final,
-            {k: agent.memory.get_context(k) for k in RUN_VIEW_CONTEXT_KEYS},
-            objective=run_objective_text,
+            related_paths=tuple(related_paths),
+            join_overrides=join_overrides,
+            ml_max_depth=max_depth if use_ml else None,
+            ml_test_size=test_pct / 100.0 if use_ml else None,
+            ml_n_cv_folds=n_cv if use_ml else None,
+            ml_tune=tune_hyperparameters if use_ml else None,
             is_sample=_sample_run,
+            keep_summary=not _HOSTED,
         )
+    )
+    st.session_state["_run"] = _new_run
+    _new_run.start()
+    # Re-render once so the sidebar (Run disabled, New analysis offered) already
+    # reflects the active run; the fragment below takes over from here.
+    st.rerun()
 
-        # ── Mark all stages done ──────────────────────────────────────────
-        _upd("2", "done", "plan generated & executed")
-        tool_names_run = list({r.get("tool_name","") for r in [t.to_dict() for t in agent.memory.tool_results]})
-        _upd("3", "done", f"{len(agent.memory.tool_results)} tools executed: {', '.join(tool_names_run[:5])}")
-        _upd("4", "done", "results interpreted")
-        _upd("5", "done", f"{agent.memory.iteration_count} iteration(s)")
-        if enable_rlm:
-            sub = agent.memory.get_context("rlm_sub_results")
-            _upd("6", "done",
-                 f"{len(sub)} sub-tasks" if sub else "no decomposition needed")
-        _upd("7", "done", "report saved")
-
-        st.session_state["tool_results"]  = [r.to_dict() for r in agent.memory.tool_results]
-        st.session_state["final_report"]  = final
-        if agent.last_profile is not None:
-            st.session_state["profile"] = agent.last_profile.to_dict()
-        st.session_state["read_report"] = agent.memory.get_context("read_report")
-        st.session_state["coercions"] = agent.memory.get_context("coercions")
-        st.session_state["profile_status"] = agent.memory.get_context("profile_status")
-        _dash_path = Path(outdir) / "reports" / "dashboard.json"
-        if _dash_path.exists():
-            try:
-                st.session_state["dashboard"] = json.loads(
-                    _dash_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                st.session_state["dashboard"] = None
-        _sum_path = Path(outdir) / "reports" / "summary.json"
-        if _sum_path.exists() and not _HOSTED:
-            # "Compare with a previous run" lists every summary under
-            # output/runs, so on a shared server it would show other
-            # visitors' runs. Local single-user runs only.
-            try:   # keep a copy where "Compare with a previous run" looks
-                _keep = Path("output") / "runs" / f"ui-{datetime.now():%Y%m%d-%H%M%S}" / "reports"
-                _keep.mkdir(parents=True, exist_ok=True)
-                (_keep / "summary.json").write_bytes(_sum_path.read_bytes())
-                st.session_state["current_summary_path"] = str(_keep / "summary.json")
-            except OSError:
-                pass
-        st.session_state["analysis_done"] = True
-        st.session_state["progress_lines"] = _progress_lines
-        llm_err = agent.memory.get_context("llm_error")
-        if llm_err:
-            st.session_state["llm_warning"] = f"Fallback plan was used (LLM issue): {llm_err[:300]}"
-        _spinner_ph.empty()
-
-    except Exception:
-        err = traceback.format_exc()
-        st.session_state["analysis_error"] = err
-        st.session_state["progress_lines"] = _progress_lines
-        for _n, _s, _d in reversed(st.session_state["stage_log"]):
-            if _s == "active":
-                _set_stage(_n, "error", "failed")
-                break
-        _spinner_ph.empty()
-        st.error(
-            "Something went wrong during the run and it couldn't finish. "
-            "This usually means a step in the analysis hit an unexpected "
-            "problem with this specific file. See the technical details "
-            "below if you want to know exactly what happened."
-        )
-        with st.expander("Technical details"):
-            st.code(err, language="python")
+if st.session_state.get("_run") is not None:
+    _run_progress()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1112,7 +1033,8 @@ _done = sum(1 for _, s, _ in st.session_state["stage_log"] if s == "done")
 _errored = any(s == "error" for _, s, _ in st.session_state["stage_log"])
 _running = any(s == "active" for _, s, _ in st.session_state["stage_log"])
 
-if st.session_state.get("analysis_done") or _errored or _running:
+_run_active = _active_run() is not None
+if (st.session_state.get("analysis_done") or _errored or _running) and not _run_active:
     steps_list_slot.markdown(_render_steps_list(st.session_state["stage_log"]), unsafe_allow_html=True)
     with pipeline_slot.container():
         with st.expander("Show how it's working", expanded=False):
@@ -1128,6 +1050,8 @@ _error_step = next((n for n, s, _ in st.session_state["stage_log"] if s == "erro
 _active_step = next((n for n, s, _ in st.session_state["stage_log"] if s == "active"), None)
 _status_str = (
     f"Stopped at step {_error_step}" if _error_step else
+    "Running" if _run_active else
+    "Stopped early" if (st.session_state.get("final_report") or {}).get("stopped") else
     "Done" if st.session_state.get("analysis_done") else
     f"Working on step {_active_step} of 7" if _active_step else
     "Ready"
@@ -1167,6 +1091,16 @@ if st.session_state.get("analysis_done"):
     # content already exists as a standalone HTML export in Downloads
     # (`tab_vault`, below) — keeping both was two ways to reach the same
     # experience.
+    if report.get("stopped"):
+        _n_tools = sum(
+            1 for t in tool_results
+            if t.get("tool_name") not in ("ingest_dataset", "planner", "generate_report")
+        )
+        st.warning(
+            "This run was stopped before it finished. The results below cover only "
+            f"the {_n_tools} analysis step{'s' if _n_tools != 1 else ''} completed up to that point, "
+            "so they may be incomplete."
+        )
     if st.session_state.get("is_sample"):
         st.info(
             "This is a real analysis of the bundled sample file "

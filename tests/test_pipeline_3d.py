@@ -131,13 +131,17 @@ def test_hostile_stage_name_is_escaped(captured: list[dict[str, Any]]) -> None:
 
 # ── Design system ────────────────────────────────────────────────────────────
 def test_palette_matches_design_tokens() -> None:
-    """DESIGN.md rations these inks; the scene may not invent others."""
-    assert PALETTE["ink"] == "#3a2b1e"
-    assert PALETTE["pen"] == "#a34f20"
-    assert PALETTE["risk"] == "#a33526"
-    assert set(PALETTE) == {
-        "stock", "sheet", "ink", "graphite", "pen", "risk", "accent", "grid",
-    }
+    """The scene's inks come from src/core/design_tokens.py; it may not invent others.
+
+    Compared to the tokens, not to typed hex values: a hard-coded copy here went stale
+    when the palette changed, which is the drift this test exists to catch."""
+    from src.core import design_tokens
+
+    day = design_tokens.palette("day")
+    for key in ("ink", "pen", "risk", "stock", "sheet", "graphite", "accent"):
+        assert PALETTE[key] == day[key], f"plate {key} drifted from design_tokens"
+    assert PALETTE["grid"] == day["rule"]  # the scene's older name for the hairline
+    assert set(PALETTE) == set(day) | {"grid"}, "the scene adds no inks beyond the tokens and its grid alias"
 
 
 def test_stage_is_immutable() -> None:

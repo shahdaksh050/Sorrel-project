@@ -658,5 +658,21 @@ iframe {{
   .check-row.animate .check:nth-child(6) {{ animation-delay: 300ms; }}
 }}
 @keyframes checkIn {{ to {{ opacity: 1; transform: translateY(0); }} }}
+/* ── "How we got here" (Details): hairline-ruled blocks, tokens only ── */
+.how-we-got-here {{ margin: 0 0 2rem; max-width: 74ch; }}
+.how-title {{ font-family: var(--heading); margin: 0 0 .25rem; }}
+.how-lede {{ color: var(--graphite); font-size: 14.5px; line-height: 1.55; margin: 0 0 1rem; }}
+.how-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0 2rem; }}
+.how-block {{ border-top: 1px solid var(--rule); padding: .9rem 0 1.1rem; min-width: 0; }}
+.how-h {{ font-size: 15px; font-weight: 700; margin: 0 0 .15rem; color: var(--ink); }}
+.how-note {{ font-size: 13px; color: var(--graphite); line-height: 1.5; margin: 0 0 .6rem; }}
+.how-lead {{ font-size: 15px; font-weight: 600; color: var(--ink); line-height: 1.5; margin: 0 0 .4rem; }}
+.how-text {{ font-size: 14.5px; color: var(--ink); line-height: 1.6; margin: 0 0 .5rem; overflow-wrap: anywhere; }}
+.how-sub {{ font-size: 12.5px; font-weight: 700; color: var(--graphite); margin: .6rem 0 .2rem; }}
+.how-list {{ margin: 0 0 .4rem; padding-left: 1.1rem; font-size: 14px; line-height: 1.55; color: var(--ink); overflow-wrap: anywhere; }}
+.how-more {{ font-size: 13px; color: var(--graphite); margin: 0; }}
+.how-tag {{ font-size: 12px; font-weight: 700; color: var(--graphite); }}
+.how-tag.supported {{ color: var(--positive); }}
+.how-tag.refuted {{ color: var(--risk); }}
 </style>
 """, unsafe_allow_html=True)

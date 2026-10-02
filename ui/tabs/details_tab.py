@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from src.core.run_view import RunView
 from ui.components.cards import (
     find_tool,
     render_agent_grid,
@@ -16,12 +17,14 @@ from ui.components.cards import (
     render_other_findings,
     safe_df,
 )
+from ui.components.how_we_got_here import build_how_html
 
 
 def render_details_tab(
     report: dict[str, Any],
     tool_results: list[dict[str, Any]],
     prof: dict[str, Any] | None,
+    run_view: RunView | None = None,
 ) -> None:
     """Render Tier 4: Statistical & ML Lab, Detailed Audit & Inspection."""
     clean_out = find_tool(tool_results, "clean_data")
@@ -29,6 +32,11 @@ def render_details_tab(
     stat_out = find_tool(tool_results, "select_statistical_test")
     train_out = find_tool(tool_results, "train_model")
     eval_out = find_tool(tool_results, "evaluate_model")
+
+    if run_view is not None:
+        how_html = build_how_html(run_view.how)
+        if how_html:
+            st.markdown(how_html, unsafe_allow_html=True)
 
     st.markdown("### Case Log")
     st.caption("A sequential record of technical checks performed on this dataset.")

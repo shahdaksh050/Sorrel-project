@@ -1206,6 +1206,7 @@ if st.session_state.get("analysis_done"):
             report=report,
             tool_results=tool_results,
             prof=profile,
+            run_view=st.session_state.get("run_view"),
         )
 
     with tab_vault:

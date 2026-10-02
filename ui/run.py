@@ -17,9 +17,11 @@ running finishes first. Nothing here kills a thread.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 import threading
+import time
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -53,6 +55,52 @@ def remove_run_dir(path: str | None) -> None:
     target = Path(path).resolve()
     if target.name.startswith(RUN_DIR_PREFIX) and target.parent == Path(tempfile.gettempdir()).resolve():
         shutil.rmtree(target, ignore_errors=True)
+
+
+#: Run directories older than this are leftovers from a closed tab or a crashed process.
+STALE_RUN_DIR_AGE_S = 24 * 3600
+
+
+def sweep_stale_run_dirs(max_age_s: float = STALE_RUN_DIR_AGE_S, now: float | None = None) -> int:
+    """Delete run directories nobody can still be using; returns how many were removed.
+
+    A run directory is removed only when it carries `RUN_DIR_PREFIX`, sits directly under
+    the system temp root, and has not been modified for `max_age_s`.
+    """
+    root = Path(tempfile.gettempdir()).resolve()
+    cutoff = (time.time() if now is None else now) - max_age_s
+    removed = 0
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if (
+                entry.name.startswith(RUN_DIR_PREFIX)
+                and entry.is_dir()
+                and not entry.is_symlink()
+                and entry.stat().st_mtime < cutoff
+            ):
+                shutil.rmtree(entry, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _max_concurrent_runs() -> int:
+    """`MAX_CONCURRENT_RUNS` analyses at once across all visitors (default 4, minimum 1)."""
+    try:
+        return max(1, int(os.getenv("MAX_CONCURRENT_RUNS", "4")))
+    except ValueError:
+        return 4
+
+
+#: Shared by every session in this process, so one busy server cannot be asked to run
+#: an unbounded number of analyses at once. Extra runs wait their turn and say so.
+_RUN_SLOTS = threading.BoundedSemaphore(_max_concurrent_runs())
+_SLOT_POLL_S = 0.5
 
 
 @dataclass(frozen=True)
@@ -234,12 +282,30 @@ class ActiveRun:
                     self._stage_log.sort(key=lambda e: e[0])
                     break
 
+    def _acquire_slot(self) -> bool:
+        """Wait for a free run slot; False if the run was stopped while it waited."""
+        if _RUN_SLOTS.acquire(blocking=False):
+            return True
+        self.set_note("Waiting for a free slot: other analyses are running on this server.")
+        while not self._stop_event.is_set():
+            if _RUN_SLOTS.acquire(timeout=_SLOT_POLL_S):
+                self.set_note("")
+                return True
+        return False
+
     def _main(self) -> None:
+        slot = False
         try:
-            _execute(self)
+            slot = self._acquire_slot()
+            if slot:
+                _execute(self)
+            else:
+                self._fail("Stopped before the analysis started.")
         except Exception:
             self._fail(traceback.format_exc())
         finally:
+            if slot:
+                _RUN_SLOTS.release()
             with self._lock:
                 discarded = self._discard
                 if self._state == "running":  # defensive: never leave the page polling forever

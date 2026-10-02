@@ -143,7 +143,7 @@ from ui.components.cards import (
     section as _section,
 )
 from ui.components.provisional import build_provisional_html
-from ui.run import RUN_DIR_PREFIX, ActiveRun, RunSpec, remove_run_dir
+from ui.run import RUN_DIR_PREFIX, ActiveRun, RunSpec, remove_run_dir, sweep_stale_run_dirs
 from ui.styles import inject_theme_css as _inject_theme_css
 from ui.tabs import (
     render_answers_tab,
@@ -196,6 +196,15 @@ _inject_theme_css()
 #: directories that carry it, directly under the system temp root.
 _RUN_DIR_PREFIX = RUN_DIR_PREFIX
 _remove_run_dir = remove_run_dir
+
+
+@st.cache_resource(show_spinner=False)
+def _sweep_once() -> int:
+    """Clear run directories left by closed tabs or crashed processes, once per server process."""
+    return sweep_stale_run_dirs()
+
+
+_sweep_once()
 
 
 def _active_run() -> ActiveRun | None:

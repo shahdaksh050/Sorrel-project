@@ -190,3 +190,57 @@ def test_the_worker_module_never_imports_streamlit() -> None:
     assert not {m for m in imported if m == "streamlit" or m.startswith("streamlit.")}
     # No attribute access to session state either (the docstring may mention it).
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "session_state"]
+
+
+# ── stale run directories and the shared run limiter ─────────────────────────
+
+
+def test_sweep_removes_only_old_prefixed_dirs_under_the_temp_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from ui.run import sweep_stale_run_dirs
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    old = tmp_path / f"{RUN_DIR_PREFIX}old"
+    fresh = tmp_path / f"{RUN_DIR_PREFIX}fresh"
+    other = tmp_path / "somebody-elses-dir"
+    for d in (old, fresh, other):
+        (d / "output").mkdir(parents=True)
+    long_ago = time.time() - 3 * 24 * 3600
+    for d in (old, other):
+        os.utime(d, (long_ago, long_ago))
+
+    assert sweep_stale_run_dirs(max_age_s=24 * 3600) == 1
+    assert not old.exists()
+    assert fresh.exists() and other.exists()
+
+
+def test_a_run_waits_for_a_free_slot_and_can_be_stopped_while_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    import ui.run as run_mod
+
+    monkeypatch.setattr(run_mod, "_RUN_SLOTS", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(run_mod, "_SLOT_POLL_S", 0.05)
+    assert run_mod._RUN_SLOTS.acquire(blocking=False)  # the only slot is taken
+
+    run = ActiveRun(_spec(tmp_path))
+    run.start()
+    deadline = time.time() + 5
+    while "Waiting for a free slot" not in run.snapshot().note and time.time() < deadline:
+        time.sleep(0.05)
+    assert "Waiting for a free slot" in run.snapshot().note
+
+    run.request_stop()
+    while not run.finished and time.time() < deadline + 5:
+        time.sleep(0.05)
+    assert run.finished and run.error is not None
+    assert "Stopped before the analysis started" in run.error
+    # The waiting run never held a slot, so it must not have released one.
+    run_mod._RUN_SLOTS.release()
+    with pytest.raises(ValueError):
+        run_mod._RUN_SLOTS.release()

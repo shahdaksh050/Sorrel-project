@@ -688,7 +688,7 @@ class LLMClient:
             }
         for block in msg.content:
             if isinstance(block, TextBlock):
-                return block.text
+                return str(block.text)
         raise ValueError("Anthropic response contained no text block.")
 
     def get_context_window(self) -> int:

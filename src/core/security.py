@@ -224,7 +224,7 @@ def _check_decompression_safety(raw_bytes: bytes, suffix: str) -> None:
         try:
             import pyarrow.parquet as pq
 
-            pf = pq.ParquetFile(io.BytesIO(raw_bytes))  # type: ignore[no-untyped-call]
+            pf = pq.ParquetFile(io.BytesIO(raw_bytes))  # type: ignore[no-untyped-call,unused-ignore]
             metadata = pf.metadata
             total_uncompressed = sum(
                 metadata.row_group(i).total_byte_size

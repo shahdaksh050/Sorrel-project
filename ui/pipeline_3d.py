@@ -25,6 +25,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from src.core import design_tokens
+from ui.styles import static_url
 
 __all__ = [
     "PALETTE",
@@ -73,6 +74,9 @@ class Stage:
     detail: str = ""
 
 
+_THREE_CDN = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+
+
 @lru_cache(maxsize=2)
 def _asset(name: str) -> str:
     """Read a bundled asset once per process."""
@@ -117,10 +121,14 @@ def build_document(stages: Sequence[Stage], theme: str = "day") -> str:
     # the inline <script> early. The scene renders them with textContent.
     state_json = json.dumps(state, ensure_ascii=False).replace("<", "\\u003c")
 
+    # Local copies first (Streamlit's static route), the CDN only as a fallback: the plate must
+    # draw with no network. The page's absolute paths resolve against the Streamlit origin.
+    three_urls = json.dumps([static_url("vendor/three/three.module.js"), _THREE_CDN]).replace("<", "\\u003c")
     return (
         _asset("pipeline_3d.html")
+        .replace("__FONT_LINKS__", f'<link rel="stylesheet" href="{static_url("fonts/ledger-fonts.css")}">')
         .replace("__STATE_JSON__", state_json)
-        .replace("__SCENE_SCRIPT__", _asset("pipeline_3d.js"))
+        .replace("__SCENE_SCRIPT__", f"window.__THREE_URLS__ = {three_urls};\n" + _asset("pipeline_3d.js"))
     )
 
 

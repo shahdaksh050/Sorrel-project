@@ -3,8 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Mukta:wght@400;500;600;700&display=swap" rel="stylesheet">
+__FONT_LINKS__
 <style>
   /* Tokens mirror DESIGN.md and are updated dynamically from window.__PIPELINE_STATE__.palette */
   :root {
@@ -203,6 +202,9 @@
     opacity: 0.8;
   }
 
+  .fallback-steps { margin: 0 20px 20px; padding-left: 1.4rem; font-size: 14px; line-height: 1.7; color: var(--ink); }
+  .fallback-steps li.done::marker, .fallback-steps li.active::marker { color: var(--pen); }
+  .fallback-steps li.error { color: var(--risk); }
   .fallback {
     padding: 24px;
     font-size: 14px;
@@ -263,6 +265,44 @@
   </script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/animejs@4.5.0/dist/bundles/anime.umd.min.js"></script>
+  <script>
+    /* If GSAP did not load (no network), stand in for it: each tween applies its end state at once, so the
+       scene still draws correctly, without the animation. Online, the real GSAP above is used unchanged. */
+    (function () {
+      if (window.gsap) return;
+      var RESERVED = ["duration", "ease", "delay", "onUpdate", "onComplete", "onStart", "repeat", "yoyo",
+                      "stagger", "overwrite", "immediateRender", "paused", "id"];
+      function apply(target, vars) {
+        (Array.isArray(target) ? target : [target]).forEach(function (t) {
+          if (!t) return;
+          for (var k in vars) if (RESERVED.indexOf(k) === -1) t[k] = vars[k];
+        });
+        if (vars && typeof vars.onUpdate === "function") vars.onUpdate();
+        if (vars && typeof vars.onComplete === "function") vars.onComplete();
+      }
+      function timeline() {
+        var tl = {
+          to: function (t, v) { apply(t, v); return tl; },
+          from: function () { return tl; },
+          fromTo: function (t, f, v) { apply(t, v); return tl; },
+          set: function (t, v) { apply(t, v); return tl; },
+          call: function (fn) { if (typeof fn === "function") fn(); return tl; },
+          add: function (x) { if (typeof x === "function") x(); return tl; },
+          clear: function () { return tl; },
+          kill: function () { return tl; }
+        };
+        return tl;
+      }
+      window.gsap = {
+        to: function (t, v) { apply(t, v); },
+        from: function () {},
+        fromTo: function (t, f, v) { apply(t, v); },
+        set: function (t, v) { apply(t, v); },
+        timeline: timeline,
+        globalTimeline: { clear: function () {} }
+      };
+    })();
+  </script>
   <script type="module">
 __SCENE_SCRIPT__
   </script>

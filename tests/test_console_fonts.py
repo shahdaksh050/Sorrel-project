@@ -62,4 +62,15 @@ def test_static_folder_holds_only_public_assets() -> None:
     allowed = {".woff2", ".css", ".js"}
     files = [p for p in (ROOT / "static").rglob("*") if p.is_file()]
     assert files
-    assert {p.suffix for p in files} <= allowed, sorted({p.suffix for p in files} - allowed)
+    other = [p for p in files if p.suffix not in allowed]
+    # The only other files are the licence texts that ship with vendored libraries.
+    assert all(p.suffix == ".txt" and p.name.upper().startswith("LICENSE") for p in other), [
+        str(p.relative_to(ROOT)) for p in other
+    ]
+
+
+def test_vendored_three_in_static_matches_the_landing_copy() -> None:
+    """The plate and the landing page load the same Three.js build, from two places."""
+    static = (ROOT / "static" / "vendor" / "three" / "three.module.js").read_bytes()
+    landing = (ROOT / "ui" / "landing_component" / "vendor" / "three.module.js").read_bytes()
+    assert static == landing

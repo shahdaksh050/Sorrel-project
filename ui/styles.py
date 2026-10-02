@@ -13,10 +13,16 @@ from src.core import design_tokens
 FONT_CSS_PATH = "app/static/fonts/ledger-fonts.css"
 
 
+def static_url(path: str) -> str:
+    """URL of a file under ./static (served at /app/static), honouring `server.baseUrlPath`."""
+    base = str(st.get_option("server.baseUrlPath") or "").strip("/")
+    rel = f"app/static/{path.lstrip('/')}"
+    return f"/{base}/{rel}" if base else f"/{rel}"
+
+
 def font_css_url() -> str:
     """URL of the local font stylesheet, honouring `server.baseUrlPath`."""
-    base = str(st.get_option("server.baseUrlPath") or "").strip("/")
-    return f"/{base}/{FONT_CSS_PATH}" if base else f"/{FONT_CSS_PATH}"
+    return static_url("fonts/ledger-fonts.css")
 
 
 def inject_theme_css() -> None:

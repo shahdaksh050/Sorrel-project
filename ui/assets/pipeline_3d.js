@@ -8,7 +8,7 @@
  * - Interactive perspective toggles (ISO, PLAN, FRONT, RESET).
  * - Full performance gating (dirty flag, visibility check, DPR clamp, teardown).
  */
-import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+// Three.js is loaded below (a local copy first, then the CDN), so a failed load cannot kill this script.
 
 const STATE = window.__PIPELINE_STATE__ || { stages: [], palette: {} };
 const C = STATE.palette || {};
@@ -107,6 +107,30 @@ function fallback(message) {
   p.className = "fallback";
   p.textContent = message;
   host.appendChild(p);
+  // The same seven stages, as text, so the plate is never an empty box.
+  const list = document.createElement("ol");
+  list.className = "fallback-steps";
+  for (const s of STAGES) {
+    const li = document.createElement("li");
+    li.className = s.status || "pending";
+    li.textContent = `${s.name} (${s.status || "pending"})${s.detail ? ": " + s.detail : ""}`;
+    list.appendChild(li);
+  }
+  host.appendChild(list);
+}
+
+let THREE = null;
+for (const url of window.__THREE_URLS__ || []) {
+  try {
+    THREE = await import(url);
+    break;
+  } catch {
+    /* try the next source */
+  }
+}
+if (!THREE) {
+  fallback("The 3D view could not load here. The steps are listed below instead.");
+  throw new Error("Three.js unavailable");
 }
 
 /* ------------------------------------------------------------------ *

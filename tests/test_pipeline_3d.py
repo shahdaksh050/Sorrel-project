@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from ui.pipeline_3d import PALETTE, Stage, _asset, render  # noqa: E402
+from ui.pipeline_3d import PALETTE, Stage, _asset, build_document, render  # noqa: E402
 
 
 @pytest.fixture
@@ -148,3 +148,27 @@ def test_stage_is_immutable() -> None:
     stage = Stage("1", "Dataset Ingestion")
     with pytest.raises(AttributeError):
         stage.status = "done"  # type: ignore[misc]
+
+
+# ── The plate must draw with no network, and never be an empty box ───────────────────────────
+def test_plate_loads_three_locally_before_the_cdn_and_never_from_google() -> None:
+    document = build_document([Stage("1", "Reading", "done", "")], theme="day")
+    urls = json.loads(re.search(r"window\.__THREE_URLS__ = (.*);", document).group(1))  # type: ignore[union-attr]
+    assert urls[0].endswith("/app/static/vendor/three/three.module.js")
+    assert urls[1].startswith("https://cdn.jsdelivr.net/")
+    assert "fonts.googleapis.com" not in document and "fonts.gstatic.com" not in document
+    assert "/app/static/fonts/ledger-fonts.css" in document
+
+
+def test_a_failed_three_load_cannot_kill_the_script_and_shows_the_stages_as_text() -> None:
+    document = build_document([Stage("1", "Reading", "done", "")], theme="day")
+    assert "import * as THREE" not in document  # a static import would die before any fallback ran
+    assert "await import(url)" in document
+    assert "fallback(" in document and 'document.createElement("ol")' in document
+
+
+def test_a_gsap_stand_in_keeps_the_scene_drawing_when_gsap_is_missing() -> None:
+    document = build_document([Stage("1", "Reading", "done", "")], theme="day")
+    assert "if (window.gsap) return;" in document
+    for method in ("timeline", "globalTimeline", "to:", "from:", "set:"):
+        assert method in document

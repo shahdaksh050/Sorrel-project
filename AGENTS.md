@@ -124,10 +124,10 @@ Operator controls (environment):
 
 | Variable | Default | Effect |
 | :--- | :--- | :--- |
-| `ENABLE_CODE_EXECUTION` | `true` | `false` hides every code-executing tool from the planner and rejects steps naming one. |
+| `ENABLE_CODE_EXECUTION` | `true` (`false` when `DSA_HOSTED=true`) | `false` hides every code-executing tool from the planner and rejects steps naming one. |
 | `MAX_CODE_EXECUTIONS` | `40` | Sandbox runs allowed per analysis; further steps are refused and logged. |
 | `SANDBOX_BACKEND` | `subprocess` | `docker` adds a kernel boundary (image: `Dockerfile`; rebuild after changing `src/`). |
-| `SANDBOX_REQUIRE_ISOLATION` | `false` | `true` runs code only in Docker — never falls back to the subprocess backend. Set it whenever datasets or objectives come from untrusted users. |
+| `SANDBOX_REQUIRE_ISOLATION` | `false` (`true` when `DSA_HOSTED=true`) | `true` runs code only in Docker — never falls back to the subprocess backend. Set it whenever datasets or objectives come from untrusted users. |
 | `SANDBOX_TIMEOUT_S` / `SANDBOX_MEMORY_MB` | `45` / `1024` | Per-execution wall-clock and process-tree RSS limits. |
 | `SANDBOX_SECCOMP` | `true` | Docker backend applies `docker/seccomp-sandbox.json`; `false` falls back to Docker's default profile. |
 | `REDACT_PII` | `true` | Values of detected personal-data columns (email, phone, names, IDs, cards, IPs) never enter LLM prompts; free text sent to the LLM is masked. |

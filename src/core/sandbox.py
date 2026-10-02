@@ -848,7 +848,9 @@ class DockerSandbox(SandboxBackend):
 def isolation_required() -> bool:
     """SANDBOX_REQUIRE_ISOLATION=true: LLM code may only run behind the
     Docker kernel boundary — never on the subprocess fallback."""
-    return os.environ.get("SANDBOX_REQUIRE_ISOLATION", "").strip().lower() in ("1", "true", "yes")
+    hosted = os.environ.get("DSA_HOSTED", "").strip().lower() in ("1", "true", "yes")
+    default = "true" if hosted else ""  # a shared server never falls back to the subprocess
+    return os.environ.get("SANDBOX_REQUIRE_ISOLATION", default).strip().lower() in ("1", "true", "yes")
 
 
 def get_sandbox_backend(backend_name: str | None = None) -> SandboxBackend | None:

@@ -44,8 +44,15 @@ LOCAL_PROVIDERS = frozenset({"local", "ollama"})
 _AUDITED_PARAM_KEYS = ("tool_name", "save_as", "description", "params_schema", "example_params")
 
 
+def hosted_deployment() -> bool:
+    """DSA_HOSTED=true: a shared server, where visitors' data and questions are untrusted."""
+    return os.getenv("DSA_HOSTED", "false").strip().lower() in ("1", "true", "yes")
+
+
 def code_execution_enabled() -> bool:
-    return os.getenv("ENABLE_CODE_EXECUTION", "true").strip().lower() not in ("0", "false", "no")
+    """Off by default on a hosted server until the operator turns it on explicitly."""
+    default = "false" if hosted_deployment() else "true"
+    return os.getenv("ENABLE_CODE_EXECUTION", default).strip().lower() not in ("0", "false", "no")
 
 
 def max_code_executions() -> int:

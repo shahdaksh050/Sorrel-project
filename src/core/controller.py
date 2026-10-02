@@ -28,7 +28,7 @@ from typing import Any
 
 import pandas as pd
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn
 
 from src.core.agenda import Question, build_agenda, coverage_report
 from src.core.causal_guard import (
@@ -799,6 +799,16 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         if not self.memory.dataset_metadata:
             raise RuntimeError("No dataset loaded. Call load_dataset() first.")
 
+        self._prepare_reasoning()
+
+        console.print("\n[bold magenta]🚀 Starting Autonomous Analysis — Stages 2-7[/]\n")
+        final_result = self._reasoning_loop()
+        final_result = self._finalize_analysis(final_result)
+        return final_result
+
+    def _prepare_reasoning(self) -> None:
+        """Stage 2 setup: enforce LOCAL_ONLY, build the PromptManager and RLMEngine,
+        seed the planner's draft plan and register library tools."""
         # LOCAL_ONLY: nothing may leave the machine. A cloud provider is
         # refused up front and the run continues deterministically.
         if self.use_llm and local_only() and self.llm_client.provider not in LOCAL_PROVIDERS:
@@ -856,7 +866,10 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             base_max_tokens=getattr(self.llm_client, "max_tokens", 4096),
         )
 
-        console.print("\n[bold magenta]🚀 Starting Autonomous Analysis — Stages 2-7[/]\n")
+    def _reasoning_loop(self) -> dict[str, Any]:
+        """Stages 2-6: run reasoning cycles until the analysis completes, stops or
+        hits max_iterations. Returns the raw final result (before post-run audits)."""
+        assert self._prompt_manager is not None and self._rlm_engine is not None
         final_result: dict[str, Any] = {}
 
         with Progress(
@@ -892,30 +905,8 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     break
 
                 # ---- Deterministic mode: no LLM, by choice ----
-                # Distinct from the failure path below. Nothing is "degraded"
-                # here — the user asked for a deterministic run, so the
-                # profile-driven plan executes once and the report is
-                # synthesised from tool output without any network call.
                 if not self.use_llm:
-                    if iteration == 1:
-                        console.print(
-                            "[cyan]🔌 LLM disabled — running the deterministic "
-                            "profile-driven plan.[/]"
-                        )
-                        llm_response = self._build_fallback_plan()
-                        llm_response["reasoning"] = (
-                            "LLM disabled for this run — plan selected from the "
-                            "dataset profile and domain inference."
-                        )
-                    steps = self._parse_steps(llm_response, cap=False)
-                    if steps:
-                        self.memory.store_analysis_plan(steps)
-                        progress.update(
-                            task_id, description=f"Stage 3 — Executing {len(steps)} tool(s)…"
-                        )
-                        self._execute_steps(steps)
-                        self.memory.save()
-                    final_result = self._deterministic_final()
+                    final_result = self._deterministic_cycle(progress, task_id)
                     break
 
                 # ---- Per-run token cap (MAX_LLM_TOKENS_PER_RUN) ----
@@ -926,59 +917,10 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                 self.llm_client.stage = stage_label
 
                 # ---- Reasoning with graceful degradation ----
-                # An LLM/API failure must never abort a running analysis:
-                # iteration 1 falls back to a deterministic plan, later
-                # iterations synthesise a final answer from existing results.
-                try:
-                    try:
-                        llm_response = self._rlm_engine.invoke(
-                            user_prompt, depth=0, stage=stage_label
-                        )
-                    except ValueError as first_exc:
-                        # A malformed/truncated/empty reply (ValueError from
-                        # LLMClient.call) is usually a one-off — one retry
-                        # asking for a compact plan is far cheaper than
-                        # discarding the LLM planner for the whole first
-                        # cycle. Transport errors (timeouts, rate limits) are
-                        # already retried by the SDK and fall straight
-                        # through to the fallback below.
-                        console.print(
-                            f"[yellow]⚠ Unusable LLM reply on iteration {iteration} "
-                            f"({first_exc}) — retrying once with a compact-JSON reminder.[/]"
-                        )
-                        llm_response = self._rlm_engine.invoke(
-                            user_prompt + _COMPACT_RETRY_NOTE,
-                            depth=0,
-                            stage=f"{stage_label}:retry",
-                        )
-                    llm_response = self._normalise_reply(llm_response)
-                    if llm_response.get("status") == "error":
-                        raise RuntimeError(
-                            str(llm_response.get("error", "Unknown LLM error"))
-                        )
-                except Exception as exc:
-                    self.memory.set_context("llm_error", f"{type(exc).__name__}: {exc}")
-                    console.print(
-                        f"[yellow]⚠ LLM failure on iteration {iteration}: {exc}[/]"
-                    )
-                    if iteration == 1:
-                        console.print("[yellow]  → Using deterministic fallback plan.[/]")
-                        # Record it in the degradations log both reports
-                        # render — otherwise, when a later cycle's LLM call
-                        # succeeds and supplies the final answer, nothing in
-                        # the report says the plan itself wasn't the LLM's.
-                        degradations = list(self.memory.get_context("degradations") or [])
-                        degradations.append(
-                            "LLM planning call failed on the first reasoning cycle "
-                            f"({type(exc).__name__}: {str(exc)[:200]}) — the analysis plan "
-                            "was chosen by the deterministic profile-driven fallback."
-                        )
-                        self.memory.set_context("degradations", degradations)
-                        llm_response = self._build_fallback_plan()
-                    else:
-                        console.print("[yellow]  → Synthesising final report from results.[/]")
-                        final_result = self._deterministic_final()
-                        break
+                llm_response, final = self._request_plan(iteration, user_prompt, stage_label)
+                if final is not None:
+                    final_result = final
+                    break
 
                 if iteration == 1:
                     self._store_data_understanding(llm_response)
@@ -994,43 +936,12 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     )
                     llm_response = self._build_fallback_plan()
 
-                # ---- Check for completion (Stage 7 trigger) ----
-                if llm_response.get("status") == "complete":
-                    if iteration < self.min_iterations:
-                        console.print(
-                            f"[yellow]ℹ LLM signalled complete on iteration {iteration} "
-                            f"(< min_iterations {self.min_iterations}) — prompting for deeper hypothesis exploration.[/]"
-                        )
-                        continue_prompt = (
-                            user_prompt
-                            + f"\n\n[SYSTEM DIRECTIVE: Minimum exploration cycles not yet reached "
-                            f"(currently iteration {iteration} of minimum {self.min_iterations}). "
-                            "Do NOT return Form 2 yet. Formulate a specific follow-up hypothesis, anomaly check, "
-                            "or deeper investigation, and return Form 1 (Action Plan) with 1–3 steps. "
-                            "Use execute_dynamic_code if you need a custom calculation.]"
-                        )
-                        try:
-                            if self._llm_budget_exhausted():
-                                raise RuntimeError("LLM token cap reached")
-                            self.llm_client.stage = f"{stage_label}:deepen_exploration"
-                            reprompt_res = self._rlm_engine.invoke(
-                                continue_prompt, depth=0, stage=f"{stage_label}:deepen_exploration"
-                            )
-                            reprompt_res = self._normalise_reply(reprompt_res)
-                            if reprompt_res.get("status") != "complete":
-                                llm_response = reprompt_res
-                            else:
-                                console.print("\n[bold green]✅ LLM confirmed analysis complete.[/]")
-                                final_result = reprompt_res
-                                break
-                        except Exception as exc:
-                            console.print(f"[yellow]⚠ Exploration reprompt failed ({exc}) — accepting completion.[/]")
-                            final_result = llm_response
-                            break
-                    else:
-                        console.print("\n[bold green]✅ LLM signalled analysis complete.[/]")
-                        final_result = llm_response
-                        break
+                llm_response, final = self._handle_completion(
+                    iteration, user_prompt, stage_label, llm_response
+                )
+                if final is not None:
+                    final_result = final
+                    break
 
                 # ---- Parse plan steps (tolerant of malformed entries) ----
                 steps = self._parse_steps(llm_response, cap=not llm_response.get("deterministic"))
@@ -1074,6 +985,139 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                 console.print("[yellow]⚠ Max iterations reached — generating final report.[/]")
                 final_result = self._final_synthesis("stage7:max_iter_synthesis")
 
+        return final_result
+
+    def _request_plan(
+        self, iteration: int, user_prompt: str, stage_label: str
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Ask the LLM for this cycle's reply, degrading gracefully on failure.
+
+        An LLM/API failure must never abort a running analysis: iteration 1 falls
+        back to a deterministic plan, later iterations synthesise a final answer
+        from existing results. Returns `(reply, final)`; a non-None `final` means
+        the loop should stop with that result."""
+        assert self._rlm_engine is not None
+        try:
+            try:
+                llm_response = self._rlm_engine.invoke(
+                    user_prompt, depth=0, stage=stage_label
+                )
+            except ValueError as first_exc:
+                # A malformed/truncated/empty reply (ValueError from
+                # LLMClient.call) is usually a one-off — one retry
+                # asking for a compact plan is far cheaper than
+                # discarding the LLM planner for the whole first
+                # cycle. Transport errors (timeouts, rate limits) are
+                # already retried by the SDK and fall straight
+                # through to the fallback below.
+                console.print(
+                    f"[yellow]⚠ Unusable LLM reply on iteration {iteration} "
+                    f"({first_exc}) — retrying once with a compact-JSON reminder.[/]"
+                )
+                llm_response = self._rlm_engine.invoke(
+                    user_prompt + _COMPACT_RETRY_NOTE,
+                    depth=0,
+                    stage=f"{stage_label}:retry",
+                )
+            llm_response = self._normalise_reply(llm_response)
+            if llm_response.get("status") == "error":
+                raise RuntimeError(
+                    str(llm_response.get("error", "Unknown LLM error"))
+                )
+        except Exception as exc:
+            self.memory.set_context("llm_error", f"{type(exc).__name__}: {exc}")
+            console.print(
+                f"[yellow]⚠ LLM failure on iteration {iteration}: {exc}[/]"
+            )
+            if iteration == 1:
+                console.print("[yellow]  → Using deterministic fallback plan.[/]")
+                # Record it in the degradations log both reports
+                # render — otherwise, when a later cycle's LLM call
+                # succeeds and supplies the final answer, nothing in
+                # the report says the plan itself wasn't the LLM's.
+                degradations = list(self.memory.get_context("degradations") or [])
+                degradations.append(
+                    "LLM planning call failed on the first reasoning cycle "
+                    f"({type(exc).__name__}: {str(exc)[:200]}) — the analysis plan "
+                    "was chosen by the deterministic profile-driven fallback."
+                )
+                self.memory.set_context("degradations", degradations)
+                llm_response = self._build_fallback_plan()
+            else:
+                console.print("[yellow]  → Synthesising final report from results.[/]")
+                return {}, self._deterministic_final()
+        return llm_response, None
+
+    def _handle_completion(
+        self, iteration: int, user_prompt: str, stage_label: str, llm_response: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Decide what a "complete" reply means (Stage 7 trigger).
+
+        Before `min_iterations` the planner is pushed for one more hypothesis;
+        otherwise the reply is accepted. Returns `(reply, final)`: a non-None
+        `final` ends the loop with that result, else `reply` is the plan to run.
+        """
+        if llm_response.get("status") != "complete":
+            return llm_response, None
+        if iteration >= self.min_iterations:
+            console.print("\n[bold green]✅ LLM signalled analysis complete.[/]")
+            return llm_response, llm_response
+        assert self._rlm_engine is not None
+        console.print(
+            f"[yellow]ℹ LLM signalled complete on iteration {iteration} "
+            f"(< min_iterations {self.min_iterations}) — prompting for deeper hypothesis exploration.[/]"
+        )
+        continue_prompt = (
+            user_prompt
+            + f"\n\n[SYSTEM DIRECTIVE: Minimum exploration cycles not yet reached "
+            f"(currently iteration {iteration} of minimum {self.min_iterations}). "
+            "Do NOT return Form 2 yet. Formulate a specific follow-up hypothesis, anomaly check, "
+            "or deeper investigation, and return Form 1 (Action Plan) with 1–3 steps. "
+            "Use execute_dynamic_code if you need a custom calculation.]"
+        )
+        try:
+            if self._llm_budget_exhausted():
+                raise RuntimeError("LLM token cap reached")
+            self.llm_client.stage = f"{stage_label}:deepen_exploration"
+            reprompt_res = self._rlm_engine.invoke(
+                continue_prompt, depth=0, stage=f"{stage_label}:deepen_exploration"
+            )
+            reprompt_res = self._normalise_reply(reprompt_res)
+            if reprompt_res.get("status") != "complete":
+                return reprompt_res, None
+            console.print("\n[bold green]✅ LLM confirmed analysis complete.[/]")
+            return reprompt_res, reprompt_res
+        except Exception as exc:
+            console.print(f"[yellow]⚠ Exploration reprompt failed ({exc}) — accepting completion.[/]")
+            return llm_response, llm_response
+
+    def _deterministic_cycle(self, progress: Progress, task_id: TaskID) -> dict[str, Any]:
+        """Deterministic mode (LLM off by choice): run the profile-driven plan once.
+
+        Distinct from the failure path in `_request_plan`. Nothing is "degraded"
+        here — the user asked for a deterministic run, so the plan executes once
+        and the report is synthesised from tool output without any network call.
+        """
+        console.print(
+            "[cyan]🔌 LLM disabled — running the deterministic "
+            "profile-driven plan.[/]"
+        )
+        llm_response = self._build_fallback_plan()
+        llm_response["reasoning"] = (
+            "LLM disabled for this run — plan selected from the "
+            "dataset profile and domain inference."
+        )
+        steps = self._parse_steps(llm_response, cap=False)
+        if steps:
+            self.memory.store_analysis_plan(steps)
+            progress.update(task_id, description=f"Stage 3 — Executing {len(steps)} tool(s)…")
+            self._execute_steps(steps)
+            self.memory.save()
+        return self._deterministic_final()
+
+    def _attach_run_metadata(self, final_result: dict[str, Any]) -> None:
+        """Strip plumbing from the raw result and attach the run's findings,
+        governance, API telemetry and question coverage."""
         # P3.1 — `final_result` is, on the "complete"/max-iteration paths,
         # the raw LLM response dict returned by RLMEngine.invoke(), which
         # LLMClient.call() may have stamped with `_rlm_usage` (this run's
@@ -1125,6 +1169,9 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         except Exception:
             logger.debug("question coverage report skipped", exc_info=True)
 
+    def _run_post_hoc_audits(self, final_result: dict[str, Any]) -> None:
+        """Claim verification plus the post-hoc audits (deliverable contract,
+        dependence, target leakage, fragility, causal language) and check marks."""
         # ---- Verbatim-metric validation: enforce "cite only verbatim
         # metrics" as a mechanism, not just a prompt instruction ----
         unverified = self._flag_unverified_claims(final_result)
@@ -1148,7 +1195,15 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         except Exception:
             audit_df = None
 
-        # ---- Deliverable Contract Audit (Phase 2) ----
+        self._audit_contract(final_result, audit_df)
+        if audit_df is not None:
+            self._audit_dependence(final_result, audit_df)
+        leakage_alerts = self._audit_target_leakage(final_result, audit_df)
+        fragility_by_id = self._audit_fragility(final_result, audit_df)
+        self._attach_audit_checks(final_result, leakage_alerts, fragility_by_id)
+
+    def _audit_contract(self, final_result: dict[str, Any], audit_df: pd.DataFrame | None) -> None:
+        """Deliverable Contract Audit (Phase 2)."""
         if not self.deliverable_contract.is_empty():
             audit_rep = audit_deliverables(self.deliverable_contract, final_result, df=audit_df)
             self.memory.set_context("deliverable_audit", {
@@ -1167,27 +1222,30 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     f"{', '.join(audit_rep.repaired)}[/]"
                 )
 
-        # ---- Dependence & Confounding Audit (Phase 4) ----
-        dep_df = audit_df
-        if dep_df is not None:
-            try:
-                self._audit_dependence_structure(dep_df)
-            except Exception as exc:
-                console.print(f"  [yellow]⚠ Dependence/Simpson's-paradox audit skipped (non-fatal): {exc}[/]")
-            # Re-derive from ranked_findings(), not the raw list — the raw
-            # list bypasses _drop_unskilled_drivers/is_trivial suppression,
-            # which would resurrect noise-level "driver" findings on every
-            # run that reaches this point (this block used to overwrite with
-            # raw findings unconditionally and broke that suppression).
-            final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
 
-        # ---- Target Leakage & Finding Fragility Audit (sensitivity.py) ----
+    def _audit_dependence(self, final_result: dict[str, Any], df: pd.DataFrame) -> None:
+        """Dependence & Confounding Audit (Phase 4)."""
+        try:
+            self._audit_dependence_structure(df)
+        except Exception as exc:
+            console.print(f"  [yellow]⚠ Dependence/Simpson's-paradox audit skipped (non-fatal): {exc}[/]")
+        # Re-derive from ranked_findings(), not the raw list — the raw
+        # list bypasses _drop_unskilled_drivers/is_trivial suppression,
+        # which would resurrect noise-level "driver" findings on every
+        # run that reaches this point (this block used to overwrite with
+        # raw findings unconditionally and broke that suppression).
+        final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
+
+    def _audit_target_leakage(
+        self, final_result: dict[str, Any], df: pd.DataFrame | None
+    ) -> list[dict[str, Any]]:
+        """Target Leakage Audit (sensitivity.py). Returns the alerts, also stored on the result."""
         leakage_alerts: list[dict[str, Any]] = []
         target_col = getattr(self.memory.dataset_metadata, "target_column", None)
-        if dep_df is not None and target_col:
+        if df is not None and target_col:
             try:
                 from src.core.sensitivity import detect_target_leakage
-                leakage_alerts = detect_target_leakage(dep_df, target_col)
+                leakage_alerts = detect_target_leakage(df, target_col)
             except Exception as exc:
                 console.print(f"  [yellow]⚠ Target leakage audit skipped (non-fatal): {exc}[/]")
             if leakage_alerts:
@@ -1198,26 +1256,39 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     f"{len(critical)} critical — {', '.join(a['column'] for a in leakage_alerts[:5])}[/]"
                 )
         final_result["target_leakage_alerts"] = leakage_alerts
+        return leakage_alerts
 
+    def _audit_fragility(
+        self, final_result: dict[str, Any], df: pd.DataFrame | None
+    ) -> dict[str, bool]:
+        """Finding Fragility Audit (sensitivity.py): finding_id -> is_fragile."""
         fragility_by_id: dict[str, bool] = {}
-        if dep_df is not None:
-            try:
-                from src.core.sensitivity import audit_finding_sensitivity
-                # Bounded to the top-ranked findings — a jackknife pass
-                # recomputes the effect once per finding, which is too
-                # costly to run over every finding on a long analysis.
-                for f in self.memory.ranked_findings()[:8]:
-                    if f.measure and f.effect is not None:
-                        report = audit_finding_sensitivity(dep_df, f)
-                        is_fragile = bool(report.get("is_fragile"))
-                        fragility_by_id[f.finding_id] = is_fragile
-                        if is_fragile:
-                            f.caveats.append(report["diagnosis"])
-                final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
-            except Exception as exc:
-                console.print(f"  [yellow]⚠ Finding fragility audit skipped (non-fatal): {exc}[/]")
+        if df is None:
+            return fragility_by_id
+        try:
+            from src.core.sensitivity import audit_finding_sensitivity
+            # Bounded to the top-ranked findings — a jackknife pass
+            # recomputes the effect once per finding, which is too
+            # costly to run over every finding on a long analysis.
+            for f in self.memory.ranked_findings()[:8]:
+                if f.measure and f.effect is not None:
+                    report = audit_finding_sensitivity(df, f)
+                    is_fragile = bool(report.get("is_fragile"))
+                    fragility_by_id[f.finding_id] = is_fragile
+                    if is_fragile:
+                        f.caveats.append(report["diagnosis"])
+            final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
+        except Exception as exc:
+            console.print(f"  [yellow]⚠ Finding fragility audit skipped (non-fatal): {exc}[/]")
+        return fragility_by_id
 
-        # ---- Causal Claim Guard (Phase 4) ----
+    def _attach_audit_checks(
+        self,
+        final_result: dict[str, Any],
+        leakage_alerts: list[dict[str, Any]],
+        fragility_by_id: dict[str, bool],
+    ) -> None:
+        """Causal Claim Guard (Phase 4), then the audited-entry check marks."""
         study_design = getattr(self, "study_design", "observational")
         causal_warns = audit_findings_causal_language(self.memory.findings, study_design=study_design)
         if causal_warns:
@@ -1242,6 +1313,11 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         )
         final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
 
+    def _finalize_analysis(self, final_result: dict[str, Any]) -> dict[str, Any]:
+        """Stage 7: attach metadata, run the audits, then write the reports."""
+        self._attach_run_metadata(final_result)
+        self._run_post_hoc_audits(final_result)
+
         # ---- Stage 7: Report Generation ----
         self._generate_final_report(final_result)
         self._generate_dashboard()
@@ -1252,6 +1328,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         if self._rlm_engine:
             console.print()
             self._rlm_engine.print_reasoning_trace()
+
 
         return final_result
 

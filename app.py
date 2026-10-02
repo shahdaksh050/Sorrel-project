@@ -1191,7 +1191,7 @@ if st.session_state.get("analysis_done"):
             prof=profile,
             preview_df=preview_df,
             vega_cfg=vega_cfg,
-            objective=st.session_state.get("run_objective", ""),
+            run_view=st.session_state.get("run_view"),
         )
 
     with tab_dash:

@@ -1,938 +1,522 @@
-# Agentic AI Powered Autonomous Data Analysis and Interpretation System
+# DSA Agent — Autonomous Data Analysis and Interpretation System
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Active-success.svg)]()
+[![Status](https://img.shields.io/badge/Status-active%20development-orange.svg)]()
 
-## Project Overview
+DSA Agent is a final-year B.Tech CSE project that turns a tabular dataset and
+a plain-language question into an auditable analysis. It profiles the data,
+selects suitable deterministic analysis tools, optionally uses an LLM to plan
+and interpret the workflow, checks the evidence behind reported claims, and
+creates reports and visualisations that a non-specialist can inspect.
 
-This project implements an autonomous AI agent system that performs end-to-end data analysis on user-uploaded datasets. The system leverages large language models (LLMs) for intelligent reasoning and tool orchestration, while delegating computational tasks to specialized Python modules. By separating reasoning from execution, the architecture achieves modularity, scalability, and interpretability in automated data science workflows.
+The project is deliberately built around one rule: **reasoning and execution
+are different responsibilities**. LLMs decide how to approach an objective
+from controlled metadata and tool results; typed Python tools perform data
+processing, statistics, model fitting, charting, and report generation.
 
-The core design is a recursive inference pattern that treats long analysis contexts as part of an external environment, allowing the LLM to programmatically decompose tasks, invoke itself on workflow segments, and process analysis pipelines beyond standard context window limitations. This keeps multi-step data science workflows efficient and avoids context saturation.
+> **Project status:** The analysis platform and Streamlit workspace are active.
+> A full frontend visual overhaul and several data-method extensions are
+> planned, not complete. The roadmap below labels those items clearly.
 
----
+> **Academic-project notice:** This is a demonstration system, not a clinical,
+> legal, financial, or compliance decision system. Do not upload sensitive or
+> regulated data to a hosted deployment. When an online LLM is enabled,
+> controlled summaries may be sent to the selected provider.
 
-## Problem Statement
+## Table of contents
 
-Traditional data analysis workflows require significant human expertise to select appropriate statistical tests, machine learning models, and visualization techniques. Manual processes are:
+- [Problem and objectives](#problem-and-objectives)
+- [What exists now](#what-exists-now)
+- [Architecture](#architecture)
+- [Analysis workflow](#analysis-workflow)
+- [Supported data and analyses](#supported-data-and-analyses)
+- [Interfaces and outputs](#interfaces-and-outputs)
+- [Installation and usage](#installation-and-usage)
+- [Configuration and safety](#configuration-and-safety)
+- [Quality assurance](#quality-assurance)
+- [Roadmap](#roadmap)
+- [Limitations](#limitations)
+- [Repository structure](#repository-structure)
 
-- **Time-consuming**: Hours spent on exploratory analysis and model selection
-- **Error-prone**: Incorrect statistical test selection and assumption violations
-- **Inaccessible**: Requires advanced domain knowledge in statistics and ML
-- **Non-scalable**: Struggles with complex multi-step workflows requiring extensive context management
+## Problem and objectives
 
-There is a critical need for an autonomous system that can intelligently interpret dataset characteristics, plan and execute multi-step analytical workflows, handle arbitrarily complex analysis pipelines, and provide interpretable natural language explanations of findings.
+Many data-analysis tasks need several kinds of judgement at once: understanding
+the file layout, determining whether data are fit for analysis, choosing a
+valid statistical method, avoiding model leakage, checking assumptions, and
+communicating results without hiding uncertainty. Repeating that workflow by
+hand is slow and inconsistent, especially for users who do not work with data
+every day.
 
----
+DSA Agent aims to make this workflow more approachable while retaining a
+defensible trail from a user question to a result. Its objectives are to:
 
-## Objectives
+- accept common tabular datasets and reveal their structure and quality;
+- translate a plain-language question into a bounded analysis plan;
+- execute deterministic, reusable Python tools rather than letting an LLM
+  calculate from raw rows;
+- choose methods conditionally on dataset properties such as targets, time,
+  repeated entities, text, coordinates, or transaction structure;
+- surface evidence, uncertainty, effect sizes, degradation notes, and model
+  validation information with each result;
+- generate shareable Markdown, JSON, dashboard, chart, and HTML artefacts;
+- make safety controls, LLM use, and dynamically executed code visible and
+  auditable.
 
-- Develop an agentic AI system that autonomously performs comprehensive data analysis from raw datasets to actionable insights
-- Implement a modular architecture that strictly separates reasoning (LLM) from execution (Python tools) for maintainability and scalability
-- Apply recursive inference patterns to handle complex multi-step analytical workflows beyond standard context limitations
-- Achieve high accuracy in statistical testing, model selection, and insight generation comparable to expert-level analysis
-- Ensure system interpretability through natural language explanations and structured reporting
-- Enable deployment-ready architecture suitable for production environments
+## What exists now
 
----
+### End-to-end capabilities
 
-## System Architecture
+The current system can:
 
-### High-Level Architecture Diagram
+- ingest a supported file through the Streamlit interface or command line;
+- safely validate, sanitise, decode, and profile the upload;
+- infer roles such as numeric, categorical, datetime, identifier, target, or
+  likely sensitive fields;
+- clean and transform data with an explicit account of the treatment applied;
+- run a profile-driven sequence of specialised tools;
+- invoke an LLM through a provider adapter for planning and interpretation, or
+  complete a deterministic no-LLM path;
+- recursively decompose suitable planning tasks using an external REPL-style
+  environment when RLM is enabled;
+- verify numerical claims in generated synthesis against tool output;
+- show an answers-first workspace with Charts, Details, and Downloads tabs;
+- emit reports, dashboard specifications, visualisations, models, and audit
+  records under the run output directory.
 
-```mermaid
-graph TB
-    subgraph "User Interface Layer"
-        A[User/Dataset Input]
-    end
-    
-    subgraph "Orchestration Layer"
-        B[Agent Controller]
-        C[Memory System]
-        D[Context Manager]
-    end
-    
-    subgraph "Reasoning Layer"
-        E[Online LLM API]
-        F[Tool Selector]
-        G[Prompt Manager]
-    end
-    
-    subgraph "Execution Layer"
-        H[Tool Library]
-        I[Data Processing Tools]
-        J[Statistical Analysis Tools]
-        K[ML Pipeline Tools]
-        L[Visualization Tools]
-    end
-    
-    subgraph "Recursive Inference Layer"
-        M[REPL Environment]
-        N[Task Decomposer]
-        O[Recursive Invoker]
-    end
-    
-    subgraph "Output Layer"
-        P[Report Generator]
-        Q[Results Formatter]
-        R[Final Output]
-    end
-    
-    A --> B
-    B --> C
-    B --> D
-    B --> E
-    E --> F
-    F --> G
-    G --> E
-    F --> H
-    H --> I
-    H --> J
-    H --> K
-    H --> L
-    I --> B
-    J --> B
-    K --> B
-    L --> B
-    B --> M
-    M --> N
-    N --> O
-    O --> E
-    C --> E
-    B --> P
-    P --> Q
-    Q --> R
-    R --> A
-```
+### Reliability and interpretation features
 
-### Detailed Data Flow Diagram
+Several controls are already part of the analysis path rather than cosmetic
+post-processing:
 
-```mermaid
-flowchart TD
-    Start([User Uploads Dataset]) --> A[Dataset Ingestion]
-    A --> B[Schema Detection & Metadata Extraction]
-    B --> C[Store in Memory System]
-    C --> D{LLM Reasoning}
-    
-    D -->|Generate Analysis Plan| E[Structured JSON Output]
-    E --> F[Agent Controller Parsing]
-    F --> G{Tool Selection}
-    
-    G -->|Data Cleaning| H1[clean_data]
-    G -->|Outlier Detection| H2[detect_outliers]
-    G -->|Correlation| H3[correlation_analysis]
-    G -->|Statistical Test| H4[select_statistical_test]
-    G -->|ML Training| H5[train_model]
-    G -->|Evaluation| H6[evaluate_model]
-    G -->|Visualization| H7[generate_visualizations]
-    
-    H1 --> I[Execution Results]
-    H2 --> I
-    H3 --> I
-    H4 --> I
-    H5 --> I
-    H6 --> I
-    H7 --> I
-    
-    I --> J[Update Memory Context]
-    J --> K[RLM Context Management]
-    K --> L{Analysis Complete?}
-    
-    L -->|No| D
-    L -->|Yes| M[LLM Final Interpretation]
-    M --> N[Generate Comprehensive Report]
-    N --> O([Output to User])
-```
+- Metadata—not raw dataset rows—is used for planner prompts.
+- Data-quality, coercion, degradation, and sufficiency notes travel with the
+  run so a weak input is not presented as a strong conclusion.
+- Statistical findings include relevant checks such as confidence intervals,
+  effect-size or practical-significance context, and run-level multiple-testing
+  control where applicable.
+- Model training uses validation appropriate to the data shape: stratified
+  folds for i.i.d. classification, time-aware splits for chronological data,
+  and group-aware splits for repeated entities. It records cross-validation
+  performance, train/test gaps, and overfit warnings.
+- The claim-verification layer flags synthesis numbers that cannot be traced to
+  executed results.
+- Dashboard specifications aggregate data where possible instead of embedding
+  large raw-row payloads in every chart.
+- Small groups can be suppressed or folded into an aggregate to reduce
+  disclosure risk in displayed results.
 
-### Component Interaction Sequence
+### Current user experience
+
+The Streamlit application currently provides:
+
+| Area | What it provides today |
+| --- | --- |
+| Landing and upload | A product entry surface, file upload, bundled sample-data path, dataset preview, and objective input. |
+| Configuration | Provider, model, reasoning, analysis, and output settings appropriate to the active run. |
+| Run state | Progress reporting from worker callbacks, a cooperative Stop action, and partial-result handling. |
+| Answers | Findings-led summary, evidence, caveats, recommendations, and key metrics. |
+| Charts | Data-driven Vega-Lite chart specifications plus table alternatives where available. |
+| Details | Dataset profile, tool output, run trace, methodology, degradation, and governance detail. |
+| Downloads | Generated reports, chart/dashboard artefacts, models when applicable, and a cinematic workflow export. |
+| Workflow plate | A seven-stage text fallback with an optional 3D process visual. |
+
+The existing visual layer is functional but is being redesigned; see
+[Frontend overhaul](#frontend-overhaul-planned) for the planned replacement.
+
+## Architecture
+
+### System map
 
 ```mermaid
-sequenceDiagram
-    participant U as User
-    participant AC as Agent Controller
-    participant LLM as Online LLM
-    participant TS as Tool Selector
-    participant TL as Tool Library
-    participant MEM as Memory System
-    participant RLM as RLM REPL Environment
-    
-    U->>AC: Upload Dataset
-    AC->>MEM: Store Dataset Metadata
-    AC->>RLM: Offload Analysis Context
-    AC->>LLM: Request Analysis Plan (Metadata Only)
-    LLM->>AC: Return Structured JSON
-    AC->>TS: Parse Tool Calls
-    TS->>TL: Execute Tool (e.g., clean_data)
-    TL->>TS: Return Results
-    TS->>AC: Pass Results
-    AC->>MEM: Update Context
-    AC->>RLM: Store Intermediate Results
-    AC->>LLM: Request Next Step (via RLM)
-    LLM->>AC: Return Next Action
-    
-    loop Until Analysis Complete
-        AC->>TS: Execute Tool
-        TS->>TL: Execute
-        TL->>AC: Results
-        AC->>MEM: Update
-        AC->>RLM: Update Environment
-    end
-    
-    AC->>LLM: Request Final Interpretation
-    LLM->>AC: Return Insights
-    AC->>U: Deliver Final Report
+flowchart TB
+    U[User: dataset + objective] --> I[Streamlit UI or CLI]
+    I --> S[Upload validation and safe reader]
+    S --> C[AgentController]
+    C <--> M[MemorySystem: metadata, results, findings]
+    C --> P[Prompt manager]
+    P --> R[RLMEngine]
+    R --> L[LLMClient: selected provider or deterministic fallback]
+    C --> V[Step validation and tool registry]
+    V --> T[Typed Python execution tools]
+    T --> F[Findings, charts, models, tool summaries]
+    F --> C
+    C --> G[Report and dashboard generation]
+    G --> O[Markdown, JSON, HTML, charts, models, audit logs]
+    O --> I
 ```
 
----
+### Layers and responsibilities
 
-## Agent Workflow Explanation
+| Layer | Main location | Responsibility |
+| --- | --- | --- |
+| Interface | `app.py`, `ui/`, `main.py` | Collect inputs, display run state/results, and expose downloadable artefacts. |
+| Reasoning | `src/core/controller.py`, `prompt_manager.py` | Plan, validate, orchestrate, interpret, and refine the analysis workflow. |
+| State | `src/core/memory.py`, findings/profile modules | Preserve metadata, context, results, findings, and degradation information. |
+| Recursive workflow | `src/rlm/engine.py` | Manage recursive LLM invocation and the REPL-style analysis environment. |
+| Execution | `src/tools/` | Perform deterministic analysis, modelling, visualisation, and report actions. |
+| Governance | `src/core/governance.py`, `sandbox.py`, `security.py` | Restrict dangerous actions, validate uploads, audit execution, and enforce LLM/data controls. |
 
-The agent operates through an iterative **reasoning-execution cycle** that combines LLM-based planning with deterministic Python execution:
+The controller uses `BaseTool.run()` to execute registered tools. Each tool has
+a schema, deterministic defaults where randomness is involved, structured error
+handling, and a `summary` result field. Execution tools do not drive the
+controller or RLM engine directly.
 
-### Workflow Stages
+### Recursive workflow management
 
-1. **Dataset Ingestion**
-   - User uploads dataset in CSV/Excel format
-   - System performs automatic schema detection
-   - Extracts metadata: column types, missing values, statistical summaries
-   - Stores in memory context for persistent access
+RLM in this project is an **inference-time scaffold**, not a trained model or
+a claim of unlimited reasoning. It stores accumulated analysis context in an
+external REPL-like environment and allows suitably scoped subtasks to be
+invoked recursively. This keeps prompts centred on metadata and relevant
+result summaries instead of repeatedly placing an entire dataset or every
+previous output into a model context.
 
-2. **Initial Reasoning Phase**
-   - LLM analyzes dataset characteristics from metadata
-   - Generates multi-step analysis plan as structured JSON
-   - Plans include tool names, parameters, and execution order
+The normal application still works without RLM (`--no-rlm`) and without any
+LLM (`--no-llm`). Those modes are important for reproducible demonstrations,
+offline/local workflows, and troubleshooting.
 
-3. **Tool Selection & Execution**
-   - Agent Controller parses JSON to identify required tools
-   - Tool Selector maps abstract tool names to concrete Python functions
-   - Executes tools with specified parameters
-   - Captures outputs and error states
+## Analysis workflow
 
-4. **Result Interpretation**
-   - LLM reviews execution outputs in context of analysis goals
-   - Updates reasoning state based on findings
-   - Decides whether to iterate or proceed to next analysis phase
-
-5. **Iterative Refinement**
-   - Cycle repeats for multi-step analyses (e.g., clean → EDA → model → evaluate)
-   - Memory system maintains coherent state across iterations
-   - Error handling triggers re-planning when tools fail
-
-6. **RLM Workflow Management**
-   - Complex analysis workflows decomposed into manageable sub-tasks
-   - Recursive invocation of reasoning on workflow segments
-   - Programmatic handling of arbitrarily long analysis chains
-
-7. **Report Generation**
-   - LLM synthesizes final insights from all analysis steps
-   - Generates natural language explanations
-   - Compiles structured report with visualizations and recommendations
-
----
-
-## Recursive Inference Integration
-
-This system uses a recursive inference pattern: an **inference-time scaffold** (not a trained model or reinforcement learning system) that enables processing of complex, multi-step analytical workflows beyond standard LLM context window limitations.
-
-### What it means here
-
-The idea: treat a long prompt as part of an external environment, and let the
-LLM programmatically examine, decompose, and recursively call itself over
-snippets of it. In this data analysis system:
-- The **"long prompt"** = cumulative analysis context (dataset metadata, intermediate results, prior steps)
-- The **"external environment"** = REPL-like execution environment storing workflow state
-- **"Recursive calls"** = LLM invokes itself on sub-problems (e.g., analyzing specific feature subsets)
-
-### RLM Architecture in This System
+Every run follows the same seven-stage model.
 
 ```mermaid
-graph TB
-    subgraph "Recursive Inference Scaffold"
-        A[Analysis Context] -->|Stored as variable| B[REPL Environment]
-        B --> C[LLM Root Call]
-        C -->|Generates code| D{Task Decomposition}
-        D -->|Filter/Slice| E[Sub-context 1]
-        D -->|Filter/Slice| F[Sub-context 2]
-        D -->|Filter/Slice| G[Sub-context N]
-        E -->|Recursive invoke| H[LLM Sub-call 1]
-        F -->|Recursive invoke| I[LLM Sub-call 2]
-        G -->|Recursive invoke| J[LLM Sub-call N]
-        H --> K[Aggregate Results]
-        I --> K
-        J --> K
-        K --> L[Final Analysis Output]
-    end
-    
-    M[Dataset Upload] --> A
-    L --> N[Generated Report]
+flowchart LR
+    A[1. Ingest and profile] --> B[2. Initial reasoning]
+    B --> C[3. Select and run tools]
+    C --> D[4. Interpret results]
+    D --> E{5. Refine?}
+    E -->|yes| B
+    E -->|no| F[6. Manage RLM decomposition]
+    F --> G[7. Generate reports]
 ```
 
-### How RLM Works in Data Analysis
+1. **Dataset ingestion:** The reader validates the file, loads the table,
+   records exactly how it was interpreted, and profiles schema and quality.
+2. **Initial reasoning:** The controller builds a constrained plan from the
+   objective, profile, tool schemas, and available safeguards.
+3. **Tool selection and execution:** Registered tools receive resolved,
+   validated parameters and return structured outputs and findings.
+4. **Result interpretation:** The system connects results to the objective and
+   checks whether the evidence supports the language used.
+5. **Iterative refinement:** Further steps are considered only while they add
+   relevant information and remain within configured limits.
+6. **RLM workflow management:** When enabled and appropriate, complex planning
+   work is decomposed into bounded recursive subtasks.
+7. **Report generation:** The final result is converted into human-readable
+   reports, visual artefacts, dashboard data, and governance summaries.
 
-#### 1. Context Offloading
-Instead offilling the LLM context window with the entire analysis history:
-```python
-# Traditional approach (context overflow risk)
-llm_call(full_dataset + metadata + all_prior_results + current_question)
+## Supported data and analyses
 
-# RLM approach (scalable)
-repl_env = {
-    'dataset': dataset,
-    'metadata': metadata,
-    'results_history': results,
-    'current_step': step_number
-}
-llm_call(metadata_summary_only + repl_access_code)
+### Input formats
+
+The unified reader currently supports the following table-oriented formats:
+
+| Family | Formats |
+| --- | --- |
+| Delimited text | CSV, TSV, gzip-compressed CSV/TSV, and ZIP-compressed CSV/TSV |
+| Spreadsheet | Excel `.xlsx` and `.xls` |
+| Structured data | JSON, JSON Lines, and Parquet |
+| Statistical packages | Stata `.dta`, SAS `.sas7bdat`/`.xpt`, SPSS `.sav`/`.zsav` |
+| Columnar/scientific tables | Feather, HDF5, and NetCDF |
+
+The reader includes encoding and delimiter detection, JSON flattening with a
+depth cap, and a configurable row cap with disclosed reservoir sampling where
+needed. Its support is for **tabular** analysis. Raw images, audio, video,
+documents, binaries, and point clouds are not directly analysed.
+
+### Data understanding and preparation
+
+| Capability | Current behaviour |
+| --- | --- |
+| Profiling | Inspects columns, types, missingness, duplicates, cardinality, target candidates, profile sufficiency, and quality signals. |
+| Type/format coercion | Repairs recognised numeric, percentage, currency, boolean, and date representations while recording the conversion. |
+| Cleaning | Handles missing values, duplicate/constant/identifier concerns, and prepared analysis paths with recorded treatments. |
+| Outliers | Provides distribution-aware outlier analysis and flags rather than silently discarding observations. |
+| Relationships | Finds correlations and other supported associations, while respecting role and sufficiency checks. |
+| Privacy-aware display | Detects PII-sensitive columns and supports small-cell suppression in group outputs. |
+| Relational data | Includes auto-join and relationship analysis support for compatible tabular sources. |
+
+### Tool library
+
+The tool registry contains the following current analysis domains. Applicability
+depends on the dataset profile and question; the presence of a tool does not
+mean it will run for every upload.
+
+| Domain | Tools and examples |
+| --- | --- |
+| Core preparation | Ingestion, cleaning, outlier detection, correlation analysis, visualisation, and report generation. |
+| Statistics | Statistical-test selection, regression, variable-scale analysis, concentration analysis, segment comparison, mixed models, experiments, and change analysis. |
+| Predictive and unsupervised ML | Training, evaluation, clustering, and dimensionality analysis. |
+| Time and curves | Time-series analysis, forecasting, curve fitting, survival analysis, and cohort analysis. |
+| Business and behavioural data | Basket analysis, price elasticity, financial analysis, workforce analysis, and equity analysis. |
+| Text, location, and network data | Text analysis, geospatial analysis, and graph analysis. |
+| Advanced extension path | Sandboxed dynamic code execution, generated tools, and LLM-authored analysis-tool definitions when operator controls permit them. |
+
+### Machine-learning safeguards
+
+Where a model is appropriate, the project prioritises out-of-sample evidence
+over training accuracy:
+
+- five-fold-or-greater stratified cross-validation for i.i.d. classification;
+- chronological splits for time-series data and group-aware splits for panels;
+- a seeded random state for reproducible stochastic operations;
+- configurable tree-depth caps and regularisation-aware model choices;
+- `cv_mean` as the primary comparison metric;
+- train/test gap reporting and an overfit warning when the gap exceeds 0.10.
+
+Models are useful only when the data and objective support them. The platform
+can analyse a dataset without training one (`--no-ml`).
+
+## Interfaces and outputs
+
+### Streamlit application
+
+Start the application with `streamlit run app.py`. The UI is designed around
+the path from upload to answer rather than around a raw list of tools. Its
+four top-level result tabs are **Answers**, **Charts**, **Details**, and
+**Downloads**. The Details tab keeps run traces and technical material out of
+the main answer path without hiding them.
+
+### Command-line interface
+
+`main.py` exposes the same core pipeline for repeatable runs and scripts. Key
+options are:
+
+| Option | Description |
+| --- | --- |
+| `--dataset`, `-d` | Required path to a supported dataset. |
+| `--provider` | Choose `openai`, `anthropic`, `gemini`, `openrouter`, `nvidia`, `local`, or `ollama`. |
+| `--model` | Override the selected provider's model. |
+| `--local-base-url` | Point a local/Ollama provider at a compatible server. |
+| `--target` | Supply a target-column hint. |
+| `--objective` | State the question in plain language. |
+| `--min-iterations`, `--max-iterations` | Bound the planning/execution loop. |
+| `--no-rlm` | Disable recursive decomposition. |
+| `--no-llm` | Use the deterministic pipeline and deterministic synthesis only. |
+| `--no-ml` | Skip all model-fitting tools. |
+| `--output-dir` | Select an output root other than `output/`. |
+| `--persist` | Persist memory JSON to a supplied path. |
+
+### Generated artefacts
+
+```text
+output/
+  reports/          Markdown reports, JSON results, dashboard data, HTML reports
+  visualizations/   Generated chart images
+  models/           Persisted model files when training is enabled
+  audit/            Code-execution and LLM-call audit logs
 ```
 
-#### 2. Programmatic Task Decomposition
-The LLM generates Python code to examine and decompose the workflow:
-```python
-# Example LLM-generated code in RLM paradigm
-# Decompose multi-variate analysis into feature groups
-feature_groups = categorize_features(metadata)
-sub_analyses = []
+The exact artefacts depend on the chosen tools and whether a run completes,
+degrades, or is stopped early. Generated numbers must be read together with
+their evidence and caveats; an output is not a substitute for expert review.
 
-for group in feature_groups:
-    # Recursively invoke LLM on each feature subset
-    result = llm_recursive_call(f"Analyze {group} features", 
-                                  data=dataset[group])
-    sub_analyses.append(result)
-
-final_insights = synthesize(sub_analyses)
-```
-
-#### 3. Recursive Invocation
-The system enables the LLM to invoke itself on workflow segments:
-
-```mermaid
-sequenceDiagram
-    participant Root as LLM Root
-    participant REPL as REPL Environment
-    participant Sub1 as LLM Sub-call 1
-    participant Sub2 as LLM Sub-call 2
-    
-    Root->>REPL: Store analysis context
-    Root->>REPL: Generate decomposition code
-    REPL->>Sub1: Invoke on Feature Group A
-    REPL->>Sub2: Invoke on Feature Group B
-    Sub1-->>REPL: Return insights for Group A
-    Sub2-->>REPL: Return insights for Group B
-    REPL->>Root: Aggregate sub-results
-    Root->>Root: Synthesize final analysis
-```
-
-### RLM Benefits for Data Analysis
-
-1. **Unbounded Workflow Length**
-   - Handles analyses with arbitrarily many steps without context window overflow
-   - Example: 50-step ML pipeline with intermediate validation and logging
-
-2. **Reduced Context Saturation**
-   - Only relevant context portions loaded for each reasoning step
-   - Minimizes "context rot" where LLMs degrade with long contexts
-
-3. **Parallel Sub-Analysis**
-   - Different feature groups or dataset partitions analyzed independently
-   - Results aggregated programmatically
-
-4. **Error Isolation**
-   - Failed sub-tasks contained without corrupting entire analysis
-   - Targeted retry mechanisms for specific workflow segments
-
-5. **Interpretable Decomposition**
-   - Clear provenance of how complex analysis was broken down
-   - Each recursive call has explicit input/output boundaries
-
-### Implementation Highlights
-
-The system implements three core design principles:
-
-**Principle 1: Symbolic Prompt Handling**
-- Analysis context stored as Python dictionaries/objects in execution environment
-- LLM receives metadata summaries, not full context
-- Enables processing contexts far exceeding model token limits
-
-**Principle 2: Programmatic Recursion**
-- LLM generates code that explicitly invokes `llm_recursive_call(sub_prompt, sub_context)`
-- Sub-calls parameterized by specific data slices or workflow stages
-- Supports loops over dataset partitions or feature combinations
-
-**Principle 3: Persistent REPL State**
-- Workflow state maintained across LLM invocations
-- Intermediate results stored in environment variables
-- Final output assembled from programmatically accumulated sub-results
-
-### Example: RLM-Enhanced Multi-Step Analysis
-
-**Scenario**: Analyzing 100-feature cancer prediction dataset
-
-**Traditional Approach** (context window issues):
-```
-LLM Input: [Full dataset + 100 feature descriptions + analysis requirements]
-→ Context overflow or degraded performance on complex reasoning
-```
-
-**RLM Approach** (scalable decomposition):
-```python
-# Root LLM call (receives only metadata)
-def analyze_cancer_data(metadata):
-    # LLM generates this decomposition code
-    feature_groups = {
-        'clinical': metadata.filter(type='clinical'),
-        'genetic': metadata.filter(type='genetic'),
-        'imaging': metadata.filter(type='imaging')
-    }
-    
-    results = {}
-    for group_name, features in feature_groups.items():
-        # Recursive sub-call per group
-        analysis = llm_recursive_call(
-            prompt=f"Analyze {group_name} features for cancer prediction",
-            context={'features': features, 'target': 'diagnosis'}
-        )
-        results[group_name] = analysis
-    
-    # Synthesize across groups
-    final_model = ll<sub-call(
-        prompt="Build ensemble model from group analyses",
-        context=results
-    )
-    
-    return final_model
-```
-
-### RLM vs Traditional Agentic Systems
-
-| Aspect | Traditional Agent | RLM-Enhanced Agent |
-|--------|------------------|-------------------|
-| **Context Handling** | Linear accumulation in context window | Offloaded to external environment |
-| **Task Decomposition** | Verbalized in natural language | Programmatic with explicit code |
-| **Sub-task Execution** | Sequential with full context | Recursive with minimal context |
-| **Scalability** | Limited by context window (~128K tokens) | Unbounded (processes 10M+ token workflows) |
-| **Error Recovery** | Retry entire workflow | Retry specific failed sub-calls |
-
-Key contributions:
-- Formal definition of RLM as inference-time scaffold
-- Algorithm for REPL-based prompt offloading
-- Empirical validation on long-context reasoning tasks
-
----
-
-## Core Features
-
-### Intelligent Analysis Capabilities
-
-- **Natural-Language Objectives**: Tell the system what you want to learn in plain English (`--objective` / UI text box) — agents prioritise analyses that answer it and the final report addresses it directly
-- **Automated Data Profiling**: Every dataset gets a data scientist's "first look" at ingestion — column semantics (numeric / categorical / datetime / boolean / identifier / constant), skew detection, missingness, duplicates, class imbalance, and a 0–100 quality score that also informs the planning LLM
-- **Dynamic Dashboard Agent**: Charts are *selected to fit the data*, not templated — class balance, distribution histograms ranked by target relevance, box plots of the most separating feature, scatter of the strongest relationship, cluster maps, time-series trends, model comparison, and correlation bars, all as interactive Vega-Lite specs
-- **Autonomous Segmentation**: When no target column exists, the `cluster_data` tool discovers natural groups with KMeans, auto-selecting k by silhouette score, and reports interpretable per-cluster profiles plus a 2-D PCA cluster map
-- **Automatic Data Treatments**: The pipeline *acts* on what the profiler diagnoses — identifier columns dropped, severely skewed features log-transformed, imbalanced targets handled with class weighting — and every action is reported
-- **Hyperparameter Tuning**: Light randomized search (seeded, bounded, auto-skipped above 20k rows) with best parameters reported per model; the search never exceeds the user's `max_depth` anti-overfitting cap
-- **Explainability**: Permutation importance on the held-out split with plain-language driver sentences ("higher `support_calls` pushes predictions toward churn")
-- **Shareable HTML Report**: A single self-contained `report.html` — executive summary answering the user's objective, insights, drivers, treatments, metrics, and the full interactive dashboard
-- **Automatic Dataset Schema Detection**: Intelligent type inference, encoding detection, and metadata extraction
-- **Missing Value Analysis**: Comprehensive gap identification with imputation strategy recommendations
-- **Outlier Detection**: Multi-method anomaly identification (Z-score, IQR, Isolation Forest)
-- **Autonomous EDA**: Automated exploratory data analysis with distribution profiling and pattern discovery
-- **Intelligent Statistical Test Selection**: Context-aware selection of appropriate hypothesis tests (t-test, ANOVA, chi-square, etc.)
-- **Automatic ML Task Detection**: Identifies classification, regression, or clustering requirements
-- **Model Selection & Evaluation**: Comparative training of multiple models with cross-validation
-- **Natural Language Interpretation**: LLM-powered explanation generation for technical findings
-
-### System Engineering Features
-
-- **Structured Report Generation**: Automated creation of comprehensive analysis documents
-- **Multi-step Reasoning**: Complex workflow orchestration with dependency management
-- **Tool-based Orchestration**: Modular execution architecture with hot-swappable components
-- **RLM Inference Optimization**: Recursive task decomposition for complex workflows
-- **Error Recovery**: Automatic retry mechanisms and fallback strategies
-- **Memory Management**: Efficient context storage for long analysis sessions
-- **Extensible Architecture**: Plugin-based tool addition without core system modifications
-
----
-
-## Technology Stack
-
-### Core Technologies
-
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| **Language** | Python 3.11+ | Primary implementation language |
-| **Data Processing** | pandas, NumPy | Dataset manipulation and numerical computation |
-| **Statistical Analysis** | SciPy, StatsModels | Hypothesis testing and statistical modeling |
-| **Machine Learning** | scikit-learn | Model training, evaluation, and preprocessing |
-| **Visualization** | Matplotlib, Seaborn | Chart generation and visual analytics |
-| **LLM Integration** | OpenAI API / Anthropic Claude | Reasoning engine and natural language generation |
-| **Data Interchange** | JSON | Structured tool call specification |
-| **Environment Management** | virtualenv / conda | Dependency isolation |
-
-### Architecture Pattern
-
-- **Design Pattern**: Agent-based architecture with tool-augmented LLM
-- **Execution Model**: Synchronous reasoning, asynchronous tool execution
-- **State Management**: In-memory context with optional persistent storage
-- **Communication**: RESTful API calls to LLM services
-
----
-
-## Installation Instructions
+## Installation and usage
 
 ### Prerequisites
 
-- Python 3.11 or higher
-- pip package manager
-- Virtual environment tool (venv or conda)
-- API key from a supported LLM provider (OpenAI, Anthropic, or OpenRouter) —
-  optional for the dry-run validation, required for live analysis
+- Python 3.11 or newer
+- `pip` and a virtual environment tool
+- An API key only for the selected online provider
+- Docker only when using the stronger Docker sandbox backend
 
-### Setup Steps
+### Set up the project
 
-1. **Clone the Repository**
-   ```bash
-   git clone https://github.com/shahdaksh050/agentic-data-analysis.git
-   cd agentic-data-analysis
-   ```
-
-2. **Create Virtual Environment**
-   ```bash
-   # Using venv
-   python -m venv .venv
-
-   # Activate on Windows
-   .venv\Scripts\activate
-
-   # Activate on Linux/Mac
-   source .venv/bin/activate
-   ```
-
-3. **Install Dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Configure Environment Variables**
-   ```bash
-   # Create .env file
-   cp .env.example .env
-
-   # Edit .env and add your API key
-   OPENAI_API_KEY=your_api_key_here
-   LLM_MODEL=gpt-4o
-   MAX_ITERATIONS=10
-   ```
-
-5. **Verify Installation (no API key required)**
-   ```bash
-   # Unit + integration tests
-   python -m pytest tests/
-
-   # Full 7-stage workflow dry-run with a mock LLM
-   python scripts/validate.py
-   ```
-
----
-
-## Usage Instructions
-
-### Basic Usage (CLI)
-
-```bash
-# Run on the bundled sample dataset
-python main.py --dataset data/sample_customer_churn.csv --target churn
-
-# With a natural-language objective
-python main.py --dataset data/sample_customer_churn.csv --target churn \
-    --objective "What drives customer churn and who should we retain?"
-
-# All options
-python main.py --dataset path/to/data.csv \
-    --provider openai            # openai | anthropic (default: openai)
-    --model gpt-4o               # override the LLM model name
-    --target churn               # target column (auto-detected when omitted)
-    --objective "..."            # plain-English analysis goal
-    --max-iterations 15          # reasoning-execution cycles
-    --no-rlm                     # disable Stage 6 RLM decomposition
-    --output-dir output          # root directory for all artifacts
-    --persist memory.json        # persist the memory state to disk
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-If the LLM is unreachable mid-run, the agent degrades gracefully: it executes a
-deterministic fallback plan (clean → outliers → correlation → train → evaluate)
-and synthesises the final report directly from tool outputs.
+`requirements.lock` is included for reproducible pinned environments. Never
+commit `.env`, API keys, output artefacts containing sensitive data, or large
+private datasets.
 
-### Web UI (Streamlit)
+### Run a deterministic sample
 
-```bash
+The bundled churn dataset can exercise the no-LLM path without a cloud key:
+
+```powershell
+python main.py --dataset data/sample_customer_churn.csv --target churn --no-llm
+```
+
+### Run with an objective and an LLM
+
+Configure only the key for the chosen provider in `.env`, then run:
+
+```powershell
+python main.py --dataset data/sample_customer_churn.csv `
+  --target churn `
+  --objective "What factors are most associated with customer churn?"
+```
+
+Or launch the graphical workspace:
+
+```powershell
 streamlit run app.py
 ```
 
-Upload a CSV/Excel file in the sidebar, optionally describe **what you want to
-learn** in plain English, paste your API key (OpenAI, Anthropic, or OpenRouter),
-tune the anti-overfitting controls, and click **Run Analysis**.
+Run `python main.py --help` for the current command-line reference.
 
-Results render across dedicated tabs:
-- **📊 Dashboard** — charts chosen dynamically by the Dashboard Agent to fit the data
-- **🔬 Profile** — quality score, column semantics, and data-health warnings
-- **📈 Overview / 🤖 Models / 💡 Insights / 📄 Report / ⬇ Downloads** — metrics, comparisons, and artifacts
+## Configuration and safety
 
-Every upload is security-checked before it touches disk: extension allowlist,
-size ceiling (`MAX_UPLOAD_MB`, default 200), filename sanitisation
-(path-traversal safe), and magic-byte content sniffing that rejects binaries
-disguised as CSV.
+The complete configuration reference is [`.env.example`](.env.example). The
+most important controls are summarised below.
 
-### Access Results
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `LLM_PROVIDER` / `LLM_MODEL` | `openai` / provider default | Select the provider and model. |
+| `MAX_ITERATIONS` | `15` | Bound reasoning/execution cycles. |
+| `ENABLE_RLM_INFERENCE` | `true` | Enable recursive task decomposition. |
+| `OUTPUT_DIR` | `output` | Select the root for generated artefacts. |
+| `LOCAL_ONLY` | `false` | Reject cloud providers; allow only local/Ollama providers. |
+| `ENABLE_CODE_EXECUTION` | `true` | Hide and refuse code-executing tools when false. |
+| `MAX_CODE_EXECUTIONS` | `40` | Cap sandboxed code runs in one analysis. |
+| `SANDBOX_BACKEND` | `subprocess` | Use the subprocess sandbox or Docker sandbox. |
+| `SANDBOX_REQUIRE_ISOLATION` | `false` | Require Docker and refuse subprocess fallback. |
+| `SANDBOX_TIMEOUT_S` / `SANDBOX_MEMORY_MB` | `45` / `1024` | Limit sandbox runtime and memory. |
+| `REDACT_PII` | `true` | Redact detected personal-data values in prompts. |
+| `MAX_LLM_TOKENS_PER_RUN` | `0` | Cap LLM token use; zero disables the cap. |
+| `AUDIT_LLM_FULL_TEXT` | `false` | Keep audit records as hashes and sizes unless explicitly enabled. |
 
-- Final report (Markdown): `output/reports/<dataset>_report.md`
-- Shareable interactive report (HTML): `output/reports/report.html`
-- Raw report data (JSON): `output/reports/<dataset>_raw.json` and `output/reports/final_report.json`
-- Dynamic dashboard (Vega-Lite JSON): `output/reports/dashboard.json`
-- Visualizations: `output/visualizations/*.png`
-- Trained models: `output/models/*.pkl`
+### Security model
 
-### Configuration (environment variables)
+The security architecture is designed to make the most sensitive boundaries
+explicit:
 
-All behaviour is configured through `.env` (see `.env.example`):
+- **Upload boundary:** file names are sanitised; file type, size, compression
+  ratio, archive entry count, and binary signatures are checked before loading.
+- **Prompt boundary:** raw rows are not passed directly to LLM prompts;
+  dataset/code-derived text is sanitised and marked as data.
+- **Code boundary:** LLM-authored code executes only through the sandbox. The
+  sandbox uses an allowlisted environment and a pre-bound `dsa` toolkit rather
+  than broad module and filesystem access.
+- **Audit boundary:** code executions and refusals are written to
+  `audit/code_executions.jsonl`. LLM calls are written to
+  `audit/llm_calls.jsonl` with hashes, sizes, and token-use information.
+- **Rendering boundary:** user- and model-derived text is escaped before it is
+  inserted into HTML reports or the application.
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `LLM_PROVIDER` | `openai` | `openai` \| `anthropic` \| `openrouter` |
-| `LLM_MODEL` | `gpt-4o` | Model name |
-| `LLM_TEMPERATURE` | `0.2` | Sampling temperature |
-| `LLM_MAX_TOKENS` | `4096` | Response token cap |
-| `MAX_ITERATIONS` | `15` | Max reasoning-execution cycles |
-| `ENABLE_RLM_INFERENCE` | `true` | Stage 6 task decomposition |
-| `RLM_MAX_DEPTH` | `5` | Max recursion depth for sub-calls |
-| `OUTPUT_DIR` | `output` | Root output directory |
-| `TARGET_COLUMN_HINT` | — | Optional target column override |
-| `USER_OBJECTIVE` | — | Plain-English analysis goal injected into all agent prompts |
-| `MAX_UPLOAD_MB` | `200` | Upload size ceiling enforced by the security layer |
+For datasets or objectives from unknown users, use the Docker backend and set
+`SANDBOX_REQUIRE_ISOLATION=true`. A public demonstration deployment should
+normally disable code execution unless Docker isolation is available.
 
-### Programmatic Usage
+## Quality assurance
 
-```python
-from src.core.controller import AgentController
+The project uses static, type, architectural, unit, integration, and
+frontend-contract checks. The core verification commands are:
 
-# Initialize agent (reads provider/key from environment)
-agent = AgentController(max_iterations=10, enable_rlm=True)
-
-# Stage 1: ingest dataset (metadata only goes to the LLM)
-metadata = agent.load_dataset("customer_data.csv", target_hint="churn")
-
-# Stages 2-7: autonomous analysis
-report = agent.analyze()
-
-print(report["best_model"])
-print(report["insights"])
-print(report["key_metrics"])
+```powershell
+ruff check .
+mypy src/
+pytest tests/ -v
 ```
 
----
+The intended acceptance path also includes an end-to-end sample CSV run that
+creates a populated Markdown report in `output/reports/`. The application has
+tests for major behaviours and architecture boundaries, while a small set of
+newer specialised tools still needs dedicated unit coverage; that gap is
+tracked in `IMPROVEMENTS.md` and the roadmap rather than being hidden.
 
-## Example Workflow
+Repository conventions are defined in `AGENTS.md`. In particular, new tools
+must use type hints, follow the `BaseTool` contract, return a `summary`, and
+receive tests. Changes to the RLM engine, task-decomposition logic,
+`MemorySystem` schema, or source-file deletion require explicit approval.
 
-### Scenario: Customer Churn Prediction
+## Roadmap
 
-**Input Dataset**: `customer_data.csv` (10,000 rows × 15 features)
-- Demographics: age, income, location
-- Behavior: purchase_frequency, avg_transaction_value
-- Target: churn_status (binary)
+The following work is planned. It is not represented as current product
+behaviour. Detailed decisions, risks, and acceptance criteria are maintained
+in `FrontendOverhaulPlan.md`, `FutureScope.md`, and `IMPROVEMENTS.md`.
 
-### Execution Trace
+### Frontend overhaul (planned)
 
-1. **Dataset Ingestion** (t=0s)
-   ```
-   ✓ Schema detected: 12 numerical, 3 categorical features
-   ✓ Target identified: churn_status (classification task)
-   ✓ Missing values: 3.2% overall
-   ```
+The next major project track is a visual and structural overhaul of every
+user-facing surface: landing, Streamlit workspace, workflow plate, cinematic
+export, and shareable HTML report. The desired experience is answers-first:
+show the plain-language answer, evidence, caveat, and next action before
+technical machinery.
 
-2. **Initial Reasoning** (t=2s)
-   ```
-   LLM Plan:
-   Step 1: Handle missing values
-   Step 2: Detect outliers in numerical features
-   Step 3: Analyze feature correlations
-   Step 4: Select and train classification models
-   Step 5: Evaluate and compare performance
-   ```
+| Priority | Planned work |
+| --- | --- |
+| Must | Establish a verified baseline; eliminate hosted-session leaks; pass per-run configuration explicitly; create a typed read-only `RunView`; replace fabricated preview content with a real deterministic sample run; state the data path honestly; make reports offline and print-ready; refresh examiner-facing documentation. |
+| Should | Close visual-token drift; split oversized UI modules; add per-session run directories and Streamlit UI smoke tests; build a static-first landing; redesign workspace empty, running, and completed states; retain a text-first workflow timeline. |
+| Deferred | Unify all Three.js runtimes; rebuild the cinematic export around native scroll; conduct the full device/accessibility matrix; add full incremental analysis streaming; add chart cross-filtering. |
 
-3. **Execution Phase 1: Data Cleaning** (t=5s)
-   ```
-   Tool: clean_data(strategy='median_imputation')
-   Result: Missing values imputed, 9,683 clean rows
-   ```
+The 3D visual remains optional explanatory polish. It must have a complete
+text, reduced-motion, keyboard, and no-WebGL fallback, and it must never be
+needed to understand a finding or obtain a report.
 
-4. **Execution Phase 2: Outlier Detection** (t=8s)
-   ```
-   Tool: detect_outliers(method='isolation_forest')
-   Result: 127 outliers detected (1.3%), flagged for analysis
-   ```
+### Analysis-quality extensions (planned)
 
-5. **Execution Phase 3: Correlation Analysis** (t=12s)
-   ```
-   Tool: correlation_analysis(method='pearson')
-   Result: High correlation between purchase_frequency and churn (r=-0.68)
-   ```
+`FutureScope.md` proposes a property-driven expansion of the system so new
+methods are triggered by data structure rather than by arbitrary industry
+labels. Major planned groups include:
 
-6. **Execution Phase 4: ML Task Detection & Training** (t=15s)
-   ```
-   Tool: train_model(models=['random_forest', 'xgboost', 'logistic_regression'])
-   Result: 
-     - Random Forest: Accuracy=0.87, F1=0.84
-     - XGBoost: Accuracy=0.89, F1=0.86
-     - Logistic Regression: Accuracy=0.82, F1=0.79
-   ```
+| Area | Examples of planned additions |
+| --- | --- |
+| Messy-table understanding | Detect report-style sheets, multi-row headers, several tables per sheet, subtotal rows, and wide-time layouts; offer safe reshaping. |
+| Data structures | Improve handling for many parallel series, irregular events, trajectories, relational data, graph edge lists, spatial dependence, sequences, curves, compositions, aggregates, and vector-valued cells. |
+| Measurement and quality | Detect counts/rates/exposures, zero inflation, circular data, heavy tails, digit preference, currencies/units, hierarchical codes, batch effects, reporting delays, revisions, and schema drift. |
+| Statistical validity | Add stronger checks for dependence, seasonality, regime changes, survey design, experimental blocking, selection bias, and aggregation limits. |
+| Comparative analysis | Compare dataset versions, surface drift, and improve reproducible evidence for conclusions across repeated runs. |
+| Testing and observability | Add missing specialised-tool tests, coverage measurement, structured runtime logging, and deeper performance/reproducibility checks. |
 
-7. **RLM Workflow Synthesis** (t=45s)
-   ```
-   RLM Decomposition Summary:
-   ✓ Analysis decomposed into 5 independent sub-tasks
-   ✓ Feature groups processed via recursive LLM sub-calls
-   ✓ Intermediate results aggregated programmatically
-   ✓ Total context processed: ~2.3M tokens (across all sub-calls)
-   ✓ Root LLM context usage: 48K tokens (95% reduction via RLM)
-   ```
+These additions will be gated by profile applicability and should disclose when
+the method does not apply instead of producing a misleading default statistic.
 
-8. **Final Report Generation** (t=50s)
-   ```
-   Key Insights:
-   - Purchase frequency is strongest churn predictor
-   - Customers with <2 purchases/month show 73% churn rate
-   - XGBoost model recommended for deployment (89% accuracy)
-   - Suggested intervention: Loyalty program for low-frequency users
-   ```
+### Explicit non-goals
 
-### Output Files
+The project does not currently aim to directly analyse raw non-tabular media
+such as images, audio, video, or arbitrary documents. It also does not claim
+to replace a data scientist, validate causal claims from observational data,
+or guarantee correctness merely because an LLM generated a fluent summary.
 
-- `output/reports/customer_churn_analysis.pdf` (12 pages)
-- `output/visualizations/correlation_matrix.png`
-- `output/visualizations/feature_importance.png`
-- `output/models/xgboost_final.pkl`
-- `output/raw/complete_results.json`
+## Limitations
 
----
+- Supported file formats can be read as tables; successful loading does not
+  guarantee that a sheet/layout has been interpreted exactly as its author
+  intended.
+- Tool selection is profile- and objective-dependent. A method may correctly
+  decline to run when assumptions, sample size, or structure are unsuitable.
+- LLM synthesis can still be incomplete or poorly framed. Claim verification
+  helps with numerical grounding but is not a proof of scientific validity.
+- Hosted deployment requires extra care: configuration and output isolation
+  must be enforced per session, and execution privileges must be restricted.
+- Browser-side third-party dependencies and presentation consistency across all
+  surfaces are still being addressed by the frontend overhaul.
+- Several specialised tools need additional direct unit-test coverage.
+- The roadmap is deliberately broader than the fixed final-year-project scope;
+  the Must/Should/Deferred priorities in `FrontendOverhaulPlan.md` define what
+  should be delivered first.
 
-## Evaluation Strategy
+## Repository structure
 
-The system is evaluated across multiple dimensions to ensure robustness, accuracy, and efficiency.
-
-### Evaluation Metrics
-
-#### 1. Tool Selection Accuracy
-- **Precision**: Proportion of selected tools that were appropriate
-- **Recall**: Proportion of necessary tools that were selected
-- **F1-Score**: Harmonic mean of precision and recall
-- **Target**: >90% F1-score on benchmark datasets
-
-#### 2. Model Performance Metrics
-- **Classification**: Accuracy, Precision, Recall, F1-score, ROC-AUC
-- **Regression**: RMSE, MAE, R²
-- **Clustering**: Silhouette score, Davies-Bouldin index
-- **Target**: Within 5% of expert-selected models
-
-#### 3. Statistical Correctness
-- **Test Assumption Validation**: Normality, homoscedasticity checks
-- **P-value Interpretation**: Correct significance conclusions
-- **Effect Size Reporting**: Cohen's d, η² where appropriate
-- **Target**: 95% correctness on statistical test battery
-
-#### 4. Report Quality Scoring
-- **Semantic Coherence**: BERT similarity to ground truth insights
-- **Completeness**: Coverage of all significant findings
-- **Actionability**: Presence of concrete recommendations
-- **Target**: >0.85 coherence score
-
-#### 5. Execution Efficiency
-- **Analysis Time**: Total time from upload to report
-- **Redundant Operations**: Repeated tool calls providing no value
-- **Memory Usage**: Peak RAM consumption
-- **Target**: <5 minutes for datasets <100K rows, <2% redundancy
-
-#### 6. RLM Inference Efficiency
-- **Context Reduction**: Percentage of context offloaded to external environment
-- **Workflow Scalability**: Maximum handled workflow complexity (number of steps)
-- **Sub-call Effectiveness**: Quality of task decomposition (measured by final accuracy)
-- **Target**: 90%+ context reduction, handle 100+ step workflows without degradation
-
-### Benchmark Datasets
-
-- **Kaggle Competitions**: Titanic, House Prices, Credit Default
-- **UCI Repository**: Iris, Wine Quality, Adult Income
-- **Synthetic Data**: Controlled scenarios with known optimal paths
-- **Custom Datasets**: Industry-specific analysis challenges
-
-### Validation Methodology
-
-```mermaid
-graph LR
-    A[Benchmark Dataset] --> B[Expert Analysis]
-    A --> C[Agent Analysis]
-    B --> D[Ground Truth]
-    C --> E[Agent Output]
-    D --> F[Comparison Engine]
-    E --> F
-    F --> G[Evaluation Metrics]
-    G --> H[Performance Report]
+```text
+.
+├── app.py                     # Streamlit application entry point
+├── main.py                    # CLI entry point
+├── src/
+│   ├── core/                  # Controller, memory, prompts, IO, safety, reports
+│   ├── rlm/                   # Recursive LLM engine and REPL environment
+│   └── tools/                 # Deterministic execution tools
+├── ui/                        # Landing, tabs, components, styles, 3D assets
+├── tests/                     # Unit, integration, architecture, UI contract tests
+├── data/                      # Bundled demonstration datasets
+├── docker/                    # Sandbox image requirements and hardening notes
+├── output/                    # Generated artefacts (runtime; do not commit data)
+├── AGENTS.md                  # Project architecture and engineering rules
+├── FrontendOverhaulPlan.md    # Active frontend implementation plan
+├── FutureScope.md             # Proposed data-method expansion
+└── IMPROVEMENTS.md            # Improvement ledger and outstanding technical work
 ```
-
----
-
-## Future Scope
-
-### Near-Term Enhancements
-
-1. **Offline LLM Migration**
-   - Transition to local models (Llama 3, Mistral, GPT-J)
-   - Benefits: Enhanced privacy, reduced latency, zero API costs
-   - Implementation: Model quantization for efficient edge deployment
-
-2. **Multi-modal Analysis Support**
-   - Image data: CNN-based feature extraction
-   - Text data: NLP pipelines with sentiment analysis
-   - Time-series: ARIMA, Prophet forecasting integration
-
-3. **Interactive Refinement Interface**
-   - Human-in-the-loop capability for expert guidance
-   - Real-time plan modification during execution
-   - Conversational debugging of analysis steps
-
-### Medium-Term Goals
-
-4. **Distributed Execution Framework**
-   - Parallel processing for large-scale datasets (>10M rows)
-   - Spark/Dask integration for distributed computing
-   - Cloud deployment with auto-scaling
-
-5. **Domain Specialization**
-   - Healthcare: Survival analysis, clinical trial tools
-   - Finance: Risk modeling, portfolio optimization
-   - Retail: Market basket analysis, demand forecasting
-
-6. **Native RLM Model Training**
-   - Fine-tune models to operate natively with recursive decomposition
-   - Improve programmatic task decomposition capabilities
-   - Enable more efficient recursive invocation patterns
-
-### Long-Term Vision
-
-7. **Autonomous Research Assistant**
-   - Literature review integration
-   - Hypothesis generation and experimental design
-   - Automated A/B test planning
-
-8. **Explainable AI Dashboard**
-   - Interactive visualization of reasoning steps
-   - Counterfactual explanations for model predictions
-   - Bias detection and fairness auditing
-
-9. **Collaborative Multi-Agent System**
-   - Specialized agents for different domains
-   - Consensus-based decision making
-   - Competitive analysis with ensemble insights
-
----
-
-## Skills Demonstrated
-
-This project showcases expertise across multiple domains critical for modern AI engineering:
-
-### AI & Machine Learning
-- **Agentic AI Systems**: Design and implementation of autonomous decision-making agents
-- **Recursive inference**: Inference-time optimization for complex workflow handling
-- **LLM Integration**: Prompt engineering, structured output parsing, API orchestration
-- **Statistical Analysis**: Hypothesis testing, effect size calculation, assumption validation
-- **ML Pipeline Development**: End-to-end model training, evaluation, and deployment
-
-### Software Engineering
-- **System Architecture**: Modular design with clear separation of concerns
-- **Design Patterns**: Agent pattern, strategy pattern, factory pattern
-- **Error Handling**: Robust retry mechanisms and graceful degradation
-- **Testing**: Unit tests, integration tests, benchmark validation
-- **Documentation**: Comprehensive technical documentation and code comments
-
-### Data Science
-- **Exploratory Data Analysis**: Automated pattern discovery and insight generation
-- **Feature Engineering**: Automated feature selection and transformation
-- **Model Selection**: Multi-model comparison with appropriate metrics
-- **Visualization**: Automated chart generation with publication-quality output
-- **Report Generation**: Structured communication of technical findings
-
-### DevOps & Deployment
-- **Environment Management**: Dependency isolation and reproducible builds
-- **Configuration Management**: YAML/JSON-based system configuration
-- **Logging & Monitoring**: Structured logging for debugging and performance tracking
-- **API Integration**: RESTful service consumption and error handling
-
-### Research & Innovation
-- **Literature Review**: Understanding of current agentic AI research
-- **Problem Formulation**: Translation of real-world needs to technical requirements
-- **Algorithm Design**: Custom reinforcement learning mechanism development
-- **Evaluation Methodology**: Comprehensive multi-dimensional assessment framework
-
----
-
-## Contributing
-
-Contributions are welcome! Please follow these guidelines:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-Please ensure:
-- Code follows PEP 8 style guidelines
-- All tests pass (`pytest tests/`)
-- New features include unit tests
-- Documentation is updated accordingly
-
----
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the [MIT License](LICENSE).
 
-### MIT License Summary
+## Contact
 
-Permission is hereby granted to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of this software, subject to the following conditions:
-
-- The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
-
----
-
-## Acknowledgments
-
-- **LLM Providers**: OpenAI, Anthropic for API access
-- **Open Source Community**: Contributors to pandas, scikit-learn, and visualization libraries
-- **Academic Research**: Papers on agentic AI and tool-augmented LLMs
-
----
-
-## Contact & Support
-
-**Developer**: Daksh Shah  
-**Email**: shahdaksh050@gmail.com 
-**GitHub**: [@shahdaksh050](https://github.com/shahdaksh050)  
-
-For bug reports and feature requests, please open an issue on GitHub.
-
----
-
-## Citation
-
-If you use this project in your research or application, please cite:
-
-```bibtex
-@software{agentic_data_analysis_2026,
-  author = {Daksh Shah},
-  title = {Agentic AI Powered Autonomous Data Analysis and Interpretation System},
-  year = {2026},
-  url = {https://github.com/shahdaksh050/agentic-data-analysis}
-}
-```
-
-
----
+For bugs, feature requests, or academic-project questions, open an issue in
+the repository.

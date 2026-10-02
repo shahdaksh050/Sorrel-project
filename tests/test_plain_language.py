@@ -97,3 +97,30 @@ def test_format_p_never_prints_zero() -> None:
     from src.core.plain_language import format_p
 
     assert (format_p(0.0), format_p(0.0004), format_p(0.04567), format_p(None)) == ("<0.001", "<0.001", "0.046", "n/a")
+
+
+class TestAdjustedPValues:
+    """An adjusted p-value means 'still true after correcting for the other tests', and must not
+    repeat the raw p-value's sentence ("... adjusted a result very unlikely to be down to chance")."""
+
+    def test_a_strong_adjusted_p_is_not_repeated_as_the_raw_phrase(self) -> None:
+        out = plainify("680 in segment vs 820 elsewhere; p<0.001 (adjusted p<0.001); 95% CI 0.28-0.35")
+        assert out.count("down to chance") == 1
+        assert "still so after correcting for the other tests" in out
+        assert "adjusted a result" not in out
+
+    def test_a_weak_adjusted_p_says_it_does_not_hold(self) -> None:
+        out = plainify("p=0.003 (adjusted p=0.2)")
+        assert "not after correcting for the other tests" in out
+        assert out.count("down to chance") == 1
+
+    @pytest.mark.parametrize(
+        "text", ["BH-adjusted p=0.012", "p_adj=0.012", "p(adj)=0.012", "corrected p<0.05", "FDR adjusted p=0.04"]
+    )
+    def test_every_adjusted_spelling_is_handled(self, text: str) -> None:
+        out = plainify(f"Welch t-test p=0.003 ({text})")
+        assert "correcting for the other tests" in out
+        assert "p=" not in out and "adj" not in out.lower().replace("correcting", "")
+
+    def test_a_plain_p_value_is_unchanged_by_the_new_rule(self) -> None:
+        assert plainify("p=0.0004") == "a result very unlikely to be down to chance"

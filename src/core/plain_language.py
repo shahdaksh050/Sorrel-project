@@ -144,6 +144,24 @@ _P_RE = re.compile(
     rf"(?<![\w.])p(?:[\s_-]?(?:adj|adjusted))?(?:\((?:adj|adjusted)\))?\s*(?P<op><=|>=|[<>=≤≥])\s*(?P<val>{_NUM}){_STARS}",
     re.IGNORECASE,
 )
+# An adjusted p-value answers a different question from the raw one ("does it still hold after
+# correcting for the other tests run?"), so it is not rewritten with the raw p-value's phrase.
+_P_ADJ_RE = re.compile(
+    rf"(?P<lead>\(\s*)?(?P<sep>[,;]\s*)?(?<![\w.])(?:(?:BH|FDR|Holm|Bonferroni)[\s-]*)?"
+    rf"(?:(?:adjusted|corrected|adj\.?)\s+p|p[\s_-]?(?:adj|adjusted)|p\((?:adj|adjusted)\))\s*"
+    rf"(?P<op><=|>=|[<>=≤≥])\s*(?P<val>{_NUM}){_STARS}(?P<tail>\s*\))?",
+    re.IGNORECASE,
+)
+_ADJ_HOLDS = "still so after correcting for the other tests"
+_ADJ_FAILS = "not after correcting for the other tests"
+
+
+def _adjusted_phrase(m: re.Match[str]) -> str:
+    holds = _p_phrase(m.group("op"), _f(m.group("val"))) != _P_WEAK
+    phrase = _ADJ_HOLDS if holds else _ADJ_FAILS
+    return f"{m.group('lead') or ''}{m.group('sep') or ''}{phrase}{m.group('tail') or ''}"
+
+
 _P_VALUE_RE = re.compile(rf"(?<![\w.])p[\s_-]?values?\s+(?:of|is|was)\s+(?P<val>{_NUM}){_STARS}", re.IGNORECASE)
 _STAT_RE = re.compile(
     rf"(?:(?:(?<=[(,;])|(?<=[,;] )|(?<=\( ))[tFUWz]|(?<![\w.])(?:χ²|chi2|chi-squared?|df))"
@@ -219,6 +237,7 @@ def plainify(text: str) -> str:
             return _stars_kept(m, effect_words(kind, _f(m.group("val"))))
 
         out = pattern.sub(_effect, out)
+    out = _P_ADJ_RE.sub(_adjusted_phrase, out)
     out = _P_RE.sub(lambda m: _stars_kept(m, _p_phrase(m.group("op"), _f(m.group("val")))), out)
     out = _P_VALUE_RE.sub(lambda m: _stars_kept(m, _p_phrase("=", _f(m.group("val")))), out)
     if _STAT_RE.search(out):

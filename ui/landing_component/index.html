@@ -722,7 +722,7 @@
       width: 100%;
     }
     .hero-content {
-      max-width: 640px;
+      max-width: 560px;
     }
     .hero-title {
       font-size: clamp(2.6rem, 5.2vw, 4.4rem);
@@ -740,6 +740,7 @@
       color: var(--graphite);
       line-height: 1.65;
       margin-bottom: 34px;
+      max-width: 34em;
     }
     .hero-cta-group {
       display: flex;
@@ -1182,6 +1183,21 @@
       .nav-links {
         display: none;
       }
+    }
+
+    @media (max-width: 960px) {
+      /* The plate sits behind the copy on a narrow screen; keep it a quiet backdrop. */
+      #webgl-canvas { opacity: 0.3; }
+      .hero-lead { margin-left: auto; margin-right: auto; }
+    }
+
+    @media (max-width: 720px) {
+      .stage-nav-pills { display: none; }
+      .header-actions { gap: 8px; }
+      .header-actions .btn-cta,
+      .theme-toggle-btn { white-space: nowrap; padding: 8px 12px; font-size: 13px; }
+      #theme-label { display: none; }
+      .brand-badge { display: none; }
     }
 
     @media (max-width: 600px) {

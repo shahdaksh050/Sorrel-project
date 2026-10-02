@@ -134,12 +134,6 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .sect h2, .sect h3 {{ margin: 0; padding: 0; }}
 .sect .note {{ font-size: 13px; color: var(--graphite); margin-top: .3rem; }}
 
-/* ── Hero ── */
-.hero {{ padding: .2rem 0 1rem; }}
-.hero h1 {{
-    font-size: clamp(36px, 5.6vw, 64px);
-    font-weight: 800;
-    line-height: 1.04;
 /* ── Chart panels ── */
 .chart-title {{
     font-family: var(--heading); font-size: 1.1rem !important; font-weight: 700 !important;
@@ -161,6 +155,12 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .file-notices summary {{ cursor: pointer; font-weight: 600; min-height: 24px; }}
 .file-notices ul {{ margin: .3rem 0 0; padding-left: 1.2rem; line-height: 1.5; }}
 
+/* ── Hero ── */
+.hero {{ padding: .2rem 0 1rem; }}
+.hero h1 {{
+    font-size: clamp(36px, 5.6vw, 64px);
+    font-weight: 800;
+    line-height: 1.04;
     letter-spacing: -.02em;
     margin: 0;
     max-width: 15ch;
@@ -175,12 +175,6 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     margin: 1rem 0 0; max-width: 54ch;
 }}
 @media (prefers-reduced-motion: reduce) {{ .hero h1 {{ animation: none; }} }}
-
-.st-key-plate {{ padding-left: 16px; margin-right: -2.8rem; }}
-@media (max-width: 900px) {{
-    .st-key-plate {{ margin-right: 0; padding-left: 0; }}
-    [data-testid="stHorizontalBlock"]:has(.st-key-plate) {{ flex-wrap: wrap !important; }}
-    [data-testid="stHorizontalBlock"]:has(.st-key-plate) > [data-testid="stColumn"] {{
 .hero.compact {{ padding: .4rem 0 .6rem; }}
 .hero.compact .hero-eyebrow {{
     font-size: 12.5px; font-weight: 700; letter-spacing: .04em; color: var(--pen); margin-bottom: .35rem;
@@ -190,8 +184,8 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     animation: none; overflow-wrap: anywhere;
 }}
 .hero.compact .hero-file {{ color: var(--graphite); font-weight: 700; }}
-        min-width: 100% !important; flex: 1 1 100% !important;
-    }}
+
+.st-key-plate {{ padding-left: 16px; margin-right: -2.8rem; }}
 /* The 3D plate is an optional extra; on a phone it would push the inputs off the first screen.
    The stage list beside it, and the live progress panel, carry the same information. */
 @media (max-width: 768px) {{
@@ -199,6 +193,12 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     .st-key-plate iframe,
     .st-key-plate .stElementContainer:has(iframe) {{ display: none; }}
 }}
+@media (max-width: 900px) {{
+    .st-key-plate {{ margin-right: 0; padding-left: 0; }}
+    [data-testid="stHorizontalBlock"]:has(.st-key-plate) {{ flex-wrap: wrap !important; }}
+    [data-testid="stHorizontalBlock"]:has(.st-key-plate) > [data-testid="stColumn"] {{
+        min-width: 100% !important; flex: 1 1 100% !important;
+    }}
     .datum .cell {{ flex: 1 1 45%; }}
     .stTabs [role="tab"] {{ min-height: 44px; }}
     .stButton button, .stDownloadButton button {{ min-height: 44px; }}

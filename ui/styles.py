@@ -681,5 +681,20 @@ iframe {{
 .prov-list {{ margin: 0; padding-left: 1.1rem; font-size: 14px; line-height: 1.55; color: var(--ink); overflow-wrap: anywhere; }}
 .prov-kind {{ font-size: 12px; font-weight: 700; color: var(--graphite); }}
 .prov-count {{ font-size: 13px; color: var(--graphite); margin: .4rem 0 0; }}
+/* ── Native widget text follows the page tokens ──
+   Streamlit's native theme is fixed (.streamlit/config.toml, Day palette), so in
+   Night mode its own text colours would be dark on a dark page. These rules take
+   the colour from the tokens instead; in Day they resolve to the same values. */
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {{ color: var(--graphite) !important; }}
+[data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] * {{ color: var(--graphite) !important; }}
+[data-testid="stCheckbox"] label *, [data-testid="stRadio"] label *,
+[data-testid="stToggle"] label * {{ color: var(--ink) !important; }}
+[data-testid="stExpander"] summary * {{ color: var(--ink) !important; }}
+[data-testid="stMetricLabel"] * {{ color: var(--graphite) !important; }}
+[data-testid="stMetricValue"], [data-testid="stMetricValue"] * {{ color: var(--ink) !important; }}
+[data-testid="stFileUploaderDropzoneInstructions"] * {{ color: var(--graphite) !important; }}
+[data-testid="stTooltipIcon"] svg {{ color: var(--graphite) !important; }}
+[data-testid="stNumberInput"] input {{ background: var(--sheet) !important; color: var(--ink) !important; }}
+[data-testid="stNumberInput"] button {{ background: var(--sheet) !important; color: var(--ink) !important; }}
 </style>
 """, unsafe_allow_html=True)

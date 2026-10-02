@@ -8,6 +8,13 @@ The TOML cannot import Python, so it carries a generated copy of the palette.
 Only the text between the BEGIN and END markers is rewritten; the fonts, radii
 and every other setting in the file are left alone. A palette change is one
 command, and `tests/test_theme_sync.py` fails if it is forgotten.
+
+Streamlit's native widgets get ONE fixed theme: the Day palette, written as flat
+`[theme]` keys. There are deliberately no `[theme.light]` / `[theme.dark]`
+sections: with both present Streamlit picks its theme from the browser's colour
+scheme, which the app's own Day/Night toggle cannot control, so a dark browser
+showed dark-themed inputs and near-invisible captions on the Day page. Night mode
+is the app's own CSS (`ui/styles.py`) on top of this fixed native theme.
 """
 from __future__ import annotations
 
@@ -35,19 +42,16 @@ THEME_KEY_TOKENS: dict[str, str] = {
     "dataframeHeaderBackgroundColor": "sheet_alt",
 }
 
-#: Streamlit section -> palette mode.
-SECTION_MODES: dict[str, Mode] = {"theme.light": "day", "theme.dark": "night"}
+#: The one palette Streamlit's native widgets use, whatever the browser prefers.
+NATIVE_MODE: Mode = "day"
 
 
 def render_block() -> str:
     """The generated text, markers included, ending with a newline."""
+    tokens = palette(NATIVE_MODE)
     lines = [BEGIN]
-    for section, mode in SECTION_MODES.items():
-        tokens = palette(mode)
-        lines.append(f"[{section}]")
-        lines.extend(f'{key} = "{tokens[tok]}"' for key, tok in THEME_KEY_TOKENS.items())
-        lines.append("")
-    lines[-1] = END
+    lines.extend(f'{key} = "{tokens[tok]}"' for key, tok in THEME_KEY_TOKENS.items())
+    lines.append(END)
     return "\n".join(lines) + "\n"
 
 

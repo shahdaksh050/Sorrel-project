@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import tomllib
 from pathlib import Path
 from types import ModuleType
@@ -28,21 +29,27 @@ script = _load_script()
 
 
 @pytest.fixture(scope="module")
-def theme() -> dict[str, object]:
+def parsed() -> dict[str, object]:
     with CONFIG.open("rb") as fh:
-        loaded = tomllib.load(fh)
-    return dict(loaded["theme"])
+        return dict(tomllib.load(fh))
 
 
-@pytest.mark.parametrize(("section", "mode"), [("light", "day"), ("dark", "night")])
-def test_every_mapped_key_equals_its_token(
-    theme: dict[str, object], section: str, mode: str
-) -> None:
-    block = theme[section]
-    assert isinstance(block, dict)
-    tokens = palette(mode)  # type: ignore[arg-type]
+def test_every_mapped_key_equals_its_day_token(parsed: dict[str, object]) -> None:
+    theme = parsed["theme"]
+    assert isinstance(theme, dict)
+    tokens = palette("day")
     for key, token in script.THEME_KEY_TOKENS.items():
-        assert block[key].lower() == tokens[token].lower(), f"{section}.{key} drifted from {token}"
+        assert theme[key].lower() == tokens[token].lower(), f"theme.{key} drifted from {token}"
+
+
+def test_native_theme_does_not_follow_the_browser_colour_scheme(parsed: dict[str, object]) -> None:
+    """With [theme.light]/[theme.dark] present Streamlit picks its theme from the
+    browser, which the app's Day/Night toggle cannot control: a dark browser then
+    showed dark-themed widgets on the Day page. One flat native theme avoids that."""
+    theme = parsed["theme"]
+    assert isinstance(theme, dict)
+    assert "light" not in theme and "dark" not in theme
+    assert "base" not in theme
 
 
 def test_a_stale_palette_value_is_detected() -> None:
@@ -68,10 +75,26 @@ def test_missing_markers_raise() -> None:
         script.sync("[theme]\nfont = 'x'\n")
 
 
-def test_non_colour_settings_are_kept(theme: dict[str, object]) -> None:
+def test_non_colour_settings_are_kept(parsed: dict[str, object]) -> None:
+    theme = parsed["theme"]
+    assert isinstance(theme, dict)
     for key in ("font", "headingFont", "codeFont", "baseRadius", "buttonRadius", "chartCategoricalColors"):
         assert key in theme
 
 
 def test_no_reference_to_the_deleted_design_doc() -> None:
     assert "DESIGN.md" not in CONFIG.read_text(encoding="utf-8")
+
+
+def test_app_defaults_to_day_and_never_reads_the_browser_theme() -> None:
+    source = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert '_DEFAULT_THEME = "day"' in source
+    assert "st.context.theme" not in source
+
+
+def test_native_text_rules_use_tokens_only() -> None:
+    styles = (ROOT / "ui" / "styles.py").read_text(encoding="utf-8")
+    start = styles.index("/* ── Native widget text follows the page tokens")
+    block = styles[start : styles.index("</style>", start)]
+    assert "var(--graphite)" in block and "var(--ink)" in block
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b", block)

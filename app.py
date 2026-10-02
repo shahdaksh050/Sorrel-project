@@ -151,14 +151,15 @@ from ui.tabs import (
     render_downloads_tab,
 )
 
-# A fresh session opens on the OS/browser theme; the sidebar toggle then owns
-# it for the rest of the session (st.context.theme is best-effort — it can be
-# None before the browser reports back, so "day" stays the fallback).
-_os_theme = "night" if st.context.theme.type == "dark" else "day"
+# Every session opens in Day mode. The sidebar toggle then owns the theme for
+# the rest of the session. The browser's own colour scheme is deliberately not
+# read: Streamlit's native widgets follow a fixed theme (.streamlit/config.toml),
+# so a dark browser must not flip only the custom CSS and leave the widgets behind.
+_DEFAULT_THEME = "day"
 
 # ── Session-state initialisation ──────────────────────────────────────────────
 _DEFAULTS: dict[str, Any] = {
-    "theme":          _os_theme,
+    "theme":          _DEFAULT_THEME,
     "preview_df":     None,   # pd.DataFrame
     "preview_name":   "",     # sanitised filename (safe for filesystem)
     "orig_name":      "",     # exact name as uploaded (change detection)
@@ -511,7 +512,7 @@ with st.sidebar:
 
     target_col = st.text_input(
         "Target column",
-        placeholder="e.g. outcome, price, result  (blank = find groupings)",
+        placeholder="e.g. outcome or price (blank = auto)",
     )
 
     objective = st.text_area(

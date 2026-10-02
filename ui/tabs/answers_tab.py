@@ -110,7 +110,7 @@ def render_answers_tab(
         )
 
     # 3. Evidence: the findings and their check rows.
-    st.markdown("### What we found")
+    st.markdown("## What we found")
     if view.headline_findings:
         dash_finding_ids: set[str] = {
             str(c["finding_id"]) for c in (dash or []) if c.get("finding_id")
@@ -158,7 +158,7 @@ def render_answers_tab(
     )
     du_html = render_data_understanding(report.get("data_understanding") or {})
     if gap_val is not None or unanswered or small_notes or du_html:
-        st.markdown("### Be careful about")
+        st.markdown("## Be careful about")
         if gap_val is not None:
             st.markdown(render_defect_stamp(gap_val), unsafe_allow_html=True)
         if unanswered:
@@ -169,11 +169,11 @@ def render_answers_tab(
         if small_notes:
             st.caption("Small groups combined. " + " ".join(small_notes[:3]))
         if du_html:
-            st.markdown("#### How we read your data")
+            st.markdown("### How we read your data")
             st.markdown(du_html, unsafe_allow_html=True)
 
     # 5. Next action.
-    st.markdown("### What to do")
+    st.markdown("## What to do")
     if view.recommendations:
         for rec in view.recommendations:
             st.markdown(
@@ -184,7 +184,7 @@ def render_answers_tab(
         st.caption("No operational recommendations generated.")
 
     # 6. Supporting context.
-    st.markdown("### At a glance")
+    st.markdown("## At a glance")
     row_count = (
         (meta.row_count if meta else None)
         or (prof.get("row_count") if prof else None)
@@ -212,7 +212,7 @@ def render_answers_tab(
     render_run_compare()
 
     # Search these findings: a keyword search over headlines, not free-form Q&A.
-    st.markdown("### Search these findings")
+    st.markdown("## Search these findings")
     ask_q = st.text_input(
         "Search these findings",
         placeholder="e.g. tenure churn",
@@ -280,14 +280,14 @@ def render_answers_tab(
 
         mc_chart = find_chart_by_id(dash, "model_comparison")
         if mc_chart:
-            st.markdown("#### How each model scored (Train vs Test vs CV)")
+            st.markdown("### How each model scored (Train vs Test vs CV)")
             render_dashboard_chart(mc_chart, vega_cfg)
         elif train_out:
             st.caption("Model comparison chart not available for this run.")
 
         tc_chart = find_chart_by_id(dash, "top_correlations")
         if tc_chart:
-            st.markdown("#### Strongest feature correlations")
+            st.markdown("### Strongest feature correlations")
             render_dashboard_chart(tc_chart, vega_cfg)
         elif corr_out:
             st.caption("Correlation chart not available for this run.")

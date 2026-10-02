@@ -39,7 +39,7 @@ def render_details_tab(
         if how_html:
             st.markdown(how_html, unsafe_allow_html=True)
 
-    st.markdown("### Case Log")
+    st.markdown("## Case Log")
     st.caption("A sequential record of technical checks performed on this dataset.")
 
     profile_status = st.session_state.get("profile_status")
@@ -53,7 +53,7 @@ def render_details_tab(
     coercions = st.session_state.get("coercions")
     if read_report or coercions:
         with st.container(border=True):
-            st.markdown("#### 1. Data Ingestion & Repair")
+            st.markdown("### 1. Data Ingestion & Repair")
             if read_report:
                 rr_bits = [
                     f"format `{read_report.get('format')}`",
@@ -89,7 +89,7 @@ def render_details_tab(
     prof = prof or st.session_state.get("profile")
     if prof:
         with st.container(border=True):
-            st.markdown("#### 2. Profiling")
+            st.markdown("### 2. Profiling")
             prows = [
                 {
                     "Column": c.get("name"),
@@ -105,7 +105,7 @@ def render_details_tab(
 
     if clean_out:
         with st.container(border=True):
-            st.markdown("#### 3. Data Cleaning")
+            st.markdown("### 3. Data Cleaning")
             c1, c2, c3 = st.columns(3)
             c1.metric("Strategy used", clean_out.get("strategy_used", "—"))
             c2.metric("Missing values before", clean_out.get("missing_before", "—"))
@@ -113,7 +113,7 @@ def render_details_tab(
 
     if outlier_out:
         with st.container(border=True):
-            st.markdown("#### 4. Outlier Detection")
+            st.markdown("### 4. Outlier Detection")
             c1, c2 = st.columns(2)
             c1.metric("Unusual rows found", outlier_out.get("total_outliers", "—"))
             c2.metric("Share of all rows", f"{outlier_out.get('outlier_percentage','—')}%")
@@ -128,7 +128,7 @@ def render_details_tab(
 
     if stat_out:
         with st.container(border=True):
-            st.markdown("#### 5. Statistical Tests")
+            st.markdown("### 5. Statistical Tests")
             c1, c2, c3 = st.columns(3)
             c1.metric("Test used", stat_out.get("test_name", "—"))
             c2.metric("p-value", format_p(stat_out.get("p_value")))
@@ -137,7 +137,7 @@ def render_details_tab(
 
     if train_out:
         with st.container(border=True):
-            st.markdown("#### 6. Model Training & Evaluation")
+            st.markdown("### 6. Model Training & Evaluation")
             mt2 = train_out.get("models_trained", {})
             best2 = train_out.get("best_model", "")
             task2 = train_out.get("task_type", "classification")
@@ -174,7 +174,7 @@ def render_details_tab(
             st.dataframe(safe_df(pd.DataFrame(rows)), width="stretch")
 
             if eval_out:
-                st.markdown("##### Accuracy by Category")
+                st.markdown("#### Accuracy by Category")
                 cr = eval_out.get("classification_report", {})
                 if cr:
                     cr_rows = [
@@ -191,7 +191,7 @@ def render_details_tab(
                     st.dataframe(safe_df(pd.DataFrame(cr_rows)), width="stretch")
 
     with st.container(border=True):
-        st.markdown("#### 7. Domain-Specific Analyses")
+        st.markdown("### 7. Domain-Specific Analyses")
         st.caption("Segmentation, trends, text, and geography — run when your data called for them.")
         render_other_findings(tool_results)
 
@@ -202,7 +202,7 @@ def render_details_tab(
             unsafe_allow_html=True,
         )
 
-        st.markdown("##### What Was Said, Step by Step")
+        st.markdown("#### What Was Said, Step by Step")
         st.caption("A record of what each helper passed to the next, and when.")
         st.markdown(
             render_handoff_stream(st.session_state.get("progress_lines", []), tool_results),
@@ -211,7 +211,7 @@ def render_details_tab(
 
         sub_results = report.get("rlm_sub_results")
         if sub_results:
-            st.markdown("##### How the Tricky Parts Were Split Up")
+            st.markdown("#### How the Tricky Parts Were Split Up")
             st.caption("Big questions got broken into smaller ones so nothing got lost.")
             for s_idx, sub in enumerate(sub_results, 1):
                 with st.expander(
@@ -223,6 +223,6 @@ def render_details_tab(
     gov = report.get("governance")
     if gov:
         with st.container(border=True):
-            st.markdown("#### 9. Governance & audit")
+            st.markdown("### 9. Governance & audit")
             st.caption("What AI-written code ran, where it ran, and what was refused.")
             render_governance(gov)

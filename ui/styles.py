@@ -105,6 +105,10 @@ h1, h2, h3, h4, h5, h6 {{
 h1 {{ font-weight: 800 !important; }}
 h2 {{ font-weight: 700 !important; font-size: 27px !important; line-height: 1.15; }}
 h3 {{ font-weight: 700 !important; font-size: 19px !important; }}
+/* Section headings inside a tab keep the earlier visual size at their corrected level. */
+[data-baseweb="tab-panel"] h2 {{ font-size: 21px !important; }}
+[data-baseweb="tab-panel"] h3 {{ font-size: 17px !important; }}
+[data-baseweb="tab-panel"] .exec-directive h2 {{ font-size: 27px !important; }}
 h4 {{ font-weight: 700 !important; font-size: 15.5px !important; letter-spacing: 0; }}
 .stMarkdown p, .stMarkdown li {{ font-size: 15.5px; line-height: 1.65; max-width: 72ch; }}
 code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
@@ -183,7 +187,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     font-size: clamp(26px, 3.4vw, 40px); line-height: 1.12; max-width: none; letter-spacing: -.01em;
     animation: none; overflow-wrap: anywhere;
 }}
-.hero.compact .hero-file {{ color: var(--graphite); font-weight: 700; }}
+.hero.compact .hero-file {{ color: var(--graphite); font-weight: 700; font-size: .62em; display: inline-block; overflow-wrap: anywhere; }}
 
 .st-key-plate {{ padding-left: 16px; margin-right: -2.8rem; }}
 /* The 3D plate is an optional extra; on a phone it would push the inputs off the first screen.

@@ -18,7 +18,7 @@ def render_downloads_tab(
     tmp_dir: str,
 ) -> None:
     """Render Tier 6: Artifact Vault & Exports."""
-    st.markdown("### Downloads")
+    st.markdown("## Downloads")
     st.caption("Everything from this run, ready to keep or share.")
 
     if tmp_dir:
@@ -35,7 +35,7 @@ def render_downloads_tab(
 
         dl_cols = st.columns(3)
         with dl_cols[0]:
-            st.markdown("#### Presentations")
+            st.markdown("### Presentations")
             with st.container(border=True):
                 st.markdown("**3D Cinematic Journey**")
                 st.caption("Standalone HTML with 3D models and animations.")
@@ -71,7 +71,7 @@ def render_downloads_tab(
         mds = sorted(rdir.glob("*.md")) if rdir.exists() else []
 
         with dl_cols[1]:
-            st.markdown("#### Data & Logs")
+            st.markdown("### Data & Logs")
             with st.container(border=True):
                 st.markdown("**Markdown Report**")
                 st.caption("The core report in plain text markdown.")
@@ -97,7 +97,7 @@ def render_downloads_tab(
                 )
 
         with dl_cols[2]:
-            st.markdown("#### Trained Models")
+            st.markdown("### Trained Models")
             mdir = out / "models"
             if mdir.exists() and any(mdir.iterdir()):
                 for mdl_f in sorted(mdir.iterdir()):
@@ -116,7 +116,7 @@ def render_downloads_tab(
                 st.caption("No predictive models were saved for this run.")
 
         st.divider()
-        st.markdown("#### Report Preview")
+        st.markdown("### Report Preview")
         if mds:
             st.markdown(mds[0].read_text(encoding="utf-8"))
         else:

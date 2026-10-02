@@ -4,7 +4,6 @@ Answers Tab (Executive Briefing & Key Findings).
 from __future__ import annotations
 
 import html
-import os
 from typing import Any
 
 import streamlit as st
@@ -40,7 +39,7 @@ def render_answers_tab(
     corr_out = find_tool(tool_results, "correlation_analysis")
 
     # Case Heading: the objective itself is the heading, not a labelled eyebrow above it.
-    user_obj = os.environ.get("USER_OBJECTIVE") or objective.strip()
+    user_obj = objective.strip()
     if user_obj and report.get("reasoning"):
         st.markdown(
             '<div class="exec-directive">'

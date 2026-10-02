@@ -21,7 +21,6 @@ is reported rather than read as a 100% drop or an infinite rise.
 """
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -29,6 +28,7 @@ import pandas as pd
 
 from src.core.findings import Finding
 from src.core.profiler import pick_measures, profile_dataframe
+from src.core.run_context import current_objective
 from src.core.stats_utils import is_partial_final_period, measure_aggregation
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
@@ -155,7 +155,7 @@ class ChangeAnalysisTool(BaseTool):
         # Stable, objective-aware choice (shared with the other tools), limited
         # to the columns this tool already accepts.
         allowed = {m.name for m in measures}
-        ranked = pick_measures(profile, os.environ.get("USER_OBJECTIVE", "").strip())
+        ranked = pick_measures(profile, current_objective())
         first = next((m for m in ranked if m.name in allowed), measures[0])
         params: dict[str, Any] = {
             "date_column": profile.datetime_cols[0],

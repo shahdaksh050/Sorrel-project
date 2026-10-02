@@ -90,6 +90,8 @@ from src.core.prompt_manager import (
     PromptManager,
 )
 from src.core.question_router import route_question
+from src.core.run_config import RunConfig
+from src.core.run_context import in_run_context, objective_scope
 from src.core.security import sanitize_for_prompt
 from src.core.shared_context import SharedAnalysisContext
 from src.core.stats_utils import repeated_entity
@@ -178,6 +180,7 @@ class AgentController:
         min_iterations: int | None = None,
         objective: str | None = None,
         output_dir: str | None = None,
+        run_config: RunConfig | None = None,
     ) -> None:
         # Capability switches. Both default on, and both are honest about
         # what they cost: with use_llm off the run is fully deterministic
@@ -210,7 +213,7 @@ class AgentController:
             else os.getenv("ENABLE_RLM_INFERENCE", "true").lower() == "true"
         )
         self.memory = MemorySystem(persist_path=memory_persist_path)
-        self.llm_client = LLMClient()
+        self.llm_client = LLMClient(run_config)
         self.tool_registry = ToolRegistry()
         self._rlm_engine: RLMEngine | None = None
         self._prompt_manager: PromptManager | None = None
@@ -433,6 +436,21 @@ class AgentController:
         return file_path, notes
 
     def load_dataset(
+        self,
+        file_path: str,
+        target_hint: str | None = None,
+        interactive: bool = True,
+        related_files: list[str] | None = None,
+        join_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> DatasetMetadata:
+        """Stage 1: see `_load_dataset`. Runs with this run's objective in scope,
+        so the profile-driven tools never read another run's question."""
+        with objective_scope(self.objective):
+            return self._load_dataset(
+                file_path, target_hint, interactive, related_files, join_overrides
+            )
+
+    def _load_dataset(
         self,
         file_path: str,
         target_hint: str | None = None,
@@ -776,6 +794,17 @@ class AgentController:
     # ------------------------------------------------------------------
 
     def analyze(
+        self,
+        file_path: str | None = None,
+        target_hint: str | None = None,
+        interactive: bool = False,
+    ) -> dict[str, Any]:
+        """Run Stages 2-7: see `_analyze`. Runs with this run's objective in
+        scope for the whole call, including the tool thread pool."""
+        with objective_scope(self.objective):
+            return self._analyze(file_path, target_hint, interactive)
+
+    def _analyze(
         self,
         file_path: str | None = None,
         target_hint: str | None = None,
@@ -2429,7 +2458,8 @@ class AgentController:
             to_run = [p for p in to_run if p.step.tool_name not in self._FILE_WRITING_TOOLS]
         if len(to_run) > 1:
             with ThreadPoolExecutor(max_workers=min(4, len(to_run))) as pool:
-                outcomes = pool.map(lambda p: p.tool.run(**p.params), to_run)
+                run_tool = in_run_context(lambda p: p.tool.run(**p.params))
+                outcomes = pool.map(run_tool, to_run)
                 results = {p.idx: result for p, result in zip(to_run, outcomes, strict=True)}
         for p in prepared:
             if p.cached is not None:

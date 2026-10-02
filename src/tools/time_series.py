@@ -25,7 +25,6 @@ Entity x time panels also get a per-entity trend read.
 """
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -35,6 +34,7 @@ from scipy import stats
 from src.core.findings import Finding
 from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.profiler import pick_measures, profile_dataframe
+from src.core.run_context import current_objective
 from src.core.stats_utils import (
     is_partial_final_period,
     mann_kendall,
@@ -196,7 +196,7 @@ def _choose_value_column_and_aggregation(
             # 10-scale concentration); the shared ranking is objective-aware,
             # completeness-first and unit-free.
             allowed = {c.name for c in pool}
-            ranked = pick_measures(profile, os.environ.get("USER_OBJECTIVE", "").strip())
+            ranked = pick_measures(profile, current_objective())
             best = next((c for c in ranked if c.name in allowed), None) or max(
                 pool, key=lambda c: (c.stats.get("std") or 0.0) ** 2
             )

@@ -18,6 +18,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import shutil
 import sys
 import tempfile
 import traceback
@@ -29,12 +30,18 @@ from typing import Any, cast
 import pandas as pd
 import streamlit as st
 
-from src.core.io import read_any, read_any_bytes
+from src.core.io import read_any_bytes
+from src.core.run_config import RunConfig
 from src.core.security import ALLOWED_EXTENSIONS
 
 # ── Project root on sys.path ─────────────────────────────────────────────────
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
+
+#: Operator switch for a shared deployment. When set, visitors cannot (a) fall
+#: back to a server-side API key, (b) point the server at a URL they typed, or
+#: (c) change the safety limits, which come from the server's environment.
+_HOSTED = os.getenv("DSA_HOSTED", "false").strip().lower() in ("1", "true", "yes")
 
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
@@ -171,6 +178,8 @@ _DEFAULTS: dict[str, Any] = {
     "llm_warning":    None,
     "from_uploader":  False,
     "preview_notes":  [],
+    "run_objective":  "",     # the question the finished run was given
+    "is_sample":      False,  # the finished run analysed the bundled sample file
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -182,7 +191,23 @@ _inject_theme_css()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+#: Prefix of every per-run temp directory; `_remove_run_dir` only ever deletes
+#: directories that carry it, directly under the system temp root.
+_RUN_DIR_PREFIX = "dsa-run-"
+
+
+def _remove_run_dir(path: str | None) -> None:
+    """Delete a finished run's temp directory (uploads, reports, models)."""
+    if not path:
+        return
+    target = Path(path).resolve()
+    if target.name.startswith(_RUN_DIR_PREFIX) and target.parent == Path(tempfile.gettempdir()).resolve():
+        shutil.rmtree(target, ignore_errors=True)
+
+
 def _reset_pipeline() -> None:
+    _remove_run_dir(st.session_state.get("tmp_dir"))
+    st.session_state.pop("current_summary_path", None)
     for k in ("stage_log", "analysis_done", "analysis_error",
               "final_report", "tool_results", "metadata", "profile",
               "dashboard", "tmp_dir", "progress_lines", "llm_warning",
@@ -230,266 +255,6 @@ def _draw_pipeline_rig(slot: Any) -> list[Any]:
         else:
             render_pipeline(stages, height=420, theme=cur_theme)
     return stages
-
-
-def _load_teamwork_preview() -> None:
-    """Populate full autonomous multi-agent teamwork demo with sample customer churn data."""
-    _reset_pipeline()
-    sample_path = ROOT / "data" / "sample_customer_churn.csv"
-    if sample_path.exists():
-        raw_bytes = sample_path.read_bytes()
-        df, _ = read_any(str(sample_path))
-    else:
-        import numpy as np
-        np.random.seed(42)
-        df = pd.DataFrame({
-            "tenure": np.random.randint(1, 72, 100),
-            "monthly_charges": np.random.uniform(20, 120, 100).round(2),
-            "total_charges": np.random.uniform(100, 8000, 100).round(2),
-            "contract": np.random.choice(["Month-to-month", "One year", "Two year"], 100),
-            "internet_service": np.random.choice(["DSL", "Fiber optic", "No"], 100),
-            "payment_method": np.random.choice(["Electronic check", "Mailed check", "Bank transfer"], 100),
-            "churn": np.random.choice([0, 1], 100, p=[0.73, 0.27]),
-        })
-        raw_bytes = df.to_csv(index=False).encode("utf-8")
-
-    st.session_state["preview_df"] = df
-    st.session_state["preview_name"] = "sample_customer_churn.csv"
-    st.session_state["orig_name"] = "sample_customer_churn.csv"
-    st.session_state["preview_bytes"] = raw_bytes
-    st.session_state["from_uploader"] = False
-
-    tmp = tempfile.mkdtemp()
-    st.session_state["tmp_dir"] = tmp
-    out_dir = Path(tmp) / "output"
-    rep_dir = out_dir / "reports"
-    rep_dir.mkdir(parents=True, exist_ok=True)
-
-    st.session_state["stage_log"] = [
-        ("1", "done", "100 rows × 8 cols · task=classification · target=churn"),
-        ("2", "done", "5 steps planned by the Planner"),
-        ("3", "done", "6 tools executed: clean, outliers, corr, test, train, eval"),
-        ("4", "done", "Anti-overfit audit passed: gap 4.2% < 10%"),
-        ("5", "done", "Converged in 2 iterations (residual variance resolved)"),
-        ("6", "done", "2 RLM sub-tasks offloaded via REPL context"),
-        ("7", "done", "analysis_report.md & report.html compiled"),
-    ]
-
-    st.session_state["tool_results"] = [
-        {
-            "tool_name": "clean_data",
-            "status": "success",
-            "execution_time_ms": 42.0,
-            "output": {
-                "summary": "Cleaned dataset: 0 missing values found. Handled numeric types and standardized categorical levels.",
-                "strategy_used": "median",
-                "missing_before": 0,
-                "missing_after": 0,
-            },
-        },
-        {
-            "tool_name": "detect_outliers",
-            "status": "success",
-            "execution_time_ms": 58.0,
-            "output": {
-                "summary": "Detected 4 outlier rows across total_charges using IQR method (3.0 threshold). Kept in dataset.",
-                "total_outliers": 4,
-                "outlier_percentage": 4.0,
-                "per_column_outliers": {"total_charges": 4, "monthly_charges": 0, "tenure": 0},
-            },
-        },
-        {
-            "tool_name": "correlation_analysis",
-            "status": "success",
-            "execution_time_ms": 85.0,
-            "output": {
-                "summary": "Identified strongest correlation pairs with churn: tenure (-0.35) and monthly_charges (+0.28).",
-                "top_correlations": [
-                    {"col_a": "tenure", "col_b": "churn", "correlation": -0.352},
-                    {"col_a": "monthly_charges", "col_b": "churn", "correlation": 0.284},
-                    {"col_a": "monthly_charges", "col_b": "total_charges", "correlation": 0.651},
-                    {"col_a": "tenure", "col_b": "total_charges", "correlation": 0.824},
-                ],
-            },
-        },
-        {
-            "tool_name": "select_statistical_test",
-            "status": "success",
-            "execution_time_ms": 36.0,
-            "output": {
-                "summary": "Mann-Whitney U test confirmed statistically significant tenure difference between churners and retainers (p=0.0004).",
-                "test_name": "Mann-Whitney U Test",
-                "p_value": 0.00041,
-                "significant": True,
-                "interpretation": "Tenure of churned customers is significantly lower than retained customers (median 10 mos vs 38 mos, p < 0.001).",
-            },
-        },
-        {
-            "tool_name": "train_model",
-            "status": "success",
-            "execution_time_ms": 320.0,
-            "output": {
-                "summary": "Trained 3 stratified 5-fold models. Random Forest achieved highest CV accuracy (81.0% ± 3.2%).",
-                "task_type": "classification",
-                "best_model": "RandomForestClassifier",
-                "n_cv_folds": 5,
-                "test_size": 0.2,
-                "overfit_warnings": [],
-                "models_trained": {
-                    "RandomForestClassifier": {
-                        "cv_mean": 0.810,
-                        "cv_std": 0.032,
-                        "train_metrics": {"accuracy": 0.852, "f1_score": 0.840},
-                        "test_metrics": {"accuracy": 0.810, "f1_score": 0.795},
-                        "train_test_gap": 0.042,
-                    },
-                    "LogisticRegression": {
-                        "cv_mean": 0.790,
-                        "cv_std": 0.028,
-                        "train_metrics": {"accuracy": 0.800, "f1_score": 0.772},
-                        "test_metrics": {"accuracy": 0.780, "f1_score": 0.760},
-                        "train_test_gap": 0.020,
-                    },
-                    "GradientBoostingClassifier": {
-                        "cv_mean": 0.775,
-                        "cv_std": 0.035,
-                        "train_metrics": {"accuracy": 0.885, "f1_score": 0.871},
-                        "test_metrics": {"accuracy": 0.760, "f1_score": 0.735},
-                        "train_test_gap": 0.125,
-                    },
-                },
-            },
-        },
-        {
-            "tool_name": "evaluate_model",
-            "status": "success",
-            "execution_time_ms": 48.0,
-            "output": {
-                "summary": "Model evaluation complete. Precision 0.82, Recall 0.79 for Retained (0); Precision 0.78, Recall 0.74 for Churned (1).",
-                "classification_report": {
-                    "Retained (0)": {"precision": 0.824, "recall": 0.795, "f1-score": 0.809, "support": 15},
-                    "Churned (1)": {"precision": 0.780, "recall": 0.740, "f1-score": 0.759, "support": 5},
-                },
-            },
-        },
-    ]
-
-    st.session_state["profile"] = {
-        "quality_score": 92,
-        "duplicate_rows": 0,
-        "memory_mb": 0.12,
-        "column_count": len(df.columns),
-        "columns": [
-            {"name": c, "kind": "numeric" if pd.api.types.is_numeric_dtype(df[c]) else "categorical",
-             "dtype": str(df[c].dtype), "missing_pct": 0.0, "nunique": int(df[c].nunique()), "flags": []}
-            for c in df.columns
-        ],
-        "warnings": [],
-    }
-
-    st.session_state["dashboard"] = [
-        {
-            "chart_id": "model_comparison",
-            "title": "Cross-Validation Accuracy vs Generalization Gap",
-            "description": "Comparison of models ranking by 5-fold CV score and train-test gap to penalize memorization.",
-            "spec": {
-                "mark": "bar",
-                "data": {"values": [
-                    {"Model": "Random Forest", "Metric": "CV Accuracy", "Score": 81.0},
-                    {"Model": "Random Forest", "Metric": "Generalization Gap", "Score": 4.2},
-                    {"Model": "Logistic Regression", "Metric": "CV Accuracy", "Score": 79.0},
-                    {"Model": "Logistic Regression", "Metric": "Generalization Gap", "Score": 2.0},
-                    {"Model": "Gradient Boosting", "Metric": "CV Accuracy", "Score": 77.5},
-                    {"Model": "Gradient Boosting", "Metric": "Generalization Gap", "Score": 12.5},
-                ]},
-                "encoding": {
-                    "x": {"field": "Model", "type": "nominal", "axis": {"labelAngle": 0}},
-                    "xOffset": {"field": "Metric"},
-                    "y": {"field": "Score", "type": "quantitative", "title": "Percentage (%)"},
-                    "color": {"field": "Metric", "type": "nominal"},
-                },
-            },
-        },
-        {
-            "chart_id": "top_correlations",
-            "title": "Key Drivers: Feature Correlation with Customer Churn",
-            "description": "Tenure exhibits strong protective negative correlation (-0.35), while high monthly charges drive churn (+0.28).",
-            "spec": {
-                "mark": "bar",
-                "data": {"values": [
-                    {"Feature": "Tenure (Months)", "Correlation": -0.352},
-                    {"Feature": "Monthly Charges", "Correlation": 0.284},
-                    {"Feature": "Paperless Billing", "Correlation": 0.175},
-                    {"Feature": "Total Charges", "Correlation": -0.198},
-                ]},
-                "encoding": {
-                    "y": {"field": "Feature", "type": "nominal", "sort": "-x"},
-                    "x": {"field": "Correlation", "type": "quantitative", "scale": {"domain": [-0.5, 0.5]}},
-                    "color": {
-                        "condition": {"test": "datum.Correlation >= 0", "value": "#a34f20"},
-                        "value": "#8a7660",
-                    },
-                },
-            },
-        },
-    ]
-
-    st.session_state["final_report"] = {
-        "best_model": "RandomForestClassifier",
-        "reasoning": (
-            "Customer churn is primarily driven by tenure length and high monthly billing tiers. "
-            "Customers on month-to-month contracts with tenure < 12 months exhibit a 44% higher probability of churning. "
-            "The Random Forest model demonstrated superior cross-validated generalization (81.0% accuracy, train-test gap 4.2%), "
-            "comfortably satisfying the 10% anti-overfitting safety threshold."
-        ),
-        "insights": [
-            "Early-tenure vulnerability: First 12 months account for 68% of all churn instances.",
-            "Billing sensitivity: Accounts paying over $75/mo without fiber reliability churn at 2.3× baseline.",
-            "Contractual resilience: Annual and two-year agreements reduce churn by 78% relative to monthly contracts.",
-        ],
-        "recommendations": [
-            "Deploy targeted 90-day onboarding incentives for high-charge month-to-month cohorts.",
-            "Offer contract term upgrades with bundled savings prior to the critical 6-month drop-off cliff.",
-            "Route at-risk accounts identified by the Random Forest model to proactive retention concierges.",
-        ],
-        "rlm_sub_results": [
-            {
-                "task_name": "Tenure Stratification Analysis",
-                "query": "Quantify churn hazard rate across 0-6mo, 6-12mo, and 12-24mo cohorts",
-                "finding": "Hazard rate peaks at month 4 (31.2% hazard rate), dropping to 4.1% past month 24.",
-            },
-            {
-                "task_name": "Billing Tier Elasticity",
-                "query": "Evaluate elasticity between monthly charge increments and churn probability",
-                "finding": "Every $10 increase above $65/mo produces an incremental 4.8% churn risk.",
-            },
-        ],
-    }
-
-    st.session_state["progress_lines"] = [
-        "[done] Stage 1: Reading Your File  100 rows × 8 cols · task=classification · target=churn",
-        "[run ] Iteration 1: model reasoning",
-        "[done] Stage 2: Understanding Your Question  5 steps planned by the Planner",
-        "       ok  clean_data: median imputation on missing numeric cells",
-        "       ok  detect_outliers: 4 anomaly rows flagged via IQR",
-        "       ok  correlation_analysis: mapped feature associations with churn",
-        "       ok  select_statistical_test: Mann-Whitney U test (p=0.0004)",
-        "       ok  train_model: 5-fold CV on RandomForest, LogisticRegression, GradientBoosting",
-        "       ok  evaluate_model: Reality-Checker confirmed train-test gap 4.2% < 10% [Certified]",
-        "[done] Stage 3: Running the Numbers  6 tools executed successfully",
-        "[run ] Iteration 1: interpreting and refining",
-        "[done] Stage 4: Making Sense of It  Key drivers tenure and charges synthesized",
-        "[done] Stage 5: Double-Checking  Loop converged in 2 iterations",
-        "[done] Stage 6: Solving the Tricky Parts  2 sub-tasks offloaded via REPL context",
-        "[done] Stage 7: Writing Your Report  Certified markdown and HTML dossier published",
-    ]
-
-    md_content = f"# Executive Analytical Dossier: Customer Churn Analysis\\n\\n{st.session_state['final_report']['reasoning']}\\n\\n## Recommendations\\n- " + "\\n- ".join(st.session_state['final_report']['recommendations'])
-    (rep_dir / "analysis_report.md").write_text(md_content, encoding="utf-8")
-    (rep_dir / "report.html").write_text("<html><body>" + md_content + "</body></html>", encoding="utf-8")
-    (rep_dir / "final_report.json").write_text(json.dumps(st.session_state["final_report"], indent=2), encoding="utf-8")
-
-    st.session_state["analysis_done"] = True
 
 
 @st.cache_resource(show_spinner=False)
@@ -614,17 +379,6 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-    if uploaded is None and st.session_state["preview_df"] is None:
-        if st.button("Try a sample dataset", width='stretch'):
-            sample_path = ROOT / "data" / "sample_customer_churn.csv"
-            if sample_path.exists():
-                st.session_state["preview_df"], _ = read_any(str(sample_path))
-                st.session_state["preview_name"] = "sample_customer_churn.csv"
-                st.session_state["orig_name"] = "sample_customer_churn.csv"
-                st.session_state["preview_bytes"] = sample_path.read_bytes()
-                st.session_state["from_uploader"] = False
-                st.rerun()
-
     # Persist to session_state immediately on upload / clear on removal.
     # Every upload passes through src.core.security before touching disk:
     # extension allowlist, size ceiling, magic-byte sniffing, safe filename.
@@ -706,7 +460,8 @@ with st.sidebar:
     st.markdown('<div class="side-head">LLM Provider</div>', unsafe_allow_html=True)
     provider = st.selectbox(
         "Provider",
-        ["openai", "anthropic", "gemini", "groq", "openrouter", "nvidia", "local"],
+        ["openai", "anthropic", "gemini", "groq", "openrouter", "nvidia"]
+        + ([] if _HOSTED else ["local"]),
         format_func=lambda p: "Local / offline" if p == "local" else p,
     )
 
@@ -746,7 +501,9 @@ with st.sidebar:
         placeholder=key_ph,
     )
 
-    _env_key = os.getenv(f"{provider.upper()}_API_KEY", "")
+    # On a shared server a visitor must supply their own key; the server's
+    # environment key is only a convenience for a single-user local run.
+    _env_key = "" if _HOSTED else os.getenv(f"{provider.upper()}_API_KEY", "")
     _effective_key = api_key.strip() or _env_key
     _dyn_models = _get_dynamic_models(
         provider,
@@ -822,12 +579,10 @@ with st.sidebar:
             "Deep: uses full reasoning depth across all cycles."
         ),
     )
-    if "Adaptive" in reasoning_mode:
-        os.environ["LLM_REASONING_EFFORT"] = "adaptive"
-    elif "Fast" in reasoning_mode:
-        os.environ["LLM_REASONING_EFFORT"] = "low"
-    elif "Deep" in reasoning_mode:
-        os.environ["LLM_REASONING_EFFORT"] = "high"
+    # Passed to the run with its other settings, never through os.environ.
+    reasoning_effort = (
+        "low" if "Fast" in reasoning_mode else "high" if "Deep" in reasoning_mode else "adaptive"
+    )
 
     # ── Engine ────────────────────────────────────────────────────────────────
     # The two capability switches. Both default on; either can be turned off
@@ -893,44 +648,62 @@ with st.sidebar:
             test_pct = st.slider("Test split %", 10, 40, 20, step=5)
             n_cv = st.slider("CV folds (k)", 3, 10, 5)
 
-    # ── Privacy ───────────────────────────────────────────────────────────────
+    # ── Privacy and code execution ────────────────────────────────────────────
+    # Operator controls (AGENTS.md "Operator controls"). On a shared deployment
+    # they come from the server's environment and are shown read-only: a
+    # visitor must not be able to switch isolation off or loosen the privacy
+    # floor from the page. On a local single-user run they stay editable.
+    from src.core.governance import code_execution_enabled
     from src.core.privacy import min_cell_size
 
     st.markdown('<div class="side-head">Privacy</div>', unsafe_allow_html=True)
-    min_cell = st.number_input("Minimum group size", min_value=1, max_value=50,
-                               value=min_cell_size(), step=1)
-    st.caption("Groups smaller than this are combined so individuals can't be identified")
+    min_cell: int = min_cell_size()
+    enable_code: bool = True
+    max_code_runs: int = 40
+    require_isolation: bool = False
+    if _HOSTED:
+        st.caption(
+            f"Groups smaller than {min_cell} are combined so individuals can't be identified. "
+            "Set by the server."
+        )
+        st.markdown('<div class="side-head">Code execution</div>', unsafe_allow_html=True)
+        st.caption(
+            "AI-written code is "
+            + ("allowed in a restricted sandbox." if code_execution_enabled() else "switched off on this server.")
+            + " Set by the server."
+        )
+    else:
+        min_cell = int(st.number_input("Minimum group size", min_value=1, max_value=50,
+                                       value=min_cell, step=1))
+        st.caption("Groups smaller than this are combined so individuals can't be identified")
 
-    # ── Code execution ────────────────────────────────────────────────────────
-    # Operator controls for LLM-authored code (src/core/governance.py);
-    # defaults match the governance defaults.
-    st.markdown('<div class="side-head">Code execution</div>', unsafe_allow_html=True)
-    enable_code = st.toggle(
-        "Allow AI-written code",
-        value=True,
-        help=(
-            "On: the planner may write and run its own analysis code in the sandbox.\n"
-            "Off: only the built-in tools run."
-        ),
-    )
-    max_code_runs = st.number_input(
-        "Max code runs per analysis",
-        min_value=0,
-        value=40,
-        step=1,
-        disabled=not enable_code,
-        help="Further code steps are refused and logged once the budget is spent.",
-    )
-    require_isolation = st.toggle(
-        "Require container isolation",
-        value=False,
-        disabled=not enable_code,
-        help=(
-            "On: code runs only in the Docker sandbox and is refused if Docker is "
-            "unavailable. Turn on whenever the data or question comes from someone "
-            "you don't trust."
-        ),
-    )
+        st.markdown('<div class="side-head">Code execution</div>', unsafe_allow_html=True)
+        enable_code = st.toggle(
+            "Allow AI-written code",
+            value=True,
+            help=(
+                "On: the planner may write and run its own analysis code in the sandbox.\n"
+                "Off: only the built-in tools run."
+            ),
+        )
+        max_code_runs = int(st.number_input(
+            "Max code runs per analysis",
+            min_value=0,
+            value=40,
+            step=1,
+            disabled=not enable_code,
+            help="Further code steps are refused and logged once the budget is spent.",
+        ))
+        require_isolation = st.toggle(
+            "Require container isolation",
+            value=False,
+            disabled=not enable_code,
+            help=(
+                "On: code runs only in the Docker sandbox and is refused if Docker is "
+                "unavailable. Turn on whenever the data or question comes from someone "
+                "you don't trust."
+            ),
+        )
 
     # ── Analysis Settings ─────────────────────────────────────────────────────
     st.markdown('<div class="side-head">Analysis Settings</div>', unsafe_allow_html=True)
@@ -958,7 +731,9 @@ with st.sidebar:
 
     # ── Buttons ───────────────────────────────────────────────────────────────
     has_file = st.session_state["preview_df"] is not None
-    has_key  = bool(api_key.strip()) or provider == "local"
+    # A key is only needed when the AI narrative is on: the no-AI run is fully
+    # deterministic and makes no network call.
+    has_key  = bool(api_key.strip()) or provider == "local" or not use_llm
     can_run  = has_file and has_key and not st.session_state["analysis_done"]
 
     run_clicked = st.button(
@@ -973,7 +748,7 @@ with st.sidebar:
             st.rerun()
 
     if not has_file:
-        st.caption("Upload a CSV/Excel file or try it with sample data in the main panel.")
+        st.caption("Upload a CSV/Excel file, or use the sample button in the main panel.")
     elif not has_key:
         st.caption("Add your API key to enable the run.")
 
@@ -1053,13 +828,20 @@ if preview_df is not None and not st.session_state["analysis_done"]:
 # ══════════════════════════════════════════════════════════════════════════════
 # PIPELINE — runs synchronously inside st.status() on button click
 # ══════════════════════════════════════════════════════════════════════════════
-if run_clicked:
+# The empty-state "sample" button sets this flag and reruns, so the sample goes
+# through exactly the same run path as an uploaded file.
+_sample_run: bool = bool(st.session_state.pop("_sample_run", False))
+if run_clicked or _sample_run:
+    # The sample is always a no-AI run, so it needs no key and no network.
+    run_llm: bool = use_llm and not _sample_run
+    run_objective_text: str = "" if _sample_run else objective.strip()
+    run_target: str | None = "churn" if _sample_run else (target_col.strip() or None)
     _reset_pipeline()
     for num, _ in STAGE_DEFS:
         _set_stage(num, "pending")
 
     # Save dataset to a temp file
-    tmp = tempfile.mkdtemp()
+    tmp = tempfile.mkdtemp(prefix=_RUN_DIR_PREFIX)
     st.session_state["tmp_dir"] = tmp
     dpath  = str(Path(tmp) / st.session_state["preview_name"])
     outdir = str(Path(tmp) / "output")
@@ -1067,7 +849,7 @@ if run_clicked:
         _f.write(st.session_state["preview_bytes"])
     related_paths: list[str] = []
     join_overrides: dict[str, dict[str, Any]] = {}
-    if related_uploads:
+    if related_uploads and not _sample_run:
         from src.core.security import UploadValidationError, validate_upload
         for _i, _ru in enumerate(related_uploads):
             _rb = _ru.getvalue()
@@ -1083,43 +865,34 @@ if run_clicked:
             if _i in join_choices:
                 join_overrides[_rp.stem] = join_choices[_i]
 
-    # Set env vars before importing src
-    os.environ["LLM_PROVIDER"]          = provider
-    os.environ["LLM_MODEL"]             = final_model
+    # Nothing below is published through os.environ: provider, model, key, URL,
+    # objective, output directory and reasoning effort all travel with the run
+    # (RunConfig / AgentController arguments), because the environment is
+    # shared by every visitor's session.
+    run_config = RunConfig(
+        provider=provider,
+        model=final_model,
+        api_key=_effective_key or None,
+        base_url=(local_base_url.strip() or None) if provider == "local" else None,
+        reasoning_effort=reasoning_effort,
+    )
     _picked = next((m for m in _dyn_models if m["model"] == final_model), None)
-    if _picked:
+    if _picked and run_llm:
         from src.core.model_telemetry import get_limiter
 
+        # Model facts (context window, published limits), not per-user state.
         _profile = get_limiter().get_profile(provider, final_model)
         _profile.context_window = _picked["context_window"]
         _profile.rpm_limit = _picked["rpm_limit"] or _profile.rpm_limit
         _profile.tpm_limit = _picked["tpm_limit"] or _profile.tpm_limit
-    os.environ["MIN_ITERATIONS"]        = str(min_iter)
-    os.environ["MAX_ITERATIONS"]        = str(max_iter)
-    os.environ["ENABLE_RLM_INFERENCE"]  = "true" if enable_rlm else "false"
-    os.environ["ENABLE_LLM"]            = "true" if use_llm else "false"
-    os.environ["ENABLE_ML"]             = "true" if use_ml else "false"
-    os.environ["ENABLE_CODE_EXECUTION"] = "true" if enable_code else "false"
-    os.environ["MAX_CODE_EXECUTIONS"]   = str(int(max_code_runs))
-    os.environ["SANDBOX_REQUIRE_ISOLATION"] = "true" if require_isolation else "false"
-    os.environ["OUTPUT_DIR"]            = outdir
-    os.environ["DSA_MIN_CELL_SIZE"]     = str(int(min_cell))
-    if objective.strip():
-        os.environ["USER_OBJECTIVE"] = objective.strip()
-    else:
-        os.environ.pop("USER_OBJECTIVE", None)
-    {
-        "openai":     lambda: os.environ.__setitem__("OPENAI_API_KEY",     api_key.strip()),
-        "anthropic":  lambda: os.environ.__setitem__("ANTHROPIC_API_KEY",  api_key.strip()),
-        "gemini":     lambda: os.environ.__setitem__("GEMINI_API_KEY",     api_key.strip()),
-        "groq":       lambda: os.environ.__setitem__("GROQ_API_KEY",       api_key.strip()),
-        "openrouter": lambda: os.environ.__setitem__("OPENROUTER_API_KEY", api_key.strip()),
-        "nvidia":     lambda: os.environ.__setitem__("NVIDIA_API_KEY",     api_key.strip()),
-        "local":      lambda: (
-            os.environ.__setitem__("LOCAL_LLM_API_KEY", api_key.strip() or "not-needed"),
-            os.environ.__setitem__("LOCAL_LLM_BASE_URL", local_base_url.strip() or "http://localhost:11434/v1"),
-        ),
-    }[provider]()
+    if not _HOSTED:
+        # Local single-user run only: src/core reads these governance and
+        # privacy limits from the environment. A shared deployment takes them
+        # from the server's own environment and never from the page.
+        os.environ["ENABLE_CODE_EXECUTION"] = "true" if enable_code else "false"
+        os.environ["MAX_CODE_EXECUTIONS"] = str(max_code_runs)
+        os.environ["SANDBOX_REQUIRE_ISOLATION"] = "true" if require_isolation else "false"
+        os.environ["DSA_MIN_CELL_SIZE"] = str(min_cell)
 
     # ── Spinner placeholder — replaced after run completes ───────────────
     _spinner_ph = st.empty()
@@ -1163,7 +936,7 @@ if run_clicked:
     # In no-LLM mode there is nothing to preflight — the run is fully
     # deterministic, so requiring a reachable model (or any API key) would
     # block the very mode that exists to work without one.
-    _ok, _ping_err = (True, "") if not use_llm else LLMClient().ping()
+    _ok, _ping_err = (True, "") if not run_llm else LLMClient(run_config).ping()
     if not _ok:
         _spinner_ph.empty()
         _set_stage("2", "error", "LLM unreachable")
@@ -1186,8 +959,11 @@ if run_clicked:
             min_iterations=min_iter,
             max_iterations=max_iter,
             enable_rlm=enable_rlm,
-            use_llm=use_llm,
+            use_llm=run_llm,
             use_ml=use_ml,
+            objective=run_objective_text,
+            output_dir=outdir,
+            run_config=run_config,
         )
         if use_ml:
             # IMPROVEMENTS.md 7.16 — TrainModelTool.requires_context reads
@@ -1199,17 +975,19 @@ if run_clicked:
             agent.memory.set_context("ui_tune_hyperparameters", tune_hyperparameters)
         meta = agent.load_dataset(
             dpath,
-            target_hint=target_col.strip() or None,
+            target_hint=run_target,
             interactive=False,
             related_files=related_paths or None,
             join_overrides=join_overrides or None,
         )
         st.session_state["metadata"] = meta
+        st.session_state["run_objective"] = run_objective_text
+        st.session_state["is_sample"] = _sample_run
         _upd("1", "done",
              f"{meta.row_count:,} rows × {meta.column_count} cols · task={meta.task_type} · target={meta.target_column}")
 
         _upd("2", "active",
-             "calling LLM for analysis plan…" if use_llm
+             "calling LLM for analysis plan…" if run_llm
              else "building deterministic plan from the data profile…")
         _upd("3", "pending")
         _upd("4", "pending")
@@ -1278,7 +1056,10 @@ if run_clicked:
             except json.JSONDecodeError:
                 st.session_state["dashboard"] = None
         _sum_path = Path(outdir) / "reports" / "summary.json"
-        if _sum_path.exists():
+        if _sum_path.exists() and not _HOSTED:
+            # "Compare with a previous run" lists every summary under
+            # output/runs, so on a shared server it would show other
+            # visitors' runs. Local single-user runs only.
             try:   # keep a copy where "Compare with a previous run" looks
                 _keep = Path("output") / "runs" / f"ui-{datetime.now():%Y%m%d-%H%M%S}" / "reports"
                 _keep.mkdir(parents=True, exist_ok=True)
@@ -1374,6 +1155,12 @@ if st.session_state.get("analysis_done"):
     # content already exists as a standalone HTML export in Downloads
     # (`tab_vault`, below) — keeping both was two ways to reach the same
     # experience.
+    if st.session_state.get("is_sample"):
+        st.info(
+            "This is a real analysis of the bundled sample file "
+            "(data/sample_customer_churn.csv), run without the AI narrative. "
+            "It is not your data."
+        )
     (tab_brief, tab_dash, tab_lab, tab_vault) = st.tabs([
         "Answers",
         "Charts",
@@ -1392,7 +1179,7 @@ if st.session_state.get("analysis_done"):
             prof=profile,
             preview_df=preview_df,
             vega_cfg=vega_cfg,
-            objective=objective,
+            objective=st.session_state.get("run_objective", ""),
         )
 
     with tab_dash:
@@ -1435,9 +1222,25 @@ if (preview_df is None
     st.markdown("#### Meet Your Helpers")
     st.markdown(_render_agent_grid([]), unsafe_allow_html=True)
     st.write("")
+    st.caption(
+        "Runs the bundled customer sample through the real analysis, "
+        "with no API key and no AI narrative."
+    )
     if st.button("Try it with sample data", type="primary"):
-        _load_teamwork_preview()
-        st.rerun()
+        _sample = ROOT / "data" / "sample_customer_churn.csv"
+        if _sample.exists():
+            _sample_bytes = _sample.read_bytes()
+            _sample_df, _sample_report = read_any_bytes(_sample_bytes, _sample.name)
+            st.session_state["preview_df"] = _sample_df
+            st.session_state["preview_read_report"] = _sample_report
+            st.session_state["preview_bytes"] = _sample_bytes
+            st.session_state["preview_name"] = _sample.name
+            st.session_state["orig_name"] = _sample.name
+            st.session_state["from_uploader"] = False
+            st.session_state["_sample_run"] = True
+            st.rerun()
+        else:
+            st.error("The bundled sample file is missing from this install (data/sample_customer_churn.csv).")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MICRO-INTERACTIONS (Phase 3)

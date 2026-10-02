@@ -16,6 +16,7 @@ from typing import Any, cast
 
 from src.core.governance import LOCAL_PROVIDERS, local_only, record_llm_call
 from src.core.model_telemetry import get_limiter
+from src.core.run_config import RunConfig
 
 logger = logging.getLogger(__name__)
 
@@ -101,9 +102,16 @@ class LLMClient:
     from environment variables only — never hardcoded.
     """
 
-    def __init__(self) -> None:
-        self.provider: str = os.getenv("LLM_PROVIDER", "openai").lower()
-        self.model: str = os.getenv("LLM_MODEL") or _DEFAULT_MODELS.get(self.provider, "gpt-4o")
+    def __init__(self, config: RunConfig | None = None) -> None:
+        # Per-run settings passed explicitly (the Streamlit app) win over the
+        # environment; a field left None falls back to the env var as before.
+        self._cfg: RunConfig = config or RunConfig()
+        self.provider: str = str(
+            self._cfg.provider or os.getenv("LLM_PROVIDER") or "openai"
+        ).lower()
+        self.model: str = (
+            self._cfg.model or os.getenv("LLM_MODEL") or _DEFAULT_MODELS.get(self.provider, "gpt-4o")
+        )
         self.temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
         local = self.provider in LOCAL_PROVIDERS
         #: True when LLM_MAX_TOKENS is set: it then beats the per-stage defaults.
@@ -141,6 +149,13 @@ class LLMClient:
         #: OpenAI-compatible JSON mode; switched off for the rest of the run
         #: the first time an endpoint rejects it.
         self._json_mode = os.getenv("LLM_JSON_FORMAT", "true").strip().lower() != "false"
+
+    def _api_key(self, env_name: str, default: str = "") -> str:
+        """The key for this run: the explicit one when given, else the env var."""
+        return str(self._cfg.api_key or os.getenv(env_name) or default)
+
+    def _local_base_url(self) -> str:
+        return str(self._cfg.base_url or os.getenv("LOCAL_LLM_BASE_URL") or "http://localhost:11434/v1")
 
     def ping(self) -> tuple[bool, str]:
         """
@@ -277,7 +292,7 @@ class LLMClient:
                 isinstance(exc, (ConnectionError, TimeoutError))
                 or type(exc).__name__ in ("APIConnectionError", "APITimeoutError")
             ):
-                base = os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+                base = self._local_base_url()
                 raise RuntimeError(
                     f"Could not reach the local model server at {base} ({type(exc).__name__}): "
                     "is the model server running and the model pulled? Check LOCAL_LLM_BASE_URL "
@@ -325,26 +340,26 @@ class LLMClient:
         """
         from openai import OpenAI
         if self.provider == "openrouter":
-            api_key = os.getenv("OPENROUTER_API_KEY", "")
+            api_key = self._api_key("OPENROUTER_API_KEY")
             base_url: str | None = "https://openrouter.ai/api/v1"
             extra_headers: dict[str, str] = {
                 "HTTP-Referer": os.getenv("OPENROUTER_REFERER", "https://github.com/agentic-data-analysis"),
                 "X-Title": "Agentic Data Analysis",
             }
         elif self.provider == "nvidia":
-            api_key = os.getenv("NVIDIA_API_KEY", "")
+            api_key = self._api_key("NVIDIA_API_KEY")
             base_url = "https://integrate.api.nvidia.com/v1"
             extra_headers = {}
         elif self.provider == "gemini":
             # Google's OpenAI-compatible endpoint — no separate SDK needed.
             # https://ai.google.dev/gemini-api/docs/openai
-            api_key = os.getenv("GEMINI_API_KEY", "")
+            api_key = self._api_key("GEMINI_API_KEY")
             base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
             extra_headers = {}
         elif self.provider == "groq":
             # Groq Cloud's ultra-fast OpenAI-compatible endpoint
             # https://console.groq.com/docs/openai
-            api_key = os.getenv("GROQ_API_KEY", "")
+            api_key = self._api_key("GROQ_API_KEY")
             base_url = "https://api.groq.com/openai/v1"
             extra_headers = {}
         elif self.provider in ("local", "ollama"):
@@ -352,11 +367,11 @@ class LLMClient:
             # Studio, vLLM, llama.cpp server, text-generation-webui, etc.
             # No cloud API key required — most local servers accept any
             # non-empty string, so default to a placeholder.
-            api_key = os.getenv("LOCAL_LLM_API_KEY", "not-needed")
-            base_url = os.getenv("LOCAL_LLM_BASE_URL", "http://localhost:11434/v1")
+            api_key = self._api_key("LOCAL_LLM_API_KEY", "not-needed")
+            base_url = self._local_base_url()
             extra_headers = {}
         else:
-            api_key = os.getenv("OPENAI_API_KEY", "")
+            api_key = self._api_key("OPENAI_API_KEY")
             base_url = None
             extra_headers = {}
         if not api_key:
@@ -414,6 +429,7 @@ class LLMClient:
         )
         resolved_effort = (
             getattr(self._usage_local, "effort", None)
+            or self._cfg.reasoning_effort
             or os.getenv("LLM_REASONING_EFFORT")
             or (os.getenv(provider_env) if provider_env else None)
             or "adaptive"
@@ -615,7 +631,7 @@ class LLMClient:
         import anthropic
         from anthropic.types import TextBlock
 
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key = self._api_key("ANTHROPIC_API_KEY") or None
         if not api_key:
             raise ValueError("No API key set for provider 'anthropic'. Set ANTHROPIC_API_KEY.")
         if self._client is None:

@@ -42,88 +42,206 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
-from src.core.chart_spec import alias_fields, chart_has_data, spec_to_vegalite, validate_chart_spec
-from src.core.chart_theme import axis_format, humanize_axis_title, humanize_label
+from src.core.chart_spec import chart_has_data, spec_to_vegalite, validate_chart_spec
+from src.core.chart_theme import humanize_label
+from src.core.dashboard_charts_basic import (
+    _HEATMAP_GROUP_DISTANCE,
+    _SAMPLE_SEED,
+    _TREND_MIN_ABS_R,
+    _UNIFORM_RATIO_THRESHOLD,
+    HEATMAP_MAX_COLUMNS,
+    HEATMAP_MIN_COLUMNS,
+    HEATMAP_TEXT_MAX_COLUMNS,
+    HEATMAP_TEXT_MIN_ABS_R,
+    MAX_CATEGORY_CHARTS,
+    MAX_HISTOGRAMS,
+    SCATTER_MAX_POINTS,
+    SCREE_MAX_COMPONENTS,
+    _box_plot_chart,
+    _category_charts,
+    _class_balance_chart,
+    _cluster_chart,
+    _correlation_chart,
+    _five_number_summary,
+    _geospatial_chart,
+    _histogram_charts,
+    _is_near_uniform,
+    _pick_measure_column,
+    _records,
+    _scatter_chart,
+    _scree_chart,
+    _time_series_chart,
+    correlation_heatmap,
+)
+from src.core.dashboard_charts_domain import (
+    _GRAIN_UNIT,
+    LORENZ_MAX_POINTS,
+    WATERFALL_MAX_SEGMENTS,
+    _change_comparison_chart,
+    _change_waterfall_chart,
+    _cohort_charts,
+    _cohort_month_chart,
+    _cohort_pareto_chart,
+    _cohort_rfm_chart,
+    _financial_charts,
+    _group_ci_chart,
+    _lorenz_chart,
+    _merge_small_bins,
+    _segment_lift_chart,
+    _signed,
+    _tool_outputs,
+    _workforce_charts,
+    _workforce_dept_chart,
+    _workforce_tenure_chart,
+)
+from src.core.dashboard_charts_model import (
+    _confusion_matrix_chart,
+    _drivers_chart,
+    _importance_bounds,
+    _model_comparison_chart,
+    _roc_chart,
+)
+from src.core.dashboard_common import (
+    _NON_CONTINUOUS_ROLES,
+    CORRELATION_HEATMAP_TITLE,
+    DEFAULT_HIST_BINS,
+    MAX_CATEGORIES_SHOWN,
+    MAX_POINTS,
+    ChartSpec,
+    _chartable,
+    _fmt_value,
+    _histogram_bins,
+    _merge_axis_format,
+    _num,
+    _safe,
+    _slug,
+    _to_primitive,
+    dashboard_to_json,
+)
 from src.core.plain_language import fallback_caption
-from src.core.privacy import fold_small_groups, is_small, min_cell_size, suppression_note
 from src.core.profiler import ColumnProfile, DatasetProfile
-from src.core.stats_utils import aggregate_to_entity, measure_aggregation
-
-#: Hard cap on inline rows per chart (keeps specs lightweight).
-MAX_POINTS = 1_000
-
-#: Scatter is the one panel that genuinely needs raw points (P2.7) — capped
-#: much lower than MAX_POINTS since it's visually indistinguishable above a
-#: few hundred points at typical opacity, and much lighter in the artifact.
-SCATTER_MAX_POINTS = 350
-
-#: How many numeric histograms / categorical bars to show at most — and only
-#: for columns a finding actually references (strict curation).
-MAX_HISTOGRAMS = 2
-MAX_CATEGORY_CHARTS = 3
-
-#: Correlation heatmap: fewest chartable numeric columns worth a matrix, the
-#: most it shows (n² cells), and the |r| at which a cell prints its value.
-HEATMAP_MIN_COLUMNS = 5
-HEATMAP_MAX_COLUMNS = 15
-HEATMAP_TEXT_MAX_COLUMNS = 15
-HEATMAP_TEXT_MIN_ABS_R = 0.3
-#: Title of the correlation heatmap; the generate_visualizations tool uses the
-#: same one, so the dashboard can tell it already has this view.
-CORRELATION_HEATMAP_TITLE = "Which Columns Move Together"
-#: Average-linkage cut (on 1 - |r|) that defines "a group that moves together".
-_HEATMAP_GROUP_DISTANCE = 0.5
-
-#: Categorical columns with more classes than this get truncated to top-N.
-MAX_CATEGORIES_SHOWN = 12
-
-#: Default bin count for pre-aggregated histograms.
-DEFAULT_HIST_BINS = 20
 
 #: Technical safety ceiling on rendered charts (render-performance protection,
 #: not a target): the design stage decides how many charts are meaningful.
 MAX_CHARTS = 60
 
-#: Scree plots show at most this many leading components.
-SCREE_MAX_COMPONENTS = 15
+#: Public surface of this module. The chart builders now live in dashboard_common /
+#: dashboard_charts_*; they are re-exported here so `src.core.dashboard.<name>` keeps working.
+__all__ = [
+    "CORRELATION_HEATMAP_TITLE",
+    "DEFAULT_HIST_BINS",
+    "HEATMAP_MAX_COLUMNS",
+    "HEATMAP_MIN_COLUMNS",
+    "HEATMAP_TEXT_MAX_COLUMNS",
+    "HEATMAP_TEXT_MIN_ABS_R",
+    "LORENZ_MAX_POINTS",
+    "MAX_AUTO_RESULT_CHARTS",
+    "MAX_CATEGORIES_SHOWN",
+    "MAX_CATEGORY_CHARTS",
+    "MAX_CHARTS",
+    "MAX_FINDING_PANELS",
+    "MAX_HISTOGRAMS",
+    "MAX_PANELS_PER_KIND",
+    "MAX_POINTS",
+    "SCATTER_MAX_POINTS",
+    "SCREE_MAX_COMPONENTS",
+    "WATERFALL_MAX_SEGMENTS",
+    "_CAVEAT_FINDING_KINDS",
+    "_DATE_LABEL_RE",
+    "_GRAIN_UNIT",
+    "_HEATMAP_GROUP_DISTANCE",
+    "_NON_CONTINUOUS_ROLES",
+    "_SAMPLE_SEED",
+    "_SOURCE_TOOL_CHART_IDS",
+    "_TREND_MIN_ABS_R",
+    "_UNIFORM_RATIO_THRESHOLD",
+    "ChartSpec",
+    "_attach_finding_metadata",
+    "_box_plot_chart",
+    "_category_charts",
+    "_change_comparison_chart",
+    "_change_waterfall_chart",
+    "_chartable",
+    "_class_balance_chart",
+    "_cluster_chart",
+    "_cohort_charts",
+    "_cohort_month_chart",
+    "_cohort_pareto_chart",
+    "_cohort_rfm_chart",
+    "_confusion_matrix_chart",
+    "_correlation_chart",
+    "_covers_pair",
+    "_drivers_chart",
+    "_eligible_numeric",
+    "_eta_squared",
+    "_financial_charts",
+    "_find_tool_output",
+    "_finding_charts",
+    "_finding_columns",
+    "_finding_fits_chart",
+    "_five_number_summary",
+    "_fmt_value",
+    "_geospatial_chart",
+    "_group_ci_chart",
+    "_has_data",
+    "_histogram_bins",
+    "_histogram_charts",
+    "_importance_bounds",
+    "_is_near_uniform",
+    "_llm_chart",
+    "_llm_charts",
+    "_lorenz_chart",
+    "_merge_axis_format",
+    "_merge_small_bins",
+    "_model_comparison_chart",
+    "_num",
+    "_pick_measure_column",
+    "_rank_numeric_features",
+    "_records",
+    "_result_table_chart",
+    "_roc_chart",
+    "_safe",
+    "_scatter_chart",
+    "_scree_chart",
+    "_segment_lift_chart",
+    "_signed",
+    "_slug",
+    "_tag",
+    "_time_series_chart",
+    "_to_primitive",
+    "_tool_outputs",
+    "_workforce_charts",
+    "_workforce_dept_chart",
+    "_workforce_tenure_chart",
+    "build_dashboard",
+    "correlation_heatmap",
+    "dashboard_to_json",
+    "designed_chart",
+    "merge_designed",
+]
 
-#: |r| from which the scatter panel draws a fitted trend line.
-_TREND_MIN_ABS_R = 0.3
 
-#: Numeric roles that must never be binned/plotted as if continuous
-#: (integer-coded dimensions such as year/region codes included).
-_NON_CONTINUOUS_ROLES = ("flag", "ordinal", "identifier", "dimension")
-
-#: A category distribution whose largest group is within this ratio of its
-#: smallest is "near uniform" — it conveys no story (T5 triviality, applied
-#: to panel selection rather than just findings).
-_UNIFORM_RATIO_THRESHOLD = 1.15
 
 #: How many top-ranked findings we *attempt* to build/tag a panel for.
 #: Most won't produce one (no obvious chart, or the underlying tool didn't
 #: run) — this just bounds the work, it isn't a promise of that many panels.
 MAX_FINDING_PANELS = 30
 
+
 #: At most this many segment-lift / group-test panels (each is one
 #: measure x dimension pairing; more would crowd out every other kind).
 MAX_PANELS_PER_KIND = 3
 
-#: Segments drawn individually in a change waterfall; the rest are one bar.
-WATERFALL_MAX_SEGMENTS = 8
-
-#: Points kept on a Lorenz curve (evenly spaced over the ranked entities).
-LORENZ_MAX_POINTS = 100
 
 #: Findings of these kinds are caveats, not discoveries (src.core.findings.
 #: is_trivial never suppresses them for exactly that reason) — they must
 #: never be treated as chart-worthy insights.
 _CAVEAT_FINDING_KINDS = ("method_fit", "coverage_gap")
+
 
 #: Which existing chart_id(s) a finding from a given source_tool should be
 #: tagged onto (finding_id/priority/layer/caption), so a high-importance
@@ -143,47 +261,6 @@ _SOURCE_TOOL_CHART_IDS: dict[str, tuple[str, ...]] = {
     "workforce_analysis": ("workforce_headcount_by_dept", "workforce_tenure_hist"),
 }
 
-_SAMPLE_SEED = 42
-
-
-@dataclass
-class ChartSpec:
-    """One renderable chart: metadata plus a complete Vega-Lite spec.
-
-    `finding_id`/`priority`/`layer`/`caption` are new (7.8 story layer) but
-    additive and backward compatible — a chart nobody tagged just keeps the
-    defaults, and every existing consumer reading chart_id/title/description/
-    spec still gets exactly those keys from to_dict().
-    """
-
-    chart_id: str
-    title: str
-    description: str
-    spec: dict[str, Any]
-    finding_id: str | None = None
-    priority: float = 0.0
-    layer: str = "analyst"
-    caption: str | None = None
-    size: str | None = None
-
-    def __post_init__(self) -> None:
-        # Vega treats . [ ] \ ' " in a field name as path syntax; alias them
-        # (idempotent) so every consumer gets a spec that actually renders.
-        self.spec = alias_fields(self.spec)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "chart_id": self.chart_id,
-            "title": self.title,
-            "description": self.description,
-            "spec": self.spec,
-            "finding_id": self.finding_id,
-            "priority": self.priority,
-            "layer": self.layer,
-            "caption": self.caption,
-            "size": self.size,
-        }
-
 
 def _has_data(chart: ChartSpec) -> bool:
     """False only for a chart that would render nothing; never raises."""
@@ -201,15 +278,6 @@ def _covers_pair(charts: list[ChartSpec], pair: list[Any]) -> bool:
     return False
 
 
-def dashboard_to_json(charts: list[ChartSpec]) -> str:
-    """Serialise a dashboard for saving to output/dashboard.json."""
-    return json.dumps([c.to_dict() for c in charts], indent=2, default=str)
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
 def _find_tool_output(
     tool_results: list[dict[str, Any]], name: str
 ) -> dict[str, Any] | None:
@@ -219,165 +287,6 @@ def _find_tool_output(
             out = r.get("output")
             return out if isinstance(out, dict) else None
     return None
-
-
-def _to_primitive(value: Any) -> Any:
-    """Coerce numpy/pandas scalars into JSON-safe Python primitives.
-
-    `dashboard_to_json` serialises with `default=str` — anything that isn't
-    already a plain int/float/str/bool/None falls through to `str()`, which
-    would silently turn e.g. a numpy.int64 count into the *string* "5" fed
-    to a quantitative encoding. Every computed aggregate in this module must
-    be routed through this (or an explicit int()/float() cast) before it
-    reaches a spec.
-    """
-    if value is None or isinstance(value, (str, bool, int, float)):
-        return value
-    if pd.isna(value):
-        return None
-    if hasattr(value, "item"):
-        return value.item()
-    return str(value)
-
-
-def _records(df: pd.DataFrame, cols: list[str], max_rows: int = MAX_POINTS) -> list[dict[str, Any]]:
-    """Sampled, primitive-typed records for inlining into a Vega-Lite spec."""
-    subset = df[cols].dropna()
-    if len(subset) > max_rows:
-        subset = subset.sample(n=max_rows, random_state=_SAMPLE_SEED)
-    return [
-        {col: _to_primitive(val) for col, val in row.items()}
-        for row in subset.to_dict(orient="records")
-    ]
-
-
-def _chartable(profile: DatasetProfile, *kinds: str) -> list[str]:
-    """Column names of the given kinds, excluding identifiers/constants."""
-    return [c.name for c in profile.columns_of_kind(*kinds)]
-
-
-def _safe(fn: Any, *args: Any, default: Any = None, **kwargs: Any) -> Any:
-    """Run a panel builder, swallowing any exception into `default`.
-
-    One malformed finding, missing column, or degenerate group must not
-    zero out the entire dashboard — the controller already wraps the whole
-    of `_generate_dashboard` in a try/except, but that means a single bad
-    panel currently costs *every* chart, not just its own.
-    """
-    try:
-        return fn(*args, **kwargs)
-    except Exception:
-        return default
-
-
-def _merge_axis_format(encoding_entry: dict[str, Any], fmt: dict[str, str]) -> None:
-    """Merge `chart_theme.axis_format()`'s fragment into an encoding
-    channel's `axis` sub-object in place, without clobbering any axis
-    properties the builder already set (e.g. `labelAngle`)."""
-    if not fmt:
-        return
-    axis = dict(encoding_entry.get("axis") or {})
-    axis.update(fmt)
-    encoding_entry["axis"] = axis
-
-
-def _histogram_bins(
-    series: pd.Series, max_bins: int = DEFAULT_HIST_BINS, log: bool = False
-) -> list[dict[str, Any]]:
-    """Pre-aggregated bin counts for a numeric series (P2.7) — a histogram
-    ships as {bin_start, bin_end, count} triples, never raw values. `log`
-    uses geometrically spaced edges (strictly positive series only) so the
-    bins are equal-width on a log axis."""
-    clean = pd.to_numeric(series, errors="coerce").dropna()
-    if clean.empty:
-        return []
-    nunique = int(clean.nunique())
-    if nunique <= 1:
-        return []
-    bins: Any = max(1, min(max_bins, nunique))
-    if log:
-        bins = np.geomspace(float(clean.min()), float(clean.max()), bins + 1)
-    counts, edges = np.histogram(clean.to_numpy(dtype=float), bins=bins)
-    return [
-        {
-            "bin_start": round(float(edges[i]), 6),
-            "bin_end": round(float(edges[i + 1]), 6),
-            "count": int(counts[i]),
-        }
-        for i in range(len(counts))
-    ]
-
-
-def _five_number_summary(series: pd.Series) -> dict[str, float] | None:
-    """Whisker-clipped five-number summary (P2.7) for a manual box plot —
-    min/max here are the 1.5xIQR whiskers clipped to the observed range,
-    matching the `extent: 1.5` the raw-data boxplot mark used to compute."""
-    clean = pd.to_numeric(series, errors="coerce").dropna()
-    if clean.empty:
-        return None
-    q1, median, q3 = (float(clean.quantile(q)) for q in (0.25, 0.5, 0.75))
-    iqr = q3 - q1
-    obs_min, obs_max = float(clean.min()), float(clean.max())
-    whisker_low = max(obs_min, q1 - 1.5 * iqr)
-    whisker_high = min(obs_max, q3 + 1.5 * iqr)
-    return {
-        "low": round(whisker_low, 4),
-        "q1": round(q1, 4),
-        "median": round(median, 4),
-        "q3": round(q3, 4),
-        "high": round(whisker_high, 4),
-    }
-
-
-def _is_near_uniform(counts: pd.Series, ratio_threshold: float = _UNIFORM_RATIO_THRESHOLD) -> bool:
-    """True when a category-count distribution has no story — every group is
-    roughly the same size, so a bar chart of it conveys nothing (T5 applied
-    to panel selection, not just findings)."""
-    if len(counts) < 2:
-        return False
-    lo, hi = float(counts.min()), float(counts.max())
-    if lo <= 0:
-        return False
-    return (hi / lo) <= ratio_threshold
-
-
-def _fmt_value(value: float, unit_hint: str | None = None) -> str:
-    """Magnitude-aware number for captions: 0.034 stays "0.034", not "0"."""
-    if unit_hint == "percent":
-        return f"{value:.0%}" if abs(value) >= 0.1 else f"{value:.1%}"
-    magnitude = abs(value)
-    if magnitude >= 100 or magnitude == 0:
-        text = f"{value:,.0f}"
-    elif magnitude >= 1:
-        text = f"{value:,.2f}".rstrip("0").rstrip(".")
-    else:
-        text = f"{value:.2g}"
-    return f"${text}" if unit_hint == "currency" else text
-
-
-def _signed(value: float, unit_hint: str | None = None) -> str:
-    """`_fmt_value` with an explicit sign: "+$1,200" / "−$300"."""
-    return ("+" if value >= 0 else "−") + _fmt_value(abs(value), unit_hint)
-
-
-def _num(value: Any) -> float | None:
-    """A finite real number as float, else None (bools and strings excluded)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
-        return None
-    number = float(value)
-    return number if np.isfinite(number) else None
-
-
-def _slug(text: Any) -> str:
-    return re.sub(r"\W+", "_", str(text)).strip("_").lower() or "x"
-
-
-def _tool_outputs(tool_results: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
-    """Every successful output dict of a tool, most recent first."""
-    return [
-        r["output"] for r in reversed(tool_results)
-        if r.get("tool_name") == name and r.get("status") == "success" and isinstance(r.get("output"), dict)
-    ]
 
 
 def _eligible_numeric(ranked: list[str], col_by_name: dict[str, ColumnProfile]) -> list[str]:
@@ -446,64 +355,6 @@ def _rank_numeric_features(
     return sorted(usable, key=lambda c: variances[c], reverse=True)
 
 
-def _pick_measure_column(
-    ranked_numeric: list[str], col_by_name: dict[str, ColumnProfile], target: str | None,
-) -> str | None:
-    """
-    Pick the numeric column to use where the panel's purpose is "show the
-    measure" (a total/aggregate) rather than generic exploration — P2.7's
-    named bug: "monthly mean quantity" should become "monthly total
-    revenue" when a currency measure exists. Prefers a semantic `measure`
-    column, and among those a `currency` one, over whatever ranked highest
-    by pure correlation/variance.
-    """
-    candidates = [
-        c for c in ranked_numeric
-        if c != target and col_by_name.get(c) is not None and col_by_name[c].is_measure()
-    ]
-    if not candidates:
-        return None
-    currency = [c for c in candidates if col_by_name[c].unit_hint == "currency"]
-    return currency[0] if currency else candidates[0]
-
-
-# ---------------------------------------------------------------------------
-# Chart builders — each returns a ChartSpec or None when not applicable
-# ---------------------------------------------------------------------------
-
-def _class_balance_chart(
-    df: pd.DataFrame, target: str | None, task_type: str | None
-) -> ChartSpec | None:
-    if not target or target not in df.columns or task_type != "classification":
-        return None
-    counts = df[target].dropna().astype(str).value_counts().head(MAX_CATEGORIES_SHOWN)
-    if counts.empty:
-        return None
-    values = [{"class": str(k), "count": int(v)} for k, v in counts.items()]
-    count_fmt = axis_format("count")
-    y_encoding: dict[str, Any] = {"field": "count", "type": "quantitative", "title": "Rows"}
-    _merge_axis_format(y_encoding, count_fmt)
-    return ChartSpec(
-        chart_id="class_balance",
-        title=f"Class Balance — {humanize_label(target)}",
-        description="Distribution of the target classes. Heavy imbalance means accuracy is misleading.",
-        spec={
-            "data": {"values": values},
-            "mark": {"type": "bar"},
-            "height": 220,
-            "encoding": {
-                # Class order carries no meaning on its own — sort by count
-                # descending so the largest class renders first.
-                "x": {"field": "class", "type": "nominal", "sort": "-y",
-                      "axis": {"labelAngle": 0, "title": None}},
-                "y": y_encoding,
-                "color": {"field": "class", "type": "nominal", "legend": None},
-                "tooltip": [{"field": "class"}, {"field": "count", **count_fmt}],
-            },
-        },
-    )
-
-
 def _finding_columns(findings: list[dict[str, Any]], known: set[str]) -> set[str]:
     """Dataset columns any non-caveat finding refers to: its measure /
     dimension / `columns`, or any string inside its evidence that is a column
@@ -529,1771 +380,12 @@ def _finding_columns(findings: list[dict[str, Any]], known: set[str]) -> set[str
     return found
 
 
-def _histogram_charts(
-    df: pd.DataFrame,
-    ranked_numeric: list[str],
-    col_by_name: dict[str, ColumnProfile],
-    referenced: set[str] | None = None,
-    limit: int = MAX_HISTOGRAMS,
-) -> list[ChartSpec]:
-    """P2.7: bin counts, not raw values. Skips flag/ordinal/identifier
-    columns outright (a binary flag's "histogram" is just its two counts,
-    reported better as a category chart; an ordinal or identifier should
-    never be binned as if it were continuous). With `referenced`, only
-    columns a finding uses are drawn (up to `limit`); None means any."""
-    charts: list[ChartSpec] = []
-    eligible = [
-        c for c in ranked_numeric
-        if col_by_name.get(c) is not None
-        and col_by_name[c].semantic_role not in _NON_CONTINUOUS_ROLES
-        and (referenced is None or c in referenced)
-    ]
-    for col in eligible:
-        if len(charts) >= limit:
-            break
-        # A severely skewed, strictly positive measure is binned and drawn on
-        # a log axis — linear bins would pile almost every row into one bar.
-        log_x = "severe_skew" in col_by_name[col].flags and bool((pd.to_numeric(df[col], errors="coerce").dropna() > 0).all())
-        bins = _histogram_bins(df[col], log=log_x)
-        if not bins:
-            continue
-        unit_hint = col_by_name[col].unit_hint if col_by_name.get(col) else None
-        fmt = axis_format(unit_hint)
-        axis_title = humanize_axis_title(col, unit_hint)
-
-        x_encoding: dict[str, Any] = {"field": "bin_start", "type": "quantitative", "title": axis_title}
-        if log_x:
-            x_encoding["scale"] = {"type": "log"}
-        else:
-            x_encoding["bin"] = "binned"
-        _merge_axis_format(x_encoding, fmt)
-
-        # 8.4 — an EDA filler panel (no bound finding, since hist_* chart_ids
-        # never appear in _SOURCE_TOOL_CHART_IDS) gets a one-line plain-
-        # language caption computed from the same quantile logic the box
-        # plot already uses, not a second distribution pass.
-        caption: str | None = None
-        summary = _five_number_summary(df[col])
-        if summary is not None:
-            col_label = humanize_label(col).lower()
-            lo, hi = _fmt_value(summary["q1"], unit_hint), _fmt_value(summary["q3"], unit_hint)
-            caption = f"Most {col_label} values fall between {lo} and {hi}."
-
-        charts.append(ChartSpec(
-            chart_id=f"hist_{col}",
-            title=f"Distribution — {humanize_label(col)}",
-            description=f"Pre-binned histogram of '{col}'. Watch for skew, gaps, and outlier tails."
-                        + (" Heavily right-skewed, so bins are log-spaced on a log axis." if log_x else ""),
-            spec={
-                "data": {"values": bins},
-                "mark": {"type": "bar"},
-                "height": 200,
-                "encoding": {
-                    "x": x_encoding,
-                    "x2": {"field": "bin_end"},
-                    "y": {"field": "count", "type": "quantitative", "title": "Rows"},
-                    "tooltip": [
-                        {"field": "bin_start", "title": f"{axis_title} from", **fmt},
-                        {"field": "bin_end", "title": "to", **fmt},
-                        {"field": "count", "title": "Rows"},
-                    ],
-                },
-            },
-            caption=caption,
-        ))
-    return charts
-
-
-def _category_charts(
-    df: pd.DataFrame, profile: DatasetProfile, target: str | None,
-    referenced: set[str] | None = None,
-) -> tuple[list[ChartSpec], list[ChartSpec]]:
-    """Returns (charts, trivial_charts). A near-uniform category distribution
-    has no story (T5) and is set aside into `trivial_charts` — the caller
-    only falls back to one of those if nothing else in the whole dashboard
-    has anything to show. With `referenced`, `charts` holds only columns a
-    finding uses (None means any)."""
-    charts: list[ChartSpec] = []
-    trivial: list[ChartSpec] = []
-    cat_cols = [
-        c for c in profile.columns_of_kind("categorical", "boolean")
-        if c.name != target and "high_cardinality" not in c.flags
-    ]
-    # Most informative first: how far the largest group sits above an even
-    # split. Ascending cardinality used to hand every slot to 2-level columns.
-    full_by_col = {c.name: df[c.name].dropna().astype(str).value_counts() for c in cat_cols}
-    cat_cols = [c for c in cat_cols if not full_by_col[c.name].empty]
-    cat_cols.sort(
-        key=lambda c: float(full_by_col[c.name].iloc[0] / full_by_col[c.name].sum()) - 1.0 / len(full_by_col[c.name]),
-        reverse=True,
-    )
-    for col in cat_cols:
-        full_counts = full_by_col[col.name]
-        counts = full_counts.head(MAX_CATEGORIES_SHOWN)
-        values = [{"category": str(k), "count": int(v)} for k, v in counts.items()]
-        if len(full_counts) > MAX_CATEGORIES_SHOWN:
-            counts = full_counts.head(MAX_CATEGORIES_SHOWN - 1)
-            rest = full_counts.iloc[MAX_CATEGORIES_SHOWN - 1:]
-            values = [{"category": str(k), "count": int(v)} for k, v in counts.items()]
-            values.append({"category": f"Other ({len(rest)} more)", "count": int(rest.sum())})
-
-        count_fmt = axis_format("count")
-        x_encoding: dict[str, Any] = {"field": "count", "type": "quantitative", "title": "Rows"}
-        _merge_axis_format(x_encoding, count_fmt)
-
-        # 8.4 — cat_* charts never appear in _SOURCE_TOOL_CHART_IDS, so they
-        # are always an unbound EDA filler panel; give them a plain-language
-        # caption from the counts already computed above (total against the
-        # full, untruncated distribution, not just the top-N shown).
-        top_category, top_count = str(counts.index[0]), int(counts.iloc[0])
-        total = int(full_counts.sum())
-        pct = (top_count / total * 100) if total else 0.0
-        caption = f"{top_category} is the largest group at {pct:.0f}% of rows."
-
-        spec = ChartSpec(
-            chart_id=f"cat_{col.name}",
-            title=f"Category Counts — {humanize_label(col.name)}",
-            description=f"Frequency of each '{col.name}' value"
-                        + (f" (top {MAX_CATEGORIES_SHOWN - 1}, the rest grouped as Other)."
-                           if len(full_counts) > MAX_CATEGORIES_SHOWN else "."),
-            spec={
-                "data": {"values": values},
-                "mark": {"type": "bar"},
-                "height": max(120, 24 * len(values)),
-                "encoding": {
-                    # Rows arrive largest-first with "Other" last — keep that order.
-                    "y": {"field": "category", "type": "nominal", "sort": None, "title": None},
-                    "x": x_encoding,
-                    "tooltip": [{"field": "category"}, {"field": "count", **count_fmt}],
-                },
-            },
-            caption=caption,
-        )
-        if _is_near_uniform(counts):
-            trivial.append(spec)
-            continue
-        if len(charts) < MAX_CATEGORY_CHARTS and (referenced is None or col.name in referenced):
-            charts.append(spec)
-    return charts, trivial
-
-
-def _scatter_chart(
-    df: pd.DataFrame,
-    ranked_numeric: list[str],
-    target: str | None,
-    task_type: str | None,
-    corr_output: dict[str, Any] | None,
-    col_by_name: dict[str, ColumnProfile] | None = None,
-) -> ChartSpec | None:
-    """`ranked_numeric` must already be restricted to continuous columns
-    (`_eligible_numeric`); a correlation pair outside it is skipped."""
-    pair: tuple[str, str] | None = None
-    if corr_output:
-        for entry in corr_output.get("top_correlations", []):
-            a, b = str(entry.get("col_a", "")), str(entry.get("col_b", ""))
-            if a in ranked_numeric and b in ranked_numeric and a != target and b != target:
-                pair = (a, b)
-                break
-    if pair is None and len(ranked_numeric) >= 2:
-        pair = (ranked_numeric[0], ranked_numeric[1])
-    if pair is None:
-        return None
-
-    cols = list(pair)
-    color_field: str | None = None
-    if (
-        task_type == "classification"
-        and target
-        and target in df.columns
-        and df[target].nunique(dropna=True) <= 10
-    ):
-        color_field = target
-        cols.append(target)
-
-    # Scatter is the one panel P2.7 exempts from aggregate-first — it
-    # genuinely needs points — but its own cap is much lower than the
-    # general MAX_POINTS (visually indistinguishable above a few hundred).
-    values = _records(df, cols, max_rows=SCATTER_MAX_POINTS)
-    if not values:
-        return None
-    complete = df[cols].dropna()
-    r = complete[pair[0]].astype(float).corr(complete[pair[1]].astype(float))
-    if color_field:
-        for row in values:
-            row[color_field] = str(row[color_field])
-
-    col_by_name = col_by_name or {}
-    unit_x = col_by_name[pair[0]].unit_hint if col_by_name.get(pair[0]) else None
-    unit_y = col_by_name[pair[1]].unit_hint if col_by_name.get(pair[1]) else None
-    fmt_x, fmt_y = axis_format(unit_x), axis_format(unit_y)
-    title_x, title_y = humanize_axis_title(pair[0], unit_x), humanize_axis_title(pair[1], unit_y)
-
-    x_encoding: dict[str, Any] = {"field": pair[0], "type": "quantitative",
-                                   "scale": {"zero": False}, "title": title_x}
-    y_encoding: dict[str, Any] = {"field": pair[1], "type": "quantitative",
-                                   "scale": {"zero": False}, "title": title_y}
-    _merge_axis_format(x_encoding, fmt_x)
-    _merge_axis_format(y_encoding, fmt_y)
-
-    unit_by_field = {pair[0]: fmt_x, pair[1]: fmt_y}
-    title_by_field = {pair[0]: title_x, pair[1]: title_y}
-    encoding: dict[str, Any] = {
-        "x": x_encoding,
-        "y": y_encoding,
-        "tooltip": [
-            {"field": c, "title": title_by_field.get(c, humanize_label(c)), **unit_by_field.get(c, {})}
-            for c in cols
-        ],
-    }
-    if color_field:
-        encoding["color"] = {"field": color_field, "type": "nominal", "title": humanize_label(color_field)}
-
-    points = {"mark": {"type": "circle", "opacity": 0.55, "size": 36}, "encoding": encoding}
-    spec: dict[str, Any] = {"data": {"values": values}, "height": 280, "usermeta": {"columns": list(pair)}}
-    has_trend = pd.notna(r) and abs(float(r)) >= _TREND_MIN_ABS_R
-    if has_trend:
-        # Fitted on the plotted points; drawn in the theme's line colour.
-        spec["layer"] = [points, {
-            "mark": {"type": "line", "strokeDash": [4, 3]},
-            "transform": [{"regression": pair[1], "on": pair[0]}],
-            "encoding": {"x": {"field": pair[0], "type": "quantitative"},
-                         "y": {"field": pair[1], "type": "quantitative"}},
-        }]
-    else:
-        spec.update(points)
-
-    description = "The strongest numeric relationship in the data"
-    if pd.notna(r):
-        description += f" (r = {float(r):.2f}" + (", dashed line = linear fit)" if has_trend else ")")
-    description += " — colored by target class." if color_field else "."
-    if len(complete) > len(values):
-        description += f" Showing a random sample of {len(values):,} of {len(complete):,} rows."
-    return ChartSpec(
-        chart_id="scatter_top_pair",
-        title=f"Relationship — {humanize_label(pair[0])} vs {humanize_label(pair[1])}",
-        description=description,
-        spec=spec,
-    )
-
-
-def _box_plot_chart(
-    df: pd.DataFrame,
-    ranked_numeric: list[str],
-    target: str | None,
-    task_type: str | None,
-    col_by_name: dict[str, ColumnProfile] | None = None,
-) -> ChartSpec | None:
-    """P2.7: a five-number summary per group (rule+bar+tick layers), not raw
-    points — Vega-Lite's `boxplot` mark needs raw data to compute its own
-    quartiles, which is exactly the raw-row inlining P2.7 wants gone."""
-    if (
-        task_type != "classification"
-        or not target
-        or target not in df.columns
-        or not ranked_numeric
-        or df[target].nunique(dropna=True) > 10
-    ):
-        return None
-    feature = ranked_numeric[0]
-    frame = df[[feature, target]].dropna()
-    if frame.empty:
-        return None
-    summaries: list[dict[str, Any]] = []
-    for level, group in frame.groupby(target):
-        summary = _five_number_summary(group[feature])
-        if summary is None:
-            continue
-        summaries.append({"level": str(level), **summary})
-    if not summaries:
-        return None
-    col_by_name = col_by_name or {}
-    unit_hint = col_by_name[feature].unit_hint if col_by_name.get(feature) else None
-    feature_fmt = axis_format(unit_hint)
-    feature_title = humanize_axis_title(feature, unit_hint)
-    y_low_encoding: dict[str, Any] = {
-        "field": "low", "type": "quantitative", "scale": {"zero": False}, "title": feature_title,
-    }
-    _merge_axis_format(y_low_encoding, feature_fmt)
-    return ChartSpec(
-        chart_id=f"box_{feature}",
-        title=f"Separation — {humanize_label(feature)} by {humanize_label(target)}",
-        description=(
-            f"Five-number summary of '{feature}' (the most target-linked feature) "
-            "across classes — box is the interquartile range, whiskers at 1.5×IQR."
-        ),
-        spec={
-            "data": {"values": summaries},
-            "height": 240,
-            "layer": [
-                {
-                    "mark": {"type": "rule"},
-                    "encoding": {
-                        "x": {"field": "level", "type": "nominal", "axis": {"labelAngle": 0}, "title": None},
-                        "y": y_low_encoding,
-                        "y2": {"field": "high"},
-                    },
-                },
-                {
-                    "mark": {"type": "bar", "size": 30},
-                    "encoding": {
-                        "x": {"field": "level", "type": "nominal"},
-                        "y": {"field": "q1", "type": "quantitative"},
-                        "y2": {"field": "q3"},
-                        "color": {"field": "level", "type": "nominal", "legend": None},
-                    },
-                },
-                {
-                    "mark": {"type": "tick", "size": 30},
-                    "encoding": {
-                        "x": {"field": "level", "type": "nominal"},
-                        "y": {"field": "median", "type": "quantitative"},
-                    },
-                },
-            ],
-        },
-    )
-
-
-def _time_series_chart(
-    df: pd.DataFrame,
-    profile: DatasetProfile,
-    ranked_numeric: list[str],
-    col_by_name: dict[str, ColumnProfile],
-    target_column: str | None,
-    ts_output: dict[str, Any] | None = None,
-) -> ChartSpec | None:
-    datetime_cols = _chartable(profile, "datetime")
-    if not datetime_cols or not ranked_numeric:
-        return None
-    # Prefer the columns time_series_analysis actually examined (it may have
-    # auto-detected a different pair than "first datetime, top-ranked
-    # numeric") so the chart matches the trend/stationarity findings below
-    # instead of silently re-deriving its own, possibly different, series.
-    time_col = datetime_cols[0]
-    # P2.7 named bug: default to a semantic measure (a currency one first)
-    # rather than whatever ranked highest by variance/correlation, so a
-    # "monthly mean quantity" chart doesn't outrank "monthly total revenue".
-    value_col = _pick_measure_column(ranked_numeric, col_by_name, target_column) or ranked_numeric[0]
-    if ts_output:
-        ts_time_col = ts_output.get("date_column")
-        ts_value_col = ts_output.get("value_column")
-        if isinstance(ts_time_col, str) and ts_time_col in datetime_cols:
-            time_col = ts_time_col
-        if (
-            isinstance(ts_value_col, str)
-            and ts_value_col in df.columns
-            and pd.api.types.is_numeric_dtype(df[ts_value_col])
-        ):
-            value_col = ts_value_col
-
-    frame = df[[time_col, value_col]].dropna()
-    if frame.empty:
-        return None
-    parsed = pd.to_datetime(frame[time_col], errors="coerce", format="mixed")
-    frame = frame.assign(**{time_col: parsed}).dropna()
-    if frame.empty:
-        return None
-
-    # Prefer time_series_analysis's OWN grain/aggregation choice (7.7 —
-    # monthly/weekly/daily picked from the date span, sum for additive
-    # measures, mean for rates) over re-deriving it here — otherwise the
-    # chart can silently disagree with the tool's own trend/seasonality
-    # findings (the exact "monthly mean quantity" vs "monthly total revenue"
-    # mismatch this round's audit named). Only fall back to a local guess
-    # when no tool output is available (e.g. the tool wasn't scheduled).
-    grain_freq = {"daily": "D", "weekly": "W", "monthly": "MS"}
-    unit_hint = col_by_name[value_col].unit_hint if col_by_name.get(value_col) else None
-    tool_grain = str(ts_output.get("grain") or "") if ts_output else ""
-    tool_agg = ts_output.get("aggregation") if ts_output else None
-    freq = grain_freq.get(tool_grain, "MS")
-    profiled_agg = col_by_name[value_col].aggregation if col_by_name.get(value_col) else None
-    agg = tool_agg or profiled_agg or ("sum" if unit_hint in ("currency", "count") else "mean")
-    # Empty calendar periods are missing, not zero (a plain resample sum
-    # would draw them as 0) — matching time_series_analysis. `position`
-    # keeps each period's calendar index for the Sen's-slope line below.
-    bucketed = frame.set_index(time_col)[value_col].resample(freq)
-    resampled = (bucketed.sum(min_count=1) if agg == "sum" else bucketed.agg(agg)).reset_index()
-    resampled["position"] = np.arange(len(resampled))
-    resampled = resampled.dropna(subset=[value_col]).reset_index(drop=True)
-    grain_label = tool_grain if tool_grain in grain_freq else "monthly"
-    # A final bucket the data doesn't fully cover (e.g. a month with 9 days
-    # of data) shows a fake drop on a sum; drop it. Only when the data is
-    # much finer than the grain — monthly rows dated the 1st are complete.
-    # Weekly labels are the week's closing Sunday, monthly the first day.
-    trimmed_note = ""
-    dates = frame[time_col].dt.normalize().drop_duplicates().sort_values()
-    gap = dates.diff().median() if len(dates) > 1 else pd.NaT
-    if freq != "D" and len(resampled) > 2 and pd.notna(gap):
-        last_label = resampled[time_col].iloc[-1]
-        if freq == "W":
-            start, end = last_label - pd.Timedelta(days=6), last_label + pd.Timedelta(days=1)
-        else:
-            start, end = last_label, last_label + pd.offsets.MonthBegin(1)
-        if gap <= (end - start) / 2 and dates.iloc[-1] + gap < end:
-            resampled = resampled.iloc[:-1]
-            trimmed_note = (
-                f" The final {grain_label.removesuffix('ly')} is omitted — "
-                f"data only runs to {dates.iloc[-1]:%Y-%m-%d}, so it is incomplete."
-            )
-    values = [
-        {"period": ts.strftime("%Y-%m-%d"), "value": round(float(v), 4)}
-        for ts, v in zip(resampled[time_col], resampled[value_col], strict=True)
-    ]
-    if len(values) < 2:
-        return None
-    verb = "total" if agg == "sum" else "average"
-    title_override = ts_output.get("chart_title") if ts_output else None
-    description = title_override or f"'{value_col}' aggregated ({grain_label} {verb}) over '{time_col}'."
-    description += trimmed_note
-    if ts_output:
-        direction = ts_output.get("trend_direction")
-        is_stationary = ts_output.get("is_stationary")
-        seasonal_lags = ts_output.get("seasonal_lags_detected") or []
-        if direction:
-            description += f" Trend: {direction}."
-        if is_stationary is not None:
-            description += f" {'Stationary' if is_stationary else 'Non-stationary'} (ADF test)."
-        if seasonal_lags:
-            description += f" Seasonal signal at lag(s) {', '.join(str(x) for x in seasonal_lags)}."
-
-    value_fmt = axis_format(unit_hint)
-    value_title = humanize_axis_title(value_col, unit_hint)
-    y_encoding: dict[str, Any] = {
-        "field": "value", "type": "quantitative", "title": value_title, "scale": {"zero": False},
-    }
-    _merge_axis_format(y_encoding, value_fmt)
-    x_encoding = {"field": "period", "type": "temporal", "title": None}
-    series_layer: dict[str, Any] = {
-        "mark": {"type": "line", "point": True},
-        "encoding": {
-            "x": x_encoding,
-            "y": y_encoding,
-            "tooltip": [
-                {"field": "period", "type": "temporal"},
-                {"field": "value", "title": value_title, **value_fmt},
-            ],
-        },
-    }
-    layers: list[dict[str, Any]] = [series_layer]
-    if len(values) >= 20:
-        # A noisy series: lighten the raw line and overlay a thicker rolling mean.
-        window = max(3, len(values) // 12)
-        smooth = pd.Series([v["value"] for v in values]).rolling(window, min_periods=1, center=True).mean()
-        for row, s in zip(values, smooth, strict=True):
-            row["smooth"] = round(float(s), 4)
-        series_layer["mark"] = {"type": "line", "opacity": 0.35}
-        layers.append({
-            "mark": {"type": "line", "strokeWidth": 3},
-            "encoding": {"x": x_encoding, "y": {**y_encoding, "field": "smooth"}},
-        })
-    spec: dict[str, Any] = {"usermeta": {"value_column": value_col}, "data": {"values": values}, "height": 240}
-    # Robust trend annotation: Sen's slope (median pairwise slope per
-    # period) through the median-residual intercept, drawn dashed, when
-    # time_series_analysis ran the Mann-Kendall test on this series.
-    # Only when the chart plots the tool's own series (its columns and
-    # grain) — otherwise the slope belongs to a different series.
-    same_series = ts_output is not None and tool_grain in grain_freq and (time_col, value_col) == (
-        ts_output.get("date_column"), ts_output.get("value_column"))
-    sen_slope = _num(ts_output.get("sen_slope")) if ts_output and same_series else None
-    if ts_output and sen_slope is not None:
-        # The slope is per calendar period, or per observed period when the
-        # tool tested a gappy series on its observed points only.
-        if ts_output.get("sen_slope_unit") == "observed period":
-            x_pos = np.arange(len(values), dtype=float)
-        else:
-            x_pos = resampled["position"].to_numpy(dtype=float)
-        series_y = np.array([v["value"] for v in values], dtype=float)
-        intercept = float(np.median(series_y - sen_slope * x_pos))
-        for row, pos in zip(values, x_pos, strict=True):
-            row["sen_fit"] = round(intercept + sen_slope * float(pos), 4)
-        layers.append({
-            "mark": {"type": "line", "strokeDash": [4, 3]},
-            "encoding": {"x": x_encoding, "y": {"field": "sen_fit", "type": "quantitative"}},
-        })
-        unit = ts_output.get("sen_slope_unit") or "period"
-        mk_p = _num(ts_output.get("mk_p_value"))
-        description += (
-            f" Dashed line: Sen's slope {'+' if sen_slope >= 0 else '−'}{_fmt_value(abs(sen_slope), unit_hint)}"
-            f" per {unit}"
-            + (f" (Mann-Kendall p={mk_p:.3g}{', ' + str(ts_output['mk_trend']) if ts_output.get('mk_trend') else ''})"
-               if mk_p is not None else "")
-            + "."
-        )
-    if len(layers) > 1:
-        spec["layer"] = layers
-    else:
-        spec.update(series_layer)
-    return ChartSpec(
-        chart_id="time_series",
-        title=f"Trend — {humanize_label(value_col)} ({grain_label} {verb})",
-        description=description,
-        spec=spec,
-    )
-
-
-def _model_comparison_chart(train_output: dict[str, Any] | None) -> ChartSpec | None:
-    if not train_output:
-        return None
-    models = train_output.get("models_trained", {})
-    if not isinstance(models, dict) or not models:
-        return None
-    task = str(train_output.get("task_type", "classification"))
-    metric = "accuracy" if task == "classification" else "r2"
-    # Accuracy reads as a percentage; R² stays on its own scale (it can be
-    # negative, and the y domain fits the data rather than clipping it).
-    scale, metric_title = (100, "Accuracy %") if metric == "accuracy" else (1, "R²")
-
-    rows: list[dict[str, Any]] = []
-    for name, m in models.items():
-        if not isinstance(m, dict):
-            continue
-        # A metric the tool didn't report is left out — never drawn as 0.
-        for label, raw in (
-            ("Train", (m.get("train_metrics") or {}).get(metric)),
-            ("Test", (m.get("test_metrics") or {}).get(metric)),
-            ("CV mean", m.get("cv_mean")),
-        ):
-            if isinstance(raw, (int, float)) and not isinstance(raw, bool) and np.isfinite(raw):
-                rows.append({"model": str(name), "metric": label, "score": round(float(raw) * scale, 4)})
-    if not rows:
-        return None
-    return ChartSpec(
-        chart_id="model_comparison",
-        title="Model Comparison",
-        description=f"Train vs held-out test vs cross-validated {metric}. "
-                    "A large train-test gap signals overfitting.",
-        spec={
-            "data": {"values": rows},
-            "mark": {"type": "bar"},
-            "height": 280,
-            "encoding": {
-                "x": {"field": "model", "type": "nominal", "axis": {"labelAngle": 0, "title": None}},
-                "xOffset": {"field": "metric"},
-                "y": {"field": "score", "type": "quantitative", "title": metric_title},
-                "color": {
-                    "field": "metric",
-                    "scale": {"domain": ["Train", "Test", "CV mean"]},
-                    "legend": {"orient": "top", "title": None},
-                },
-                "tooltip": [{"field": "model"}, {"field": "metric"},
-                            {"field": "score", "title": metric_title, "format": ".3~f"}],
-            },
-        },
-    )
-
-
-def _importance_bounds(driver: dict[str, Any], importance: float) -> tuple[float, float] | None:
-    """(low, high) around a driver's importance: its own CI when reported,
-    else ±1 std across the permutation repeats, else None."""
-    low = _num(driver.get("importance_ci_lower", driver.get("ci_lower")))
-    high = _num(driver.get("importance_ci_upper", driver.get("ci_upper")))
-    if low is not None and high is not None:
-        return low, high
-    std = _num(driver.get("importance_std", driver.get("std")))
-    return (importance - std, importance + std) if std is not None else None
-
-
-def _drivers_chart(model_output: dict[str, Any] | None) -> ChartSpec | None:
-    """Permutation-importance drivers (evaluate_model's `top_drivers`) — the
-    one chart that says *what moves the outcome* after a modelling run. A
-    dot plot, with the importance's spread across shuffles as error bars
-    whenever the tool reported it."""
-    if not model_output:
-        return None
-    values: list[dict[str, Any]] = []
-    for d in model_output.get("top_drivers") or []:
-        importance = _num(d.get("importance")) if isinstance(d, dict) else None
-        if importance is None or d.get("feature") is None:
-            continue
-        bounds = _importance_bounds(d, importance)
-        values.append({
-            "feature": humanize_label(str(d["feature"])),
-            "importance": round(importance, 4),
-            "low": round(bounds[0], 4) if bounds else None,
-            "high": round(bounds[1], 4) if bounds else None,
-            "effect": str(d.get("headline") or d.get("direction") or ""),
-        })
-    if not values:
-        return None
-    y_enc = {"field": "feature", "type": "nominal", "sort": {"field": "importance", "order": "descending"},
-             "title": None}
-    x_title = "Permutation importance"
-    layers: list[dict[str, Any]] = []
-    has_bounds = any(v["low"] is not None for v in values)
-    if has_bounds:
-        layers.append({"mark": {"type": "rule"}, "encoding": {
-            "y": y_enc,
-            "x": {"field": "low", "type": "quantitative", "title": x_title},
-            "x2": {"field": "high"},
-        }})
-    layers.append({"mark": {"type": "circle", "size": 90, "opacity": 1}, "encoding": {
-        "y": y_enc,
-        "x": {"field": "importance", "type": "quantitative", "title": x_title},
-        "tooltip": [{"field": "feature", "title": "Feature"},
-                    {"field": "importance", "title": "Importance", "format": ".3~f"},
-                    *([{"field": "low", "title": "Low", "format": ".3~f"},
-                       {"field": "high", "title": "High", "format": ".3~f"}] if has_bounds else []),
-                    {"field": "effect", "title": "Effect"}],
-    }})
-    return ChartSpec(
-        chart_id="model_drivers",
-        title="What Drives the Outcome — Top Model Drivers",
-        description="Permutation importance on held-out data: how much the model's score drops "
-                    "when each feature is shuffled. Further right = the model leans on it more."
-                    + (" Whiskers show how much that drop varied across repeated shuffles."
-                       if has_bounds else ""),
-        spec={
-            "data": {"values": values},
-            "height": max(140, 30 * len(values)),
-            "layer": layers,
-        },
-    )
-
-
-def _confusion_matrix_chart(eval_output: dict[str, Any] | None) -> ChartSpec | None:
-    """Held-out confusion matrix, when evaluate_model reports one (a list of
-    rows, actual x predicted, aligned with `class_labels`)."""
-    matrix = (eval_output or {}).get("confusion_matrix")
-    if not isinstance(matrix, list) or len(matrix) < 2 or not all(isinstance(r, list) for r in matrix):
-        return None
-    labels = (eval_output or {}).get("class_labels") or []
-    if len(labels) != len(matrix):
-        labels = [str(i) for i in range(len(matrix))]
-    values = [
-        {"actual": str(labels[i]), "predicted": str(labels[j]), "count": int(c)}
-        for i, row in enumerate(matrix) for j, c in enumerate(row)
-        if j < len(labels) and _num(c) is not None
-    ]
-    if not values:
-        return None
-    order = [str(label) for label in labels]
-    x_enc = {"field": "predicted", "type": "nominal", "sort": order, "title": "Predicted",
-             "axis": {"labelAngle": 0}}
-    y_enc = {"field": "actual", "type": "nominal", "sort": order, "title": "Actual"}
-    return ChartSpec(
-        chart_id="model_confusion_matrix",
-        title="Where the Model Gets It Wrong — Confusion Matrix",
-        description="Held-out rows only: each cell counts rows of the actual class (row) "
-                    "predicted as the column's class. The diagonal is correct predictions.",
-        spec={
-            "data": {"values": values},
-            "height": max(160, 40 * len(labels)),
-            "layer": [
-                {"mark": {"type": "rect"}, "encoding": {
-                    "x": x_enc, "y": y_enc,
-                    "color": {"field": "count", "type": "quantitative", "title": "Rows",
-                              "scale": {"scheme": "oranges"}},
-                    "tooltip": [{"field": "actual", "title": "Actual"},
-                                {"field": "predicted", "title": "Predicted"},
-                                {"field": "count", "title": "Rows", "format": ",d"}],
-                }},
-                {"mark": {"type": "text"}, "encoding": {
-                    "x": x_enc, "y": y_enc, "text": {"field": "count", "format": ",d"},
-                }},
-            ],
-        },
-    )
-
-
-def _roc_chart(eval_output: dict[str, Any] | None) -> ChartSpec | None:
-    """Held-out ROC curve, when evaluate_model reports its points — either
-    {"fpr": [...], "tpr": [...]} or a list of {"fpr", "tpr"} records."""
-    roc = (eval_output or {}).get("roc_curve")
-    pairs: list[tuple[Any, Any]] = []
-    if isinstance(roc, dict) and isinstance(roc.get("fpr"), list) and isinstance(roc.get("tpr"), list):
-        pairs = list(zip(roc["fpr"], roc["tpr"], strict=False))
-    elif isinstance(roc, list):
-        pairs = [(p.get("fpr"), p.get("tpr")) for p in roc if isinstance(p, dict)]
-    points = [(f, t) for f, t in ((_num(a), _num(b)) for a, b in pairs) if f is not None and t is not None]
-    if len(points) < 2:
-        return None
-    if len(points) > MAX_POINTS:
-        points = points[:: -(-len(points) // MAX_POINTS)]
-    values = [{"fpr": round(f, 4), "tpr": round(t, 4)} for f, t in points]
-    auc = _num((eval_output or {}).get("roc_auc", roc.get("auc") if isinstance(roc, dict) else None))
-    axis = {"scale": {"domain": [0, 1]}}
-    return ChartSpec(
-        chart_id="model_roc",
-        title="How Well the Model Ranks Cases — ROC Curve" + (f" (AUC {auc:.2f})" if auc is not None else ""),
-        description="Held-out rows only: true-positive rate against false-positive rate across every "
-                    "decision threshold. The dashed diagonal is a coin flip; the closer the curve hugs "
-                    "the top-left corner, the better.",
-        spec={
-            "height": 260,
-            "layer": [
-                {"data": {"values": values}, "mark": {"type": "line"}, "encoding": {
-                    "x": {"field": "fpr", "type": "quantitative", "title": "False-positive rate", **axis},
-                    "y": {"field": "tpr", "type": "quantitative", "title": "True-positive rate", **axis},
-                    "tooltip": [{"field": "fpr", "title": "FPR"}, {"field": "tpr", "title": "TPR"}],
-                }},
-                {"data": {"values": [{"fpr": 0, "tpr": 0}, {"fpr": 1, "tpr": 1}]},
-                 "mark": {"type": "line", "strokeDash": [4, 3]},
-                 "encoding": {"x": {"field": "fpr", "type": "quantitative"},
-                              "y": {"field": "tpr", "type": "quantitative"}}},
-            ],
-        },
-    )
-
-
-def _cluster_chart(cluster_output: dict[str, Any] | None) -> ChartSpec | None:
-    if not cluster_output:
-        return None
-    points = cluster_output.get("pca_points", [])
-    if not isinstance(points, list) or len(points) < 10:
-        return None
-    n = cluster_output.get("n_clusters", "?")
-    sil = cluster_output.get("silhouette_score", "?")
-    return ChartSpec(
-        chart_id="cluster_scatter",
-        title=f"Segments — {n} clusters (silhouette {sil})",
-        description="Rows projected to 2-D (PCA), colored by discovered cluster. "
-                    "Tight, well-separated colors mean meaningful segments.",
-        spec={
-            "data": {"values": points},
-            "mark": {"type": "circle", "opacity": 0.6, "size": 40},
-            "height": 300,
-            "encoding": {
-                "x": {"field": "x", "type": "quantitative", "title": "PC 1",
-                      "scale": {"zero": False}},
-                "y": {"field": "y", "type": "quantitative", "title": "PC 2",
-                      "scale": {"zero": False}},
-                "color": {"field": "cluster", "type": "nominal",
-                          "legend": {"orient": "top", "title": None}},
-                "tooltip": [{"field": "cluster"}],
-            },
-        },
-    )
-
-
-def _geospatial_chart(geo_output: dict[str, Any] | None) -> ChartSpec | None:
-    if not geo_output:
-        return None
-    cells = geo_output.get("densest_cells", [])
-    if not isinstance(cells, list) or not cells:
-        return None
-    values = [
-        {
-            "lat": round((c["lat_range"][0] + c["lat_range"][1]) / 2, 5),
-            "lon": round((c["lon_range"][0] + c["lon_range"][1]) / 2, 5),
-            "count": c["count"],
-        }
-        for c in cells
-        if isinstance(c, dict) and c.get("lat_range") and c.get("lon_range")
-    ]
-    if not values:
-        return None
-    return ChartSpec(
-        chart_id="geospatial_hotspots",
-        title="Geographic Hotspots",
-        description="Densest grid cells by point count — bubble size and color show concentration.",
-        spec={
-            "data": {"values": values},
-            "mark": {"type": "circle", "opacity": 0.75},
-            "height": 300,
-            "encoding": {
-                "x": {"field": "lon", "type": "quantitative", "title": "Longitude", "scale": {"zero": False}},
-                "y": {"field": "lat", "type": "quantitative", "title": "Latitude", "scale": {"zero": False}},
-                "size": {"field": "count", "type": "quantitative", "title": "Points",
-                         "scale": {"range": [50, 800]}},
-                "color": {"field": "count", "type": "quantitative", "title": "Points",
-                          "scale": {"scheme": "oranges"}},
-                "tooltip": [{"field": "lat"}, {"field": "lon"}, {"field": "count"}],
-            },
-        },
-    )
-
-
-def _scree_chart(dim_output: dict[str, Any] | None) -> ChartSpec | None:
-    if not dim_output:
-        return None
-    explained = dim_output.get("explained_variance_ratio", [])
-    cumulative = dim_output.get("cumulative_variance", [])
-    if not isinstance(explained, list) or not explained:
-        return None
-    values = [
-        {
-            "component": f"PC{i + 1}",
-            "order": i,
-            "explained": round(float(e) * 100, 2),
-            "cumulative": round(float(cumulative[i]) * 100, 2) if i < len(cumulative) else None,
-        }
-        for i, e in enumerate(explained[:SCREE_MAX_COMPONENTS])
-    ]
-    n_needed = dim_output.get("n_components_for_threshold")
-    threshold = dim_output.get("variance_threshold")
-    description = "Share of the data's variance each principal component captures (bars) and the running total (line)."
-    if n_needed and threshold:
-        description += f" {n_needed} component(s) reach {threshold:.0%} of total variance."
-    if len(explained) > SCREE_MAX_COMPONENTS:
-        description += f" First {SCREE_MAX_COMPONENTS} of {len(explained)} components shown."
-    y_scale = {"domain": [0, 100]}
-    x_enc = {"field": "component", "type": "ordinal", "sort": {"field": "order"}, "title": None}
-    # One percent axis; 80% / 90% reference lines show where "enough" is.
-    return ChartSpec(
-        chart_id="pca_scree",
-        title="How many underlying factors matter",
-        description=description,
-        spec={
-            "data": {"values": values},
-            "height": 280,
-            "layer": [
-                {
-                    # No literal color — bar/line get distinct theme-default
-                    # colors from the injected vega_config()'s per-mark-type
-                    # config (bar: pen, line: ink).
-                    "mark": {"type": "bar"},
-                    "encoding": {
-                        "x": x_enc,
-                        "y": {"field": "explained", "type": "quantitative", "scale": y_scale,
-                              "title": "Share of variance (%)"},
-                        "tooltip": [{"field": "component"}, {"field": "explained", "title": "Component %"},
-                                    {"field": "cumulative", "title": "Cumulative %"}],
-                    },
-                },
-                {
-                    "mark": {"type": "line", "point": True},
-                    "encoding": {
-                        "x": x_enc,
-                        "y": {"field": "cumulative", "type": "quantitative", "scale": y_scale},
-                    },
-                },
-                {
-                    "data": {"values": [{"level": 80}, {"level": 90}]},
-                    "mark": {"type": "rule", "strokeDash": [4, 3], "opacity": 0.5},
-                    "encoding": {"y": {"field": "level", "type": "quantitative", "scale": y_scale}},
-                },
-            ],
-        },
-    )
-
-
-def correlation_heatmap(
-    corr: pd.DataFrame, max_columns: int = HEATMAP_MAX_COLUMNS,
-) -> tuple[list[dict[str, Any]], dict[str, Any], str] | None:
-    """Clustered correlation matrix -> (rows, vega_lite_spec_without_data,
-    caption); None when fewer than 3 columns have usable correlations.
-
-    Keeps the `max_columns` columns with the highest mean |r| to the rest,
-    orders them by average-linkage clustering on 1 - |r| so variables that
-    move together sit in adjacent blocks, and captions the largest such
-    group. Rows carry `col_a`/`col_b` (raw names) so a correlation finding
-    can be matched to the pair. Shared with the generate_visualizations tool."""
-    from scipy.cluster.hierarchy import fcluster, leaves_list, linkage
-    from scipy.spatial.distance import squareform
-
-    corr = corr.dropna(how="all").dropna(axis=1, how="all")
-    corr = corr.loc[corr.index.intersection(corr.columns), corr.index.intersection(corr.columns)]
-    if len(corr) < 3:
-        return None
-    strength = corr.abs().fillna(0.0).to_numpy(copy=True)  # pandas 3 hands back a read-only view
-    np.fill_diagonal(strength, 0.0)
-    keep =np.argsort(-strength.sum(axis=1) / (len(corr) - 1), kind="stable")[:max_columns]
-    corr = corr.iloc[sorted(keep), sorted(keep)]
-    n = len(corr)
-    strength = corr.abs().fillna(0.0).to_numpy()
-    dist = np.clip(1.0 - strength, 0.0, 1.0)
-    dist = (dist + dist.T) / 2
-    np.fill_diagonal(dist, 0.0)
-    tree = linkage(squareform(dist, checks=False), method="average", optimal_ordering=True)
-    order = [int(i) for i in leaves_list(tree)]
-    clusters = fcluster(tree, t=_HEATMAP_GROUP_DISTANCE, criterion="distance")
-
-    names = [str(c) for c in corr.columns]
-    labels = [humanize_label(c) for c in names]
-    if len(set(labels)) != n:
-        labels = names
-    ordered = [labels[i] for i in order]
-    rows = [
-        {
-            "feature_x": labels[j], "feature_y": labels[i], "col_a": names[j], "col_b": names[i],
-            "r": round(float(corr.iloc[i, j]), 3), "abs_r": round(abs(float(corr.iloc[i, j])), 3),
-        }
-        for i in range(n) for j in range(n) if pd.notna(corr.iloc[i, j])
-    ]
-
-    groups: list[tuple[int, float, bool, list[int]]] = []
-    for cid in {int(c) for c in clusters}:
-        members = [i for i in order if int(clusters[i]) == cid]
-        if len(members) < 2:
-            continue
-        block = corr.iloc[members, members].to_numpy()
-        off = ~np.eye(len(members), dtype=bool)
-        groups.append((len(members), float(np.nanmean(np.abs(block[off]))), bool((block[off] > 0).all()), members))
-    if groups:
-        _, strength_mean, same_way, members = max(groups, key=lambda g: (g[0], g[1]))
-        shown = [labels[i] for i in members]
-        if len(shown) <= 3:
-            listed = " and ".join([", ".join(shown[:-1]), shown[-1]])
-        else:
-            listed = f"{', '.join(shown[:3])} and {len(shown) - 3} more"
-        caption = (
-            f"{listed} {'move together' if same_way else 'are closely linked'} "
-            f"(average |r| {strength_mean:.2f})."
-            + (f" {len(groups) - 1} other group{'s' if len(groups) > 2 else ''} of related columns also stand out."
-               if len(groups) > 1 else "")
-        )
-    else:
-        caption = f"No group of columns moves together strongly — every pair has |r| below {1 - _HEATMAP_GROUP_DISTANCE:.1f}."
-
-    r_field = {"field": "r", "type": "quantitative", "title": "r"}
-    x_enc: dict[str, Any] = {"field": "feature_x", "type": "nominal", "sort": ordered, "title": None,
-                             "axis": {"labelAngle": -45, "labelLimit": 260, "labelOverlap": False,
-                                      "orient": "bottom"}}
-    y_enc: dict[str, Any] = {"field": "feature_y", "type": "nominal", "sort": ordered, "title": None,
-                             "axis": {"labelLimit": 260}}
-    layers: list[dict[str, Any]] = [{
-        "mark": {"type": "rect"},
-        "encoding": {
-            "x": x_enc, "y": y_enc,
-            "color": {**r_field, "scale": {"scheme": "blueorange", "domainMid": 0, "domain": [-1, 1]},
-                      "legend": {"format": ".1f"}},
-            "tooltip": [{"field": "feature_x", "title": "Column"}, {"field": "feature_y", "title": "Column"},
-                        {**r_field, "format": ".2f"}],
-        },
-    }]
-    if n <= HEATMAP_TEXT_MAX_COLUMNS:
-        # Contrast against the cell fill (the scheme is theme-independent),
-        # not against the page: white on strong cells, dark on pale ones.
-        # Two static-colour layers rather than a `test` condition (an
-        # expression, which the raw-spec sanitiser rejects).
-        for colour, text_filter in (
-            ("white", {"field": "abs_r", "gte": 0.6}),
-            ("black", {"and": [{"field": "abs_r", "gte": HEATMAP_TEXT_MIN_ABS_R}, {"field": "abs_r", "lt": 0.6}]}),
-        ):
-            layers.append({
-                "mark": {"type": "text", "fontSize": 10, "color": colour},
-                "transform": [{"filter": text_filter}],
-                "encoding": {"x": x_enc, "y": y_enc, "text": {**r_field, "format": ".2f"}},
-            })
-    return rows, {"width": {"step": 26}, "height": {"step": 26}, "layer": layers}, caption
-
-
-def _correlation_chart(
-    df: pd.DataFrame, numeric_cols: list[str], corr_output: dict[str, Any] | None,
-) -> ChartSpec | None:
-    """With >= HEATMAP_MIN_COLUMNS chartable numeric columns, a clustered
-    correlation heatmap of them; otherwise bars of the tool's top pairs
-    (colour only when both signs occur — else it carries no information)."""
-    if not corr_output:
-        return None
-    cols = [c for c in numeric_cols if c in df.columns]
-    if len(cols) >= HEATMAP_MIN_COLUMNS:
-        built = correlation_heatmap(df[cols].apply(pd.to_numeric, errors="coerce").corr())
-        if built is not None:
-            rows, spec, caption = built
-            return ChartSpec(
-                chart_id="top_correlations",
-                title=CORRELATION_HEATMAP_TITLE,
-                description="Pearson correlation between numeric columns, grouped so related columns sit "
-                            "side by side; orange is positive, blue negative.",
-                spec={"data": {"values": rows}, **spec},
-                caption=caption,
-            )
-    top = corr_output.get("top_correlations", [])[:10]
-    if not top:
-        return None
-    # col_a/col_b ride along so a correlation finding is only attached to
-    # this chart when its own pair is actually plotted here.
-    values = [
-        {
-            "pair": f"{humanize_label(str(e.get('col_a')))} ↔ {humanize_label(str(e.get('col_b')))}",
-            "col_a": str(e.get("col_a")),
-            "col_b": str(e.get("col_b")),
-            "correlation": round(float(e["correlation"]), 4),
-            "abs_correlation": round(abs(float(e["correlation"])), 4),
-            "direction": "positive" if float(e["correlation"]) >= 0 else "negative",
-        }
-        for e in top if isinstance(e, dict) and isinstance(e.get("correlation"), (int, float))
-    ]
-    if not values:
-        return None
-    directions = {v["direction"] for v in values}
-    encoding: dict[str, Any] = {
-        "y": {"field": "pair", "type": "nominal", "title": None,
-              "sort": {"field": "abs_correlation", "order": "descending"},
-              "axis": {"labelLimit": 360}},
-        "x": {"field": "correlation", "type": "quantitative",
-              "scale": {"domain": [0, 1] if directions == {"positive"} else [-1, 0] if directions == {"negative"} else [-1, 1]},
-              "title": "Correlation (r)"},
-        "tooltip": [{"field": "pair", "title": "Pair"},
-                    {"field": "correlation", "title": "r", "format": ".2f"}],
-    }
-    if len(directions) > 1:
-        encoding["color"] = {
-            "field": "direction", "type": "nominal",
-            "scale": {"domain": ["positive", "negative"]},
-            "legend": {"orient": "top", "title": None},
-        }
-    return ChartSpec(
-        chart_id="top_correlations",
-        title="Top Feature Correlations",
-        description="Strongest pairwise relationships, ranked by strength |r|"
-                    + ("; colour gives the sign." if len(directions) > 1 else f"; all are {next(iter(directions))}."),
-        spec={
-            "data": {"values": values},
-            "mark": {"type": "bar"},
-            "height": max(160, len(values) * 30),
-            "encoding": encoding,
-        },
-    )
-
-
-# ---------------------------------------------------------------------------
-# 6.1 — cohort / financial / workforce panels (previously entirely absent).
-# All pre-aggregated from the tool's own output where it already computed
-# the right grain (revenue by month, RFM segments, department rollups); the
-# tenure histogram and revenue-concentration Pareto recompute from `df`
-# because the tool output only carries summary quantiles, not bin counts —
-# still aggregate-first (bins / deciles), never raw per-row inlining.
-# ---------------------------------------------------------------------------
-
-def _cohort_charts(df: pd.DataFrame, cohort_output: dict[str, Any] | None) -> list[ChartSpec]:
-    if not cohort_output:
-        return []
-    # Each panel is isolated so one bad value drops only that panel.
-    return [
-        *_safe(_cohort_rfm_chart, cohort_output, default=[]),
-        *_safe(_cohort_month_chart, cohort_output, default=[]),
-        *_safe(_cohort_pareto_chart, df, cohort_output, default=[]),
-    ]
-
-
-def _cohort_rfm_chart(cohort_output: dict[str, Any]) -> list[ChartSpec]:
-    charts: list[ChartSpec] = []
-    segments = cohort_output.get("rfm_segments")
-    if isinstance(segments, list) and segments:
-        values = [
-            {
-                "segment": str(s.get("segment")),
-                "revenue_share_pct": float(s.get("revenue_share_pct") or 0.0),
-                "customer_share_pct": float(s.get("customer_share_pct") or 0.0),
-            }
-            for s in segments if isinstance(s, dict)
-        ]
-        if values:
-            charts.append(ChartSpec(
-                chart_id="cohort_rfm_segments",
-                title="Customer Segments — Revenue vs Customer Share (RFM)",
-                description=(
-                    "Share of revenue vs. share of the customer base per RFM segment. "
-                    "A segment whose revenue bar towers over its customer bar is doing outsized work."
-                ),
-                spec={
-                    "data": {"values": values},
-                    "transform": [{"fold": ["revenue_share_pct", "customer_share_pct"], "as": ["metric", "share"]}],
-                    "mark": {"type": "bar"},
-                    "height": max(160, 26 * len(values)),
-                    "encoding": {
-                        "y": {"field": "segment", "type": "nominal", "sort": "-x", "title": None},
-                        "x": {"field": "share", "type": "quantitative", "title": "Share %"},
-                        "yOffset": {"field": "metric"},
-                        "color": {
-                            "field": "metric", "type": "nominal",
-                            "scale": {"domain": ["revenue_share_pct", "customer_share_pct"]},
-                            "legend": {"orient": "top", "title": None},
-                        },
-                        "tooltip": [{"field": "segment"}, {"field": "metric"}, {"field": "share"}],
-                    },
-                },
-            ))
-
-    return charts
-
-
-def _cohort_month_chart(cohort_output: dict[str, Any]) -> list[ChartSpec]:
-    charts: list[ChartSpec] = []
-    revenue_by_month = cohort_output.get("revenue_by_month")
-    if isinstance(revenue_by_month, dict) and len(revenue_by_month) >= 2:
-        values = [{"period": k, "revenue": float(v)} for k, v in sorted(revenue_by_month.items())]
-        charts.append(ChartSpec(
-            chart_id="cohort_revenue_by_month",
-            title="Revenue by Month",
-            description="Total revenue per calendar month.",
-            spec={
-                "data": {"values": values},
-                "mark": {"type": "line", "point": True},
-                "height": 220,
-                "encoding": {
-                    "x": {"field": "period", "type": "temporal", "title": None},
-                    "y": {"field": "revenue", "type": "quantitative", "title": "Revenue", "scale": {"zero": False}},
-                    "tooltip": [{"field": "period", "type": "temporal"}, {"field": "revenue"}],
-                },
-            },
-        ))
-
-    return charts
-
-
-def _cohort_pareto_chart(df: pd.DataFrame, cohort_output: dict[str, Any]) -> list[ChartSpec]:
-    charts: list[ChartSpec] = []
-    customer_col = cohort_output.get("customer_column")
-    amount_col = cohort_output.get("amount_column")
-    if customer_col and amount_col and customer_col in df.columns and amount_col in df.columns:
-        amounts = pd.to_numeric(df[amount_col], errors="coerce")
-        per_customer = amounts.groupby(df[customer_col]).sum().dropna()
-        total = float(per_customer.sum())
-        if total > 0 and len(per_customer) >= 10:
-            ranked_rev = per_customer.sort_values(ascending=False).reset_index(drop=True)
-            n = len(ranked_rev)
-            deciles: list[dict[str, Any]] = []
-            for decile in range(1, 11):
-                cutoff = max(1, round(n * decile / 10))
-                cumulative = float(ranked_rev.iloc[:cutoff].sum())
-                deciles.append({
-                    "customer_decile_pct": decile * 10,
-                    "cumulative_revenue_share_pct": round(cumulative / total * 100, 2),
-                })
-            charts.append(ChartSpec(
-                chart_id="cohort_pareto",
-                title="Revenue Concentration — Customers Ranked by Spend",
-                description=(
-                    "Cumulative share of total revenue as more customers (ranked highest-spend "
-                    "first) are included — how much of the business rests on a few customers."
-                ),
-                spec={
-                    "data": {"values": deciles},
-                    "mark": {"type": "line", "point": True},
-                    "height": 220,
-                    "encoding": {
-                        "x": {"field": "customer_decile_pct", "type": "quantitative", "title": "Top % of customers"},
-                        "y": {"field": "cumulative_revenue_share_pct", "type": "quantitative",
-                              "title": "Cumulative revenue share %", "scale": {"domain": [0, 100]}},
-                        "tooltip": [{"field": "customer_decile_pct"}, {"field": "cumulative_revenue_share_pct"}],
-                    },
-                },
-            ))
-    return charts
-
-
-def _financial_charts(df: pd.DataFrame, financial_output: dict[str, Any] | None) -> list[ChartSpec]:
-    if not financial_output:
-        return []
-    date_col = financial_output.get("date_column")
-    price_col = financial_output.get("price_column")
-    if not date_col or not price_col or date_col not in df.columns or price_col not in df.columns:
-        return []
-
-    symbol_col = financial_output.get("symbol_column")
-    cols = [date_col, price_col] + ([symbol_col] if symbol_col and symbol_col in df.columns else [])
-    frame = df[cols].copy()
-    frame[date_col] = pd.to_datetime(frame[date_col], errors="coerce", format="mixed")
-    frame[price_col] = pd.to_numeric(frame[price_col], errors="coerce")
-    frame = frame.dropna(subset=[date_col, price_col])
-    if frame.empty:
-        return []
-
-    label: str | None = None
-    best = False
-    if symbol_col and symbol_col in frame.columns:
-        symbols = frame[symbol_col].astype(str)
-        best_symbol = (financial_output.get("best_performer") or {}).get("symbol")
-        if best_symbol is not None and (symbols == str(best_symbol)).any():
-            label = str(best_symbol)
-            best = True
-        else:
-            # No usable best performer: pick the most frequent symbol so several
-            # tickers are never interleaved into one series.
-            label = str(symbols.mode().iloc[0])
-            best = False
-        frame = frame[symbols == label]
-
-    frame = frame[[date_col, price_col]].sort_values(date_col)
-    # Aggregate-first for long series (P2.7) — resample to weekly last-value
-    # rather than inlining every row; a further stride decimates the rare
-    # case where even weekly resampling exceeds MAX_POINTS.
-    if len(frame) > MAX_POINTS:
-        frame = frame.set_index(date_col)[price_col].resample("W").last().dropna().reset_index()
-    if len(frame) > MAX_POINTS:
-        step = max(1, len(frame) // MAX_POINTS)
-        frame = frame.iloc[::step]
-    if len(frame) < 3:
-        return []
-
-    prices = frame[price_col].astype(float).reset_index(drop=True)
-    dates = frame[date_col].reset_index(drop=True)
-    base = float(prices.iloc[0])
-    running_peak = prices.cummax()
-    rows: list[dict[str, Any]] = []
-    for ts, price, peak in zip(dates, prices, running_peak, strict=True):
-        cumulative_return = (float(price) / base - 1.0) * 100 if base else 0.0
-        drawdown = (float(price) / float(peak) - 1.0) * 100 if peak else 0.0
-        rows.append({
-            "date": ts.strftime("%Y-%m-%d"),
-            "cumulative_return_pct": round(cumulative_return, 4),
-            "drawdown_pct": round(drawdown, 4),
-        })
-
-    title_symbol = f" — {label}" if label else ""
-    return [ChartSpec(
-        chart_id="financial_overview",
-        title=f"Return & Drawdown{title_symbol}",
-        description=(
-            f"Cumulative return and drawdown of '{price_col}' over time"
-            + (f" ({'best performer' if best else 'most frequent symbol'} '{label}')" if label else "")
-            + "."
-        ),
-        spec={
-            # Named dataset (P2.7) — both layers read the same rows once
-            # instead of each mark inlining its own copy.
-            "datasets": {"financial_series": rows},
-            "height": 260,
-            "layer": [
-                {
-                    "data": {"name": "financial_series"},
-                    "mark": {"type": "area", "opacity": 0.35},
-                    "encoding": {
-                        "x": {"field": "date", "type": "temporal", "title": None},
-                        "y": {"field": "drawdown_pct", "type": "quantitative", "title": "Drawdown %"},
-                    },
-                },
-                {
-                    "data": {"name": "financial_series"},
-                    "mark": {"type": "line"},
-                    "encoding": {
-                        "x": {"field": "date", "type": "temporal", "title": None},
-                        "y": {"field": "cumulative_return_pct", "type": "quantitative",
-                              "title": "Cumulative return %"},
-                        "tooltip": [
-                            {"field": "date", "type": "temporal"},
-                            {"field": "cumulative_return_pct"},
-                            {"field": "drawdown_pct"},
-                        ],
-                    },
-                },
-            ],
-            "resolve": {"scale": {"y": "independent"}},
-        },
-    )]
-
-
-def _workforce_charts(df: pd.DataFrame, workforce_output: dict[str, Any] | None) -> list[ChartSpec]:
-    if not workforce_output:
-        return []
-    # Each panel is isolated so one bad value drops only that panel.
-    return [
-        *_safe(_workforce_dept_chart, workforce_output, default=[]),
-        *_safe(_workforce_tenure_chart, df, workforce_output, default=[]),
-    ]
-
-
-def _workforce_dept_chart(workforce_output: dict[str, Any]) -> list[ChartSpec]:
-    charts: list[ChartSpec] = []
-    by_dept =workforce_output.get("by_department")
-    if isinstance(by_dept, list) and by_dept:
-        values = [
-            {"department": str(r.get("department")), "headcount": int(r.get("headcount") or 0)}
-            for r in by_dept if isinstance(r, dict)
-        ]
-        # Small-cell suppression: departments under the minimum headcount are
-        # merged into one "Other" bar (a no-op for output the tool already folded).
-        folded_frame, folded = fold_small_groups(pd.DataFrame(values), "headcount", "department")
-        if folded:
-            values = [
-                {"department": str(r["department"]), "headcount": int(r["headcount"])}
-                for r in folded_frame.to_dict("records")
-            ]
-        if values:
-            charts.append(ChartSpec(
-                chart_id="workforce_headcount_by_dept",
-                title="Headcount by Department",
-                description="Number of employee records per department."
-                + (f" {suppression_note(folded)}" if folded else ""),
-                spec={
-                    "data": {"values": values},
-                    "mark": {"type": "bar"},
-                    "height": max(140, 26 * len(values)),
-                    "encoding": {
-                        "y": {"field": "department", "type": "nominal", "sort": "-x", "title": None},
-                        "x": {"field": "headcount", "type": "quantitative", "title": "Headcount"},
-                        "tooltip": [{"field": "department"}, {"field": "headcount"}],
-                    },
-                },
-            ))
-    return charts
-
-
-def _merge_small_bins(bins: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Small-cell suppression for a pre-binned histogram: a non-empty bin
-    with fewer than the minimum count is merged into its nearest non-empty
-    neighbour (widening that bar) so no bar shows a handful of people."""
-    if len(bins) < 2 or sum(b["count"] for b in bins) < min_cell_size():
-        return bins
-    merged: list[dict[str, Any]] = []
-    carry: dict[str, Any] | None = None
-    for b in bins:
-        b = dict(b)
-        if carry is not None:
-            b["bin_start"] = carry["bin_start"]
-            b["count"] += carry["count"]
-            carry = None
-        if 0 < b["count"] < min_cell_size():
-            carry = b
-            continue
-        merged.append(b)
-    if carry is not None:
-        if merged:
-            merged[-1]["bin_end"] = carry["bin_end"]
-            merged[-1]["count"] += carry["count"]
-        else:
-            merged.append(carry)
-    return merged
-
-
-def _workforce_tenure_chart(df: pd.DataFrame, workforce_output: dict[str, Any]) -> list[ChartSpec]:
-    charts: list[ChartSpec] = []
-    hire_col = workforce_output.get("hire_date_column")
-    if hire_col and hire_col in df.columns:
-        hired = pd.to_datetime(df[hire_col], errors="coerce", format="mixed")
-        exit_col = workforce_output.get("exit_date_column")
-        if exit_col and exit_col in df.columns:
-            ended = pd.to_datetime(df[exit_col], errors="coerce", format="mixed")
-        else:
-            ended = pd.Series(pd.NaT, index=df.index)
-        ref_str = workforce_output.get("tenure_reference_date")
-        reference = pd.Timestamp(ref_str) if ref_str else pd.Timestamp.now()
-        ended = ended.fillna(reference)
-        tenure_years = (ended - hired).dt.total_seconds() / (365.25 * 86400)
-        tenure_years = tenure_years[tenure_years.notna() & (tenure_years >= 0)]
-        if len(tenure_years) >= 5:
-            bins = _merge_small_bins(_histogram_bins(tenure_years, max_bins=15))
-            if bins:
-                charts.append(ChartSpec(
-                    chart_id="workforce_tenure_hist",
-                    title="Tenure Distribution",
-                    description="Years of tenure across employees (pre-binned).",
-                    spec={
-                        "data": {"values": bins},
-                        "mark": {"type": "bar"},
-                        "height": 200,
-                        "encoding": {
-                            "x": {"field": "bin_start", "bin": "binned", "type": "quantitative", "title": "Years"},
-                            "x2": {"field": "bin_end"},
-                            "y": {"field": "count", "type": "quantitative", "title": "Employees"},
-                            "tooltip": [{"field": "bin_start"}, {"field": "bin_end"}, {"field": "count"}],
-                        },
-                    },
-                ))
-    return charts
-
-
-# ---------------------------------------------------------------------------
-# Phase 3 — a panel for each top finding kind that has none of its own,
-# built from the finding's evidence plus the tool output it came from and
-# pre-tagged with that finding so it leads the dashboard. Uncertainty is
-# drawn wherever the tool reported it or it follows exactly from the data;
-# nothing is drawn where it doesn't.
-# ---------------------------------------------------------------------------
-
-_GRAIN_UNIT = {"monthly": "month", "weekly": "week", "daily": "day"}
-
-
 def _tag(chart: ChartSpec, finding: dict[str, Any]) -> ChartSpec:
     chart.finding_id = finding.get("finding_id") or f"{finding.get('kind')}::{finding.get('measure')}"
     chart.priority = float(finding.get("importance") or 0.0)
     chart.layer = finding.get("layer") or "analyst"
     chart.caption = fallback_caption(finding) or finding.get("headline")
     return chart
-
-
-def _segment_lift_chart(
-    finding: dict[str, Any], results: list[dict[str, Any]], col_by_name: dict[str, ColumnProfile],
-) -> ChartSpec | None:
-    """Every level of the finding's dimension (segment_comparison's own
-    comparisons) with its 95% CI as an error bar and the overall average as
-    a dashed reference; the finding's own level is drawn solid. Falls back
-    to that level vs everyone else when no sibling levels were reported."""
-    ev = finding.get("evidence") or {}
-    measure, dimension, level = ev.get("measure"), ev.get("dimension"), str(ev.get("level"))
-    baseline = _num(ev.get("baseline_value"))
-    if not measure or not dimension or baseline is None or _num(ev.get("level_value")) is None:
-        return None
-    if ev.get("n") is not None and is_small(ev.get("n") or 0):
-        return None  # the finding's own segment is under the minimum cell size
-    siblings: list[dict[str, Any]] = []
-    for out in _tool_outputs(results, "segment_comparison"):
-        siblings = [
-            c for c in out.get("comparisons") or []
-            if isinstance(c, dict) and c.get("measure") == measure and c.get("dimension") == dimension
-            and _num(c.get("level_value")) is not None
-            and not (c.get("n") is not None and is_small(c.get("n") or 0))
-        ]
-        if len(siblings) >= 2:
-            break
-    else:
-        siblings = []
-
-    values: list[dict[str, Any]] = [
-        {
-            "segment": str(c.get("level")),
-            "value": _num(c.get("level_value")),
-            "ci_lower": _num(c.get("ci_lower")),
-            "ci_upper": _num(c.get("ci_upper")),
-            "n": _to_primitive(c.get("n")),
-            "focus": str(c.get("level")) == level,
-        }
-        for c in (siblings or [ev])
-    ]
-    values.sort(key=lambda r: r["value"], reverse=True)
-    if len(values) > MAX_CATEGORIES_SHOWN:
-        head = values[:MAX_CATEGORIES_SHOWN - 1]
-        values = head + [r for r in values[MAX_CATEGORIES_SHOWN - 1:] if r["focus"]]
-    if not siblings:
-        values.append({"segment": "Everyone else", "value": baseline, "ci_lower": None, "ci_upper": None,
-                       "n": _to_primitive(ev.get("n_rest")), "focus": False})
-
-    is_rate = bool(ev.get("is_rate"))
-    col = col_by_name.get(str(measure))
-    unit_hint = "percent" if is_rate else (ev.get("unit_hint") or (col.unit_hint if col else None))
-    fmt = axis_format(unit_hint)
-    value_title = f"{humanize_label(measure)} rate" if is_rate else humanize_axis_title(measure, unit_hint)
-    dim_title = humanize_label(dimension)
-
-    horizontal = len(values) >= 9
-    cat_ch, val_ch = ("y", "x") if horizontal else ("x", "y")
-    sort = {"field": "value", "order": "descending"}
-    cat_enc: dict[str, Any] = {"field": "segment", "type": "nominal", "sort": sort, "title": dim_title}
-    if not horizontal:
-        cat_enc["axis"] = {"labelAngle": 0}
-    val_enc: dict[str, Any] = {"field": "value", "type": "quantitative", "title": value_title}
-    _merge_axis_format(val_enc, fmt)
-    layers: list[dict[str, Any]] = [{"mark": {"type": "bar"}, "encoding": {
-        cat_ch: cat_enc,
-        val_ch: val_enc,
-        "opacity": {"condition": {"test": "datum.focus", "value": 1}, "value": 0.45},
-        "tooltip": [
-            {"field": "segment", "title": dim_title},
-            {"field": "value", "title": value_title, **fmt},
-            {"field": "ci_lower", "title": "95% CI from", **fmt},
-            {"field": "ci_upper", "title": "95% CI to", **fmt},
-            {"field": "n", "title": "Sample size"},
-        ],
-    }}]
-    has_ci = any(r["ci_lower"] is not None and r["ci_upper"] is not None for r in values)
-    if has_ci:
-        layers.append({"mark": {"type": "rule"}, "encoding": {
-            cat_ch: {"field": "segment", "type": "nominal", "sort": sort},
-            val_ch: {"field": "ci_lower", "type": "quantitative", "title": value_title},
-            f"{val_ch}2": {"field": "ci_upper"},
-        }})
-    overall = _num(ev.get("overall_mean")) if siblings else None
-    if overall is not None:
-        layers.append({
-            "data": {"values": [{"overall": overall}]},
-            "mark": {"type": "rule", "strokeDash": [4, 3]},
-            "encoding": {val_ch: {"field": "overall", "type": "quantitative", "title": value_title}},
-        })
-
-    noun = "rate" if is_rate else "average"
-    description = (
-        f"{humanize_label(measure)} {noun} for each {dim_title} level" if siblings
-        else f"{humanize_label(measure)} {noun} for {level} vs everyone else"
-    ) + "; the solid bar is the segment this finding is about."
-    if has_ci:
-        description += " Error bars: 95% confidence interval of each segment's own value."
-    if overall is not None:
-        description += f" Dashed line: overall {noun} ({_fmt_value(overall, unit_hint)})."
-    return ChartSpec(
-        chart_id=f"segment_{_slug(measure)}_{_slug(dimension)}",
-        title=f"{humanize_label(measure)} by {dim_title}",
-        description=description,
-        spec={
-            "data": {"values": values},
-            "height": max(160, 24 * len(values)) if horizontal else 260,
-            "layer": layers,
-        },
-    )
-
-
-def _lorenz_chart(df: pd.DataFrame, finding: dict[str, Any]) -> ChartSpec | None:
-    """Lorenz curve of a concentration finding: entities ranked smallest to
-    largest against their cumulative share of the measure, with the
-    equality diagonal. Recomputed from the data when its columns are
-    present, else drawn through the tool's own top-10/20/50% checkpoints."""
-    ev = finding.get("evidence") or {}
-    measure, entity = ev.get("measure_column"), ev.get("entity_column")
-    if not measure or not entity:
-        return None
-    points: list[tuple[float, float]] = []
-    if measure in df.columns and entity in df.columns:
-        # Same rows the tool summed: both an entity and a numeric measure.
-        pair = pd.DataFrame({"entity": df[entity], "value": pd.to_numeric(df[measure], errors="coerce")}).dropna()
-        per_entity = pair.groupby("entity")["value"].sum()
-        total = float(per_entity.sum())
-        if len(per_entity) >= 2 and total > 0 and bool((per_entity >= 0).all()):
-            cumulative = per_entity.sort_values().cumsum().to_numpy(dtype=float) / total
-            n = len(cumulative)
-            idx = np.unique(np.linspace(0, n - 1, min(n, LORENZ_MAX_POINTS)).astype(int))
-            points = [(0.0, 0.0)] + [((i + 1) / n, float(cumulative[i])) for i in idx]
-    if not points:
-        # The bottom (100 - p)% of entities hold 1 - (top p% share).
-        shares = [(p, _num(ev.get(f"top_{p}_pct_share"))) for p in (50, 20, 10)]
-        if any(s is None for _, s in shares):
-            return None
-        points = [(0.0, 0.0), *((1 - p / 100, 1 - (s or 0.0)) for p, s in shares), (1.0, 1.0)]
-
-    values = [{"entity_share": round(x * 100, 2), "measure_share": round(y * 100, 2)} for x, y in points]
-    entity_label, measure_label = humanize_label(entity).lower(), humanize_label(measure).lower()
-    domain = {"scale": {"domain": [0, 100]}}
-    gini = _num(ev.get("gini_coefficient"))
-    return ChartSpec(
-        chart_id=f"lorenz_{_slug(measure)}_{_slug(entity)}",
-        title=f"Concentration — {humanize_label(measure)} across {humanize_label(entity)}",
-        description=(
-            f"Lorenz curve: {entity_label} ranked from smallest to largest {measure_label}, against "
-            f"their cumulative share of the total. The dashed diagonal is a perfectly even split; the "
-            f"further the curve sags below it, the more the total rests on a few {entity_label}."
-            + (f" Gini = {gini:.2f}." if gini is not None else "")
-        ),
-        spec={
-            "height": 260,
-            "layer": [
-                {"data": {"values": values}, "mark": {"type": "area", "line": True}, "encoding": {
-                    "x": {"field": "entity_share", "type": "quantitative",
-                          "title": f"Cumulative % of {entity_label} (smallest first)", **domain},
-                    "y": {"field": "measure_share", "type": "quantitative",
-                          "title": f"Cumulative % of {measure_label}", **domain},
-                    "tooltip": [{"field": "entity_share", "title": f"% of {entity_label}"},
-                                {"field": "measure_share", "title": f"% of {measure_label}"}],
-                }},
-                {"data": {"values": [{"entity_share": 0, "measure_share": 0},
-                                     {"entity_share": 100, "measure_share": 100}]},
-                 "mark": {"type": "line", "strokeDash": [4, 3]},
-                 "encoding": {"x": {"field": "entity_share", "type": "quantitative"},
-                              "y": {"field": "measure_share", "type": "quantitative"}}},
-            ],
-        },
-    )
-
-
-def _change_comparison_chart(
-    measure: str, prior: float, latest: float, unit: str, latest_label: str,
-    unit_hint: str | None, agg_word: str,
-) -> ChartSpec:
-    """Two bars from a zero baseline — previous period vs latest — with the
-    change written above the latest bar as "+x (+y%)". A waterfall of two
-    levels and one thin step says nothing; this is the honest version when
-    there is no additive segment breakdown to decompose."""
-    change = latest - prior
-    pct = f" ({change / abs(prior):+.1%})" if prior else ""
-    rows = [
-        {"period": f"Previous {unit}", "order": 0, "value": round(prior, 6),
-         "label": _fmt_value(prior, unit_hint), "note": "", "latest": False},
-        {"period": latest_label, "order": 1, "value": round(latest, 6),
-         "label": _fmt_value(latest, unit_hint), "note": f"{_signed(change, unit_hint)}{pct}", "latest": True},
-    ]
-    fmt = axis_format(unit_hint)
-    x_enc: dict[str, Any] = {"field": "period", "type": "nominal", "sort": {"field": "order"}, "title": None,
-                             "axis": {"labelAngle": 0}}
-    y_enc: dict[str, Any] = {"field": "value", "type": "quantitative", "scale": {"zero": True},
-                             "title": f"{agg_word.capitalize()} {humanize_axis_title(measure, unit_hint)}"}
-    _merge_axis_format(y_enc, fmt)
-    return ChartSpec(
-        chart_id=f"change_waterfall_{_slug(measure)}",
-        title=f"{humanize_label(measure)} — {latest_label} vs Previous {unit.capitalize()}",
-        description=f"{agg_word.capitalize()} {humanize_label(measure).lower()} in the previous {unit} and in "
-                    f"{latest_label}, both from zero, with the change between them.",
-        spec={
-            "data": {"values": rows},
-            "height": 240,
-            "layer": [
-                {"mark": {"type": "bar"}, "encoding": {
-                    "x": x_enc, "y": y_enc,
-                    "tooltip": [{"field": "period", "title": "Period"}, {"field": "label", "title": "Value"}],
-                }},
-                {"mark": {"type": "text", "dy": -7}, "encoding": {
-                    "x": x_enc, "y": {"field": "value", "type": "quantitative"}, "text": {"field": "label"},
-                }},
-                {"mark": {"type": "text", "dy": -22, "fontWeight": "bold"},
-                 "transform": [{"filter": {"field": "latest", "equal": True}}],
-                 "encoding": {"x": x_enc, "y": {"field": "value", "type": "quantitative"}, "text": {"field": "note"}}},
-            ],
-        },
-    )
-
-
-def _change_waterfall_chart(
-    finding: dict[str, Any], col_by_name: dict[str, ColumnProfile],
-) -> ChartSpec | None:
-    """Waterfall from the previous period's total to the latest one, one
-    step per segment's contribution (change_analysis `segment_breakdown`)
-    plus an explicit "Other segments" remainder so the bars reconcile to the
-    headline change. Only an additive (summed) measure with a segment
-    breakdown gets one; an averaged measure's segment deltas don't add up,
-    and with no breakdown a waterfall is just two levels — both get a
-    two-bar previous-vs-latest comparison instead."""
-    ev = finding.get("evidence") or {}
-    prior, latest = _num(ev.get("prior_period_value")), _num(ev.get("latest_value"))
-    if prior is None or latest is None:
-        return None
-    measure = str(ev.get("measure_column") or finding.get("measure") or "value")
-    col = col_by_name.get(measure)
-    unit_hint = col.unit_hint if col else None
-    unit = _GRAIN_UNIT.get(str(ev.get("period_grain")), "period")
-    latest_label = str(ev.get("latest_period") or f"Latest {unit}")
-    additive = ev.get("aggregation") == "sum"
-    raw_breakdown = ev.get("segment_breakdown")
-    breakdown: list[Any] = raw_breakdown if additive and isinstance(raw_breakdown, list) else []
-
-    steps: list[tuple[str, float, bool]] = [(f"Previous {unit}", prior, True)]
-    for seg in breakdown[:WATERFALL_MAX_SEGMENTS]:
-        delta = _num(seg.get("delta")) if isinstance(seg, dict) else None
-        if delta is not None:
-            steps.append((str(seg.get("level")), delta, False))
-    if len(steps) == 1:
-        return _change_comparison_chart(
-            measure, prior, latest, unit, latest_label, unit_hint, "total" if additive else "average",
-        )
-    rest = (latest - prior) - sum(value for _, value, is_total in steps if not is_total)
-    if abs(rest) > 1e-9 * max(abs(prior), abs(latest), 1.0):
-        steps.append(("Other segments", rest, False))
-    steps.append((latest_label, latest, True))
-
-    rows: list[dict[str, Any]] = []
-    running = 0.0
-    for order, (label, value, is_total) in enumerate(steps):
-        start, end = (0.0, value) if is_total else (running, running + value)
-        running = end
-        rows.append({
-            "step": label, "order": order,
-            "start": round(start, 6), "end": round(end, 6), "top": round(max(start, end), 6),
-            "total": is_total,
-            "label": _fmt_value(value, unit_hint) if is_total else _signed(value, unit_hint),
-        })
-
-    agg_word = "total" if additive else "average"
-    fmt = axis_format(unit_hint)
-    x_enc: dict[str, Any] = {"field": "step", "type": "nominal", "sort": {"field": "order"}, "title": None}
-    if len(rows) <= 6:
-        x_enc["axis"] = {"labelAngle": 0}
-    y_enc: dict[str, Any] = {"field": "start", "type": "quantitative",
-                             "title": f"{agg_word.capitalize()} {humanize_axis_title(measure, unit_hint)}"}
-    _merge_axis_format(y_enc, fmt)
-    description = (
-        f"How {agg_word} {humanize_label(measure).lower()} moved from the previous {unit} to {latest_label}"
-        + (": each lighter bar is one segment's contribution." if len(steps) > 3 else ".")
-        + " Solid bars are the period totals."
-    )
-    return ChartSpec(
-        chart_id=f"change_waterfall_{_slug(measure)}",
-        title=f"What Moved {humanize_label(measure)} — {latest_label} vs Previous {unit.capitalize()}",
-        description=description,
-        spec={
-            "data": {"values": rows},
-            "height": 260,
-            "layer": [
-                {"mark": {"type": "bar"}, "encoding": {
-                    "x": x_enc, "y": y_enc, "y2": {"field": "end"},
-                    "opacity": {"condition": {"test": "datum.total", "value": 1}, "value": 0.55},
-                    "tooltip": [{"field": "step", "title": "Step"}, {"field": "label", "title": "Amount"}],
-                }},
-                {"mark": {"type": "text", "dy": -7}, "encoding": {
-                    "x": x_enc, "y": {"field": "top", "type": "quantitative"}, "text": {"field": "label"},
-                }},
-            ],
-        },
-    )
-
-
-def _group_ci_chart(
-    df: pd.DataFrame, finding: dict[str, Any], col_by_name: dict[str, ColumnProfile],
-) -> ChartSpec | None:
-    """Mean ± 95% CI of a test finding's measure in every group of its
-    dimension, on the test's own unit of analysis (one value per entity when
-    it aggregated repeated rows), the leading post-hoc pair highlighted."""
-    from scipy import stats
-
-    ev = finding.get("evidence") or {}
-    measure, dimension = str(finding.get("measure")), str(finding.get("dimension"))
-    if (
-        measure not in df.columns or dimension not in df.columns
-        or not pd.api.types.is_numeric_dtype(df[measure])
-        # The test quartile-binned a float grouping; regrouping it here
-        # differently would show groups the test never compared.
-        or pd.api.types.is_float_dtype(df[dimension])
-    ):
-        return None
-    unit = ev.get("unit_of_analysis")
-    entity = unit if isinstance(unit, str) and unit != "row" and unit in df.columns else None
-    frame = df[[measure, dimension] + ([entity] if entity else [])].dropna()
-    col = col_by_name.get(measure)
-    if entity:
-        agg = measure_aggregation(col) if col is not None and col.semantic_role == "measure" else "mean"
-        frame = aggregate_to_entity(frame, entity, measure, agg, by=dimension)
-    grouped = frame.groupby(frame[dimension].astype(str))[measure].agg(["mean", "std", "count"])
-    # Small-cell suppression: a group under the minimum size is not drawn.
-    dropped = int((grouped["count"] < max(2, min_cell_size())).sum())
-    grouped = grouped[grouped["count"] >= max(2, min_cell_size())].nlargest(MAX_CATEGORIES_SHOWN, "count")
-    if len(grouped) < 2:
-        return None
-    half = stats.t.ppf(0.975, grouped["count"] - 1) * grouped["std"].fillna(0.0) / np.sqrt(grouped["count"])
-
-    post_hoc = ev.get("post_hoc")
-    pair = post_hoc[0] if isinstance(post_hoc, list) and post_hoc and isinstance(post_hoc[0], dict) else None
-    focus = {str(pair.get("group_a")), str(pair.get("group_b"))} if pair else set()
-    values = [
-        {
-            "group": str(g),
-            "mean": round(float(row["mean"]), 6),
-            "ci_lower": round(float(row["mean"] - h), 6),
-            "ci_upper": round(float(row["mean"] + h), 6),
-            "n": int(row["count"]),
-            "focus": not focus or str(g) in focus,
-        }
-        for (g, row), h in zip(grouped.iterrows(), half, strict=True)
-    ]
-    unit_hint = col.unit_hint if col else None
-    fmt = axis_format(unit_hint)
-    value_title = f"Average {humanize_axis_title(measure, unit_hint)}"
-    dim_title = humanize_label(dimension)
-    horizontal = len(values) >= 9
-    cat_ch, val_ch = ("y", "x") if horizontal else ("x", "y")
-    cat_enc: dict[str, Any] = {"field": "group", "type": "nominal",
-                               "sort": {"field": "mean", "order": "descending"}, "title": dim_title}
-    if not horizontal:
-        cat_enc["axis"] = {"labelAngle": 0}
-    val_enc: dict[str, Any] = {"field": "ci_lower", "type": "quantitative", "title": value_title,
-                               "scale": {"zero": False}}
-    _merge_axis_format(val_enc, fmt)
-    opacity = {"condition": {"test": "datum.focus", "value": 1}, "value": 0.4}
-
-    description = (
-        f"Average {humanize_label(measure).lower()} in each {dim_title} group; whiskers are the "
-        "95% confidence interval of each group's mean."
-    )
-    if dropped:
-        description += f" {suppression_note(dropped)}"
-    if pair:
-        p_adj = _num(pair.get("p_adjusted"))
-        description += (
-            f" Largest follow-up gap: {pair.get('group_a')} vs {pair.get('group_b')}"
-            + (f" (adjusted p={p_adj:.3g})" if p_adj is not None else "") + ", highlighted."
-        )
-    return ChartSpec(
-        chart_id=f"groups_{_slug(measure)}_{_slug(dimension)}",
-        title=f"{humanize_label(measure)} across {dim_title}",
-        description=description,
-        spec={
-            "data": {"values": values},
-            "height": max(160, 24 * len(values)) if horizontal else 240,
-            "layer": [
-                {"mark": {"type": "rule"}, "encoding": {
-                    cat_ch: cat_enc, val_ch: val_enc, f"{val_ch}2": {"field": "ci_upper"}, "opacity": opacity,
-                }},
-                {"mark": {"type": "circle", "size": 90, "opacity": 1}, "encoding": {
-                    cat_ch: cat_enc,
-                    val_ch: {"field": "mean", "type": "quantitative", "title": value_title},
-                    "opacity": opacity,
-                    "tooltip": [
-                        {"field": "group", "title": dim_title},
-                        {"field": "mean", "title": value_title, **fmt},
-                        {"field": "ci_lower", "title": "95% CI from", **fmt},
-                        {"field": "ci_upper", "title": "95% CI to", **fmt},
-                        {"field": "n", "title": "Sample size"},
-                    ],
-                }},
-            ],
-        },
-    )
 
 
 def _finding_charts(
@@ -2334,12 +426,6 @@ def _finding_charts(
         charts.append(_tag(chart, finding))
     return charts
 
-
-# ---------------------------------------------------------------------------
-# 7.8 — story layer: tag existing panels with the top-ranked finding that
-# explains them, so the dashboard's most important chart is visually first
-# rather than always being whatever built first in code order.
-# ---------------------------------------------------------------------------
 
 def _finding_fits_chart(finding: dict[str, Any], chart: ChartSpec) -> bool:
     """A correlation finding only captions a chart that plots its own pair;
@@ -2388,11 +474,6 @@ def _attach_finding_metadata(charts: list[ChartSpec], findings: list[dict[str, A
             used_finding_ids.add(fid)
             break
 
-
-# ---------------------------------------------------------------------------
-# LLM-authored declarative charts (src.core.chart_spec): a successful tool
-# output's "chart" key, or a finding whose chart_hint is a full spec.
-# ---------------------------------------------------------------------------
 
 def _llm_chart(clean: dict[str, Any], chart_id: str, finding: dict[str, Any] | None) -> ChartSpec:
     headline = finding.get("headline") if finding else None
@@ -2450,6 +531,8 @@ def merge_designed(
 
 #: Sandbox runs whose RESULT table gets a chart although the code declared none.
 MAX_AUTO_RESULT_CHARTS = 2
+
+
 _DATE_LABEL_RE = re.compile(r"\d{4}-\d{2}(-\d{2})?")
 
 
@@ -2534,10 +617,6 @@ def _llm_charts(results: list[dict[str, Any]], findings: list[dict[str, Any]]) -
             add(raw, f"llm_{finding['finding_id'] if finding else f'{tool}_{i}'}{suffix}", finding)
     return charts
 
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
 
 def build_dashboard(
     df: pd.DataFrame,

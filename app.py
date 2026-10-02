@@ -180,6 +180,7 @@ _DEFAULTS: dict[str, Any] = {
     "preview_notes":  [],
     "run_objective":  "",     # the question the finished run was given
     "is_sample":      False,  # the finished run analysed the bundled sample file
+    "run_view":       None,   # RunView of the finished run (src/core/run_view.py)
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -211,7 +212,7 @@ def _reset_pipeline() -> None:
     for k in ("stage_log", "analysis_done", "analysis_error",
               "final_report", "tool_results", "metadata", "profile",
               "dashboard", "tmp_dir", "progress_lines", "llm_warning",
-              "preview_notes"):
+              "preview_notes", "run_view"):
         st.session_state[k] = _DEFAULTS[k]
 
 
@@ -1028,6 +1029,17 @@ if run_clicked or _sample_run:
         agent.on_iteration_callback = _on_iter
 
         final = agent.analyze()
+
+        # The controller is gone after the rerun, so everything RunView needs
+        # from memory is snapshotted into a plain dict here.
+        from src.core.run_view import RUN_VIEW_CONTEXT_KEYS, build_run_view
+
+        st.session_state["run_view"] = build_run_view(
+            final,
+            {k: agent.memory.get_context(k) for k in RUN_VIEW_CONTEXT_KEYS},
+            objective=run_objective_text,
+            is_sample=_sample_run,
+        )
 
         # ── Mark all stages done ──────────────────────────────────────────
         _upd("2", "done", "plan generated & executed")

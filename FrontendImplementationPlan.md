@@ -34,8 +34,8 @@ Decisions that shape every batch below (overhaul plan section 2b):
 - Ask-First items in `AGENTS.md`: `src/rlm/engine.py`, task decomposition, the
   `MemorySystem` schema, deleting source files, adding a tool. Batch 3 touches
   `controller.py` but not decomposition. Deleting `ui/animations.py` and
-  `frontend-landing/` is a deletion of verified-dead or duplicate files and is
-  covered by the owner's decisions; still search for importers first.
+  `frontend-landing/` is a deletion of source files, so confirm each one with
+  the owner at that step's commit ask, after searching for importers.
 - Known and accepted deviation: with the UI-selected provider no longer in the
   environment, `llm_concurrency()` in `src/rlm/engine.py` uses the cloud default
   of 4 parallel decomposition calls even for a local model (decomposition is off
@@ -82,6 +82,13 @@ Open facts that the batches below depend on:
   `static/vendor/vega/` exists unused.
 - `ui/animations.py` is live (called at the bottom of `app.py`) and loads
   Anime.js from a CDN.
+- The landing page no longer has FAQ or pricing markup (a comment in
+  `ui/landing_component/index.html` says they were removed). Dead CSS for
+  `.pricing-*` and `.faq-*` remains, and the page text still contains words the
+  overhaul plan wants gone (counts by case-insensitive search at the time of
+  writing: `swarm` 2, `manifold` 2, `synapse` 15, `certified` 15, `telemetry`
+  36). Many of these may be CSS class names or comments rather than visible
+  text; batch 4 starts by finding out which.
 
 ## 2. Batch 0: before-screenshots and a clean base
 
@@ -92,9 +99,9 @@ how every native widget looks.
 
 Steps:
 
-1. Commit the pending plan edits and this file on `frontend-overhaul`
-   (message: `docs: frontend implementation plan, record decisions`). Owner's
-   `README.md` stays out.
+1. Nothing to commit for the plans: the owner already committed the overhaul
+   plan edits and this file (`6d946a8`, `550ffb9`). Confirm `git status` is
+   clean before continuing; any later edit to either plan is its own commit.
 2. `git tag batch-0-before-visuals` on that commit. Anyone can later check it
    out to see the exact "before" state.
 3. Capture screenshots into `docs/screenshots/before/` at 1440 by 900, Day and
@@ -166,7 +173,9 @@ class HowWeGotHere:
 @dataclass(frozen=True)
 class RunView:
     objective: str; is_sample: bool; verdict: Verdict | None
-    findings: tuple[dict[str, Any], ...]; coverage: dict[str, Any]
+    findings: tuple[dict[str, Any], ...]
+    headline_findings: tuple[dict[str, Any], ...]   # the five cards Answers leads with
+    coverage: dict[str, Any]
     recommendations: tuple[str, ...]; reasoning: str
     how: HowWeGotHere
 
@@ -375,9 +384,10 @@ Steps:
 1. Backend stop hook (`src/core/controller.py`). Add `should_stop` (a zero-arg
    callable, default `None`) and a `_stop_requested()` helper. Check it before
    each LLM call and after each step batch in the loop that lives in `_analyze`,
-   and between steps inside `_execute_steps`. On stop, return the existing
-   deterministic synthesis with `stopped=True` so a partial report is still
-   written. This must not change decomposition; if a checkpoint would, stop and
+   and between steps inside `_execute_steps`. On stop, return the deterministic synthesis so a partial report is still
+   written. `_deterministic_final(self)` has no stop parameter in the committed
+   code, so add one (a `stopped: bool = False` argument that records the stop in
+   the result and in the degradations list). This must not change decomposition; if a checkpoint would, stop and
    ask.
 2. Offline test (`tests/test_controller_stop.py`): a controller with
    `should_stop=lambda: True` and the LLM off returns a result with a stopped
@@ -388,8 +398,8 @@ Steps:
    `load_dataset` and `analyze`; it never calls any `st.*` function and never
    touches `st.session_state`. The settings it needs travel in a frozen spec,
    as the key, objective and output directory already do. Because the worker
-   builds the controller, the objective scope from batch 1 applies on that
-   thread automatically.
+   builds the controller, the objective scope from the done work in section 1
+   applies on that thread automatically.
 4. Poll with `@st.fragment(run_every="1s")`: it redraws the stage list and the
    Stop button, and when the worker has finished it folds the outcome into
    `st.session_state` (including `run_view`) and calls `st.rerun()`.
@@ -436,11 +446,14 @@ Steps:
    `frontend-landing/` to `ui/landing_component/`, confirm with a search that
    nothing else references `frontend-landing/`, delete the directory. Own commit.
 2. In `ui/landing_component/index.html` change text and markup only:
-   - delete the pricing or "tiers" section and the FAQ section, and the FAQ
-     structured-data node if one remains;
-   - rewrite the jargon and unsupported claims listed in overhaul plan section 6
-     ("swarm synapses", "concentric manifold", "certified safe", exact guarantee
-     percentages, fake status chrome);
+   - first list the visible text nodes that contain the flagged words (render
+     the page, or read the `<h1>`, `<h2>`, `<p>` and button text), so class names
+     and comments are not edited by mistake;
+   - delete the dead `.pricing-*` and `.faq-*` CSS and any leftover listeners for
+     them (the FAQ and pricing markup itself is already gone);
+   - rewrite the visible jargon and unsupported claims listed in overhaul plan
+     section 6 ("swarm synapses", "concentric manifold", "certified safe",
+     exact guarantee percentages, fake status chrome);
    - sentence case for headings;
    - add a short data-path statement: the file is processed on the server for
      the session and removed when it ends; summaries of the data go to the
@@ -450,8 +463,8 @@ Steps:
 4. Run `pytest tests/test_landing.py tests/test_landing_v2.py -q` and update any
    assertion that expects removed sections.
 
-Acceptance: a search of the HTML for the removed phrases returns nothing; the
-landing tests pass; manual check that the CTA still enters the workspace and
+Acceptance: the visible text no longer contains the removed phrases (class
+names may keep them, or be renamed in the same commit); the landing tests pass; manual check that the CTA still enters the workspace and
 the theme still carries over.
 
 Risks: these tests may assert removed copy; update them to assert the new

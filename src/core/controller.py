@@ -24,11 +24,11 @@ import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from src.core.agenda import Question, build_agenda, coverage_report
 from src.core.causal_guard import (
@@ -98,6 +98,9 @@ from src.core.tool_registry import _INJECTED_PARAMS as _INJECTED_PARAMS
 from src.core.tool_registry import ToolRegistry as ToolRegistry
 from src.core.tool_registry import _short_tool_description as _short_tool_description
 from src.rlm.engine import RLMEngine, RLMSubTask
+
+if TYPE_CHECKING:
+    from rich.progress import TaskID
 
 logger = logging.getLogger(__name__)
 

@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -458,6 +459,39 @@ def _detect_formula_leakage(df: pd.DataFrame, target: str, features: list[str]) 
     return warnings
 
 
+@dataclass
+class _TrainContext:
+    """Everything `_fit_and_score` needs about one supervised training run."""
+
+    task_type: str
+    max_depth: int
+    balanced: bool
+    scale_pos_weight: float
+    do_tune: bool
+    X_train: pd.DataFrame
+    y_train: Any
+    X_test: pd.DataFrame
+    y_test: Any
+    groups_train: Any
+    split_strategy: str
+    cv: Any
+    scoring: str
+    output_dir: str
+    treatments: list[str]
+    overfit_warnings: list[str]
+
+
+class _TrainRun(NamedTuple):
+    """Outcome of a supervised or clustering training pass."""
+
+    results: dict[str, Any]
+    best_model: str
+    baseline_cv_mean: float | None
+    overfit_warnings: list[str]
+    X_train: pd.DataFrame
+    X_test: pd.DataFrame
+
+
 class TrainModelTool(BaseTool):
     """
     Train one or more ML models with anti-overfitting safeguards.
@@ -664,7 +698,6 @@ class TrainModelTool(BaseTool):
         group_column: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
-        from sklearn.model_selection import cross_val_score
 
         df = _read_df(file_path)
         target_words: dict[str, str] | None = (df.attrs.get("boolean_labels") or {}).get(target_column)
@@ -678,23 +711,8 @@ class TrainModelTool(BaseTool):
         X, y, treatments = _prepare_features(df, target_column)
         treatments.extend(split_notes)
 
-        # Auto-detect task type. Must agree with
-        # DatasetMetadata.infer_task_type, which is the canonical rule: a
-        # FLOAT target is continuous no matter how few distinct values it
-        # happens to take. The previous "nunique <= 20 -> classification"
-        # test ignored dtype, so a revenue column taking 18 distinct prices
-        # was treated as an 18-class problem and every model failed with
-        # "Supported target types are ('binary', 'multiclass'). Got
-        # 'continuous'" — the whole ML stage dying on ordinary money data.
         if task_type == "auto":
-            if not pd.api.types.is_numeric_dtype(y):
-                task_type = "classification"
-            elif pd.api.types.is_bool_dtype(y):
-                task_type = "classification"
-            elif pd.api.types.is_integer_dtype(y) and y.nunique() <= 20:
-                task_type = "classification"
-            else:
-                task_type = "regression"
+            task_type = self._infer_task_type(y)
 
         leakage_warnings = _detect_target_leakage(X, y, task_type)
         leakage_warnings += _detect_formula_leakage(df, target_column, list(X.columns))
@@ -706,18 +724,7 @@ class TrainModelTool(BaseTool):
         scale_pos_weight = 1.0
         if task_type == "classification":
             y, class_labels = _encode_target(y, target_words)
-            # Act on class imbalance instead of just warning about it
-            counts = y.value_counts()
-            if len(counts) >= 2:
-                minority_frac = float(counts.iloc[-1]) / float(counts.sum())
-                if minority_frac < IMBALANCE_THRESHOLD:
-                    balanced = True
-                    if len(counts) == 2:
-                        scale_pos_weight = float(counts.get(0, 0)) / max(float(counts.get(1, 0)), 1.0)
-                    treatments.append(
-                        f"Class weighting applied — minority class is {minority_frac:.1%} "
-                        f"of rows (threshold {IMBALANCE_THRESHOLD:.0%})."
-                    )
+            balanced, scale_pos_weight = self._class_weighting(y, treatments)
 
         do_tune = bool(tune_hyperparameters)
 
@@ -737,200 +744,18 @@ class TrainModelTool(BaseTool):
             )
 
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        results: dict[str, Any] = {}
-        overfit_warnings: list[str] = []
-        build_errors: list[str] = []
 
         if task_type in {"classification", "regression"}:
-            X_train, X_test, y_train, y_test, cv, groups_train = _split_train_test(
-                X, y, df, split_strategy, group_column, task_type, test_size, n_cv_folds
+            run = self._train_supervised(
+                X, y, df, models, task_type, test_size, n_cv_folds, max_depth, split_strategy,
+                group_column, do_tune, balanced, scale_pos_weight, output_dir, treatments,
             )
-            X_train, y_train, groups_train, orig_train_len = _cap_train_rows(
-                X_train, y_train, groups_train, split_strategy, task_type
-            )
-            if orig_train_len is not None:
-                treatments.append(
-                    f"Subsampled training set to {len(X_train):,} rows (from {orig_train_len:,}) "
-                    "for fast, memory-bounded model training."
-                )
-            scoring = "f1_weighted" if task_type == "classification" else "r2"
-
-            # The skew decision only depends on X_train's numeric columns, not
-            # on which encoder a given model's preprocessor uses — identical
-            # across every model trained in this call, so it's reported once
-            # here rather than once per model.
-            numeric_cols = [
-                c for c in X_train.columns
-                if pd.api.types.is_numeric_dtype(X_train[c]) and not pd.api.types.is_bool_dtype(X_train[c])
-            ]
-            if numeric_cols:
-                skew_probe = _SkewLog1pTransformer().fit(X_train[numeric_cols])
-                treatments.extend(skew_probe.describe())
-
-            for model_name in models:
-                try:
-                    estimator = self._build_model(
-                        model_name, task_type, max_depth,
-                        balanced=balanced, scale_pos_weight=scale_pos_weight,
-                    )
-                except Exception as exc:
-                    build_errors.append(f"{model_name}: build failed — {exc}")
-                    continue
-                if estimator is None:
-                    build_errors.append(
-                        f"{model_name}: unknown model name for task_type='{task_type}'. "
-                        f"Valid names: {self.CLASSIFICATION_MODELS if task_type == 'classification' else self.REGRESSION_MODELS}"
-                    )
-                    continue
-
-                try:
-                    from sklearn.pipeline import Pipeline
-
-                    preprocessor = _build_preprocessor(
-                        X_train, "onehot" if model_name in LINEAR_MODELS else "ordinal"
-                    )
-                    model: Any = Pipeline([("prep", preprocessor), ("model", estimator)])
-
-                    best_params: dict[str, Any] = {}
-                    cv_mean: float | None = None
-                    cv_std: float | None = None
-                    if do_tune:
-                        X_tune, y_tune, groups_tune = _tuning_sample(
-                            X_train, y_train, groups_train, split_strategy, task_type
-                        )
-                        model, best_params, tune_cv_mean, tune_cv_std = self._tune(
-                            model, model_name, X_tune, y_tune, cv, scoring, max_depth,
-                            groups=groups_tune,
-                        )
-                        # The search's own CV score is only the model's score when
-                        # it saw every training row; otherwise cross_val_score below
-                        # measures the tuned model on the full training set.
-                        if len(X_tune) == len(X_train):
-                            cv_mean, cv_std = tune_cv_mean, tune_cv_std
-
-                    try:
-                        model.fit(X_train, y_train)
-                    except Exception as fit_exc:
-                        if any(k in str(fit_exc).lower() for k in ("cuda", "gpu", "out of memory", "device")):
-                            treatments.append(f"{model_name}: GPU fit failed ({fit_exc}); refit on CPU.")
-                            estimator = self._build_model(
-                                model_name, task_type, max_depth, balanced=balanced,
-                                scale_pos_weight=scale_pos_weight, force_cpu=True,
-                            )
-                            model = Pipeline([("prep", preprocessor), ("model", estimator)])
-                            model.set_params(**{f"model__{k}": v for k, v in best_params.items()})
-                            model.fit(X_train, y_train)
-                        else:
-                            raise
-
-                    train_metrics = self._evaluate(model, X_train, y_train, task_type)
-                    test_metrics = self._evaluate(model, X_test, y_test, task_type)
-
-                    # Cross-validation (anti-overfitting measure). Fit only on the
-                    # training fold — X/y here would leak the held-out test rows
-                    # into every CV fold. When tuning ran, RandomizedSearchCV
-                    # already measured this with the same splitter/scorer, so
-                    # _tune's cv_mean/cv_std above are reused instead of paying
-                    # for a second cross_val_score pass.
-                    if cv_mean is None:
-                        cv_scores = cross_val_score(
-                            model, X_train, y_train, groups=groups_train,
-                            cv=cv, scoring=scoring, n_jobs=1,
-                        )
-                        cv_mean = round(float(cv_scores.mean()), 4)
-                        cv_std = round(float(cv_scores.std()), 4)
-
-                    # Train–test gap check
-                    primary_train = train_metrics.get("accuracy", train_metrics.get("r2", 0.0))
-                    primary_test = test_metrics.get("accuracy", test_metrics.get("r2", 0.0))
-                    gap = round(primary_train - primary_test, 4)
-                    if gap > OVERFIT_THRESHOLD:
-                        overfit_warnings.append(
-                            f"{model_name}: train-test gap={gap:.3f} > {OVERFIT_THRESHOLD} "
-                            f"— possible overfitting. Consider reducing max_depth or adding regularisation."
-                        )
-
-                    # Save model
-                    model_path = Path(output_dir) / f"{model_name}.pkl"
-                    save_model(model, model_path)
-
-                    results[model_name] = {
-                        "train_metrics": train_metrics,
-                        "test_metrics": test_metrics,
-                        "cv_mean": cv_mean,
-                        "cv_std": cv_std,
-                        "train_test_gap": gap,
-                        "model_path": str(model_path),
-                        "best_params": best_params,
-                    }
-                except Exception as exc:
-                    build_errors.append(f"{model_name}: training failed — {exc}")
-
-            if not results:
-                raise ToolExecutionError(
-                    f"No models could be trained for task_type='{task_type}'. "
-                    f"Errors: {'; '.join(build_errors) or 'all _build_model calls returned None — check model names and task_type.'}"
-                )
-
-            best_model = self._pick_best(results)
-
-            # A CV score only means something against what a no-skill
-            # predictor scores on the same folds — F1 0.82 on an 80%-majority
-            # target is barely better than always guessing the majority. On
-            # weighted F1, guessing the majority scores poorly on a balanced
-            # multiclass target, so the stronger of the two no-skill
-            # classifiers is the bar.
-            from sklearn.dummy import DummyClassifier, DummyRegressor
-
-            dummies = (
-                [
-                    DummyClassifier(strategy="most_frequent"),
-                    DummyClassifier(strategy="stratified", random_state=42),
-                ]
-                if task_type == "classification"
-                else [DummyRegressor(strategy="mean")]
-            )
-            try:
-                baseline_cv_mean = round(max(
-                    float(cross_val_score(
-                        dummy, X_train, y_train, groups=groups_train,
-                        cv=cv, scoring=scoring, n_jobs=1,
-                    ).mean())
-                    for dummy in dummies
-                ), 4)
-            except Exception:
-                baseline_cv_mean = None
-
         else:
-            # Clustering
-            X_train, X_test = X, X
-            for model_name in models:
-                try:
-                    from sklearn.pipeline import Pipeline
-
-                    estimator = self._build_model(model_name, task_type, max_depth)
-                    if estimator is None:
-                        build_errors.append(f"{model_name}: unknown clustering model name.")
-                        continue
-                    preprocessor = _build_preprocessor(X_train, "ordinal")
-                    model = Pipeline([("prep", preprocessor), ("model", estimator)])
-                    model.fit(X_train)
-                    model_path = Path(output_dir) / f"{model_name}.pkl"
-                    save_model(model, model_path)
-                    results[model_name] = {"model_path": str(model_path)}
-                except Exception as exc:
-                    build_errors.append(f"{model_name}: {exc}")
-
-            if not results:
-                raise ToolExecutionError(
-                    f"No clustering models could be trained. "
-                    f"Errors: {'; '.join(build_errors)}"
-                )
-            best_model = next(iter(results))
+            run = self._train_clustering(X, models, task_type, max_depth, output_dir)
+        results, best_model, baseline_cv_mean = run.results, run.best_model, run.baseline_cv_mean
+        overfit_warnings, X_train, X_test = run.overfit_warnings, run.X_train, run.X_test
 
         best_summary = results.get(best_model, {})
-        if task_type not in {"classification", "regression"}:
-            baseline_cv_mean = None
         lift_over_baseline = (
             round(float(best_summary["cv_mean"]) - baseline_cv_mean, 4)
             if baseline_cv_mean is not None and isinstance(best_summary.get("cv_mean"), (int, float))
@@ -993,6 +818,280 @@ class TrainModelTool(BaseTool):
             "time_column": time_column if split_strategy == "time_series" else None,
             "group_column": group_column if split_strategy == "panel" else None,
         }
+
+    @staticmethod
+    def _infer_task_type(y: pd.Series) -> str:
+        """Classification vs regression for an 'auto' task_type."""
+        # Auto-detect task type. Must agree with
+        # DatasetMetadata.infer_task_type, which is the canonical rule: a
+        # FLOAT target is continuous no matter how few distinct values it
+        # happens to take. The previous "nunique <= 20 -> classification"
+        # test ignored dtype, so a revenue column taking 18 distinct prices
+        # was treated as an 18-class problem and every model failed with
+        # "Supported target types are ('binary', 'multiclass'). Got
+        # 'continuous'" — the whole ML stage dying on ordinary money data.
+        if not pd.api.types.is_numeric_dtype(y):
+            return "classification"
+        if pd.api.types.is_bool_dtype(y):
+            return "classification"
+        if pd.api.types.is_integer_dtype(y) and y.nunique() <= 20:
+            return "classification"
+        return "regression"
+
+    @staticmethod
+    def _class_weighting(y: pd.Series, treatments: list[str]) -> tuple[bool, float]:
+        """Act on class imbalance instead of just warning about it: returns
+        `(balanced, scale_pos_weight)` and records the treatment."""
+        balanced = False
+        scale_pos_weight = 1.0
+        counts = y.value_counts()
+        if len(counts) >= 2:
+            minority_frac = float(counts.iloc[-1]) / float(counts.sum())
+            if minority_frac < IMBALANCE_THRESHOLD:
+                balanced = True
+                if len(counts) == 2:
+                    scale_pos_weight = float(counts.get(0, 0)) / max(float(counts.get(1, 0)), 1.0)
+                treatments.append(
+                    f"Class weighting applied — minority class is {minority_frac:.1%} "
+                    f"of rows (threshold {IMBALANCE_THRESHOLD:.0%})."
+                )
+
+        return balanced, scale_pos_weight
+
+
+    def _fit_and_score(self, model_name: str, estimator: Any, ctx: _TrainContext) -> dict[str, Any]:
+        """Fit one model (tuning and a GPU->CPU refit if asked), score it on the
+        train, test and CV splits, save it and return its results entry."""
+        from sklearn.model_selection import cross_val_score
+        from sklearn.pipeline import Pipeline
+
+        preprocessor = _build_preprocessor(
+            ctx.X_train, "onehot" if model_name in LINEAR_MODELS else "ordinal"
+        )
+        model: Any = Pipeline([("prep", preprocessor), ("model", estimator)])
+
+        best_params: dict[str, Any] = {}
+        cv_mean: float | None = None
+        cv_std: float | None = None
+        if ctx.do_tune:
+            X_tune, y_tune, groups_tune = _tuning_sample(
+                ctx.X_train, ctx.y_train, ctx.groups_train, ctx.split_strategy, ctx.task_type
+            )
+            model, best_params, tune_cv_mean, tune_cv_std = self._tune(
+                model, model_name, X_tune, y_tune, ctx.cv, ctx.scoring, ctx.max_depth,
+                groups=groups_tune,
+            )
+            # The search's own CV score is only the model's score when
+            # it saw every training row; otherwise cross_val_score below
+            # measures the tuned model on the full training set.
+            if len(X_tune) == len(ctx.X_train):
+                cv_mean, cv_std = tune_cv_mean, tune_cv_std
+
+        try:
+            model.fit(ctx.X_train, ctx.y_train)
+        except Exception as fit_exc:
+            if any(k in str(fit_exc).lower() for k in ("cuda", "gpu", "out of memory", "device")):
+                ctx.treatments.append(f"{model_name}: GPU fit failed ({fit_exc}); refit on CPU.")
+                estimator = self._build_model(
+                    model_name, ctx.task_type, ctx.max_depth, balanced=ctx.balanced,
+                    scale_pos_weight=ctx.scale_pos_weight, force_cpu=True,
+                )
+                model = Pipeline([("prep", preprocessor), ("model", estimator)])
+                model.set_params(**{f"model__{k}": v for k, v in best_params.items()})
+                model.fit(ctx.X_train, ctx.y_train)
+            else:
+                raise
+
+        train_metrics = self._evaluate(model, ctx.X_train, ctx.y_train, ctx.task_type)
+        test_metrics = self._evaluate(model, ctx.X_test, ctx.y_test, ctx.task_type)
+
+        # Cross-validation (anti-overfitting measure). Fit only on the
+        # training fold — X/y here would leak the held-out test rows
+        # into every CV fold. When tuning ran, RandomizedSearchCV
+        # already measured this with the same splitter/scorer, so
+        # _tune's cv_mean/cv_std above are reused instead of paying
+        # for a second cross_val_score pass.
+        if cv_mean is None:
+            cv_scores = cross_val_score(
+                model, ctx.X_train, ctx.y_train, groups=ctx.groups_train,
+                cv=ctx.cv, scoring=ctx.scoring, n_jobs=1,
+            )
+            cv_mean = round(float(cv_scores.mean()), 4)
+            cv_std = round(float(cv_scores.std()), 4)
+
+        # Train–test gap check
+        primary_train = train_metrics.get("accuracy", train_metrics.get("r2", 0.0))
+        primary_test = test_metrics.get("accuracy", test_metrics.get("r2", 0.0))
+        gap = round(primary_train - primary_test, 4)
+        if gap > OVERFIT_THRESHOLD:
+            ctx.overfit_warnings.append(
+                f"{model_name}: train-test gap={gap:.3f} > {OVERFIT_THRESHOLD} "
+                f"— possible overfitting. Consider reducing ctx.max_depth or adding regularisation."
+            )
+
+        # Save model
+        model_path = Path(ctx.output_dir) / f"{model_name}.pkl"
+        save_model(model, model_path)
+
+        return {
+            "train_metrics": train_metrics,
+            "test_metrics": test_metrics,
+            "cv_mean": cv_mean,
+            "cv_std": cv_std,
+            "train_test_gap": gap,
+            "model_path": str(model_path),
+            "best_params": best_params,
+        }
+
+    def _train_supervised(
+        self,
+        X: pd.DataFrame,
+        y: Any,
+        df: pd.DataFrame,
+        models: list[str],
+        task_type: str,
+        test_size: float,
+        n_cv_folds: int,
+        max_depth: int,
+        split_strategy: str,
+        group_column: str | None,
+        do_tune: bool,
+        balanced: bool,
+        scale_pos_weight: float,
+        output_dir: str,
+        treatments: list[str],
+    ) -> _TrainRun:
+        """Split, train every requested model with CV, pick the best and score a
+        no-skill baseline on the same folds."""
+        from sklearn.model_selection import cross_val_score
+
+        results: dict[str, Any] = {}
+        overfit_warnings: list[str] = []
+        build_errors: list[str] = []
+
+        X_train, X_test, y_train, y_test, cv, groups_train = _split_train_test(
+            X, y, df, split_strategy, group_column, task_type, test_size, n_cv_folds
+        )
+        X_train, y_train, groups_train, orig_train_len = _cap_train_rows(
+            X_train, y_train, groups_train, split_strategy, task_type
+        )
+        if orig_train_len is not None:
+            treatments.append(
+                f"Subsampled training set to {len(X_train):,} rows (from {orig_train_len:,}) "
+                "for fast, memory-bounded model training."
+            )
+        scoring = "f1_weighted" if task_type == "classification" else "r2"
+
+        # The skew decision only depends on X_train's numeric columns, not
+        # on which encoder a given model's preprocessor uses — identical
+        # across every model trained in this call, so it's reported once
+        # here rather than once per model.
+        numeric_cols = [
+            c for c in X_train.columns
+            if pd.api.types.is_numeric_dtype(X_train[c]) and not pd.api.types.is_bool_dtype(X_train[c])
+        ]
+        if numeric_cols:
+            skew_probe = _SkewLog1pTransformer().fit(X_train[numeric_cols])
+            treatments.extend(skew_probe.describe())
+
+        ctx = _TrainContext(
+            task_type=task_type, max_depth=max_depth, balanced=balanced,
+            scale_pos_weight=scale_pos_weight, do_tune=do_tune,
+            X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test,
+            groups_train=groups_train, split_strategy=split_strategy, cv=cv,
+            scoring=scoring, output_dir=output_dir, treatments=treatments,
+            overfit_warnings=overfit_warnings,
+        )
+
+        for model_name in models:
+            try:
+                estimator = self._build_model(
+                    model_name, task_type, max_depth,
+                    balanced=balanced, scale_pos_weight=scale_pos_weight,
+                )
+            except Exception as exc:
+                build_errors.append(f"{model_name}: build failed — {exc}")
+                continue
+            if estimator is None:
+                build_errors.append(
+                    f"{model_name}: unknown model name for task_type='{task_type}'. "
+                    f"Valid names: {self.CLASSIFICATION_MODELS if task_type == 'classification' else self.REGRESSION_MODELS}"
+                )
+                continue
+
+            try:
+                results[model_name] = self._fit_and_score(model_name, estimator, ctx)
+            except Exception as exc:
+                build_errors.append(f"{model_name}: training failed — {exc}")
+
+        if not results:
+            raise ToolExecutionError(
+                f"No models could be trained for task_type='{task_type}'. "
+                f"Errors: {'; '.join(build_errors) or 'all _build_model calls returned None — check model names and task_type.'}"
+            )
+
+        best_model = self._pick_best(results)
+
+        # A CV score only means something against what a no-skill
+        # predictor scores on the same folds — F1 0.82 on an 80%-majority
+        # target is barely better than always guessing the majority. On
+        # weighted F1, guessing the majority scores poorly on a balanced
+        # multiclass target, so the stronger of the two no-skill
+        # classifiers is the bar.
+        from sklearn.dummy import DummyClassifier, DummyRegressor
+
+        dummies = (
+            [
+                DummyClassifier(strategy="most_frequent"),
+                DummyClassifier(strategy="stratified", random_state=42),
+            ]
+            if task_type == "classification"
+            else [DummyRegressor(strategy="mean")]
+        )
+        try:
+            baseline_cv_mean = round(max(
+                float(cross_val_score(
+                    dummy, X_train, y_train, groups=groups_train,
+                    cv=cv, scoring=scoring, n_jobs=1,
+                ).mean())
+                for dummy in dummies
+            ), 4)
+        except Exception:
+            baseline_cv_mean = None
+
+        return _TrainRun(results, best_model, baseline_cv_mean, overfit_warnings, X_train, X_test)
+
+    def _train_clustering(
+        self, X: pd.DataFrame, models: list[str], task_type: str, max_depth: int, output_dir: str
+    ) -> _TrainRun:
+        """Fit each clustering model on the full feature frame (no held-out split)."""
+        results: dict[str, Any] = {}
+        build_errors: list[str] = []
+        X_train, X_test = X, X
+        for model_name in models:
+            try:
+                from sklearn.pipeline import Pipeline
+
+                estimator = self._build_model(model_name, task_type, max_depth)
+                if estimator is None:
+                    build_errors.append(f"{model_name}: unknown clustering model name.")
+                    continue
+                preprocessor = _build_preprocessor(X_train, "ordinal")
+                model = Pipeline([("prep", preprocessor), ("model", estimator)])
+                model.fit(X_train)
+                model_path = Path(output_dir) / f"{model_name}.pkl"
+                save_model(model, model_path)
+                results[model_name] = {"model_path": str(model_path)}
+            except Exception as exc:
+                build_errors.append(f"{model_name}: {exc}")
+
+        if not results:
+            raise ToolExecutionError(
+                f"No clustering models could be trained. "
+                f"Errors: {'; '.join(build_errors)}"
+            )
+        best_model = next(iter(results))
+        return _TrainRun(results, best_model, None, [], X_train, X_test)
 
     # ------------------------------------------------------------------
     # Internal helpers

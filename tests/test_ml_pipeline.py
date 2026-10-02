@@ -1,6 +1,9 @@
 """Unit tests for ML Pipeline Tools — Stage 3 model training."""
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -254,3 +257,24 @@ class TestStringTargetSupport:
         assert "train_test_gap" in result.output
         report_keys = set(result.output["classification_report"].keys())
         assert {"no", "yes"} <= report_keys
+
+
+def test_train_model_clustering_branch(tmp_path: Path) -> None:
+    """task_type='clustering' fits every model on the full frame: no split, no baseline."""
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({
+        "a": rng.normal(size=60), "b": rng.normal(size=60),
+        "c": rng.integers(0, 3, 60), "y": rng.integers(0, 2, 60),
+    })
+    path = tmp_path / "c.csv"
+    df.to_csv(path, index=False)
+    out = TrainModelTool().execute(
+        file_path=str(path), target_column="y", task_type="clustering",
+        output_dir=str(tmp_path / "models"),
+    )
+    assert out["task_type"] == "clustering"
+    assert out["best_model"] == "kmeans"
+    assert sorted(out["models_trained"]) == ["dbscan", "kmeans"]
+    assert out["baseline_cv_mean"] is None and out["split_strategy"] == "n/a"
+    assert out["train_samples"] == out["test_samples"] == 60
+    assert (tmp_path / "models" / "kmeans.pkl.sig").exists()

@@ -65,7 +65,7 @@ ignore = ["E501", "B008", "RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
 # sklearn convention: feature matrix is named X (N803/N806)
-"src/tools/ml_pipeline.py" = ["N803", "N806"]
+"src/tools/ml_*.py" = ["N803", "N806"]
 "src/tools/clustering.py" = ["N806"]
 "src/tools/visualization.py" = ["N806"]
 "src/tools/dimensionality.py" = ["N806"]

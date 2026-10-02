@@ -7,6 +7,17 @@ import streamlit as st
 
 from src.core import design_tokens
 
+#: Self-hosted font stylesheet, served by Streamlit's static route
+#: (`[server] enableStaticServing = true`). Its @font-face rules point at the
+#: .woff2 files beside it by relative URL, so no request leaves for a font CDN.
+FONT_CSS_PATH = "app/static/fonts/ledger-fonts.css"
+
+
+def font_css_url() -> str:
+    """URL of the local font stylesheet, honouring `server.baseUrlPath`."""
+    base = str(st.get_option("server.baseUrlPath") or "").strip("/")
+    return f"/{base}/{FONT_CSS_PATH}" if base else f"/{FONT_CSS_PATH}"
+
 
 def inject_theme_css() -> None:
     """Inject dynamic Ledger CSS supporting Day and Night modes via Python state."""
@@ -29,7 +40,7 @@ def inject_theme_css() -> None:
 
     st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Mukta:wght@400;500;600;700&display=swap');
+@import url('{font_css_url()}');
 
 :root {{
     {theme_vars}

@@ -9,6 +9,10 @@
 # Day/Night toggle could not keep native widgets in step with the page. Night mode
 # is the app's CSS (ui/styles.py) over this one fixed native theme.
 
+[server]
+# Serves ./static (the self-hosted fonts and the vendored Vega bundles) at /app/static.
+enableStaticServing = true
+
 [theme]
 font = "Mukta, 'Segoe UI', sans-serif"
 headingFont = "'Baloo 2', 'Mukta', 'Segoe UI', sans-serif"

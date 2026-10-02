@@ -180,7 +180,7 @@ Decisions already taken by the owner. Do not re-ask.
 | 2026-10-02 | Sample demo: first kept as is, then replaced by a real run (later the same day, after the conflict with the no-fabricated-numbers rule was shown) | The sample button runs the deterministic pipeline on `data/sample_customer_churn.csv` and builds a real `RunView`; `_load_teamwork_preview` and its placeholder report files are deleted in Phase 1b |
 | 2026-10-02 | Landing trust copy states the data path plainly | No claim of local processing; say where the file goes and that summaries go to the chosen LLM provider, and offer the run-without-AI option |
 | 2026-10-02 | API keys are entered per session and never stored; operator safety settings are locked | Code execution, isolation, run caps and `LOCAL_ONLY` come from the server environment and show read-only on the page |
-| 2026-10-02 | Palette is open | The direction board may propose a new palette; Phase 1 token work stays palette-agnostic |
+| 2026-10-02 | Palette was open; later settled: keep the current buff-green palette (see the direction-board row below) | Phase 1 token work stays palette-agnostic so a change stays cheap |
 | 2026-10-02 | The non-technical usability checks are recommended, not a gate | Definition of done no longer requires them; unresolved findings are still recorded if they are run |
 | 2026-10-02 | `DESIGN.md` and the older planning documents deleted | Type scale, stage names and plain-language copy rules now live only in git history; the direction board must re-lock them. The seven stage names have one source, `STAGE_DEFS` in `ui/components/cards.py`; every surface imports it or is generated from it |
 
@@ -192,6 +192,10 @@ Added after the owner's answer on hosting facts:
 | 2026-10-02 | Priority is a demonstration-ready build for a B.Tech CSE final-year project; other questions are left to the implementer's judgement | Section 2d tiers apply as written; the deadline and venue stay open and only change ordering, not scope |
 | 2026-10-02 | The earlier uncommitted UI round was reverted; the committed tree is the baseline | Everything it added is open work, not groundwork. The owner's reason: it left the UI uncertain, and an overhaul is planned anyway |
 | 2026-10-02 | Live findings: option B, an optional `on_finding_callback` with a provisional "Found so far" list (no check marks, labelled as subject to change). Full `analyze_iter()` stays deferred | Should tier, and it needs the run to move to a worker thread first (the run is synchronous in the committed tree). Provisional findings carry no check row; `RunView.provisional_findings` is empty once the run completes |
+| 2026-10-02 | The demo runs from a laptop, with a hosted link as a backup. The deadline date is not yet known | Hosted-safety fixes stay in but are lower priority; the viva fallback in section 2d (pre-recorded run, offline sample) matters more |
+| 2026-10-02 | The visual direction board is skipped; the current buff-green palette stays, with the "Guided Evidence" rules | Supersedes the earlier "palette is open". Section 3's board gate is waived; the plan's rules for type, spacing, status marks and motion still apply |
+| 2026-10-02 | Landing page: copy fixes only (remove pricing tiers, FAQ, jargon and unsupported claims); keep the existing page and 3D scene | The Phase 3 rebuild moves to Later |
+| 2026-10-02 | Next batch (batch 2): `RunView`, "How we got here", answers-first ordering, `.streamlit/config.toml` fix, removal of `ui/animations.py`. The worker-thread run with Stop is batch 3 | Phase 1b B and Phase 4 core, plus the Phase 1 theme-file item |
 
 ## 2d. Scope for a final-year project
 
@@ -206,7 +210,10 @@ specification.
 - Phase 0 in a reduced form: baseline commit, one real browser run of the
   sample CSV (Run, a failed preflight, completed result), baseline
   screenshots, the timed sample run. Confirms the committed tree works in a
-  browser before anything else changes.
+  browser before anything else changes. **Done 2026-10-02, owner-confirmed:**
+  the committed tree works, and so does Phase 1b A (sample run included). Baseline
+  screenshots for the report are still outstanding and must be taken before the
+  visual work starts.
 - Phase 1b A, minimal: per-session keys, no key or objective in `os.environ`,
   output directory and key passed as arguments (removes the click-time race),
   operator-only local-model URL. If the demo is on a public link, this is what
@@ -223,7 +230,7 @@ specification.
   loading skeleton; one primary action per screen.
 - Phase 6 core: the report prints cleanly (print CSS exists; verify it) and
   states what it needs the network for.
-- Documentation for examiners: refresh `README.md` (it is outdated), one
+- Documentation for examiners: `README.md` (rewritten by the owner, commit `a9fd98e`, done; this plan does not touch it), one
   architecture diagram of the final design, before and after screenshots, and a
   short "known limitations" section. Honest limits score better than hidden
   ones.
@@ -376,6 +383,10 @@ Phase 4.
     callbacks and no stop hook.
 
 ## 3. Design direction gate
+
+**Waived (owner decision, section 2b):** no direction board is produced. The
+current palette stays and the rules below are applied directly. Keep the
+remainder of this section as the design rules, not as a gate.
 
 Before implementation, create a small visual direction board and approve one
 direction. The recommended starting point is **Guided Evidence**:
@@ -549,7 +560,7 @@ All examples must use real or clearly labelled demonstration data.
   `tests/test_landing.py` and `tests/test_landing_v2.py`. Add the new names as
   aliases first, migrate consumers one surface at a time, and remove the old
   names only when a repository search finds no user.
-- The palette is open (section 2b): the direction board may propose a new one.
+- The palette is settled as the current one (section 2b); no board is produced.
   The token work above is palette-agnostic and can proceed before the board is
   approved. If the board changes the palette, update `design_tokens.py` and
   regenerate the TOML copy; no other file should need a hex edited.
@@ -1287,7 +1298,7 @@ The overhaul is complete only when:
 
 Resolved on 2026-10-02 (recorded in section 2b): the sample demo is replaced by
 a real run; the landing states the data path plainly; keys are per session and
-operator safety settings are locked; the palette is open; the usability checks
+operator safety settings are locked; the palette stays as it is; the usability checks
 are recommended, not a gate.
 
 Also resolved: the project is a final-year project (section 2d), so the
@@ -1296,22 +1307,20 @@ when the session ends and carries an academic-project notice.
 
 Still open:
 
-1. **Where and when (blocks the Must and Should cut in section 2d).** The
-   deadline and the demo date; whether the project is shown live from a laptop,
-   from a public free host, or from a college server; whether the examiners
-   will be given a link to use themselves; and what is assessed (working demo,
-   written report, code, viva). The tiers in section 2d are a proposal until
-   these are known.
-2. **Operator settings list (blocks Phase 1b A).** Confirm the split in the
+1. **Deadline and assessment (orders the work; does not change the tiers).**
+   Venue is decided: laptop, with a hosted link as backup. Still unknown: the
+   deadline date, whether examiners get the link to use themselves, and what is
+   assessed (working demo, written report, code, viva).
+2. **Operator settings list (needs a yes).** The local provider is already
+   hidden in hosted mode (`DSA_HOSTED`). Confirm the split in the
    decisions log: users edit provider, model, thoroughness and ML options; the
    operator locks code execution, isolation, run caps, token caps and
    `LOCAL_ONLY`. Recommendation, not a neutral option: also lock the local-model
    base URL and the "local" provider to the operator, because a visitor-typed
    URL is fetched by the server (finding 2c.10). Name anything else that should
    move to the other side.
-3. **`analyze_iter` (blocks nothing, shapes Phase 4).** Promote the event
-   stream into this overhaul, or leave it deferred and design the progress view
-   for stage and step events only? The plan assumes deferred.
+3. **`analyze_iter`: resolved.** Option B (a provisional finding callback, Should
+   tier) is recorded in section 2b. The full event generator stays deferred.
 
 ## 18. Status log
 
@@ -1322,3 +1331,5 @@ Still open:
 | 2026-10-02 | Owner answered the first four questions (demo, trust claim, keys and settings, palette and usability gate); answers applied to the phases and decisions log. Open: hosting facts, operator settings confirmation, `analyze_iter`. |
 | 2026-10-02 | The owner reverted an earlier uncommitted UI round (the working tree was reset to `1585d9d`). Sections 2a and 2c, Phase 0, 1, 1b, 4, 6, section 2d and the risks were rewritten against the committed tree; threaded run, Stop, offline report, console fonts, Charts overview and the snapshot script are open work again. |
 | 2026-10-02 | Phase 1b A implemented on the committed tree (static gates only: `ruff check .` and `mypy src/` pass; not run in a browser or under pytest). Added `src/core/run_config.py` (`RunConfig`) and `src/core/run_context.py` (per-thread objective, carried into the controller's tool thread pool). `LLMClient` and `AgentController` accept a `RunConfig`; three tools stopped reading `USER_OBJECTIVE` from the environment. `app.py` stopped writing provider, model, key, URL, objective, output directory, iterations and switches to `os.environ`; a `DSA_HOSTED` operator flag hides the local provider, ignores the server key, and shows privacy and code-execution limits read-only; the run gate is `has_key or not use_llm`; the fabricated demo is replaced by a real no-AI sample run (`_sample_run`) labelled as the bundled file; per-run temp directories are prefixed and removed on reset; run comparison is local-only. Review fixes the same day: the objective now lives in `objective_scope` around `load_dataset` and `analyze` (it no longer outlives the run), and the tool thread pool runs each call in its own context copy (one context object cannot be entered by several threads). Known small deviation: the RLM engine's `llm_concurrency()` no longer sees the UI-selected provider, so a local-model run with decomposition on uses the cloud default of 4 parallel calls instead of 1 (the engine is Ask-First, so it was left alone). **Status: written and statically checked only. It has not been run, and the concurrent tool batch in particular needs one real run before this item is called done.** Remaining Phase 1b: `RunView`, module split, session-isolation and AppTest tests. |
+| 2026-10-02 | Owner tested the branch and confirmed the changes work, including the sample run. Phase 0's baseline commit (`77424d9`, `ffc4280`) and first browser run are done; baseline screenshots are not. The owner also committed a new `README.md` (`a9fd98e`). |
+| 2026-10-02 | Owner answered the next-step questions: laptop demo with a hosted backup; next batch is `RunView` plus "How we got here" plus answers-first plus the theme-file fix plus removing `ui/animations.py`; no direction board; landing copy fixes only. Applied to section 2b, 3 and 17. No code changed. |

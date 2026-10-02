@@ -13,7 +13,6 @@ rows it was trained on.
 """
 from __future__ import annotations
 
-import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +22,8 @@ import pandas as pd
 from src.core.chart_spec import chart_spec_to_plotly_dict, validate_chart_spec
 from src.core.chart_theme import humanize_label
 from src.core.dashboard import CORRELATION_HEATMAP_TITLE, correlation_heatmap
+from src.core.model_io import ModelIntegrityError, load_model
+from src.core.security import UploadValidationError, resolve_output_path
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -80,6 +81,15 @@ class GenerateVisualizationsTool(BaseTool):
             raw_mp = params.get("model_path", "")
             if not raw_mp or not Path(raw_mp).exists():
                 params["model_path"] = best_path
+        # Pin model_path under the run's output directory before it reaches
+        # the pickle load (as evaluate_model does): a planner step naming any
+        # other file must not be honoured; fall back to the trusted best model.
+        raw_mp = params.get("model_path", "")
+        if raw_mp:
+            try:
+                params["model_path"] = str(resolve_output_path(output_root, raw_mp))
+            except UploadValidationError:
+                params["model_path"] = best_path or ""
         return params
 
     def default_params(
@@ -170,8 +180,10 @@ class GenerateVisualizationsTool(BaseTool):
         if not target_column:
             raise ToolExecutionError("target_column is required for feature_importance chart.")
 
-        with open(model_path, "rb") as f:
-            loaded = pickle.load(f)
+        try:
+            loaded = load_model(model_path)
+        except ModelIntegrityError as exc:
+            raise ToolExecutionError(str(exc)) from exc
 
         # train_model saves a Pipeline([("prep", ColumnTransformer), ("model",
         # estimator)]) (IMPROVEMENTS.md P0.1/P0.5) — importances live on the

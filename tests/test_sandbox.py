@@ -276,3 +276,33 @@ class TestRunSandboxed:
         # An explicit docker request with the daemon down is refused, never
         # silently downgraded to the unisolated subprocess backend.
         assert sandbox.get_sandbox_backend("docker") is None
+
+
+class TestWorkerCrashDiagnostics:
+    def test_stderr_tail_surfaces_when_worker_dies_before_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        crasher = tmp_path / "crasher.py"
+        crasher.write_text(
+            "import sys\nsys.stderr.write('ImportError: no module named boom')\nsys.exit(1)\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(sandbox, "_WORKER_SCRIPT", crasher)
+        result = sandbox.run_sandboxed("RESULT = 1\n", str(single_column(tmp_path)))
+        assert result.status == "error"
+        assert result.traceback is not None
+        assert "no module named boom" in result.traceback
+
+    def test_stderr_flood_is_stopped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        flooder = tmp_path / "flooder.py"
+        flooder.write_text(
+            "import sys\nwhile True:\n    sys.stderr.write('x' * 65536)\n    sys.stderr.flush()\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(sandbox, "_WORKER_SCRIPT", flooder)
+        monkeypatch.setattr(sandbox, "_STDERR_MAX_BYTES", 1024 * 1024)
+        result = sandbox.run_sandboxed("RESULT = 1\n", str(single_column(tmp_path)), timeout_s=20)
+        assert result.status == "error"
+        assert "stderr" in (result.hint or "")

@@ -417,7 +417,7 @@ The intended acceptance path also includes an end-to-end sample CSV run that
 creates a populated Markdown report in `output/reports/`. The application has
 tests for major behaviours and architecture boundaries, while a small set of
 newer specialised tools still needs dedicated unit coverage; that gap is
-tracked in `IMPROVEMENTS.md` and the roadmap rather than being hidden.
+tracked in `docs/IMPROVEMENTS.md` and the roadmap rather than being hidden.
 
 Repository conventions are defined in `AGENTS.md`. In particular, new tools
 must use type hints, follow the `BaseTool` contract, return a `summary`, and
@@ -428,7 +428,7 @@ receive tests. Changes to the RLM engine, task-decomposition logic,
 
 The following work is planned. It is not represented as current product
 behaviour. Detailed decisions, risks, and acceptance criteria are maintained
-in `FrontendOverhaulPlan.md`, `FutureScope.md`, and `IMPROVEMENTS.md`.
+in `docs/FrontendOverhaulPlan.md`, `docs/FutureScope.md`, and `docs/IMPROVEMENTS.md`.
 
 ### Frontend overhaul (planned)
 
@@ -450,7 +450,7 @@ needed to understand a finding or obtain a report.
 
 ### Analysis-quality extensions (planned)
 
-`FutureScope.md` proposes a property-driven expansion of the system so new
+`docs/FutureScope.md` proposes a property-driven expansion of the system so new
 methods are triggered by data structure rather than by arbitrary industry
 labels. Major planned groups include:
 
@@ -488,7 +488,7 @@ or guarantee correctness merely because an LLM generated a fluent summary.
   surfaces are still being addressed by the frontend overhaul.
 - Several specialised tools need additional direct unit-test coverage.
 - The roadmap is deliberately broader than the fixed final-year-project scope;
-  the Must/Should/Deferred priorities in `FrontendOverhaulPlan.md` define what
+  the Must/Should/Deferred priorities in `docs/FrontendOverhaulPlan.md` define what
   should be delivered first.
 
 ## Repository structure
@@ -507,9 +507,7 @@ or guarantee correctness merely because an LLM generated a fluent summary.
 ├── docker/                    # Sandbox image requirements and hardening notes
 ├── output/                    # Generated artefacts (runtime; do not commit data)
 ├── AGENTS.md                  # Project architecture and engineering rules
-├── FrontendOverhaulPlan.md    # Active frontend implementation plan
-├── FutureScope.md             # Proposed data-method expansion
-└── IMPROVEMENTS.md            # Improvement ledger and outstanding technical work
+└── docs/                      # IMPROVEMENTS.md (ledger), FutureScope.md, frontend plans
 ```
 
 ## License

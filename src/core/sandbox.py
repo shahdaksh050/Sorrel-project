@@ -343,6 +343,30 @@ def _worker_env(scratch_dir: str) -> dict[str, str]:
     return env
 
 
+#: Bytes of worker stderr kept for crash diagnostics, and the size at which a
+#: worker spamming stderr is killed (it goes to a scratch file, not a pipe).
+_STDERR_TAIL_BYTES = 2000
+_STDERR_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _stderr_tail(path: Path) -> str:
+    """Last few KB of the worker's stderr, for the crash message ('' if none)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - _STDERR_TAIL_BYTES))
+            return f.read().decode("utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
 def _tree_rss_mb(proc: psutil.Process) -> float:
     """RSS of the worker plus every descendant — a library that forks a
     helper must not escape the memory cap."""
@@ -540,15 +564,17 @@ class SubprocessSandbox(SandboxBackend):
                 encoding="utf-8",
             )
 
-            proc = subprocess.Popen(
-                # -s: no user site-packages. Not -I, which would also drop the
-                # PYTHONPATH the worker needs to import src.*.
-                [sys.executable, "-s", str(_WORKER_SCRIPT), str(input_path), str(result_path)],
-                cwd=scratch_dir,
-                env=_worker_env(scratch_dir),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            stderr_path = Path(scratch_dir) / f"stderr_{uuid.uuid4().hex}.log"
+            with open(stderr_path, "wb") as stderr_file:
+                proc = subprocess.Popen(
+                    # -s: no user site-packages. Not -I, which would also drop the
+                    # PYTHONPATH the worker needs to import src.*.
+                    [sys.executable, "-s", str(_WORKER_SCRIPT), str(input_path), str(result_path)],
+                    cwd=scratch_dir,
+                    env=_worker_env(scratch_dir),
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                )
 
             try:
                 ps_proc: psutil.Process | None = psutil.Process(proc.pid)
@@ -570,6 +596,8 @@ class SubprocessSandbox(SandboxBackend):
                                 killed_as = "memory"
                         except psutil.NoSuchProcess:
                             pass
+                    if killed_as is None and _file_size(stderr_path) > _STDERR_MAX_BYTES:
+                        killed_as = "stderr"
                     if killed_as is not None:
                         _kill_tree(ps_proc, proc)
                         break
@@ -599,11 +627,24 @@ class SubprocessSandbox(SandboxBackend):
                     duration_ms=duration_ms,
                 )
 
-            if not result_path.exists():
+            if killed_as == "stderr":
                 return SandboxResult(
                     status="error", result=None, finding=None, stdout="",
                     error_type="runtime",
-                    traceback=f"Worker exited with code {proc.returncode} and wrote no result.",
+                    traceback=None,
+                    hint="Execution was stopped for writing excessive output to stderr.",
+                    duration_ms=duration_ms,
+                )
+
+            if not result_path.exists():
+                tail = _stderr_tail(stderr_path)
+                return SandboxResult(
+                    status="error", result=None, finding=None, stdout="",
+                    error_type="runtime",
+                    traceback=(
+                        f"Worker exited with code {proc.returncode} and wrote no result."
+                        + (f"\nWorker stderr (tail):\n{tail}" if tail else "")
+                    ),
                     hint="The sandboxed process crashed before producing a result.",
                     duration_ms=duration_ms,
                 )

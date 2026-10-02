@@ -17,7 +17,6 @@ natural groups in the data:
 """
 from __future__ import annotations
 
-import pickle
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -25,6 +24,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import pandas as pd
 
 from src.core.findings import Finding
+from src.core.model_io import save_model
 from src.core.profiler import SEVERE_SKEW_THRESHOLD, profile_dataframe
 from src.core.stats_utils import measure_aggregation, repeated_entity
 from src.tools.base import BaseTool, ToolExecutionError
@@ -272,11 +272,10 @@ class ClusterDataTool(BaseTool):
 
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         model_path = Path(output_dir) / "kmeans.pkl"
-        with open(model_path, "wb") as f:
-            pickle.dump({
-                "scaler": scaler, "kmeans": best_model, "features": list(features.columns),
-                "log1p_features": log_features,
-            }, f)
+        save_model({
+            "scaler": scaler, "kmeans": best_model, "features": list(features.columns),
+            "log1p_features": log_features,
+        }, model_path)
 
         # Kaufman & Rousseeuw: 0.71+ strong, 0.51-0.70 reasonable,
         # 0.26-0.50 weak (possibly artificial), <= 0.25 no real structure.

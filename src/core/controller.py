@@ -23,6 +23,7 @@ import ast
 import copy
 import difflib
 import json
+import logging
 import os
 import re
 from collections.abc import Callable
@@ -102,6 +103,8 @@ from src.core.tool_registry import _INJECTED_PARAMS as _INJECTED_PARAMS
 from src.core.tool_registry import ToolRegistry as ToolRegistry
 from src.core.tool_registry import _short_tool_description as _short_tool_description
 from src.rlm.engine import RLMEngine, RLMSubTask
+
+logger = logging.getLogger(__name__)
 
 console = Console()
 
@@ -909,7 +912,7 @@ class AgentController:
             try:
                 self.memory.set_context("draft_plan", self._build_fallback_plan()["steps"])
             except Exception:
-                pass
+                logger.debug("could not seed the planner's draft plan", exc_info=True)
             # Registered after the tool list and draft plan are built, so
             # library tools are listed once — in the per-cycle "Tools you
             # created" block, like any generated tool.
@@ -1195,7 +1198,7 @@ class AgentController:
                 [Question(**q) for q in agenda], final_result["findings"]
             )
         except Exception:
-            pass
+            logger.debug("question coverage report skipped", exc_info=True)
 
         # ---- Verbatim-metric validation: enforce "cite only verbatim
         # metrics" as a mechanism, not just a prompt instruction ----
@@ -1213,10 +1216,10 @@ class AgentController:
         # path twice. ----
         audit_df: pd.DataFrame | None = None
         try:
-            from src.tools.data_processing import _read_df
+            from src.core.analysis_io import read_analysis_df
             audit_path = self.memory.get_context("cleaned_file_path") or getattr(self.memory.dataset_metadata, "file_path", None)
             if audit_path:
-                audit_df = _read_df(str(audit_path))
+                audit_df = read_analysis_df(str(audit_path))
         except Exception:
             audit_df = None
 
@@ -1388,10 +1391,10 @@ class AgentController:
         if meta is None:
             return
         try:
+            from src.core.analysis_io import read_analysis_df
             from src.core.roles import validate_roles
-            from src.tools.data_processing import _read_df
 
-            df = _read_df(str(self.memory.get_context("cleaned_file_path") or meta.file_path))
+            df = read_analysis_df(str(self.memory.get_context("cleaned_file_path") or meta.file_path))
             accepted, rejected = validate_roles(df, proposals)
         except Exception as exc:
             console.print(f"  [dim]Column roles skipped: {exc}[/]")
@@ -1732,7 +1735,7 @@ class AgentController:
             try:
                 tool_params.update(tool.default_params(profile, meta) or {})
             except Exception:
-                pass
+                logger.debug("default_params failed for a scheduled tool", exc_info=True)
 
             # Never schedule a step that cannot run. file_path and output_dir
             # are injected by BaseTool.prepare_params, and requires_context
@@ -1778,7 +1781,7 @@ class AgentController:
                     try:
                         test_params.update(test_tool.default_params(profile, meta) or {})
                     except Exception:
-                        pass
+                        logger.debug("default_params failed for a test tool", exc_info=True)
                     test_step = {
                         "step_number": len(steps) + 1,
                         "tool_name": "select_statistical_test",

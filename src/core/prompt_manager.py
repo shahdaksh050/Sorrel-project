@@ -21,6 +21,7 @@ analysis from a blank page.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections import Counter
@@ -34,6 +35,8 @@ from src.core.memory import MemorySystem
 from src.core.roles import ALLOWED_ROLES
 from src.core.sandbox import ALLOWED_MODULES_TEXT
 from src.core.security import sanitize_for_prompt as _sp
+
+logger = logging.getLogger(__name__)
 
 try:
     from src.core.security import pii_redaction_enabled, redact_pii_text
@@ -670,7 +673,7 @@ class PromptManager:
                 cols = ", ".join(_sp(c) for c in q.get("columns") or [])
                 lines.append(f"- {_sp(_redact(q['text']), max_len=240)} → {q['suggested_tool']} (columns: {cols})")
         except Exception:
-            pass
+            logger.debug("open-question prompt section skipped", exc_info=True)
         u = self.memory.get_context("data_understanding")
         if isinstance(u, dict):
             for question in (u.get("questions") or [])[:5]:

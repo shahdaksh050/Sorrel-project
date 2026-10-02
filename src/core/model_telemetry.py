@@ -14,6 +14,7 @@ Workflow coverage:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -23,6 +24,8 @@ from collections import deque
 from dataclasses import dataclass
 from threading import RLock
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -408,7 +411,7 @@ def fetch_available_models(
                 profiles.sort(key=lambda p: (0 if "flash" in p.model else 1, p.model))
                 return profiles
         except Exception:
-            pass
+            logger.debug("model catalog fetch failed; using fallback", exc_info=True)
         return [p for (pr, _), p in DEFAULT_PROFILES.items() if pr == "gemini"]
 
     # OpenAI-compatible /v1/models endpoints (Groq, OpenAI, OpenRouter, NVIDIA, Local)
@@ -489,7 +492,7 @@ def fetch_available_models(
                     profiles.sort(key=lambda p: p.model)
                 return profiles
         except Exception:
-            pass
+            logger.debug("model catalog fetch failed; using fallback", exc_info=True)
 
     # Fallback to defaults
     return [p for (pr, _), p in DEFAULT_PROFILES.items() if pr == provider]

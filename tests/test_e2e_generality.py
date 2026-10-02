@@ -23,7 +23,7 @@ from src.tools.graph_analysis import GraphAnalysisTool
 
 def test_e2e_deterministic_air_quality(tmp_path: Path) -> None:
     # Build a representative sample of AirQuality data if root file exists or synthetic
-    root_csv = Path("AirQualityUCI.csv")
+    root_csv = Path(__file__).resolve().parents[1] / "data" / "AirQualityUCI.csv"
     out_dir = str(tmp_path / "output_aq")
     os.makedirs(out_dir, exist_ok=True)
 

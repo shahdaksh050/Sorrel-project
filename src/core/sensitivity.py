@@ -6,6 +6,7 @@ and target leakage in predictive features.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +16,8 @@ from scipy import stats
 
 if TYPE_CHECKING:
     from src.core.findings import Finding
+
+logger = logging.getLogger(__name__)
 
 #: Semantic indicators of post-outcome or target-derived columns
 _POST_OUTCOME_PREFIXES = ("post_", "after_", "resolved_", "exit_", "outcome_")
@@ -176,7 +179,7 @@ def detect_target_leakage(df: pd.DataFrame, target_col: str) -> list[dict[str, A
                             "rationale": f"Near-perfect Pearson correlation (|r| = {abs(r):.3f}) with target.",
                         })
                 except Exception:
-                    pass
+                    logger.debug("near-perfect-correlation check skipped for a column", exc_info=True)
 
         # 3. Exact categorical mapping (target uniquely determined by feature)
         elif not pd.api.types.is_numeric_dtype(target_s):

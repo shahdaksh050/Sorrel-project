@@ -35,7 +35,7 @@ REL_TOL, ABS_TOL = 0.30, 0.5
 
 # ---------------------------------------------------------------- datasets
 def _air_quality(_: Path) -> Path | None:
-    p = ROOT / "AirQualityUCI.csv"
+    p = ROOT / "data" / "AirQualityUCI.csv"
     return p if p.exists() else None
 
 

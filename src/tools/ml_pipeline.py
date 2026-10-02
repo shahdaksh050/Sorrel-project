@@ -14,8 +14,8 @@ Anti-overfitting measures built in:
 """
 from __future__ import annotations
 
+import logging
 import os
-import pickle
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -26,6 +26,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, OneToOneFeatureMixin, TransformerMixin
 
 from src.core.findings import Finding
+from src.core.model_io import ModelIntegrityError, load_model, save_model
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import (
     _read_df as _read_df,  # re-exported: src.tools.clustering imports it from here
@@ -34,6 +35,8 @@ from src.tools.data_processing import (
 if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata, MemorySystem
     from src.core.profiler import DatasetProfile
+
+logger = logging.getLogger(__name__)
 
 # _read_df (src.tools.data_processing) applies coerce_types (so "$1,234.56" /
 # "45%" strings become numeric before a model ever sees them) and caches the
@@ -1056,8 +1059,7 @@ class TrainModelTool(BaseTool):
 
                     # Save model
                     model_path = Path(output_dir) / f"{model_name}.pkl"
-                    with open(model_path, "wb") as f:
-                        pickle.dump(model, f)
+                    save_model(model, model_path)
 
                     results[model_name] = {
                         "train_metrics": train_metrics,
@@ -1121,8 +1123,7 @@ class TrainModelTool(BaseTool):
                     model = Pipeline([("prep", preprocessor), ("model", estimator)])
                     model.fit(X_train)
                     model_path = Path(output_dir) / f"{model_name}.pkl"
-                    with open(model_path, "wb") as f:
-                        pickle.dump(model, f)
+                    save_model(model, model_path)
                     results[model_name] = {"model_path": str(model_path)}
                 except Exception as exc:
                     build_errors.append(f"{model_name}: {exc}")
@@ -1640,8 +1641,10 @@ class EvaluateModelTool(BaseTool):
         if task_type == "classification":
             y, class_labels = _encode_target(y, target_words)
 
-        with open(model_path, "rb") as f:
-            model = pickle.load(f)
+        try:
+            model = load_model(model_path)
+        except ModelIntegrityError as exc:
+            raise ToolExecutionError(str(exc)) from exc
 
         # Recreate train_model's exact split so evaluation runs on rows the
         # model never trained on, whichever strategy produced them.
@@ -1802,7 +1805,7 @@ class EvaluateModelTool(BaseTool):
             labels = list(range(len(class_labels))) if class_labels else sorted(pd.Series(y_test).unique())
             out["confusion_matrix"] = confusion_matrix(y_test, y_pred_test, labels=labels).tolist()
         except Exception:
-            pass
+            logger.debug("confusion matrix skipped", exc_info=True)
         try:
             if pd.Series(y_test).nunique() == 2 and (y_prob_test is not None or hasattr(model, "predict_proba")):
                 proba = y_prob_test[:, 1] if y_prob_test is not None else model.predict_proba(X_test)[:, 1]
@@ -1815,7 +1818,7 @@ class EvaluateModelTool(BaseTool):
                                     "tpr": [round(float(v), 4) for v in tpr]}
                 out["roc_auc"] = round(float(roc_auc_score(y_test == positive, proba)), 4)
         except Exception:
-            pass
+            logger.debug("ROC curve skipped", exc_info=True)
         return out
 
     @staticmethod
@@ -1883,7 +1886,7 @@ class EvaluateModelTool(BaseTool):
                         outcome = pd.Series(proba[:, 1], index=X_test.index)
                         is_rate = True
                 except Exception:
-                    pass
+                    logger.debug("probability outcome unavailable; using point predictions", exc_info=True)
             baseline = float(outcome.mean())
 
             drivers: list[dict[str, Any]] = []

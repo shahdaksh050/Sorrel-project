@@ -6,12 +6,17 @@ on:
 
 jobs:
   quality:
-    name: Lint, types, tests (${{ matrix.os }})
+    name: Lint, types, tests (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
+        python: ["3.13"]
+        include:
+          # pyproject.toml declares >=3.11; keep the floor under test.
+          - os: ubuntu-latest
+            python: "3.11"
     env:
       PYTHONUTF8: "1"
     steps:
@@ -19,7 +24,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python }}
           cache: pip
 
       - name: Install dependencies

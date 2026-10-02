@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import math
 import re
 from pathlib import Path
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
     from src.core.findings import Finding
     from src.core.memory import DatasetMetadata, MemorySystem
     from src.core.profiler import DatasetProfile
+
+logger = logging.getLogger(__name__)
 
 #: Deterministic finding_id slugs — never hash(), which is process-randomized.
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -153,7 +156,7 @@ def sandbox_findings(output: dict[str, Any], source_tool: str, kind: str, caveat
                 **_optional_fields(payload),
             ))
     except Exception:
-        pass
+        logger.debug("building a finding from the code payload failed", exc_info=True)
 
     field_names = {f.name for f in dataclasses.fields(Finding)}
     for item in output.get("tool_findings") or []:

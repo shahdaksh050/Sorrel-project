@@ -34,18 +34,11 @@ dependencies = [
     "statsmodels>=0.14.0,<1",
     "scikit-learn>=1.4.0,<2",
     "xgboost>=2.0.0,<3",
-    "matplotlib>=3.8.0,<4",
-    "seaborn>=0.13.0,<1",
-    "plotly>=5.20.0,<6",
-    "reportlab>=4.1.0,<5",
-    "markdown>=3.6,<4",
     "openai>=1.30.0,<2",
     "anthropic>=0.25.0,<1",
     "streamlit>=1.49.0,<2",
     "rich>=13.7.0,<14",
     "python-dotenv>=1.0.0,<2",
-    "pydantic>=2.6.0,<3",
-    "pydantic-settings>=2.2.0,<3",
 ]
 
 [project.optional-dependencies]

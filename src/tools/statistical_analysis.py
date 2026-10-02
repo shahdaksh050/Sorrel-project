@@ -178,6 +178,11 @@ def _epsilon_squared(h_stat: float, n: int) -> float:
     return h_stat / denom
 
 
+def _p_text(p: float) -> str:
+    """`p<0.001` below 0.001, else `p=0.043`. An exact p of 0 does not exist, so it is never printed."""
+    return "p<0.001" if p < 0.001 else f"p={p:.3f}"
+
+
 def _cramers_v(chi2: float, n: int, n_rows: int, n_cols: int) -> float:
     denom = n * min(n_rows - 1, n_cols - 1)
     if denom <= 0:
@@ -259,19 +264,19 @@ def _lead_with_effect(
     magnitude = "a meaningful" if practical else "a negligible"
     parts = [f"{effect_label}={effect_value:.3f} — {magnitude} effect (threshold {threshold})."]
     if significant and practical:
-        parts.append(f"Statistically significant (p={p_val:.4f} < α={alpha}) and practically meaningful.")
+        parts.append(f"Statistically significant ({_p_text(p_val)} < α={alpha}) and practically meaningful.")
     elif significant and not practical:
         parts.append(
-            f"Statistically significant (p={p_val:.4f} < α={alpha}) but the effect size is below the "
+            f"Statistically significant ({_p_text(p_val)} < α={alpha}) but the effect size is below the "
             "practical-significance threshold — likely a large-sample artifact, not a meaningful difference."
         )
     elif not significant and practical:
         parts.append(
-            f"Not statistically significant (p={p_val:.4f} ≥ α={alpha}) despite an effect size above the "
+            f"Not statistically significant ({_p_text(p_val)} ≥ α={alpha}) despite an effect size above the "
             "practical threshold — likely underpowered."
         )
     else:
-        parts.append(f"Not statistically significant (p={p_val:.4f} ≥ α={alpha}).")
+        parts.append(f"Not statistically significant ({_p_text(p_val)} ≥ α={alpha}).")
     return " ".join(parts)
 
 
@@ -706,7 +711,7 @@ class SelectStatisticalTestTool(BaseTool):
         sample_size_note = _sample_size_note(group_sizes, significant, practical)
 
         result: dict[str, Any] = {
-            "summary": f"{test_name}: stat={stat:.4f}, p={p_val:.4f}. {interpretation}",
+            "summary": f"{test_name}: stat={stat:.4f}, {_p_text(p_val)}. {interpretation}",
             "test_name": test_name,
             "statistic": round(float(stat), 6),
             "p_value": round(float(p_val), 6),
@@ -771,7 +776,7 @@ class SelectStatisticalTestTool(BaseTool):
         sample_size_note = _sample_size_note([n], significant, practical)
 
         result: dict[str, Any] = {
-            "summary": f"{test_name}: stat={stat:.4f}, p={p_val:.4f}. {interpretation}",
+            "summary": f"{test_name}: stat={stat:.4f}, {_p_text(p_val)}. {interpretation}",
             "test_name": test_name,
             "statistic": round(stat, 6),
             "p_value": round(p_val, 6),

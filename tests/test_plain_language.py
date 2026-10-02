@@ -124,3 +124,10 @@ class TestAdjustedPValues:
 
     def test_a_plain_p_value_is_unchanged_by_the_new_rule(self) -> None:
         assert plainify("p=0.0004") == "a result very unlikely to be down to chance"
+
+
+@pytest.mark.parametrize("text", ["rank_biserial=0.625", "rank-biserial r=0.625", "rank biserial: 0.625"])
+def test_rank_biserial_is_rewritten_in_every_spelling(text: str) -> None:
+    out = plainify(f"Mann-Whitney U, {text}")
+    assert "biserial" not in out
+    assert "strong positive relationship" in out

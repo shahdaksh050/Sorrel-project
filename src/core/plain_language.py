@@ -187,6 +187,7 @@ _EFFECT_SPECS: tuple[tuple[str, str, str], ...] = (
     (r"(?i:(?:partial\s+)?(?:eta[\s_-]?sq(?:uared)?|eta2|η²|η2|epsilon_squared))", r"[=:]", "eta"),
     (r"(?i:cram[eé]r'?s?[\s_]*v)", r"[=:]", "v"),
     (r"(?:Pearson|Spearman|Kendall)(?:'s)?\s+(?:r|ρ|τ)", r"[=:]", "r"),
+    (r"(?i:rank[\s_-]?biserial(?:[\s_-]?r)?)", r"[=:]", "r"),
     (r"(?i:rho|tau)|ρ|τ|r", "=", "r"),
 )
 _EFFECT_RES: tuple[tuple[re.Pattern[str], str], ...] = tuple(

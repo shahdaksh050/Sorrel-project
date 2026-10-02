@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from src.core.plain_language import format_p
 from src.core.run_view import RunView
 from ui.components.cards import (
     find_tool,
@@ -130,7 +131,7 @@ def render_details_tab(
             st.markdown("#### 5. Statistical Tests")
             c1, c2, c3 = st.columns(3)
             c1.metric("Test used", stat_out.get("test_name", "—"))
-            c2.metric("p-value", f"{stat_out.get('p_value', 0):.4f}")
+            c2.metric("p-value", format_p(stat_out.get("p_value")))
             c3.metric("Likely real, not chance", "Yes" if stat_out.get("significant") else "No")
             st.info(stat_out.get("interpretation", "No interpretation recorded."))
 

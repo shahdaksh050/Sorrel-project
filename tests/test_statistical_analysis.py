@@ -227,3 +227,18 @@ class TestBooleanFeaturesAreCategorical:
         result = SelectStatisticalTestTool().run(file_path=str(p), group_column="tier")
         assert result.status == "success"
         assert result.output.get("feature_column", "spend") != "is_vip"
+
+
+class TestPValuesAreNeverPrintedAsZero:
+    def test_a_tiny_p_value_reads_as_less_than_0_001(self, tmp_path: Path) -> None:
+        rng = np.random.default_rng(3)
+        n = 600
+        group = rng.choice(["a", "b"], n)
+        df = pd.DataFrame({"value": rng.normal(0, 1, n) + np.where(group == "a", 2.0, 0.0), "group": group})
+        p = tmp_path / "big_effect.csv"
+        df.to_csv(p, index=False)
+        result = SelectStatisticalTestTool().run(file_path=str(p), feature_column="value", group_column="group")
+        assert result.status == "success"
+        text = result.output["summary"] + " " + result.output["interpretation"]
+        assert "p=0.0000" not in text and "p=0.000 " not in text
+        assert "p<0.001" in text

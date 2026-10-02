@@ -383,7 +383,7 @@ _MAX_TABLE_ROWS = 20
 _MAX_TABLE_COLS = 8
 
 
-def _spec_rows(spec: dict[str, Any]) -> list[dict[str, Any]]:
+def spec_rows(spec: dict[str, Any]) -> list[dict[str, Any]]:
     """The data rows a Vega-Lite spec carries inline (top level, else its first layer)."""
     candidates: list[Any] = [spec.get("data")]
     candidates.extend(layer.get("data") for layer in spec.get("layer") or [] if isinstance(layer, dict))
@@ -404,7 +404,7 @@ def _table_cell(value: Any) -> str:
 
 def _chart_data_table(spec: dict[str, Any]) -> str:
     """Server-rendered table of the data behind a chart; "" when the spec carries none."""
-    rows = _spec_rows(spec)
+    rows = spec_rows(spec)
     if not rows:
         return ""
     columns: list[str] = []

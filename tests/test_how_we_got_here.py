@@ -144,3 +144,27 @@ def test_builds_from_a_real_runview() -> None:
     out = build_how_html(view.how)
     assert "What we decided" in out
     assert "No AI was used in this run." in out
+
+
+def test_hypothesis_statements_are_rewritten_in_plain_language_and_still_escaped() -> None:
+    how = HowWeGotHere(
+        hypotheses=(
+            Hypothesis("tenure differs (Mann-Whitney U, rank_biserial=0.625, p_adj=0.0000)", "supported", 0.9),
+            Hypothesis(HOSTILE, "refuted", 0.1),
+        ),
+        hypothesis_counts=(("refuted", 1), ("supported", 1)),
+    )
+    out = build_how_html(how)
+    assert "p_adj" not in out and "rank_biserial" not in out
+    assert "correcting for the other tests" in out
+    assert "<script" not in out and "<img" not in out and "&lt;script&gt;" in out
+
+
+def test_a_capped_hypothesis_list_says_how_many_were_tested() -> None:
+    shown = tuple(Hypothesis(f"idea {i}", "supported", 0.7) for i in range(8))
+    how = HowWeGotHere(hypotheses=shown, hypothesis_counts=(("supported", 33),))
+    out = build_how_html(how)
+    assert "Showing 8 of 33." in out
+    assert "Showing" not in build_how_html(
+        HowWeGotHere(hypotheses=shown[:3], hypothesis_counts=(("supported", 3),))
+    )

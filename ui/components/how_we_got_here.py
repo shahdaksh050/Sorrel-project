@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 
+from src.core.plain_language import plainify
 from src.core.run_view import HowWeGotHere
 
 _MODE_LABELS: dict[str, str] = {
@@ -60,7 +61,7 @@ def _decided(how: HowWeGotHere) -> str:
     label = _MODE_LABELS.get(d.mode, d.mode)
     body = f'<p class="how-lead">{_e(label)}</p>'
     if d.rationale:
-        body += f'<p class="how-text">{_e(d.rationale)}</p>'
+        body += f'<p class="how-text">{_e(plainify(d.rationale))}</p>'
     if d.rejected:
         body += '<p class="how-sub">Options we turned down</p>' + _list(d.rejected)
     return _block(
@@ -125,11 +126,17 @@ def _ideas(how: HowWeGotHere) -> str:
     )
     rows = "".join(
         f'<li><span class="how-tag {_e(h.status)}">{_e(_STATUS_LABELS.get(h.status, h.status))}'
-        f"</span> {_e(h.statement)}</li>"
+        f"</span> {_e(plainify(h.statement))}</li>"
         for h in how.hypotheses
     )
+    tested = sum(n for _, n in how.hypothesis_counts)
+    more = (
+        f'<p class="how-more">Showing {len(how.hypotheses)} of {tested}.</p>'
+        if tested > len(how.hypotheses)
+        else ""
+    )
     body = (f'<p class="how-lead">{_e(counts)}.</p>' if counts else "") + (
-        f'<ul class="how-list">{rows}</ul>'
+        f'<ul class="how-list">{rows}</ul>{more}'
     )
     return _block(
         "Ideas we tested",

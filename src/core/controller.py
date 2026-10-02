@@ -19,21 +19,14 @@ ARCHITECTURAL BOUNDARY:
 """
 from __future__ import annotations
 
-import ast
-import copy
-import difflib
 import json
 import logging
 import os
-import re
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 import pandas as pd
-from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
@@ -43,7 +36,6 @@ from src.core.causal_guard import (
     audit_findings_causal_language,
     classify_study_design,
 )
-from src.core.chart_designer import design_from_reply
 from src.core.claim_verification import _CANON_PRECISIONS as _CANON_PRECISIONS
 from src.core.claim_verification import _KEYWORD_TOOL_MAP as _KEYWORD_TOOL_MAP
 from src.core.claim_verification import _KEYWORD_TOOL_PATTERNS as _KEYWORD_TOOL_PATTERNS
@@ -51,21 +43,28 @@ from src.core.claim_verification import _NUMBER_RE as _NUMBER_RE
 from src.core.claim_verification import _UNVERIFIABLE_SKIP_ABS_INT as _UNVERIFIABLE_SKIP_ABS_INT
 from src.core.claim_verification import _canon_number as _canon_number
 from src.core.claim_verification import _collect_numbers as _collect_numbers
-from src.core.claim_verification import flag_unverified_claims, verified_number_pools
 from src.core.coercion import coerce_types
-from src.core.dashboard import (
-    ChartSpec,
-    build_dashboard,
-    dashboard_to_json,
-    designed_chart,
-    merge_designed,
+from src.core.controller_common import (  # noqa: F401 - re-exported: other modules import these from here
+    _AUTODETECT_HIGH,
+    _AUTODETECT_LOW,
+    _COMPACT_RETRY_NOTE,
+    _MAX_PLANNER_CONTEXT_TOKENS,
+    _MAX_STEPS_PER_CYCLE,
+    _MIN_CHART_DESIGN_CONTEXT,
+    MAX_CODE_STEP_RETRIES,
+    MAX_STEP_RETRIES,
+    _PreparedStep,
+    _read_dataframe,
+    console,
 )
+from src.core.controller_planning import PlanMixin
+from src.core.controller_report import ReportMixin
+from src.core.controller_steps import StepMixin
 from src.core.degradations import collect_degradations
 from src.core.deliverable_contract import audit_deliverables, parse_deliverable_contract
-from src.core.dependence import check_simpsons_paradox, intraclass_correlation
 from src.core.domain_packs import detect_domain_pack, evaluate_domain_pack
 from src.core.domains import infer_domains
-from src.core.findings import Finding, attach_finding_checks, score_objective_fit
+from src.core.findings import Finding, attach_finding_checks
 from src.core.governance import (
     AUDIT_SUBDIR,
     LOCAL_PROVIDERS,
@@ -74,31 +73,27 @@ from src.core.governance import (
     local_only,
     max_llm_tokens_per_run,
 )
-from src.core.hypothesis import HypothesisTree, generate_counterfactual_probes
+from src.core.hypothesis import HypothesisTree
 from src.core.integrity import evaluate_data_integrity
 from src.core.io import get_max_rows, read_any
 from src.core.joins import join_related
 from src.core.llm_client import _DEFAULT_MODELS as _DEFAULT_MODELS
 from src.core.llm_client import LLMClient as LLMClient
 from src.core.llm_client import LocalOnlyError as LocalOnlyError
-from src.core.memory import AnalysisStep, DatasetMetadata, MemorySystem, ToolResult
+from src.core.memory import DatasetMetadata, MemorySystem, ToolResult
 from src.core.model_telemetry import get_limiter
-from src.core.multiple_testing import adjust_findings_run_level
 from src.core.profiler import DatasetProfile, profile_dataframe
 from src.core.prompt_manager import (
     ARCHETYPES,
-    CHART_DESIGN_PROMPT,
     RLM_SUBTASK_SYSTEM,
     PromptManager,
 )
 from src.core.question_router import route_question
 from src.core.run_config import RunConfig
-from src.core.run_context import in_run_context, objective_scope
+from src.core.run_context import objective_scope
 from src.core.security import sanitize_for_prompt
 from src.core.shared_context import SharedAnalysisContext
-from src.core.stats_utils import repeated_entity
 from src.core.step_validation import _COLUMN_PARAM_NAMES as _COLUMN_PARAM_NAMES
-from src.core.step_validation import columns_for, is_column_param, validate_step
 from src.core.tool_registry import _INJECTED_PARAMS as _INJECTED_PARAMS
 from src.core.tool_registry import ToolRegistry as ToolRegistry
 from src.core.tool_registry import _short_tool_description as _short_tool_description
@@ -106,66 +101,12 @@ from src.rlm.engine import RLMEngine, RLMSubTask
 
 logger = logging.getLogger(__name__)
 
-console = Console()
-
-
-class _PreparedStep(NamedTuple):
-    """A plan step resolved against run state and cleared to execute."""
-
-    idx: int
-    step: AnalysisStep
-    tool: Any
-    params: dict[str, Any]
-    dropped_note: str
-    cache_key: str
-    cached: ToolResult | None
-
-
-def _read_dataframe(file_path: str) -> pd.DataFrame:
-    """Load a CSV/TSV/Excel dataset for dashboard generation."""
-    df, _report = read_any(file_path)
-    return df
-
-# Max retries before abandoning a failed step
-MAX_STEP_RETRIES = 2
-#: Code-running tools fail as part of normal self-correction (a wrong column
-#: name, a pandas idiom) — each failure returns a hint the next attempt uses,
-#: so they get a larger budget than a deterministic tool that is simply broken.
-MAX_CODE_STEP_RETRIES = 5
-
-#: Appended to a reasoning prompt when the first reply was unusable
-#: (non-JSON, truncated at max_tokens, or empty) — see analyze().
-_COMPACT_RETRY_NOTE = (
-    "\n\n## Retry Note\nYour previous reply could not be used (it was not "
-    "complete, valid JSON — possibly cut off by the output length limit). "
-    "Reply again with ONLY the JSON object: at most 8 steps, one short "
-    "sentence per rationale, no markdown fences, no text outside the JSON.\n"
-)
-
-#: Ceiling on the prompt budget derived from the model's context window. A
-#: 1M-token window is not a reason to send 750k-token planner prompts: cost
-#: and latency grow with prompt size while the ranked findings already keep
-#: what matters compact. LLM_CONTEXT_TOKENS, when set, overrides all of this.
-_MAX_PLANNER_CONTEXT_TOKENS = 32_000
-
-#: Steps run per reasoning cycle — a model that lists twenty is padding, and
-#: each extra step costs a tool run plus digest tokens on every later prompt.
-_MAX_STEPS_PER_CYCLE = 8
-
-#: Below this context window the chart-design call is skipped: a small model
-#: would spend its scarce budget on it and the deterministic dashboard stands.
-_MIN_CHART_DESIGN_CONTEXT = 16_000
-
-# Target auto-detection confidence thresholds
-_AUTODETECT_HIGH = 0.75   # proceed autonomously above this
-_AUTODETECT_LOW  = 0.40   # prompt user (CLI) or best-guess (UI) above this
-
 
 # ---------------------------------------------------------------------------
 # Agent Controller — the top-level orchestrator
 # ---------------------------------------------------------------------------
 
-class AgentController:
+class AgentController(PlanMixin, StepMixin, ReportMixin):
     """
     Top-level orchestrator implementing the full 7-stage workflow.
 
@@ -314,22 +255,6 @@ class AgentController:
         "estimate", "will churn", "likely to", "propensity",
         "drive", "what affect", "what influenc", "what cause", "depends on", "explain", "why ",
     )
-
-    #: Read-only analytical tools that only read the dataset file and touch
-    #: no shared run state, so a cycle's consecutive steps of these can run
-    #: concurrently. Excluded on purpose: tools that read `prior_results`
-    #: (generate_visualizations, generate_report), model training/clustering
-    #: (CPU- and memory-heavy), and anything that executes LLM-authored code.
-    _CONCURRENT_SAFE_TOOLS: frozenset[str] = frozenset({
-        "detect_outliers", "correlation_analysis", "select_statistical_test",
-        "segment_comparison", "time_series_analysis", "text_analysis",
-        "geospatial_analysis", "experiment_analysis", "anomaly_analysis",
-        "survival_analysis", "basket_analysis", "price_elasticity_analysis", "equity_analysis",
-        "curve_fit_analysis",
-    })
-
-    #: Concurrent-safe tools that write a fixed-name output file.
-    _FILE_WRITING_TOOLS: frozenset[str] = frozenset({"detect_outliers"})
 
     def _decide_analysis_mode(self, col: str | None, confidence: float) -> dict[str, Any]:
         """
@@ -1330,55 +1255,12 @@ class AgentController:
 
         return final_result
 
-    def _final_synthesis(self, stage: str) -> dict[str, Any]:
-        """One LLM call for the final interpretation of everything found so
-        far; the deterministic synthesis when the LLM is off, capped, failing,
-        or does not return a usable Form 2 reply."""
-        if not self.use_llm or self._prompt_manager is None or self._rlm_engine is None:
-            return self._deterministic_final()
-        try:
-            if self._llm_budget_exhausted():
-                raise RuntimeError("LLM token cap reached")
-            self.llm_client.stage = stage
-            result: dict[str, Any] = self._normalise_reply(self._rlm_engine.invoke(
-                self._prompt_manager.get_final_interpretation_prompt(), depth=0, stage=stage
-            ))
-            if result.get("status") == "error":
-                raise RuntimeError(str(result.get("error", "Unknown LLM error")))
-            if result.get("status") != "complete" or not result.get("insights"):
-                raise RuntimeError("final interpretation reply had no insights")
-            return result
-        except Exception as exc:
-            self.memory.set_context("llm_error", f"{type(exc).__name__}: {exc}")
-            return self._deterministic_final()
 
-    def _all_steps_cached(self, steps: list[AnalysisStep]) -> bool:
-        """True when every planned step would be answered from the step cache."""
-        for step in steps:
-            if not self.tool_registry.has(step.tool_name):
-                return False
-            tool = self.tool_registry.get(step.tool_name)
-            params = tool.prepare_params(
-                self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
-            )
-            params, _dropped, errors, _normalised = self._validate_step(tool, step.parameters, params)
-            if errors or self._step_cache_key(step.tool_name, params) not in self._step_cache:
-                return False
-        return bool(steps)
 
     # ------------------------------------------------------------------
     # Resilience helpers — plan parsing and LLM-failure fallbacks
     # ------------------------------------------------------------------
 
-    def _tool_blocks(self) -> tuple[str, str, str]:
-        """(full, short, compact) candidate-tool descriptions for the current profile."""
-        args = (self.last_profile, self.memory.dataset_metadata)
-        kwargs = {"use_ml": self.use_ml, "use_llm": self.use_llm}
-        return (
-            self.tool_registry.get_candidate_descriptions(*args, **kwargs),
-            self.tool_registry.get_candidate_short_descriptions(*args, **kwargs),
-            self.tool_registry.get_candidate_descriptions(*args, **kwargs, compact=True),
-        )
 
     def _apply_column_roles(self, proposals: Any) -> None:
         """Validate the planner's proposed column roles against the data, keep
@@ -1448,1202 +1330,45 @@ class AgentController:
         if clean:
             self.memory.set_context("data_understanding", clean)
 
-    _PLAN_KEYS = ("steps", "plan", "next_steps", "actions", "tasks")
-    _TOOL_KEYS = ("tool_name", "tool", "name", "function", "action", "tool_call")
-    _PARAM_KEYS = ("parameters", "params", "arguments", "args", "input", "inputs")
-    _STEP_NO_KEYS = ("step_number", "step", "id", "index")
-    _TOOL_PREFIX_RE = re.compile(r"^(?:(?:functions?|tools?)\s*[.:/]\s*)+", re.IGNORECASE)
-    _DONE_STATUSES = frozenset({"complete", "completed", "done", "finished", "final", "finish"})
-    _GOING_STATUSES = frozenset({"in_progress", "inprogress", "continue", "continuing", "running", "ongoing", "working"})
 
-    @classmethod
-    def _plan_items(cls, reply: Any) -> list[Any]:
-        """The plan's step list wherever a drifting model put it: a top-level
-        list, under steps/plan/next_steps/actions/tasks, or a dict keyed by
-        step number."""
-        if isinstance(reply, list):
-            return reply
-        if not isinstance(reply, dict):
-            return []
-        for key in cls._PLAN_KEYS:
-            value = reply.get(key)
-            if isinstance(value, list) and value:
-                return value
-            if isinstance(value, dict) and value:
-                if any(k in value for k in cls._TOOL_KEYS):
-                    return [value]
-                if nested := cls._plan_items(value):
-                    return nested
-                keyed = [(k, v) for k, v in value.items() if isinstance(v, dict)]
-                if keyed:
-                    return [
-                        {**v, "step_number": int(m.group())} if (m := re.search(r"\d+", str(k))) else v
-                        for k, v in keyed
-                    ]
-        return []
 
-    @classmethod
-    def _normalise_reply(cls, reply: Any) -> Any:
-        """Repair reply-form drift: a bare step list, a missing or oddly
-        spelled `status`. Error replies pass through untouched."""
-        if isinstance(reply, list):
-            return {"status": "in_progress", "steps": reply}
-        if not isinstance(reply, dict) or reply.get("status") == "error":
-            return reply
-        reply = dict(reply)
-        status = re.sub(r"[\s-]+", "_", str(reply.get("status") or "").strip().lower())
-        if status in cls._DONE_STATUSES:
-            reply["status"] = "complete"
-        elif status in cls._GOING_STATUSES or cls._plan_items(reply):
-            reply["status"] = "in_progress"
-        elif reply.get("insights") or reply.get("recommendations"):
-            reply["status"] = "complete"
-        return reply
 
-    def _resolve_tool_name(self, raw: str) -> tuple[str | None, str]:
-        """(registered tool name or None, the name cleaned of decoration).
-        Small models write "functions.clean_data", "Clean_Data", "clean_dat":
-        match case-/underscore-insensitively, then by a unique close match."""
-        name = self._TOOL_PREFIX_RE.sub("", raw.strip()).strip("`'\" ").removesuffix("()").split(".")[-1].strip()
-        if not name or self.tool_registry.has(name):
-            return (name or None), name
-        names = self.tool_registry.names()
-        key = re.sub(r"[\W_]+", "", name.lower())
-        exact = [n for n in names if re.sub(r"[\W_]+", "", n.lower()) == key]
-        if len(exact) == 1:
-            return exact[0], name
-        close = difflib.get_close_matches(name.lower(), names, n=2, cutoff=0.8)
-        return (close[0] if len(close) == 1 else None), name
 
-    def _parse_steps(self, llm_response: Any, *, cap: bool = True) -> list[AnalysisStep]:
-        """
-        Parse LLM plan steps, skipping malformed entries instead of crashing.
-        Field names, tool names and the step container are matched tolerantly;
-        exact duplicates are dropped and the plan is capped at
-        _MAX_STEPS_PER_CYCLE (`cap=False` for a plan the profile built).
 
-        Anti-hallucination guard: steps naming tools that do not exist in the
-        ToolRegistry are rejected here (never executed), and a planner note is
-        recorded so the next reasoning cycle sees the correction.
-        """
-        steps: list[AnalysisStep] = []
-        rejected: list[str] = []
-        notes: list[str] = []
-        seen: set[str] = set()
-        duplicates = 0
-        for idx, s in enumerate(self._plan_items(llm_response), 1):
-            if isinstance(s, str):
-                s = {"tool_name": s}
-            if not isinstance(s, dict):
-                continue
-            for key in ("function", "tool_call"):  # OpenAI style: {"function": {"name", "arguments"}}
-                if isinstance(s.get(key), dict):
-                    s = {**s, **s[key]}
-            candidates = [v for k in self._TOOL_KEYS if isinstance(v := s.get(k), str) and v.strip()]
-            if not candidates:
-                continue
-            resolved = [self._resolve_tool_name(c) for c in candidates]
-            hit = next(((n, c) for n, c in resolved if n), None)
-            if hit is None:
-                rejected.append(resolved[0][1] or candidates[0])
-                continue
-            tool_name, cleaned = hit
-            if (
-                getattr(self.tool_registry.get(tool_name), "executes_code", False)
-                and not code_execution_enabled()
-            ):
-                rejected.append(tool_name)
-                continue
-            if tool_name != cleaned:
-                notes.append(f"corrected {cleaned!r} -> {tool_name!r}")
-            parameters: Any = next((s[k] for k in self._PARAM_KEYS if s.get(k)), {})
-            if isinstance(parameters, str):
-                # ...and sometimes send the parameter object as a JSON string.
-                try:
-                    parameters = json.loads(parameters)
-                except json.JSONDecodeError:
-                    parameters = {}
-            if not isinstance(parameters, dict):
-                parameters = {}
-            signature = f"{tool_name}|{json.dumps(parameters, sort_keys=True, default=str)}"
-            if signature in seen:
-                duplicates += 1
-                continue
-            seen.add(signature)
-            number = next((s[k] for k in self._STEP_NO_KEYS if s.get(k) is not None), None)
-            if isinstance(number, str) and number.strip().isdigit():
-                number = int(number)
-            steps.append(
-                AnalysisStep(
-                    step_number=number if isinstance(number, int) and not isinstance(number, bool) and number > 0 else idx,
-                    tool_name=tool_name,
-                    parameters=parameters,
-                    rationale=str(s.get("rationale", "")),
-                )
-            )
-        if duplicates:
-            notes.append(f"dropped {duplicates} duplicate step(s)")
-        if cap and len(steps) > _MAX_STEPS_PER_CYCLE:
-            notes.append(
-                f"only the first {_MAX_STEPS_PER_CYCLE} of {len(steps)} steps were run, the rest "
-                "were dropped; plan them in a later cycle"
-            )
-            steps = steps[:_MAX_STEPS_PER_CYCLE]
-        if rejected:
-            console.print(
-                f"  [yellow]⚠ Rejected {len(rejected)} hallucinated tool name(s): "
-                f"{', '.join(rejected)}[/]"
-            )
-        if rejected or notes:
-            summary = [
-                *(
-                    [
-                        f"Rejected unknown tool name(s): {', '.join(sorted(set(rejected)))}. "
-                        f"Only these tools exist: {', '.join(self.tool_registry.names())}."
-                    ]
-                    if rejected else []
-                ),
-                *(f"Plan note: {n}." for n in notes),
-            ]
-            self.memory.append_tool_result(
-                ToolResult(
-                    tool_name="planner",
-                    status="skipped",
-                    output={"summary": " ".join(summary)},
-                    iteration=self.memory.iteration_count,
-                )
-            )
-        return steps
 
-    #: Nature-driven tools included in the fallback plan when applies_to()
-    #: scores them at full confidence (1.0) — same tools, same gating logic
-    #: the LLM planner sees, so there's one source of truth for "what suits
-    #: this data" (controller._should_decompose folds in the same way).
-    #: Tools the deterministic plan sequences explicitly (or never runs from
-    #: the profile sweep): pipeline control, the supervised branch decided
-    #: below on the target, and code execution, which needs an LLM to write
-    #: the code and is meaningless without one.
-    _FALLBACK_EXCLUDED_TOOLS = frozenset({
-        "ingest_dataset", "clean_data", "generate_report",
-        "train_model", "evaluate_model", "cluster_data",
-        "execute_dynamic_code",
-        # Now returns chart specs the dashboard renders, but everything it
-        # draws unprompted (distributions, correlation heatmap, importances)
-        # the deterministic dashboard already builds from the profile and
-        # tool outputs — scheduling it here would only duplicate panels. The
-        # LLM planner can still call it for a specific chart_type.
-        "generate_visualizations",
-    })
 
-    #: applies_to score a tool must reach to earn a slot in the deterministic
-    #: plan. Below 1.0 so a domain matched on partial evidence (0.65 for a
-    #: ticker+price file with no OHLC) still contributes its analysis.
-    _FALLBACK_MIN_SCORE = 0.6
 
-    _ARM_NAME_RE = re.compile(r"arm|variant|treat|group|condition|cohort|bucket|version", re.IGNORECASE)
 
-    @classmethod
-    def _experiment_arm_column(cls, profile: DatasetProfile | None, target: str | None) -> str | None:
-        """The arm column of an experiment-archetype profile, else None:
-        a low-cardinality dimension named in the archetype evidence (whatever
-        its shape), else one with an arm-like name, else the first one."""
-        if profile is None or getattr(profile, "archetype", None) != "experiment":
-            return None
-        dims = [c.name for c in profile.dimensions() if 2 <= c.nunique <= 6 and c.name != target]
-        raw_evidence = getattr(profile, "archetype_evidence", None)
-        if isinstance(raw_evidence, dict):
-            evidence = [f"{k} {v}" for k, v in raw_evidence.items()]
-        elif isinstance(raw_evidence, (list, tuple)):
-            evidence = [str(e) for e in raw_evidence]
-        else:
-            evidence = [str(raw_evidence or "")]
-        # A name counts only as a whole word/quoted token of an evidence item.
-        named = [d for d in dims if any(re.search(rf"(?<!\w){re.escape(d)}(?!\w)", e) for e in evidence)]
-        for group in (
-            named,
-            [d for d in dims if cls._ARM_NAME_RE.search(d)],
-            dims,
-        ):
-            if group:
-                return group[0]
-        return None
 
-    def _build_fallback_plan(self) -> dict[str, Any]:
-        """
-        Deterministic analysis plan used when the LLM is unreachable on the
-        first reasoning cycle. Always: clean → outliers → correlation, plus
-        whichever nature-specific tools the profile-driven gating says
-        apply at full confidence, plus (train + evaluate) when a target
-        exists or (cluster + visualise) otherwise.
-        """
-        meta = self.memory.dataset_metadata
-        if meta is None:
-            raise RuntimeError("No dataset loaded — cannot build a fallback plan.")
-        fp = meta.file_path
-        profile = self.last_profile
-        steps: list[dict[str, Any]] = [
-            {
-                "step_number": 1,
-                "tool_name": "clean_data",
-                "parameters": {
-                    "file_path": fp,
-                    "target_column": meta.target_column,
-                },
-                # No imputation: inferential tools use complete cases and
-                # models impute inside cross-validation.
-                "rationale": "Fallback plan: clean the dataset (types, duplicates) before analysis.",
-            },
-        ]
 
-        # detect_outliers/correlation_analysis are near-universal but not
-        # unconditional — e.g. correlation_analysis needs 2+ numeric columns
-        # — so they go through the same applies_to gate as everything else
-        # rather than being hardcoded past it (a single-numeric-column
-        # dataset would otherwise error out here every time).
-        for name, params, rationale in (
-            ("detect_outliers", {"file_path": fp, "method": "iqr"}, "Fallback plan: flag anomalous rows."),
-            ("correlation_analysis", {"file_path": fp, "target_column": meta.target_column}, "Fallback plan: quantify feature relationships."),
-        ):
-            if self.tool_registry.has(name) and self.tool_registry.get(name).applies_to(profile, meta) > 0.0:
-                steps.append({
-                    "step_number": len(steps) + 1,
-                    "tool_name": name,
-                    "parameters": params,
-                    "rationale": rationale,
-                })
 
-        # Every registered tool the profile says fits, ranked by its own
-        # applies_to score — not a hardcoded name list. This is what makes the
-        # no-LLM path a real analyst rather than a stub: a tool registered
-        # after this function was written (the domain tools, anything added
-        # later) is planned automatically, and a dataset recognised as
-        # transactional gets its cohort analysis without an LLM ever being
-        # reachable. The previous hardcoded tuple silently excluded every
-        # tool it predated.
-        already = {s["tool_name"] for s in steps} | self._FALLBACK_EXCLUDED_TOOLS
-        for tool in self.tool_registry.candidate_tools(
-            profile, meta, use_ml=self.use_ml, use_llm=self.use_llm
-        ):
-            name = getattr(tool, "name", "")
-            if name in already:
-                continue
-            score = tool.applies_to(profile, meta)
-            if score < self._FALLBACK_MIN_SCORE:
-                continue
 
-            tool_params: dict[str, Any] = {"file_path": fp}
-            try:
-                tool_params.update(tool.default_params(profile, meta) or {})
-            except Exception:
-                logger.debug("default_params failed for a scheduled tool", exc_info=True)
 
-            # Never schedule a step that cannot run. file_path and output_dir
-            # are injected by BaseTool.prepare_params, and requires_context
-            # entries are filled from memory, so only genuinely unfilled
-            # required parameters disqualify a tool.
-            try:
-                schema = tool.get_schema()
-            except Exception:
-                schema = {}
-            injected = {"file_path", "output_dir"} | set(
-                getattr(tool, "requires_context", {}).values()
-            )
-            unfilled = [
-                key
-                for key, spec in schema.items()
-                if spec.get("required")
-                and key not in tool_params
-                and key not in injected
-            ]
-            if unfilled:
-                continue
-
-            steps.append({
-                "step_number": len(steps) + 1,
-                "tool_name": name,
-                "parameters": tool_params,
-                "rationale": (
-                    f"Fallback plan: profile-driven selection scored '{name}' "
-                    f"at {score:.2f} for this dataset."
-                ),
-            })
-            already.add(name)
-
-        # An experiment's primary question is the arm comparison — make sure
-        # the draft tests it rather than leaving the grouping to chance.
-        arm = self._experiment_arm_column(profile, meta.target_column)
-        if arm and self.tool_registry.has("select_statistical_test"):
-            test_tool = self.tool_registry.get("select_statistical_test")
-            if test_tool.applies_to(profile, meta) > 0.0:
-                test_step = next((s for s in steps if s["tool_name"] == "select_statistical_test"), None)
-                if test_step is None:
-                    test_params: dict[str, Any] = {"file_path": fp}
-                    try:
-                        test_params.update(test_tool.default_params(profile, meta) or {})
-                    except Exception:
-                        logger.debug("default_params failed for a test tool", exc_info=True)
-                    test_step = {
-                        "step_number": len(steps) + 1,
-                        "tool_name": "select_statistical_test",
-                        "parameters": test_params,
-                        "rationale": f"Fallback plan: experiment data — compare outcomes across arms of '{arm}'.",
-                    }
-                    steps.append(test_step)
-                test_step["parameters"]["group_column"] = arm
-
-        if not self.use_ml:
-            # No model-fitting branch at all: no supervised training and no
-            # clustering fallback. The profile-driven analyses above already
-            # ran, so the plan is complete and genuinely ML-free.
-            pass
-        elif meta.target_column and meta.task_type in ("classification", "regression"):
-            steps += [
-                {
-                    "step_number": len(steps) + 1,
-                    "tool_name": "train_model",
-                    "parameters": {
-                        "file_path": fp,
-                        "target_column": meta.target_column,
-                        "task_type": meta.task_type,
-                    },
-                    "rationale": "Fallback plan: train baseline models with CV.",
-                },
-                {
-                    "step_number": len(steps) + 2,
-                    "tool_name": "evaluate_model",
-                    "parameters": {
-                        "file_path": fp,
-                        "target_column": meta.target_column,
-                        "task_type": meta.task_type,
-                    },
-                    "rationale": "Fallback plan: evaluate the best model on held-out data.",
-                },
-            ]
-        else:
-            steps += [
-                {
-                    "step_number": len(steps) + 1,
-                    "tool_name": "cluster_data",
-                    "parameters": {"file_path": fp},
-                    "rationale": "Fallback plan: no target — discover natural segments.",
-                },
-            ]
-        return {
-            "status": "in_progress",
-            "reasoning": "LLM unavailable — executing deterministic fallback plan.",
-            "steps": steps,
-            "deterministic": True,   # _parse_steps does not cap a plan the profile built
-        }
-
-    def _generate_dashboard(self) -> None:
-        """
-        Build the dynamic dashboard from the final state of the analysis and
-        save it as JSON next to the reports. Non-fatal on any failure.
-        """
-        meta = self.memory.dataset_metadata
-        if meta is None:
-            return
-        source = str(self.memory.get_context("cleaned_file_path") or meta.file_path)
-        try:
-            df = _read_dataframe(source)
-            profile = profile_dataframe(df, target_column=meta.target_column)
-            charts = build_dashboard(
-                df,
-                profile,
-                target_column=meta.target_column,
-                task_type=meta.task_type,
-                tool_results=[r.to_dict() for r in self.memory.tool_results],
-                findings=[f.to_dict() for f in self.memory.ranked_findings()],
-            )
-            charts = self._design_charts(df, profile, charts)
-            out_path = Path(self._output_dir) / "reports" / "dashboard.json"
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(dashboard_to_json(charts), encoding="utf-8")
-            self._last_charts = [c.to_dict() for c in charts]
-            self.memory.set_context("dashboard_path", str(out_path))
-            console.print(
-                f"  [green]📊 Dashboard generated: {len(charts)} chart(s) → {out_path}[/]"
-            )
-        except Exception as exc:
-            console.print(f"  [yellow]⚠ Dashboard generation failed (non-fatal): {exc}[/]")
-
-    def _design_charts(
-        self, df: pd.DataFrame, profile: DatasetProfile, charts: list[ChartSpec]
-    ) -> list[ChartSpec]:
-        """One low-effort LLM call that designs a few finding-driven charts and
-        drops generic ones they make redundant. Any failure keeps `charts`."""
-        if (
-            not self.use_llm
-            or self._prompt_manager is None
-            or os.getenv("CHART_DESIGN", "").strip().lower() == "false"
-        ):
-            return charts
-        try:
-            findings = [f.to_dict() for f in self.memory.ranked_findings()]
-            if not findings or self._llm_budget_exhausted():
-                return charts
-            if self.llm_client.get_context_window() < _MIN_CHART_DESIGN_CONTEXT:
-                console.print("  [dim]Chart design skipped: the model's context window is too small for it.[/]")
-                return charts
-            self.llm_client.stage = "chart_design"
-            reply = self.llm_client.call(
-                CHART_DESIGN_PROMPT,
-                self._prompt_manager.get_chart_design_prompt(
-                    findings, [c.to_dict() for c in charts], profile
-                ),
-                reasoning_effort="low",
-                max_tokens=3000,  # room for the recipes of as many charts as it judges worthwhile
-            )
-            if self._rlm_engine is not None:
-                self._rlm_engine.record_usage(reply.get("_rlm_usage"))
-                self.memory.set_context("llm_usage", self._rlm_engine.usage_summary())
-            design = design_from_reply(df, reply)
-            designed = [
-                c for i, raw in enumerate(design.charts)
-                if (c := designed_chart(raw, i, findings)) is not None
-            ]
-            return merge_designed(charts, designed, set(design.drop_ids))
-        except Exception as exc:
-            if self._rlm_engine is not None:  # a failed call still spent tokens
-                self._rlm_engine.record_usage(getattr(exc, "rlm_usage", None))
-            console.print(f"  [dim]Chart design skipped (non-fatal): {exc}[/]")
-            return charts
-
-    def _write_run_summary(self) -> None:
-        """reports/summary.json: a compact record of this run for run-to-run
-        comparison. Non-fatal on any failure."""
-        meta = self.memory.dataset_metadata
-        if meta is None:
-            return
-        try:
-            times: dict[str, float] = {}
-            for r in self.memory.tool_results:
-                times[r.tool_name] = times.get(r.tool_name, 0.0) + float(r.execution_time_ms or 0.0) / 1000.0
-            summary = {
-                "dataset": {"name": Path(meta.file_path).stem, "rows": meta.row_count, "cols": meta.column_count},
-                "objective": self.objective,
-                "llm": {"enabled": bool(self.use_llm), "model": self.llm_client.model if self.use_llm else None},
-                "created": datetime.now(UTC).isoformat(timespec="seconds"),
-                "findings": [
-                    {"finding_id": f.finding_id, "kind": f.kind, "layer": f.layer,
-                     "importance": f.importance, "headline": f.headline}
-                    for f in self.memory.ranked_findings()
-                ],
-                "charts": [{"chart_id": c.get("chart_id"), "title": c.get("title")} for c in self._last_charts],
-                "tool_seconds": {k: round(v, 3) for k, v in times.items()},
-            }
-            out = Path(self._output_dir) / "reports" / "summary.json"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
-        except Exception as exc:
-            console.print(f"  [yellow]Run summary not written (non-fatal): {exc}[/]")
-
-    def _generate_html_report(self, llm_final: dict[str, Any]) -> None:
-        """
-        Write the self-contained HTML report (summary + interactive dashboard).
-        Non-fatal on any failure.
-        """
-        meta = self.memory.dataset_metadata
-        if meta is None:
-            return
-        try:
-            from src.core.html_report import build_html_report
-
-            html_doc = build_html_report(
-                dataset_name=Path(meta.file_path).stem,
-                llm_insights=llm_final,
-                tool_results=[r.to_dict() for r in self.memory.tool_results],
-                charts=self._last_charts,
-                objective=self.objective,
-                profile=self.memory.get_context("data_profile"),
-                read_report=self.memory.get_context("read_report"),
-                coercions=self.memory.get_context("coercions"),
-                plan_rationales=self.memory.get_context("plan_rationales"),
-                statistical_test_pvalues=self.memory.get_context("statistical_test_pvalues"),
-                unverified_claims=self.memory.get_context("unverified_claims"),
-                profile_status=self.memory.get_context("profile_status"),
-                degradations=self.memory.get_context("degradations"),
-                findings=[f.to_dict() for f in self.memory.ranked_findings()],
-                analysis_decision=self.memory.get_context("analysis_decision"),
-            )
-            out_path = Path(self._output_dir) / "reports" / "report.html"
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(html_doc, encoding="utf-8")
-            self.memory.set_context("html_report_path", str(out_path))
-            console.print(f"  [green]🌐 HTML report generated → {out_path}[/]")
-        except Exception as exc:
-            console.print(f"  [yellow]⚠ HTML report generation failed (non-fatal): {exc}[/]")
-
-    def _deterministic_final(self) -> dict[str, Any]:
-        """
-        Synthesise a final report dict, projected from the finding bus (7.1)
-        rather than re-deriving a narrative from raw tool output per tool.
-        `best_model`/`key_metrics` stay derived directly from train_model's
-        output since they're model-internal facts, not audience-facing
-        findings; every analytical claim ("X differs by Y", "Z is trending")
-        comes from `MemorySystem.ranked_findings()`, which is the same list
-        every other surface (both reports, the dashboard) reads — a tool
-        that gains a findings() implementation reaches all of them at once
-        instead of needing a hardcoded case in each narrator.
-        """
-        recommendations: list[str] = []
-        key_metrics: dict[str, Any] = {}
-        best_model = self.memory.get_context("best_model_name")
-
-        train = self.memory.get_last_result_for("train_model")
-        if train and train.status == "success":
-            models_trained = train.output.get("models_trained", {})
-            best = train.output.get("best_model")
-            if best and best in models_trained:
-                best_model = best
-                metrics = models_trained[best]
-                key_metrics["cv_mean"] = metrics.get("cv_mean")
-                key_metrics["cv_std"] = metrics.get("cv_std")
-                key_metrics["train_test_gap"] = metrics.get("train_test_gap")
-            warnings = train.output.get("overfit_warnings", [])
-            if warnings:
-                recommendations.append(
-                    "Reduce model complexity (lower max_depth) or add regularisation "
-                    "to close the train-test gap."
-                )
-
-        ranked = self.memory.ranked_findings()
-        insights = [f.headline for f in ranked[:12]]
-        if not insights:
-            insights.append("Analysis produced no tool results to synthesise.")
-        # Chosen deterministic mode and a mid-run LLM failure produce the same
-        # findings but are not the same event, and saying so matters: telling
-        # someone to "re-run with a reachable provider" when they deliberately
-        # switched the LLM off reads as a malfunction rather than the mode
-        # working as asked.
-        if not self.use_llm:
-            reasoning = (
-                "Deterministic run: the LLM was switched off, so the plan came "
-                "from the dataset profile and domain inference and these "
-                "findings were compiled directly from tool output."
-            )
-            if not recommendations:
-                recommendations.append(
-                    "Turn the AI narrative on to get these same findings "
-                    "interpreted and prioritised in plain language."
-                )
-        else:
-            if not recommendations:
-                recommendations.append(
-                    "Re-run with a reachable LLM provider for narrative interpretation "
-                    "of these deterministic findings."
-                )
-            reasoning = (
-                "Deterministic synthesis: the LLM became unreachable mid-run, so "
-                "findings were compiled directly from tool outputs."
-            )
-            llm_error = self.memory.get_context("llm_error")
-            if llm_error:
-                reasoning += f" (LLM error: {llm_error})"
-
-        if not self.use_ml:
-            recommendations.append(
-                "Machine learning was switched off for this run — no model was "
-                "fitted. Turn it on for predictive modelling and clustering."
-            )
-        if self.objective:
-            reasoning = f"User objective: {self.objective}\n{reasoning}"
-
-        return {
-            "status": "complete",
-            "llm_fallback": not self.use_llm or bool(self.memory.get_context("llm_error")),
-            "deterministic_mode": not self.use_llm,
-            "ml_enabled": self.use_ml,
-            "reasoning": reasoning,
-            "insights": insights,
-            "recommendations": recommendations,
-            "best_model": best_model,
-            "key_metrics": key_metrics,
-            "findings": [f.to_dict() for f in ranked],
-        }
 
     # ------------------------------------------------------------------
     # Stage 3 execution helper
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _code_of(tool: Any, params: dict[str, Any]) -> str:
-        """The LLM-authored code a code-executing step runs: inline for
-        execute_dynamic_code/define_analysis_tool, the spec body for a
-        generated tool."""
-        code = params.get("code")
-        if isinstance(code, str):
-            return code
-        spec = getattr(tool, "spec", None)
-        return str(getattr(spec, "code", "") or "")
 
-    #: Import roots / sklearn submodules and bare estimator names that fit
-    #: predictive or clustering models. Preprocessing, metrics and other
-    #: utility submodules are not listed — scaling a column is not "machine
-    #: learning".
-    _ML_IMPORT_ROOTS = frozenset({"xgboost", "lightgbm", "catboost"})
-    _ML_SKLEARN_MODULES = frozenset({
-        "ensemble", "linear_model", "tree", "svm", "neighbors", "naive_bayes",
-        "neural_network", "cluster", "mixture", "gaussian_process",
-        "discriminant_analysis", "cross_decomposition",
-    })
-    _ML_ESTIMATORS = frozenset({
-        "KMeans", "SVC", "SVR", "LogisticRegression", "LinearRegression", "Ridge", "Lasso",
-    })
 
-    @classmethod
-    def _detects_ml_code(cls, code: str) -> bool:
-        """Whether LLM-authored code imports a model-fitting library."""
-        try:
-            tree = ast.parse(code)
-        except SyntaxError:
-            return False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                modules = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                modules = [f"{node.module}.{alias.name}" for alias in node.names]
-            elif isinstance(node, ast.Name):
-                if node.id in cls._ML_ESTIMATORS or node.id.endswith(("Classifier", "Regressor")):
-                    return True
-                continue
-            else:
-                continue
-            for module in modules:
-                parts = module.split(".")
-                if parts[0] in cls._ML_IMPORT_ROOTS or (
-                    parts[0] == "sklearn" and (len(parts) == 1 or parts[1] in cls._ML_SKLEARN_MODULES)
-                ):
-                    return True
-        return False
 
-    def _resolve_file_path(self, tool: Any, params: dict[str, Any]) -> dict[str, Any]:
-        """
-        The planner may omit file_path (the system prompt tells it to) or
-        name a derived dataset instead of giving its path. Fill in the raw
-        dataset path — BaseTool.prepare_params then redirects it to the
-        cleaned file — or the derived dataset's path.
-        """
-        try:
-            schema = tool.get_schema()
-        except Exception:
-            schema = {}
-        if "file_path" not in schema:
-            return params
-        params = dict(params)
-        derived = self.memory.get_context("derived_datasets") or {}
-        current = params.get("file_path")
-        if isinstance(current, str) and current in derived:
-            params["file_path"] = derived[current]["path"]
-        elif not current and self.memory.dataset_metadata is not None:
-            params["file_path"] = self.memory.dataset_metadata.file_path
-        return params
 
     # ------------------------------------------------------------------
     # Plan validation — deterministic, before a step spends a tool run
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _is_column_param(key: str) -> bool:
-        return is_column_param(key)
 
-    def _columns_for(self, file_path: Any) -> list[str] | None:
-        """Columns of the dataset a step will read — see `step_validation.columns_for`."""
-        return columns_for(self.memory, file_path)
 
-    def _validate_step(
-        self, tool: Any, raw: dict[str, Any], params: dict[str, Any]
-    ) -> tuple[dict[str, Any], list[str], list[str], str]:
-        """Check a step against its tool's schema before it runs — see
-        `step_validation.validate_step`."""
-        return validate_step(self.memory, tool, raw, params)
 
-    #: Params injected from run state (not chosen by the planner) that must
-    #: not key the step cache — they change every step and are large.
-    _CACHE_EXCLUDED_PARAMS = frozenset({"prior_results", "_prior_results"})
 
-    @staticmethod
-    def _step_cache_key(tool_name: str, params: dict[str, Any]) -> str:
-        """
-        Content-address a step: same tool, same resolved params, same input
-        file content → same key. File-valued params are stamped with
-        mtime+size (not just path) so an in-place edit still invalidates.
-        """
-        parts = [tool_name]
-        for key in sorted(params):
-            if key in AgentController._CACHE_EXCLUDED_PARAMS:
-                continue
-            value = params[key]
-            parts.append(f"{key}={value!r}")
-            if isinstance(value, str):
-                candidate = Path(value)
-                if candidate.is_file():
-                    stat = candidate.stat()
-                    parts.append(f"{key}.stat={stat.st_mtime_ns}:{stat.st_size}")
-        return "|".join(parts)
 
-    def _record_step(self, step: AnalysisStep, result: ToolResult) -> None:
-        """Append a step's outcome, tagged with the current cycle, to memory."""
-        result.iteration = self.memory.iteration_count
-        self.memory.append_tool_result(result)
-        self.memory.mark_step_complete(step.step_number, result)
 
-    def _process_step_result(self, prepared: _PreparedStep, result: ToolResult, total_steps: int) -> None:
-        """Record a freshly executed step and fold its output into run state."""
-        idx, step, tool, params = prepared.idx, prepared.step, prepared.tool, prepared.params
-        executes_code = getattr(tool, "executes_code", False)
-        if executes_code:
-            self._governor.record(
-                tool_name=step.tool_name, code=self._code_of(tool, params), params=params,
-                status=result.status, iteration=self.memory.iteration_count,
-                step_number=step.step_number, output=result.output,
-                error=result.error_message,
-            )
-        if prepared.dropped_note:
-            if result.status == "success":
-                result.output = {**result.output, "plan_note": prepared.dropped_note}
-            else:
-                result.error_message = f"{result.error_message or ''} ({prepared.dropped_note})".strip()
-        self._record_step(step, result)
 
-        if result.status == "success":
-            try:
-                new_findings: list[Finding] = tool.findings(result.output, self.last_profile, self.memory.dataset_metadata)
-            except Exception as exc:
-                new_findings = []
-                console.print(f"  [yellow]⚠ findings() failed for {step.tool_name} (non-fatal): {exc}[/]")
-            if new_findings:
-                seen_ids = {f.finding_id for f in self.memory.findings}
-                for i, finding in enumerate(new_findings):
-                    if not finding.finding_id:
-                        finding.finding_id = f"{step.tool_name}_{step.step_number}_{i}"
-                    if finding.finding_id in seen_ids:
-                        finding.finding_id = f"{finding.finding_id}_i{self.memory.iteration_count}s{step.step_number}_{i}"
-                    seen_ids.add(finding.finding_id)
-                    if not finding.source_tool:
-                        finding.source_tool = step.tool_name
-                    if self.objective:
-                        finding.objective_fit = score_objective_fit(finding, self.objective)
-                    if not isinstance(finding.evidence, dict):
-                        finding.evidence = {}
-                    unit = finding.evidence.get("unit_of_analysis") or result.output.get("unit_of_analysis")
-                    if isinstance(unit, str) and unit and unit != "row":
-                        finding.evidence["unit_of_analysis"] = unit
-                        note = f"Counts are per '{unit}' (repeated rows aggregated), not per row."
-                        if note not in finding.caveats:
-                            finding.caveats.append(note)
-                self.memory.add_findings(new_findings)
-                self._notify_findings(new_findings)
-                col_names = [c.name for c in self.last_profile.columns] if self.last_profile else []
-                for f in new_findings:
-                    m = f.measure or ""
-                    d = f.dimension or ""
-                    confounders = [c for c in col_names if c not in (m, d)][:3]
-                    cf_probes = generate_counterfactual_probes(m, d, confounders) if (m and d) else []
-                    key = (m, d) if (m and d) else None
-                    # Nest under the first hypothesis already recorded about
-                    # this exact (measure, dimension) pair — a later finding
-                    # on the same relationship is a refinement/counterfactual
-                    # of it, not an unrelated top-level hypothesis. Exact-key
-                    # match only, so unrelated findings stay flat siblings.
-                    parent_id = self._hypothesis_parent_by_key.get(key) if key else None
-                    node = self.hypothesis_tree.add_hypothesis(
-                        statement=f"{f.headline or f.detail}",
-                        parent_id=parent_id,
-                        status="supported",
-                        rationale=f"Observed in step {step.step_number} ({step.tool_name})",
-                        counterfactuals=cf_probes,
-                    )
-                    if key and key not in self._hypothesis_parent_by_key:
-                        self._hypothesis_parent_by_key[key] = node.id
-                    self._hypothesis_parent_by_tool[step.tool_name] = node.id
-                self.memory.set_context("hypothesis_tree", self.hypothesis_tree.to_dict())
-                if any(f.p_value is not None for f in new_findings):
-                    try:
-                        adjust_findings_run_level(self.memory.findings)
-                    except Exception as exc:
-                        console.print(f"  [yellow]⚠ Run-level FDR correction skipped (non-fatal): {exc}[/]")
 
-            derived = result.output.get("derived_dataset")
-            if isinstance(derived, dict) and derived.get("name") and derived.get("path"):
-                registry = dict(self.memory.get_context("derived_datasets") or {})
-                registry[str(derived["name"])] = derived
-                self.memory.set_context("derived_datasets", registry)
-                console.print(
-                    f"  [dim]Derived dataset '{derived['name']}' → {derived['path']}[/]"
-                )
 
-        if step.tool_name == "define_analysis_tool" and result.status == "success":
-            self._maybe_register_generated_tool(result)
 
-        # Cached only now: registration can flip a define_analysis_tool result
-        # to "error", and an error must never be served from the cache.
-        if result.status == "success":
-            self._step_cache[prepared.cache_key] = result
-            # A prior interrupt's CRITICAL PRECONDITION VIOLATION block would
-            # otherwise keep re-injecting into every subsequent prompt for
-            # the rest of the run — a later step succeeding means the agent
-            # has already pivoted past it.
-            if self.memory.get_context("interrupt_signal") is not None:
-                self.memory.clear_context("interrupt_signal")
 
-        rationales = self.memory.get_context("plan_rationales") or []
-        rationales.append({
-            "step_number": step.step_number,
-            "tool_name": step.tool_name,
-            "rationale": step.rationale,
-        })
-        self.memory.set_context("plan_rationales", rationales)
 
-        if step.tool_name == "select_statistical_test" and result.status == "success":
-            pvalue_tests = self.memory.get_context("statistical_test_pvalues") or []
-            family = result.output.get("family_results")
-            if family:
-                for entry in family:
-                    feature = entry.get("feature_column") or result.output.get("feature_column")
-                    group = entry.get("group_column")
-                    pvalue_tests.append({
-                        "step_number": step.step_number,
-                        "feature_column": f"{feature} by {group}" if group else feature,
-                        "test_name": entry.get("test_name"),
-                        "p_value": entry.get("p_value"),
-                    })
-            elif "p_value" in result.output:
-                pvalue_tests.append({
-                    "step_number": step.step_number,
-                    "feature_column": result.output.get("feature_column"),
-                    "test_name": result.output.get("test_name"),
-                    "p_value": result.output["p_value"],
-                })
-            self.memory.set_context("statistical_test_pvalues", pvalue_tests)
-
-        if step.tool_name == "segment_comparison" and result.status == "success":
-            pvalue_tests = self.memory.get_context("statistical_test_pvalues") or []
-            for c in result.output.get("comparisons", []):
-                if c.get("p_value") is None:
-                    continue
-                test_name = "proportions_ztest" if c.get("is_rate") else "welch_ttest"
-                pvalue_tests.append({
-                    "step_number": step.step_number,
-                    "feature_column": f"{c.get('measure')} by {c.get('dimension')}={c.get('level')}",
-                    "test_name": test_name,
-                    "p_value": c["p_value"],
-                })
-            self.memory.set_context("statistical_test_pvalues", pvalue_tests)
-
-        if result.status == "error":
-            self._tool_failure_counts[step.tool_name] = (
-                self._tool_failure_counts.get(step.tool_name, 0) + 1
-            )
-            self.memory.increment_retry(step.step_number)
-
-        if step.tool_name == "train_model" and result.status == "success":
-            best = result.output.get("best_model", "")
-            mt = result.output.get("models_trained", {})
-            if best and best in mt:
-                model_path = mt[best].get("model_path", "")
-                if model_path:
-                    self.memory.set_context("best_model_path", model_path)
-                    self.memory.set_context("best_model_name", best)
-            trained_test_size = result.output.get("test_size")
-            if trained_test_size is not None:
-                self.memory.set_context("train_test_size", trained_test_size)
-            trained_split_strategy = result.output.get("split_strategy")
-            if trained_split_strategy in ("random", "time_series", "panel"):
-                self.memory.set_context("split_strategy", trained_split_strategy)
-                self.memory.set_context("split_time_column", result.output.get("time_column"))
-                self.memory.set_context("split_group_column", result.output.get("group_column"))
-
-        if result.status == "interrupt":
-            self.memory.set_context("interrupt_signal", result.output)
-            reason = result.error_message or "Execution interrupted by tool precondition violation."
-            pivot = result.output.get("recommended_pivot")
-            # A precondition violation for a tool that already produced
-            # findings is a refutation of *that* hypothesis, not a new
-            # unrelated top-level one — nest it under the most recent
-            # hypothesis this same tool contributed.
-            parent_id = self._hypothesis_parent_by_tool.get(step.tool_name)
-            self.hypothesis_tree.add_hypothesis(
-                statement=f"Precondition check for {step.tool_name}",
-                parent_id=parent_id,
-                status="refuted",
-                rationale=reason,
-                counterfactuals=[f"Pivot recommendation: {pivot}"] if pivot else [],
-            )
-            self.memory.set_context("hypothesis_tree", self.hypothesis_tree.to_dict())
-            console.print(f"  [red bold]⚡ Step {step.step_number}: {step.tool_name} triggered INTERRUPT:[/] {reason}")
-            if self.on_step_callback:
-                self.on_step_callback(step.tool_name, "interrupt", f"Halted by interrupt: {reason[:80]}")
-
-        if step.tool_name == "clean_data" and result.status == "success":
-            cleaned_path = result.output.get("cleaned_file_path")
-            if cleaned_path:
-                self.memory.set_context("cleaned_file_path", cleaned_path)
-                console.print(
-                    f"  [dim]Cleaned file stored → {cleaned_path}[/]"
-                )
-
-        if self.on_step_callback:
-            summary = result.output.get("summary", "")[:80] if result.status == "success" else result.error_message
-            self.on_step_callback(step.tool_name, result.status, f"{idx}/{total_steps} done — {summary}")
-
-    def _step_budget(self, step: AnalysisStep) -> int:
-        """Failures a tool may accumulate before its steps are skipped."""
-        is_code_tool = self.tool_registry.has(step.tool_name) and getattr(
-            self.tool_registry.get(step.tool_name), "executes_code", False
-        )
-        return MAX_CODE_STEP_RETRIES if is_code_tool else MAX_STEP_RETRIES
-
-    def _prepare_step(self, idx: int, step: AnalysisStep, total_steps: int) -> _PreparedStep | None:
-        """
-        Resolve a step against current run state and run every pre-execution
-        gate (retry budget, registry, plan validation, ML switch, governance).
-        A step that fails a gate is recorded here and yields None.
-        """
-        budget = self._step_budget(step)
-        if self._tool_failure_counts.get(step.tool_name, 0) >= budget:
-            console.print(
-                f"  [yellow]⏭ Step {step.step_number}: {step.tool_name} skipped "
-                f"(exceeded {budget} retries).[/]"
-            )
-            self._record_step(step, ToolResult(
-                tool_name=step.tool_name, status="skipped",
-                output={"summary": f"Skipped: '{step.tool_name}' already failed {budget} times. Do not plan it again."},
-            ))
-            return None
-        # Defense in depth: _parse_steps filters unknown tools, but never
-        # let a registry miss crash the whole pipeline.
-        try:
-            tool = self.tool_registry.get(step.tool_name)
-        except KeyError as exc:
-            self._record_step(step, ToolResult(
-                tool_name=step.tool_name, status="error", output={}, error_message=str(exc),
-            ))
-            return None
-        if getattr(tool, "requires_ml", False) and not self.use_ml:
-            console.print(
-                f"  [yellow]⏭ Step {step.step_number}: {step.tool_name} skipped "
-                f"(use_ml=False).[/]"
-            )
-            self._record_step(step, ToolResult(
-                tool_name=step.tool_name, status="skipped",
-                output={"summary": f"Skipped: '{step.tool_name}' needs machine learning, which is turned off (use_ml=False). Do not plan it."},
-            ))
-            return None
-
-        # Parameter resolution is driven by each tool's own declarations
-        # (BaseTool.prepare_params) so this controller never grows a per-tool
-        # if-ladder. It must run after earlier steps of the cycle have been
-        # recorded: it reads cleaned_file_path, best_model_path and the like.
-        params = tool.prepare_params(
-            self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
-        )
-        # Plan validation: an invalid step never runs (and never spends
-        # code-execution budget); its error — with close column matches —
-        # goes back to the planner and counts against the retry budget.
-        params, dropped, plan_errors, normalised = self._validate_step(tool, step.parameters, params)
-        dropped_note = f"Ignored unknown parameter(s): {', '.join(dropped)}." if dropped else ""
-        if dropped:
-            console.print(f"  [yellow]⚠ Step {step.step_number}: {step.tool_name} — {dropped_note}[/]")
-        if normalised:
-            console.print(f"  [dim]Step {step.step_number}: {step.tool_name} — {normalised}[/]")
-            dropped_note = f"{dropped_note} {normalised}.".strip()
-        if plan_errors:
-            message = " ".join(["Plan validation failed, step not run:", *plan_errors, dropped_note]).strip()
-            console.print(f"  [yellow]✗ Step {step.step_number}: {step.tool_name} — {message}[/]")
-            self._record_step(step, ToolResult(
-                tool_name=step.tool_name, status="error", output={}, error_message=message,
-            ))
-            self._tool_failure_counts[step.tool_name] = self._tool_failure_counts.get(step.tool_name, 0) + 1
-            self.memory.increment_retry(step.step_number)
-            if self.on_step_callback:
-                self.on_step_callback(step.tool_name, "error", f"{idx}/{total_steps} — {message[:80]}")
-            return None
-
-        if getattr(tool, "executes_code", False):
-            code = self._code_of(tool, params)
-            refusal = (
-                "Machine learning is turned off for this analysis (use_ml=False); ML code was not run."
-                if not self.use_ml and self._detects_ml_code(code)
-                else self._governor.refusal_reason()
-            )
-            if refusal:
-                console.print(f"  [yellow]⛔ Step {step.step_number}: {step.tool_name} refused — {refusal}[/]")
-                self._governor.record(
-                    tool_name=step.tool_name, code=code, params=params,
-                    status="refused", iteration=self.memory.iteration_count,
-                    step_number=step.step_number, error=refusal, refused=True,
-                )
-                self._record_step(step, ToolResult(
-                    tool_name=step.tool_name, status="skipped",
-                    output={"summary": f"Refused by policy: {refusal}"},
-                ))
-                return None
-
-        cache_key = self._step_cache_key(step.tool_name, params)
-        cached = self._step_cache.get(cache_key)
-        if cached is None:
-            console.print(f"  [cyan]→ Step {step.step_number}: {step.tool_name}[/] [dim]{step.rationale[:60]}[/]")
-            if self.on_step_callback:
-                self.on_step_callback(step.tool_name, "running", f"{idx}/{total_steps} — {step.tool_name}…")
-        return _PreparedStep(idx, step, tool, params, dropped_note, cache_key, cached)
-
-    def _record_cached_step(self, prepared: _PreparedStep, total_steps: int) -> None:
-        """Answer a step from the cache. Only the result is re-recorded (so
-        this cycle's digest shows it): its findings, p-values and context
-        side effects already exist from the original run, and repeating them
-        would duplicate findings and inflate the multiple-testing family."""
-        assert prepared.cached is not None
-        step = prepared.step
-        console.print(
-            f"  [dim]↺ Step {step.step_number}: {step.tool_name} — "
-            f"identical to a prior successful step, reusing its result.[/]"
-        )
-        result = copy.copy(prepared.cached)
-        result.output = {
-            **result.output,
-            "plan_note": (
-                f"Identical to the iteration-{prepared.cached.iteration} step; its result was "
-                "reused, not recomputed. Plan something new instead of repeating it."
-            ),
-        }
-        self._record_step(step, result)
-        if self.on_step_callback:
-            summary = str(result.output.get("summary", ""))[:80]
-            self.on_step_callback(step.tool_name, "success", f"{prepared.idx}/{total_steps} done — {summary}")
-
-    def _run_batch(self, batch: list[tuple[int, AnalysisStep]], total_steps: int) -> bool:
-        """Prepare and execute consecutive steps; a batch of two or more
-        uncached steps runs concurrently, and results are recorded in plan
-        order either way so findings and ids stay deterministic. Returns True
-        if an interrupt signal was encountered."""
-        prepared = [p for idx, step in batch if (p := self._prepare_step(idx, step, total_steps)) is not None]
-        to_run = [p for p in prepared if p.cached is None]
-        results: dict[int, ToolResult] = {}
-        # detect_outliers writes <stem>_outliers_flagged.csv, so two of them
-        # in one batch would clobber each other's file: run those serially.
-        if sum(p.step.tool_name in self._FILE_WRITING_TOOLS for p in to_run) > 1:
-            to_run = [p for p in to_run if p.step.tool_name not in self._FILE_WRITING_TOOLS]
-        if len(to_run) > 1:
-            with ThreadPoolExecutor(max_workers=min(4, len(to_run))) as pool:
-                run_tool = in_run_context(lambda p: p.tool.run(**p.params))
-                outcomes = pool.map(run_tool, to_run)
-                results = {p.idx: result for p, result in zip(to_run, outcomes, strict=True)}
-        for p in prepared:
-            if p.cached is not None:
-                self._record_cached_step(p, total_steps)
-            else:
-                result = results[p.idx] if p.idx in results else p.tool.run(**p.params)
-                self._process_step_result(p, result, total_steps)
-                if result.status == "interrupt":
-                    return True
-        return False
-
-    def _execute_steps(self, steps: list[AnalysisStep]) -> None:
-        """
-        Stage 3 — execute the plan with retry budgets. clean_data goes first
-        (later steps read the cleaned file); runs of independent read-only
-        analytical tools execute concurrently, everything else sequentially.
-        If any tool raises a ToolInterruptSignal, execution of the remaining
-        steps is halted so the agent can replan.
-        """
-        ordered = sorted(steps, key=lambda s: s.tool_name != "clean_data")
-        total_steps = len(ordered)
-        batch: list[tuple[int, AnalysisStep]] = []
-        for idx, step in enumerate(ordered, 1):
-            if self._stop_requested():
-                return  # steps not yet started, including a pending batch, are dropped
-            if step.tool_name in self._CONCURRENT_SAFE_TOOLS:
-                batch.append((idx, step))
-                continue
-            if batch and self._run_batch(batch, total_steps):
-                return
-            batch = []
-            if self._run_batch([(idx, step)], total_steps):
-                return
-        if batch:
-            self._run_batch(batch, total_steps)
-
-    def _maybe_register_generated_tool(self, result: ToolResult) -> None:
-        """
-        Round 8 — validate and, if it passes, register+persist a tool the
-        LLM proposed via define_analysis_tool.
-
-        define_analysis_tool.execute() only validates/smoke-tests (it must
-        never mutate the registry or memory itself, per AGENTS.md's layer
-        rule); this is where that proposal actually becomes a callable tool.
-        A validation failure rewrites `result` in place to status="error" so
-        the LLM sees exactly what to fix on its next iteration, the same way
-        any other tool failure is surfaced.
-        """
-        if result.output.get("status") != "ready":
-            return
-        spec_dict = result.output.get("spec") or {}
-        name = spec_dict.get("name")
-        description = spec_dict.get("description", "")
-        params_schema = spec_dict.get("params_schema", {}) or {}
-        code = spec_dict.get("code", "")
-        if not name:
-            result.status = "error"
-            result.error_message = "define_analysis_tool returned status='ready' with no tool name."
-            return
-
-        from src.core.tool_factory import (
-            GeneratedToolSpec,
-            compute_dataset_fingerprint,
-            register_and_persist,
-            save_to_library,
-            tool_library_dir,
-            tool_library_enabled,
-            validate_spec,
-        )
-
-        existing_generated = {g["name"]: g for g in self.memory.list_generated_tools() if g.get("name")}
-        errors = validate_spec(
-            name=name,
-            description=description,
-            params_schema=params_schema,
-            code=code,
-            existing_tool_names=[n for n in self.tool_registry.names() if n not in existing_generated],
-            existing_generated=existing_generated,
-        )
-        if errors:
-            result.status = "error"
-            result.error_message = (
-                f"'{name}' was not registered: " + "; ".join(errors)
-            )
-            console.print(f"  [yellow]⚠ Generated tool '{name}' rejected: {result.error_message}[/]")
-            return
-
-        prior = existing_generated.get(name)
-        version = (prior.get("version", 0) + 1) if prior else 1
-        # GeneratedTool inherits uses_cleaned_file=True (the default), so it
-        # always runs against the cleaned dataset once one exists — fingerprint
-        # that same path, or a later opt-in reload (load_persisted_tools)
-        # would never match.
-        runtime_path = (
-            self.memory.get_context("cleaned_file_path")
-            or (self.memory.dataset_metadata.file_path if self.memory.dataset_metadata else "")
-        )
-        fingerprint = compute_dataset_fingerprint(runtime_path) if runtime_path else ""
-        spec = GeneratedToolSpec(
-            name=name,
-            description=description,
-            params_schema=params_schema,
-            code=code,
-            version=version,
-            created_at=datetime.now(UTC).isoformat(),
-            dataset_fingerprint=fingerprint,
-        )
-        register_and_persist(spec, self.tool_registry, self.memory, self._output_dir)
-        if tool_library_enabled() and self.last_profile is not None:
-            save_to_library(
-                spec, tool_library_dir(), {c.name: c.kind for c in self.last_profile.columns}
-            )
-        console.print(
-            f"  [bold green]✓ Registered generated tool[/] '{name}' "
-            f"(v{version}, callable starting next iteration)."
-        )
 
     # ------------------------------------------------------------------
     # Stage 6 — RLM decomposition
@@ -2778,187 +1503,7 @@ class AgentController:
     # Stage 7 — Report generation
     # ------------------------------------------------------------------
 
-    def _verified_number_pool(self) -> set[str]:
-        """Every numeric literal that actually appears in accumulated tool
-        results, canonicalised for verbatim-citation checking."""
-        pool, _per_tool = self._verified_number_pools()
-        return pool
 
-    def _verified_number_pools(self) -> tuple[set[str], dict[str, set[str]]]:
-        """Global and per-tool verified-number pools — see
-        `claim_verification.verified_number_pools`."""
-        return verified_number_pools(self.memory)
 
-    def _flag_unverified_claims(self, final_result: dict[str, Any]) -> list[str]:
-        """Enforce the "cite only verbatim metrics" rule — see
-        `claim_verification.flag_unverified_claims`."""
-        return flag_unverified_claims(self.memory, final_result)
 
-    def _audit_dependence_structure(self, df: pd.DataFrame | None) -> None:
-        """Phase 4 (FutureScope §5.3) — dependence- and design-aware
-        inference, wired as a post-hoc audit over already-collected findings
-        and the profiled dataframe, the same pattern the Causal Claim Guard
-        just below uses. Cost is ~0 when the triggering structure is absent:
-        the clustering check only runs when `repeated_entity` finds a repeat-
-        measurement column, and the Simpson's-paradox check only runs
-        against `segment_lift` findings that already exist — a dataset with
-        no lift claim to double-check pays nothing."""
-        profile = self.last_profile
-        if profile is None or df is None or df.empty:
-            return
 
-        def slug(text: str) -> str:
-            return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_") or "x"
-
-        # ---- Cluster/hierarchy check: rows nested in an entity (students in
-        # schools, orders per customer) are not independent; naive p-values
-        # overstate significance unless cluster-robust. ----
-        entity_col = repeated_entity(profile, df)
-        if entity_col and entity_col in df.columns:
-            measure_col = next(
-                (c.name for c in profile.measures() if c.name in df.columns and c.name != entity_col),
-                None,
-            )
-            if measure_col:
-                try:
-                    icc_res = intraclass_correlation(df, entity_col, measure_col)
-                except Exception:
-                    icc_res = {}
-                if icc_res.get("needs_cluster_robust"):
-                    icc_finding = Finding(
-                        finding_id=f"dependence_icc_{slug(entity_col)}_{slug(measure_col)}",
-                        kind="method_fit",
-                        headline=(
-                            f"'{measure_col}' is clustered by '{entity_col}' "
-                            f"(ICC={icc_res['icc']:.2f}, design effect={icc_res['deff']:.2f}) — "
-                            f"treat this as {icc_res['n_eff']:.0f} effective observations, not {icc_res['n']}."
-                        ),
-                        detail=icc_res.get("recommendation", ""),
-                        evidence=icc_res,
-                        source_tool="dependence_audit",
-                        measure=measure_col,
-                        dimension=entity_col,
-                        confidence=0.7,
-                        layer="analyst",
-                        caveats=["Rows are repeated measurements within an entity; standard-error estimates assuming independence are optimistic."],
-                    )
-                    self.memory.add_findings([icc_finding])
-                    console.print(
-                        f"[yellow]⚠ Clustering detected: '{measure_col}' rows are not independent "
-                        f"within '{entity_col}' (ICC={icc_res['icc']:.2f}); significance tests overstate "
-                        "confidence unless cluster-robust.[/]"
-                    )
-
-        # ---- Simpson's paradox: does a real segment_lift finding reverse
-        # sign once stratified by another dimension? ----
-        segment_findings = [f for f in self.memory.findings if f.kind == "segment_lift"]
-        if not segment_findings:
-            return
-        candidate_dims = [
-            c.name for c in profile.dimensions()
-            if c.kind == "categorical" and 2 <= c.nunique <= 12 and c.name in df.columns
-        ]
-        if not candidate_dims:
-            return
-
-        checked_pairs: set[tuple[str, str, str]] = set()
-        top_findings = sorted(segment_findings, key=lambda f: -abs(f.effect or 0.0))[:5]
-        for sfinding in top_findings:
-            if not sfinding.measure or not sfinding.dimension or sfinding.level is None:
-                continue
-            if sfinding.measure not in df.columns or sfinding.dimension not in df.columns:
-                continue
-            confounders = [c for c in candidate_dims if c != sfinding.dimension][:2]
-            for confounder in confounders:
-                key = (sfinding.measure, sfinding.dimension, confounder)
-                if key in checked_pairs:
-                    continue
-                checked_pairs.add(key)
-                level_str = str(sfinding.level)
-                try:
-                    sub = df[[sfinding.measure, sfinding.dimension, confounder]].copy()
-                    dim_as_str = sub[sfinding.dimension].astype(str)
-                    sub["_dep_group"] = dim_as_str.where(dim_as_str == level_str, other="rest")
-                    res = check_simpsons_paradox(sub, sfinding.measure, "_dep_group", confounder)
-                except Exception:
-                    continue
-                if not res.get("paradox_detected"):
-                    continue
-                n_level = int((df[sfinding.dimension].astype(str) == level_str).sum())
-                opposing = res.get("opposing_strata_count", 0)
-                valid_strata = res.get("valid_strata_count", 0)
-                para_finding = Finding(
-                    finding_id=f"dependence_simpsons_{slug(sfinding.measure)}_{slug(sfinding.dimension)}_{slug(confounder)}",
-                    kind="method_fit",
-                    headline=(
-                        f"The '{sfinding.level}' vs rest difference in '{sfinding.measure}' reverses direction "
-                        f"in {opposing} of {valid_strata} strata of '{confounder}' — possible confounding; "
-                        "treat the unstratified effect with caution."
-                    ),
-                    detail=res.get("explanation", ""),
-                    evidence={**res, "n_level": n_level},
-                    source_tool="dependence_audit",
-                    measure=sfinding.measure,
-                    dimension=sfinding.dimension,
-                    level=sfinding.level,
-                    confidence=0.6,
-                    layer="analyst",
-                    caveats=["Simpson's paradox: the aggregate and stratified effects disagree in sign."],
-                )
-                sfinding.caveats.append(
-                    f"Possible Simpson's paradox when stratified by '{confounder}' — see the dependence audit finding."
-                )
-                self.memory.add_findings([para_finding])
-                console.print(
-                    f"[yellow]⚠ Simpson's paradox: '{sfinding.level}' vs rest on '{sfinding.measure}' "
-                    f"reverses when stratified by '{confounder}'.[/]"
-                )
-                break
-
-    def _generate_final_report(self, llm_final: dict[str, Any]) -> None:
-        """
-        Stage 7: Invoke GenerateReportTool to produce the Markdown/JSON report.
-
-        The report tool is called with the serialised tool results and the
-        LLM's final interpretation so it can produce a complete document.
-        """
-        meta = self.memory.dataset_metadata
-        dataset_name = Path(meta.file_path).stem if meta else "dataset"
-
-        tool_results_json = json.dumps(
-            [r.to_dict() for r in self.memory.tool_results], default=str
-        )
-
-        report_tool = self.tool_registry.get("generate_report")
-        result = report_tool.run(
-            dataset_name=dataset_name,
-            tool_results_json=tool_results_json,
-            llm_insights=llm_final,
-            output_dir=str(Path(self._output_dir) / "reports"),
-            data_profile=self.memory.get_context("data_profile"),
-            read_report=self.memory.get_context("read_report"),
-            coercions=self.memory.get_context("coercions"),
-            plan_rationales=self.memory.get_context("plan_rationales"),
-            statistical_test_pvalues=self.memory.get_context("statistical_test_pvalues"),
-            unverified_claims=self.memory.get_context("unverified_claims"),
-            profile_status=self.memory.get_context("profile_status"),
-            degradations=self.memory.get_context("degradations"),
-            findings=[f.to_dict() for f in self.memory.ranked_findings()],
-            analysis_decision=self.memory.get_context("analysis_decision"),
-        )
-
-        self.memory.append_tool_result(result)
-
-        if result.status == "success":
-            console.print(
-                Panel(
-                    f"[bold green]Stage 7 — Report Generated[/]\n"
-                    f"Markdown: {result.output.get('markdown_path')}\n"
-                    f"JSON:     {result.output.get('json_path')}",
-                    border_style="green",
-                )
-            )
-        else:
-            console.print(
-                f"[yellow]⚠ Report generation failed: {result.error_message}[/]"
-            )

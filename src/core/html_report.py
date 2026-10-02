@@ -145,6 +145,8 @@ th { background: var(--sheet-alt); color: var(--ink); font-weight: 700; font-siz
             font-family: 'Baloo 2', 'Mukta', sans-serif; }
 .chart p { margin: .15rem 0 .9rem; color: var(--graphite); font-size: .85rem; max-width: 68ch; }
 .vega-holder { width: 100%; }
+/* vega-embed makes its target inline-block; with width:"container" that shrinks to 0 unless it is full width. */
+.vega-holder .vega-embed { width: 100%; }
 .chart-data { font-size: .78rem; margin: .4rem 0; }
 .chart-data caption { text-align: left; color: var(--graphite); padding-bottom: .3rem; }
 .chart-data-details summary { cursor: pointer; font-size: .8rem; color: var(--graphite); margin-top: .5rem; }

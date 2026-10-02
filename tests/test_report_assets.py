@@ -161,3 +161,11 @@ def test_print_hides_the_collapsed_data_details_and_uses_tokens() -> None:
     assert ".chart-data-details { display: none; }" in doc.split("@media print")[1]
     css = doc[doc.index(".chart-data {") : doc.index("@media print")]
     assert not re.search(r"#[0-9a-fA-F]{3,8}\b", css)
+
+
+def test_the_embedded_chart_node_is_full_width() -> None:
+    """Regression: vega-embed makes its target inline-block, which collapses a
+    width:"container" chart to 0 pixels unless the node is explicitly full width.
+    Found by opening a real report in a browser; unit tests cannot see layout."""
+    doc = _report([_chart([{"x": 1}])])
+    assert ".vega-holder .vega-embed { width: 100%; }" in doc

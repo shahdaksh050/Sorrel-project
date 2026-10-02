@@ -5,21 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <!-- Anime.js Animation Engine (/animejs-animation standard) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.2/anime.min.js"></script>
-  <title>DSA Agent // Autonomous Data Analysis & Certified Statistical Engine</title>
+  <title>DSA Agent: data analysis that checks its own findings</title>
 
   <!-- SEO & Social OpenGraph Meta Tags (/landing-page-generator standard) -->
-  <meta name="description" content="Stop debugging hallucinated math. DSA Agent is an autonomous 7-stage recursive statistical analysis system with local Python sandboxing and certified anti-overfit ML.">
-  <meta name="keywords" content="autonomous data science, agentic data analysis, machine learning anti-overfit, python data sandbox, stratified k-fold, executive ledger">
+  <meta name="description" content="DSA Agent is a final-year project: a seven-stage data analysis assistant that runs Python tools on your table, checks its own findings, and says what it could not verify.">
+  <meta name="keywords" content="data analysis assistant, checked findings, cross-validation, overfit warnings, plain-language report">
   <meta name="author" content="DSA Agent Team">
   <link rel="canonical" href="https://dsa-agent.local/">
 
-  <meta property="og:title" content="DSA Agent // Autonomous Data Analysis & Statistical Engine">
-  <meta property="og:description" content="Never get fooled by your data. Automated profiling, sandboxed Python execution, and certified generalization safety bounds.">
+  <meta property="og:title" content="DSA Agent: data analysis that checks its own findings">
+  <meta property="og:description" content="Ask a question of your table. Python tools do the calculations, and every finding shows the checks it passed or failed.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://dsa-agent.local/">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="DSA Agent // Autonomous Data Analysis">
-  <meta name="twitter:description" content="Stop debugging hallucinated math. Run certified autonomous data science in an isolated REPL runtime.">
+  <meta name="twitter:title" content="DSA Agent: data analysis that checks its own findings">
+  <meta name="twitter:description" content="Python tools do the calculations, and every finding shows the checks it passed or failed.">
 
   <!-- JSON-LD Structured Data Schema (SoftwareApplication). The FAQPage entity was
        dropped along with the FAQ accordion section (FrontendPlan.md 3.7) — a schema
@@ -38,7 +38,7 @@
           "price": "0",
           "priceCurrency": "USD"
         },
-        "description": "Autonomous 7-stage recursive statistical analysis system with sandboxed REPL execution and certified generalization bounds."
+        "description": "A final-year project: a seven-stage data analysis assistant that checks its own findings and reports what it could not verify."
       }
     ]
   }
@@ -1056,187 +1056,6 @@
     }
 
     /* ==========================================================================
-       INTERACTIVE PRICING & DEPLOYMENT TIERS
-       ========================================================================== */
-    .pricing-section {
-      padding: 120px 0;
-      background: var(--sheet);
-      border-top: 1px solid var(--rule);
-      border-bottom: 1px solid var(--rule);
-    }
-    .pricing-toggle-wrap {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 16px;
-      margin-bottom: 50px;
-      font-family: var(--sans);
-      font-size: 13px;
-    }
-    .toggle-switch {
-      position: relative;
-      width: 52px;
-      height: 28px;
-      border-radius: var(--radius-pill);
-      background: var(--sheet-alt);
-      border: 1px solid var(--card-border);
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      padding: 3px;
-      transition: background 0.3s ease;
-    }
-    .toggle-thumb {
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background: var(--pen);
-      transition: transform 0.3s var(--ease-out);
-    }
-    .toggle-switch.annual .toggle-thumb {
-      transform: translateX(24px);
-    }
-    .discount-pill {
-      background: rgba(127, 183, 126, 0.16);
-      color: var(--positive);
-      padding: 2px 8px;
-      border-radius: var(--radius-pill);
-      font-size: 10px;
-      font-weight: 700;
-    }
-
-    .pricing-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 28px;
-    }
-    .pricing-card {
-      padding: 36px 30px;
-      border-radius: var(--radius);
-      background: var(--stock);
-      border: 1px solid var(--card-border);
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      position: relative;
-      transition: all var(--dur-ui) var(--ease-out);
-    }
-    .pricing-card.featured {
-      border-color: var(--pen);
-      background: var(--card-bg);
-      box-shadow: 0 12px 36px var(--pen-glow);
-      transform: scale(1.02);
-    }
-    .popular-flag {
-      position: absolute;
-      top: -13px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: var(--pen);
-      color: var(--sheet);
-      font-family: var(--sans);
-      font-size: 10px;
-      font-weight: 800;
-      padding: 3px 14px;
-      border-radius: var(--radius-pill);
-      letter-spacing: 0.08em;
-    }
-    .plan-name {
-      font-size: 1.5rem;
-      margin-bottom: 6px;
-    }
-    .plan-desc {
-      color: var(--graphite);
-      font-size: 0.9rem;
-      margin-bottom: 24px;
-    }
-    .plan-price-box {
-      margin-bottom: 28px;
-      display: flex;
-      align-items: baseline;
-      gap: 6px;
-    }
-    .plan-price {
-      font-family: var(--heading);
-      font-size: 3rem;
-      font-weight: 800;
-      color: var(--ink);
-    }
-    .plan-period {
-      color: var(--graphite);
-      font-family: var(--sans);
-      font-size: 12px;
-    }
-    .plan-features-list {
-      list-style: none;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      margin-bottom: 32px;
-      font-size: 0.95rem;
-    }
-    .feature-item {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .check-icon {
-      color: var(--positive);
-      font-weight: 700;
-    }
-
-    /* ==========================================================================
-       FAQ ACCORDION SECTION
-       ========================================================================== */
-    .faq-section {
-      padding: 120px 0;
-    }
-    .faq-container {
-      max-width: 820px;
-      margin: 0 auto;
-    }
-    .faq-item {
-      border-bottom: 1px solid var(--rule);
-      padding: 24px 0;
-    }
-    .faq-button {
-      width: 100%;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      background: none;
-      border: none;
-      color: var(--ink);
-      font-family: var(--heading);
-      font-size: 1.25rem;
-      font-weight: 600;
-      text-align: left;
-      cursor: pointer;
-      gap: 16px;
-    }
-    .faq-toggle-icon {
-      font-family: var(--sans);
-      font-size: 1.4rem;
-      color: var(--pen);
-      transition: transform var(--dur-ui) ease;
-    }
-    .faq-item.open .faq-toggle-icon {
-      transform: rotate(45deg);
-    }
-    .faq-answer {
-      max-height: 0;
-      overflow: hidden;
-      color: var(--graphite);
-      font-size: 1.02rem;
-      line-height: 1.7;
-      transition: max-height 0.35s var(--ease-out), padding-top 0.35s ease;
-    }
-    .faq-item.open .faq-answer {
-      max-height: 250px;
-      padding-top: 14px;
-    }
-
-    /* ==========================================================================
        CLOSING CONVERSION CTA BANNER
        ========================================================================== */
     .cta-banner-section {
@@ -1359,12 +1178,6 @@
       .comparison-grid {
         grid-template-columns: 1fr;
       }
-      .pricing-grid {
-        grid-template-columns: 1fr;
-      }
-      .pricing-card.featured {
-        transform: none;
-      }
       .footer-grid {
         grid-template-columns: 1fr 1fr;
       }
@@ -1416,7 +1229,7 @@
   <div id="hud-layer">
     <canvas id="leader-lines-canvas"></canvas>
     <div id="hud-pin">
-      <div class="hud-card" id="hud-tag">Raw dataset // unstructured tabular stream</div>
+      <div class="hud-card" id="hud-tag">Your file as rows of a table</div>
     </div>
   </div>
 
@@ -1426,7 +1239,7 @@
       <div class="brand-mark">D</div>
       <div>
         <span class="brand-name">DSA AGENT</span>
-        <span class="brand-badge">RLM v2.4</span>
+        <span class="brand-badge">Student project</span>
       </div>
     </div>
 
@@ -1437,7 +1250,7 @@
       <button class="stage-pill-item" data-stage="0">01 Raw</button>
       <button class="stage-pill-item" data-stage="1">02 Profile</button>
       <button class="stage-pill-item" data-stage="2">03 Reason</button>
-      <button class="stage-pill-item" data-stage="3">04 Deploy</button>
+      <button class="stage-pill-item" data-stage="3">04 Checks</button>
     </div>
 
     <nav aria-label="Main Navigation">
@@ -1454,7 +1267,7 @@
         <span id="theme-icon">◑</span>
         <span id="theme-label">Night mode</span>
       </button>
-      <a href="#cta" class="btn-cta" id="nav-launch-btn">Launch the sandbox →</a>
+      <a href="#cta" class="btn-cta" id="nav-launch-btn">Open the workspace →</a>
     </div>
   </header>
 
@@ -1462,19 +1275,19 @@
        page-top content) and revealed by calculateScrollProgress() once the track is in view; no dot
        starts .active for the same reason the nav pills don't. -->
   <aside class="floating-stage-dots" id="floating-stage-dots" aria-label="3D stage progress">
-    <button class="stage-dot" data-stage="0" title="Stage 01: raw tabular stream"><span class="dot-label">01 Raw stream</span></button>
-    <button class="stage-dot" data-stage="1" title="Stage 02: profiling and outliers"><span class="dot-label">02 Profiling</span></button>
-    <button class="stage-dot" data-stage="2" title="Stage 03: multi-agent reasoning"><span class="dot-label">03 Reasoning</span></button>
-    <button class="stage-dot" data-stage="3" title="Stage 04: certified generalization guard"><span class="dot-label">04 Deployment</span></button>
+    <button class="stage-dot" data-stage="0" title="Stage 1: reading your file"><span class="dot-label">01 Your file</span></button>
+    <button class="stage-dot" data-stage="1" title="Stage 2: profiling and unusual values"><span class="dot-label">02 Profiling</span></button>
+    <button class="stage-dot" data-stage="2" title="Stage 3: choosing and running tools"><span class="dot-label">03 Tools</span></button>
+    <button class="stage-dot" data-stage="3" title="Stages 4 to 7: checks and report"><span class="dot-label">04 Checks and report</span></button>
   </aside>
 
   <!-- Bottom interactive stage telemetry bar -->
   <div class="stage-telemetry-bar" id="stage-telemetry-bar">
     <div class="telemetry-info">
       <span class="telemetry-pulse"></span>
-      <span class="telemetry-title" id="telemetry-stage-text">Stage 01 // raw dataset stream</span>
+      <span class="telemetry-title" id="telemetry-stage-text">Stage 1: reading your file</span>
       <span class="telemetry-divider">·</span>
-      <span class="telemetry-sub" id="telemetry-stage-sub">Scroll or click a stage to morph the 3D tokens</span>
+      <span class="telemetry-sub" id="telemetry-stage-sub">Scroll or click a stage to see an illustration of it</span>
     </div>
     <div class="telemetry-buttons">
       <button class="telemetry-btn" id="btn-prev-stage" title="Previous stage (ArrowUp)">↑ Prev</button>
@@ -1495,22 +1308,22 @@
         <div class="hero-content">
           <div class="eyebrow-pill">
             <span class="eyebrow-dot"></span>
-            An autonomous data analyst
+            A data analysis assistant
           </div>
           <h1 class="hero-title">
             We check every <span class="highlight">answer</span> twice.
           </h1>
           <p class="hero-lead">
-            Give it a dataset and a question in plain English. It plans the analysis, runs the tests, trains the models, and tells you where it might have fooled itself.
+            Give it a dataset and a question in plain English. It plans the analysis, runs the tests, checks its own conclusions, and tells you which findings held up and which need more data.
           </p>
           <div class="hero-cta-group">
-            <button class="btn-cta lg" id="hero-enter-btn">Launch the sandbox →</button>
+            <button class="btn-cta lg" id="hero-enter-btn">Open the workspace →</button>
             <a href="#audited-entry" class="btn-cta secondary lg" id="hero-explore-btn">See how it checks itself ↓</a>
           </div>
           <div class="trust-list trust-strip">
-            <span class="trust-pill"><span class="trust-check">✓</span> Runs entirely on your machine, your data never leaves it</span>
-            <span class="trust-pill"><span class="trust-check">✓</span> Every model checked with 5-fold cross-validation</span>
-            <span class="trust-pill"><span class="trust-check">✓</span> Every finding shows the checks it passed, not just the answer</span>
+            <span class="trust-pill"><span class="trust-check">✓</span> Your file is processed on the server for your session</span>
+            <span class="trust-pill"><span class="trust-check">✓</span> Models are scored on held-out data, not training accuracy</span>
+            <span class="trust-pill"><span class="trust-check">✓</span> Findings show the checks that were run on them</span>
           </div>
         </div>
       </div>
@@ -1524,7 +1337,7 @@
          section above; stage 0 here instead covers the raw-ingestion narrative that
          the "01 Raw" nav pill / floating dot / HUD tag already describe, keeping
          data-stage="0" meaningful rather than dangling. Stages 1-3 are otherwise the
-         original profiling / reasoning / certified-ledger narrative.
+         original profiling / reasoning / checks narrative.
          ========================================================================== -->
     <div class="stages-pin-container" id="stages-pin-track">
       <div class="stages-sticky-wrapper">
@@ -1537,23 +1350,23 @@
             <div class="stage-panel active" data-stage="0" id="stage-panel-0">
               <div class="eyebrow-pill">
                 <span class="eyebrow-dot"></span>
-                Stage 01 // dataset ingestion
+                Stage 1: reading your file
               </div>
               <h2 class="stage-panel-title">
-                Unparsed tabular matrix <span class="highlight">undulation</span>
+                Your table, <span class="highlight">read and checked</span>
               </h2>
               <p class="stage-panel-desc">
-                Every dataset streams into the sandboxed REPL as raw tokens first. The engine computes memory footprint, row cardinality, and compression ratio before a single number reaches an answer.
+                The file is checked on upload, read with its encoding and delimiter detected, and profiled for types, missing values and duplicates before any analysis runs.
               </p>
               <div class="stage-stats-row">
-                <div class="stat-pill"><span class="stat-val">0</span><span class="stat-lbl">Cloud transmissions</span></div>
-                <div class="stat-pill"><span class="stat-val">100%</span><span class="stat-lbl">Local storage</span></div>
-                <div class="stat-pill"><span class="stat-val">1</span><span class="stat-lbl">Isolated REPL</span></div>
+                <div class="stat-pill"><span class="stat-val">Checked</span><span class="stat-lbl">Type and size</span></div>
+                <div class="stat-pill"><span class="stat-val">Profiled</span><span class="stat-lbl">Types and gaps</span></div>
+                <div class="stat-pill"><span class="stat-val">Recorded</span><span class="stat-lbl">How it was read</span></div>
               </div>
               <div class="step-tags">
-                <span class="pill-tag pen">Stream telemetry</span>
-                <span class="pill-tag">Memory profiling</span>
-                <span class="pill-tag positive">100% local storage</span>
+                <span class="pill-tag pen">Upload checks</span>
+                <span class="pill-tag">Profiling</span>
+                <span class="pill-tag positive">Temporary server copy</span>
               </div>
             </div>
 
@@ -1561,23 +1374,23 @@
             <div class="stage-panel" data-stage="1" id="stage-panel-1">
               <div class="eyebrow-pill">
                 <span class="eyebrow-dot"></span>
-                Stage 02 // profiling &amp; anomaly bounds
+                Stage 2: profiling and unusual values
               </div>
               <h2 class="stage-panel-title">
-                Feature histograms and <span class="highlight">IQR 1.5&times; outliers</span>
+                Distributions and <span class="highlight">unusual values</span>
               </h2>
               <p class="stage-panel-desc">
-                The 3D data tokens restructure into 5 continuous feature distribution bars. Extreme anomalies are clamped via Tukey's IQR 1.5&times; fences and demarcated in risk red.
+                Unusual values are found with distribution-aware rules and flagged. They stay in the data: nothing is deleted silently. The 3D scene is an illustration of this step.
               </p>
               <div class="stage-stats-row">
-                <div class="stat-pill"><span class="stat-val">5</span><span class="stat-lbl">Histograms</span></div>
-                <div class="stat-pill"><span class="stat-val">1.5&times;</span><span class="stat-lbl">IQR bounds</span></div>
-                <div class="stat-pill"><span class="stat-val">0%</span><span class="stat-lbl">Data leakage</span></div>
+                <div class="stat-pill"><span class="stat-val">Flagged</span><span class="stat-lbl">Unusual rows</span></div>
+                <div class="stat-pill"><span class="stat-val">Kept</span><span class="stat-lbl">Not deleted</span></div>
+                <div class="stat-pill"><span class="stat-val">Noted</span><span class="stat-lbl">Quality warnings</span></div>
               </div>
               <div class="step-tags">
-                <span class="pill-tag risk">IQR 1.5&times; fences</span>
-                <span class="pill-tag">Skewness isolation</span>
-                <span class="pill-tag positive">Deterministic imputation</span>
+                <span class="pill-tag risk">Outlier flags</span>
+                <span class="pill-tag">Skewness checks</span>
+                <span class="pill-tag positive">Recorded cleaning steps</span>
               </div>
             </div>
 
@@ -1585,47 +1398,47 @@
             <div class="stage-panel" data-stage="2" id="stage-panel-2">
               <div class="eyebrow-pill">
                 <span class="eyebrow-dot"></span>
-                Stage 03 // multi-agent orchestration
+                Stage 3: choosing and running tools
               </div>
               <h2 class="stage-panel-title">
-                Central reasoning hub and <span class="highlight">swarm synapses</span>
+                A plan, then <span class="highlight">tools that do the math</span>
               </h2>
               <p class="stage-panel-desc">
-                The RLM engine recursively routes subtasks across specialized Python execution tools. Dynamic synapse vectors pulse in real time as statistical models train in the isolated REPL.
+                Your question and the data profile become a bounded plan. Python tools do the calculations, so numbers come from code and not from a language model's arithmetic. With AI switched on, a model helps plan and write the summary; the tools stay in charge of the math.
               </p>
               <div class="stage-stats-row">
-                <div class="stat-pill"><span class="stat-val">5</span><span class="stat-lbl">Agent hubs</span></div>
-                <div class="stat-pill"><span class="stat-val">7</span><span class="stat-lbl">Tool domains</span></div>
-                <div class="stat-pill"><span class="stat-val">100%</span><span class="stat-lbl">Sandboxed</span></div>
+                <div class="stat-pill"><span class="stat-val">Plan</span><span class="stat-lbl">From your question</span></div>
+                <div class="stat-pill"><span class="stat-val">Python</span><span class="stat-lbl">Does the math</span></div>
+                <div class="stat-pill"><span class="stat-val">Sandbox</span><span class="stat-lbl">AI-written code only</span></div>
               </div>
               <div class="step-tags">
-                <span class="pill-tag accent">Sub-agent graph</span>
-                <span class="pill-tag pen">Dynamic REPL invocations</span>
-                <span class="pill-tag">Trace logging</span>
+                <span class="pill-tag accent">Tool plan</span>
+                <span class="pill-tag pen">Optional AI planning</span>
+                <span class="pill-tag">Run log</span>
               </div>
             </div>
 
-            <!-- Stage 3 panel: certified ledger and generalization guard -->
+            <!-- Stage 3 panel: checks and report -->
             <div class="stage-panel" data-stage="3" id="stage-panel-3">
               <div class="eyebrow-pill">
                 <span class="eyebrow-dot"></span>
-                Stage 04-07 // certified ledger
+                Stages 4 to 7: checks and report
               </div>
               <h2 class="stage-panel-title">
-                Concentric manifold and <span class="highlight">generalization guard</span>
+                Checks before <span class="highlight">the report</span>
               </h2>
               <p class="stage-panel-desc">
-                5-fold stratified cross-validation forms concentric decision boundaries. A positive safety ring seals the envelope, ensuring the train-test gap strictly remains under 0.10.
+                Models are scored on held-out data, not training accuracy: stratified cross-validation (five folds or more) for ordinary data, and time-aware or grouped splits when the data needs them. A train-test gap above 0.10 raises an overfit warning.
               </p>
               <div class="stage-stats-row">
-                <div class="stat-pill"><span class="stat-val">&lt; 10%</span><span class="stat-lbl">Train-test gap</span></div>
-                <div class="stat-pill"><span class="stat-val">5-fold</span><span class="stat-lbl">Stratified CV</span></div>
-                <div class="stat-pill"><span class="stat-val">100%</span><span class="stat-lbl">Anti-overfit</span></div>
+                <div class="stat-pill"><span class="stat-val">0.10</span><span class="stat-lbl">Gap that warns</span></div>
+                <div class="stat-pill"><span class="stat-val">5+ folds</span><span class="stat-lbl">Cross-validation</span></div>
+                <div class="stat-pill"><span class="stat-val">Held-out</span><span class="stat-lbl">Scores rank models</span></div>
               </div>
               <div class="step-tags">
-                <span class="pill-tag positive">Guard status: secure</span>
-                <span class="pill-tag pen">Train-test gap &lt; 10%</span>
-                <span class="pill-tag">Executive synthesis</span>
+                <span class="pill-tag positive">Overfit warnings</span>
+                <span class="pill-tag pen">Cross-validation</span>
+                <span class="pill-tag">Written report</span>
               </div>
               <div class="hero-cta-group" style="margin-top: 24px;">
                 <a href="#audited-entry" class="btn-cta secondary lg" id="btn-continue-audited">See how it checks itself ↓</a>
@@ -1652,7 +1465,7 @@
           </div>
           <h2>Every answer comes with its own checks</h2>
           <p>
-            Not a black box, and not a technical tab you have to go looking for. Each finding is a plain sentence, followed by the tests it actually passed or failed.
+            Not a black box, and not a technical tab you have to go looking for. Each finding is a plain sentence, followed by the tests it actually passed or failed. The two findings below are an illustration, not results from your data.
           </p>
         </div>
 
@@ -1675,10 +1488,10 @@
           </div>
         </div>
 
-        <div class="audited-entry-verdict">4 of 5 findings held up. 1 needs more data.</div>
+        <div class="audited-entry-verdict">Example: 4 of 5 findings held up. 1 needs more data.</div>
 
         <div class="hero-cta-group" style="justify-content: center; margin-top: 28px;">
-          <button class="btn-cta lg" id="enter-btn">Enter the workspace →</button>
+          <button class="btn-cta lg" id="enter-btn">Open the workspace →</button>
         </div>
       </div>
     </section>
@@ -1695,64 +1508,64 @@
           </div>
           <h2>How the pipeline works, stage by stage</h2>
           <p>
-            Every stage below runs inside an isolated Python sandbox, in order, the same way every time.
+            The same seven stages run in the same order every time. Python tools do the calculations; code written by an AI model runs only in a restricted sandbox.
           </p>
         </div>
 
         <div class="workflow-cards-grid">
           <!-- Step 1 (Stage 0: Raw Tabular Stream) -->
           <div class="step-card" data-stage="0">
-            <span class="step-badge">Stage 01 // dataset ingestion</span>
-            <h3 class="step-title">Unparsed tabular matrix undulation</h3>
+            <span class="step-badge">Stage 1: reading your file</span>
+            <h3 class="step-title">Your table, read and checked</h3>
             <p class="step-desc">
-              Streams raw CSV/Parquet memory buffers directly into the sandboxed REPL. Computes memory footprint, row cardinality, and compression ratios with zero cloud transmission.
+              Checks the file type, size and contents, reads supported table formats, and profiles types, missing values and duplicates. Anything repaired is recorded.
             </p>
             <div class="step-tags">
-              <span class="pill-tag pen">Stream telemetry</span>
-              <span class="pill-tag">Memory profiling</span>
-              <span class="pill-tag positive">100% local storage</span>
+              <span class="pill-tag pen">Upload checks</span>
+              <span class="pill-tag">Profiling</span>
+              <span class="pill-tag positive">Temporary server copy</span>
             </div>
           </div>
 
           <!-- Step 2 (Stage 1: Profile & Clean) -->
           <div class="step-card" data-stage="1">
-            <span class="step-badge">Stage 02 // profiling &amp; anomaly bounds</span>
-            <h3 class="step-title">Feature histograms and IQR 1.5&times; outlier demarcation</h3>
+            <span class="step-badge">Stage 2: profiling and unusual values</span>
+            <h3 class="step-title">Distributions and unusual values</h3>
             <p class="step-desc">
-              The tokens restructure into 5 feature distribution bars. Extreme outliers are highlighted in risk red and clamped via Tukey's IQR and robust Z-score fences.
+              Unusual values are found with distribution-aware rules and flagged in the results. They are not deleted silently.
             </p>
             <div class="step-tags">
-              <span class="pill-tag risk">IQR 1.5&times; fences</span>
-              <span class="pill-tag">Skewness isolation</span>
-              <span class="pill-tag positive">Deterministic imputation</span>
+              <span class="pill-tag risk">Outlier flags</span>
+              <span class="pill-tag">Skewness checks</span>
+              <span class="pill-tag positive">Recorded cleaning steps</span>
             </div>
           </div>
 
           <!-- Step 3 (Stage 2: Recursive Multi-Agent Reasoning) -->
           <div class="step-card" data-stage="2">
-            <span class="step-badge">Stage 03 // multi-agent orchestration</span>
-            <h3 class="step-title">Central reasoning hub and swarm synapses</h3>
+            <span class="step-badge">Stage 3: choosing and running tools</span>
+            <h3 class="step-title">A plan, then tools that do the math</h3>
             <p class="step-desc">
-              The RLM engine dynamically routes tasks between specialized tools (ingestion, statistics, ML training, evaluation). Live synapses track tool invocations.
+              The question and the data profile become a plan of Python tool calls: statistics, modelling, charts. Each step and its result are logged.
             </p>
             <div class="step-tags">
-              <span class="pill-tag accent">Sub-agent graph</span>
-              <span class="pill-tag pen">Dynamic REPL invocations</span>
-              <span class="pill-tag">Trace logging</span>
+              <span class="pill-tag accent">Tool plan</span>
+              <span class="pill-tag pen">Optional AI planning</span>
+              <span class="pill-tag">Run log</span>
             </div>
           </div>
 
-          <!-- Step 4 (Stage 3: Certified Model & Generalization Guard) -->
+          <!-- Step 4 (Stage 3: checks and report) -->
           <div class="step-card" data-stage="3">
-            <span class="step-badge">Stage 04-07 // certified ledger</span>
-            <h3 class="step-title">Concentric generalization envelope and guard ring</h3>
+            <span class="step-badge">Stages 4 to 7: checks and report</span>
+            <h3 class="step-title">Held-out scores and overfit warnings</h3>
             <p class="step-desc">
-              5-fold stratified cross-validation forms concentric decision manifolds. A positive guard ring seals the envelope, ensuring the train-test gap strictly remains under 0.10.
+              Models are ranked on cross-validated scores, and the gap between training and test scores is reported. A gap above 0.10 raises a warning in the report.
             </p>
             <div class="step-tags">
-              <span class="pill-tag positive">Guard status: secure</span>
-              <span class="pill-tag pen">Train-test gap &lt; 10%</span>
-              <span class="pill-tag">Executive synthesis</span>
+              <span class="pill-tag positive">Overfit warnings</span>
+              <span class="pill-tag pen">Cross-validation</span>
+              <span class="pill-tag">Written report</span>
             </div>
           </div>
         </div>
@@ -1765,11 +1578,11 @@
         <div class="section-title-center">
           <div class="eyebrow-pill">
             <span class="eyebrow-dot"></span>
-            Why teams choose DSA Agent
+            How it differs
           </div>
-          <h2>The difference between guessing and proof</h2>
+          <h2>Checked results, not just fluent ones</h2>
           <p>
-            Generic chat LLMs hallucinate calculations and spreadsheets leave silent errors unflagged. DSA Agent enforces formal mathematical verification.
+            A chat model can write fluent numbers that were never computed. DSA Agent computes with Python tools, compares the written summary against them, and says what it could not verify.
           </p>
         </div>
 
@@ -1777,49 +1590,49 @@
           <div class="compare-card problem">
             <div class="compare-header">
               <h3 class="compare-heading">Chat LLMs and spreadsheets</h3>
-              <span class="compare-badge risk">HIGH RISK</span>
+              <span class="compare-badge risk">Watch out</span>
             </div>
             <ul class="compare-list">
               <li class="compare-item">
                 <span class="compare-icon risk">✕</span>
-                <span><strong>Hallucinated Arithmetic:</strong> LLMs generate plausible-looking numbers that do not match actual row operations.</span>
+                <span><strong>Invented arithmetic:</strong> a chat model can write plausible numbers that were never calculated from your rows.</span>
               </li>
               <li class="compare-item">
                 <span class="compare-icon risk">✕</span>
-                <span><strong>Silent Data Leakage:</strong> Training and test folds are casually shuffled, creating fictitious 99% accuracy models that crash in production.</span>
+                <span><strong>Leakage between train and test:</strong> when training and test rows are mixed, accuracy looks far better than it will be on new data.</span>
               </li>
               <li class="compare-item">
                 <span class="compare-icon risk">✕</span>
-                <span><strong>Cloud Privacy Exposure:</strong> Sensitive customer tabular data uploaded to external SaaS endpoints without an audit trail.</span>
+                <span><strong>Unchecked methods:</strong> a spreadsheet applies whatever formula was typed, even when the test does not fit the data.</span>
               </li>
               <li class="compare-item">
                 <span class="compare-icon risk">✕</span>
-                <span><strong>Unreproducible Workflows:</strong> Prompts change outputs randomly between runs; no two analyst sessions agree.</span>
+                <span><strong>Hard to repeat:</strong> prompts can give a different answer on each try, so two sessions may not agree.</span>
               </li>
             </ul>
           </div>
 
           <div class="compare-card solution">
             <div class="compare-header">
-              <h3 class="compare-heading">DSA Agent's autonomous engine</h3>
-              <span class="compare-badge positive">CERTIFIED SAFE</span>
+              <h3 class="compare-heading">What DSA Agent does</h3>
+              <span class="compare-badge positive">Checks built in</span>
             </div>
             <ul class="compare-list">
               <li class="compare-item">
                 <span class="compare-icon positive">✓</span>
-                <span><strong>Isolated Python REPL:</strong> Calculations run in real Python runtime (Pandas, SciPy, Scikit-Learn) with zero prompt arithmetic.</span>
+                <span><strong>Python does the math:</strong> calculations run as Python code (pandas, SciPy, scikit-learn), not as prompt arithmetic.</span>
               </li>
               <li class="compare-item">
                 <span class="compare-icon positive">✓</span>
-                <span><strong>Anti-Overfitting Guard:</strong> Hard stop on train-test gaps &gt; 10%, automatic Stratified K-Fold CV, and L2 regularization clamping.</span>
+                <span><strong>Overfitting checks:</strong> models are scored on held-out data, and a train-test gap above 0.10 raises a warning.</span>
               </li>
               <li class="compare-item">
                 <span class="compare-icon positive">✓</span>
-                <span><strong>100% Local Confidentiality:</strong> Raw rows stay in local memory buffers. Only compact metadata touches the reasoning engine.</span>
+                <span><strong>Raw rows stay out of prompts:</strong> only compact metadata and tool summaries go to the AI model, never the full table. Switch AI off and nothing is sent to a provider.</span>
               </li>
               <li class="compare-item">
                 <span class="compare-icon positive">✓</span>
-                <span><strong>Deterministic Cryptographic Ledgers:</strong> Fixed seeds (`random_state=42`) and sealed Markdown/JSON run summaries for total auditability.</span>
+                <span><strong>Repeatable by design:</strong> random steps use fixed seeds, and each run writes Markdown and JSON reports you can inspect.</span>
               </li>
             </ul>
           </div>
@@ -1833,11 +1646,11 @@
         <div class="section-title-center">
           <div class="eyebrow-pill">
             <span class="eyebrow-dot"></span>
-            Production-grade capabilities
+            What it does
           </div>
-          <h2>Everything you need to trust your data</h2>
+          <h2>What each stage gives you</h2>
           <p>
-            An end-to-end data science laboratory packaged into a clean, autonomous console.
+            A guided workspace from upload to report.
           </p>
         </div>
 
@@ -1845,90 +1658,90 @@
           <!-- Feature 1 -->
           <div class="feature-box">
             <div class="feature-top">
-              <span class="feature-stage-tag">STAGE 01 // MEMORY ENGINE</span>
-              <h3 class="feature-title">Zero-leakage dataset ingestion</h3>
+              <span class="feature-stage-tag">Stage 1: reading</span>
+              <h3 class="feature-title">Checked, recorded ingestion</h3>
               <p class="feature-desc">
-                Streams tabular files into memory. Automatically profiles missingness topology, cardinality splits, and schema typing without leaking raw rows.
+                Files are checked on upload, read with encoding and delimiter detection, and profiled for types, missing values and duplicates. Anything repaired is recorded.
               </p>
             </div>
             <div class="feature-metric-row">
-              <span class="metric-value">&lt; 50ms</span>
-              <span class="metric-label">Ingestion Overhead</span>
+              <span class="metric-value">Recorded</span>
+              <span class="metric-label">How the file was read</span>
             </div>
           </div>
 
           <!-- Feature 2 -->
           <div class="feature-box">
             <div class="feature-top">
-              <span class="feature-stage-tag">STAGE 02 // PROFILING</span>
-              <h3 class="feature-title">Tukey 1.5&times; outlier demarcation</h3>
+              <span class="feature-stage-tag">Stage 2: profiling</span>
+              <h3 class="feature-title">Unusual values, flagged</h3>
               <p class="feature-desc">
-                Automated IQR bounds and modified Z-scores detect severe anomalies before statistical hypotheses are formulated.
+                Outliers are found with distribution-aware rules and flagged in the results, not silently removed.
               </p>
             </div>
             <div class="feature-metric-row">
-              <span class="metric-value">100%</span>
-              <span class="metric-label">Outlier Isolation</span>
+              <span class="metric-value">Flagged</span>
+              <span class="metric-label">Not deleted</span>
             </div>
           </div>
 
           <!-- Feature 3 -->
           <div class="feature-box">
             <div class="feature-top">
-              <span class="feature-stage-tag">STAGE 03 // REASONING</span>
-              <h3 class="feature-title">Recursive multi-agent orchestrator</h3>
+              <span class="feature-stage-tag">Stage 3: tools</span>
+              <h3 class="feature-title">A plan, then Python tools</h3>
               <p class="feature-desc">
-                Mathematical task decomposition breaks vague questions into atomic, executable tool calls executed in the sandboxed Python REPL.
+                Your question and the data profile become a bounded plan of Python tool calls. Optional AI planning can split a larger question into smaller ones.
               </p>
             </div>
             <div class="feature-metric-row">
-              <span class="metric-value">RLM Core</span>
-              <span class="metric-label">Decomposition Model</span>
+              <span class="metric-value">Optional</span>
+              <span class="metric-label">AI planning</span>
             </div>
           </div>
 
           <!-- Feature 4 -->
           <div class="feature-box">
             <div class="feature-top">
-              <span class="feature-stage-tag">STAGE 04 // MACHINE LEARNING</span>
-              <h3 class="feature-title">Stratified 5-fold cross-validation</h3>
+              <span class="feature-stage-tag">Stage 4: modelling</span>
+              <h3 class="feature-title">Validation that fits the data</h3>
               <p class="feature-desc">
-                Ensemble learning with strict partitioning. Never ranks models on training accuracy; ranks exclusively on mean cross-validation folds.
+                Models are ranked on cross-validated scores, not training accuracy. Time-ordered data uses time-aware splits and repeated entities use grouped splits.
               </p>
             </div>
             <div class="feature-metric-row">
-              <span class="metric-value">k = 5</span>
-              <span class="metric-label">Minimum Folds</span>
+              <span class="metric-value">5+</span>
+              <span class="metric-label">Folds for ordinary data</span>
             </div>
           </div>
 
           <!-- Feature 5 -->
           <div class="feature-box">
             <div class="feature-top">
-              <span class="feature-stage-tag">STAGE 05 // SAFETY GUARD</span>
-              <h3 class="feature-title">Anti-overfit generalization envelope</h3>
+              <span class="feature-stage-tag">Stage 5: refining</span>
+              <h3 class="feature-title">Overfit warnings</h3>
               <p class="feature-desc">
-                Monitors `train_score - test_score`. When gap &gt; 0.10, L2 penalty is escalated, tree depth clamped to 6, and warnings emitted.
+                The gap between train and test scores is reported for every model, and a gap above 0.10 raises a warning. Tree depth is capped by default.
               </p>
             </div>
             <div class="feature-metric-row">
-              <span class="metric-value">&lt; 0.10</span>
-              <span class="metric-label">Allowed Gap Threshold</span>
+              <span class="metric-value">0.10</span>
+              <span class="metric-label">Gap that raises a warning</span>
             </div>
           </div>
 
           <!-- Feature 6 -->
           <div class="feature-box">
             <div class="feature-top">
-              <span class="feature-stage-tag">STAGE 07 // SYNTHESIS</span>
-              <h3 class="feature-title">Sealed executive ledger report</h3>
+              <span class="feature-stage-tag">Stage 7: report</span>
+              <h3 class="feature-title">A written report</h3>
               <p class="feature-desc">
-                Exports production Markdown reports, publication-grade figures, and JSON execution logs for formal peer and compliance audit.
+                Writes a Markdown report, charts, a shareable HTML report and JSON results, with caveats and untraced numbers marked.
               </p>
             </div>
             <div class="feature-metric-row">
-              <span class="metric-value">PDF / MD</span>
-              <span class="metric-label">Audit-Ready Export</span>
+              <span class="metric-value">Files</span>
+              <span class="metric-label">Markdown, HTML, JSON</span>
             </div>
           </div>
         </div>
@@ -1949,17 +1762,17 @@
         <div class="cta-banner">
           <div class="eyebrow-pill">
             <span class="eyebrow-dot"></span>
-            Start in seconds
+            Try it
           </div>
-          <h2>Turn raw spreadsheets into verified decisions</h2>
+          <h2>Ask a question of your own table</h2>
           <p>
-            Drop your file in, ask your question in plain English, and get back an audited report with every number traceable to a real Python calculation.
+            Add your file, ask your question in plain English, and get a report where each finding shows its checks and untraced numbers are marked.
           </p>
           <div class="cta-btn-wrap">
-            <button class="btn-cta lg" id="cta-launch-btn">Launch the workspace →</button>
+            <button class="btn-cta lg" id="cta-launch-btn">Open the workspace →</button>
             <a href="https://github.com/shahdaksh050/agentic-data-analysis" target="_blank" rel="noopener noreferrer" class="btn-cta secondary lg">View source on GitHub</a>
           </div>
-          <p class="guarantee-subtext">No credit card required · Runs entirely on your machine · Open source core</p>
+          <p class="guarantee-subtext" id="data-path">Where your data goes: your file is processed on the server for your session and deleted when you start a new analysis. Summaries of the data are sent to the AI provider you choose, unless you switch AI off. This is an academic project. Do not upload sensitive data.</p>
         </div>
       </div>
     </section>
@@ -1974,16 +1787,16 @@
               <span class="brand-name">DSA AGENT</span>
             </div>
             <p>
-              Autonomous 7-stage recursive statistical analysis system with sandboxed REPL execution and certified generalization safety bounds.
+              A final-year project: a seven-stage data analysis assistant that checks its own findings.
             </p>
           </div>
           <div class="footer-col">
             <h4>Architecture</h4>
             <ul>
-              <li><a href="#workflow">7-Stage Pipeline</a></li>
-              <li><a href="#comparison">Anti-Overfit Guard</a></li>
-              <li><a href="#features">REPL Sandbox</a></li>
-              <li><a href="#features">MemorySystem</a></li>
+              <li><a href="#workflow">Seven stages</a></li>
+              <li><a href="#comparison">Overfit checks</a></li>
+              <li><a href="#features">Code sandbox</a></li>
+              <li><a href="#features">Run memory</a></li>
             </ul>
           </div>
           <div class="footer-col">
@@ -1995,11 +1808,9 @@
             </ul>
           </div>
           <div class="footer-col">
-            <h4>Compliance</h4>
+            <h4>Project</h4>
             <ul>
-              <li><a href="#">Privacy by Design</a></li>
-              <li><a href="#">Air-Gapped Telemetry</a></li>
-              <li><a href="#">WCAG AA Standards</a></li>
+              <li><a href="#data-path">Where your data goes</a></li>
               <li><a href="#">MIT License</a></li>
             </ul>
           </div>
@@ -2008,8 +1819,7 @@
         <div class="footer-bottom">
           <span>&copy; 2026 DSA Agent Project. Distributed under the MIT License.</span>
           <div class="system-status-indicator">
-            <span class="status-dot"></span>
-            <span>REPL sandbox: operational</span>
+            <span>Academic project, not for sensitive data</span>
           </div>
         </div>
       </div>
@@ -2396,10 +2206,10 @@
 
     /* Leader Canvas & HUD Overlay */
     const HUD_TITLES = [
-      'Raw dataset // unstructured tabular stream',
-      'Feature distributions // profile and outlier bounds',
-      'Multi-agent graph // recursive reasoning network',
-      'Certified ledger // sealed generalization bound',
+      'Your file as rows of a table',
+      'Feature distributions and unusual values',
+      'A plan routed to Python tools',
+      'Checks and the report',
     ];
     const tempVec = new THREE.Vector3();
     // True once the pinned stage track has scrolled away; the HUD must stay hidden over page sections
@@ -2504,10 +2314,10 @@
     const floatingDots = document.getElementById('floating-stage-dots');
 
     const STAGE_SUMMARIES = [
-      { tag: 'Stage 01 // raw dataset stream', sub: 'Unparsed CSV tabular matrix streaming into the sandboxed REPL' },
-      { tag: 'Stage 02 // profiling and anomaly bounds', sub: '5 feature histograms with IQR 1.5× outliers flagged in risk red' },
-      { tag: 'Stage 03 // multi-agent reasoning graph', sub: 'Central orchestrator hub routing tasks across dynamic tool synapses' },
-      { tag: 'Stage 04 // certified generalization ledger', sub: 'Stratified cross-validation with a sealed under-10% train-test safety ring' },
+      { tag: 'Stage 1: reading your file', sub: 'An illustration: the 3D tokens stand for the rows of your table' },
+      { tag: 'Stage 2: profiling and unusual values', sub: 'An illustration: feature distributions with unusual values marked' },
+      { tag: 'Stage 3: choosing and running tools', sub: 'An illustration: one plan split across several Python tools' },
+      { tag: 'Stages 4 to 7: checks and report', sub: 'An illustration: cross-validation folds and a train-test gap check' },
     ];
 
     /* Smooth Programmatic Scrolling via Anime.js — a single tween at a time, cancelled by user input */
@@ -3125,7 +2935,7 @@
     }
 
     // Global Keyboard Shortcut: Enter launches the workspace. Space is left to native page scrolling,
-    // and Enter on a focused button/link keeps its own activation (FAQ toggles, nav links).
+    // and Enter on a focused button/link keeps its own activation (nav links).
     window.addEventListener('keydown', (e) => {
       const active = document.activeElement;
       if (active && active !== document.body) return;

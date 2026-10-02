@@ -674,5 +674,12 @@ iframe {{
 .how-tag {{ font-size: 12px; font-weight: 700; color: var(--graphite); }}
 .how-tag.supported {{ color: var(--positive); }}
 .how-tag.refuted {{ color: var(--risk); }}
+/* ── "Found so far, may change" (live run): hairline block, tokens only ── */
+.prov {{ border-top: 1px solid var(--rule); padding: .8rem 0 .4rem; margin: .8rem 0; max-width: 74ch; }}
+.prov-h {{ font-size: 15px; font-weight: 700; margin: 0 0 .15rem; color: var(--ink); }}
+.prov-note {{ font-size: 13px; color: var(--graphite); line-height: 1.5; margin: 0 0 .5rem; }}
+.prov-list {{ margin: 0; padding-left: 1.1rem; font-size: 14px; line-height: 1.55; color: var(--ink); overflow-wrap: anywhere; }}
+.prov-kind {{ font-size: 12px; font-weight: 700; color: var(--graphite); }}
+.prov-count {{ font-size: 13px; color: var(--graphite); margin: .4rem 0 0; }}
 </style>
 """, unsafe_allow_html=True)

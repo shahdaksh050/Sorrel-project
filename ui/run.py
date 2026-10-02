@@ -26,8 +26,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from src.core.findings import Finding
 from src.core.run_config import RunConfig
-from src.core.run_view import RUN_VIEW_CONTEXT_KEYS, RunView, build_run_view
+from src.core.run_view import (
+    RUN_VIEW_CONTEXT_KEYS,
+    ProvisionalFinding,
+    RunView,
+    build_run_view,
+    is_headline_finding,
+)
 
 #: Prefix of every per-run temp directory; `remove_run_dir` only ever deletes
 #: directories that carry it, directly under the system temp root.
@@ -104,6 +111,8 @@ class RunSnapshot:
     note: str
     stop_requested: bool
     discard: bool
+    #: Headline-worthy findings seen so far, in the order they were found.
+    provisional: tuple[ProvisionalFinding, ...] = ()
 
 
 class ActiveRun:
@@ -118,6 +127,7 @@ class ActiveRun:
         self._stage_log: list[StageEntry] = [(num, "pending", "") for num, _ in spec.stage_names]
         self._progress_lines: list[str] = []
         self._note = ""
+        self._provisional: list[ProvisionalFinding] = []
         self._outcome: RunOutcome | None = None
         self._error: str | None = None
         self._metadata: Any = None
@@ -175,6 +185,7 @@ class ActiveRun:
                 note=self._note,
                 stop_requested=self._stop_event.is_set(),
                 discard=self._discard,
+                provisional=tuple(self._provisional),
             )
 
     # ── writes (worker thread) ───────────────────────────────────────────────
@@ -187,6 +198,15 @@ class ActiveRun:
     def add_progress(self, line: str) -> None:
         with self._lock:
             self._progress_lines.append(line)
+
+    def add_finding(self, finding: Finding) -> None:
+        """Record a new finding as provisional, if it would be a headline candidate."""
+        if not is_headline_finding(finding.layer, finding.kind):
+            return
+        with self._lock:
+            self._provisional.append(
+                ProvisionalFinding(finding.finding_id, finding.kind, finding.headline)
+            )
 
     def set_note(self, note: str) -> None:
         with self._lock:
@@ -309,6 +329,7 @@ def _execute(run: ActiveRun) -> None:
 
     agent.on_step_callback = on_step
     agent.on_iteration_callback = on_iter
+    agent.on_finding_callback = run.add_finding
 
     final = agent.analyze()
 

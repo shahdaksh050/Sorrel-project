@@ -141,6 +141,7 @@ from ui.components.cards import (
 from ui.components.cards import (
     section as _section,
 )
+from ui.components.provisional import build_provisional_html
 from ui.run import RUN_DIR_PREFIX, ActiveRun, RunSpec, remove_run_dir
 from ui.styles import inject_theme_css as _inject_theme_css
 from ui.tabs import (
@@ -277,6 +278,9 @@ def _run_progress() -> None:
         unsafe_allow_html=True,
     )
     st.markdown(_render_steps_list(list(snap.stage_log)), unsafe_allow_html=True)
+    _prov_html = build_provisional_html(snap.provisional)
+    if _prov_html:
+        st.markdown(_prov_html, unsafe_allow_html=True)
     if st.button("Stop", key="stop_run", disabled=snap.stop_requested or snap.discard):
         run.request_stop()
         st.rerun(scope="fragment")

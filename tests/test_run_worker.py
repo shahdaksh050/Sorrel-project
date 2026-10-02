@@ -83,6 +83,26 @@ def test_a_run_completes_with_a_view_and_truthful_stages(tmp_path: Path) -> None
     assert snap.progress_lines, "progress lines feed the Details run trace"
 
 
+def test_provisional_findings_are_collected_while_running_and_match_the_final_ones(tmp_path: Path) -> None:
+    run = ActiveRun(_spec(tmp_path))
+    run.start()
+    _wait(run)
+
+    snap = run.snapshot()
+    out = run.outcome
+    assert out is not None
+    assert snap.provisional, "the planted group effect should surface at least one headline finding"
+    final_ids = {f["finding_id"] for f in out.run_view.findings}
+    assert {p.finding_id for p in snap.provisional} <= final_ids
+    # Only headline candidates are shown while running.
+    by_id = {f["finding_id"]: f for f in out.run_view.findings}
+    for p in snap.provisional:
+        assert by_id[p.finding_id]["layer"] in ("exec", "analyst")
+        assert by_id[p.finding_id]["kind"] not in ("method_fit", "coverage_gap")
+    # And the finished view itself holds none.
+    assert out.run_view.provisional_findings == ()
+
+
 def test_stop_requested_up_front_gives_a_stopped_partial_result(tmp_path: Path) -> None:
     run = ActiveRun(_spec(tmp_path))
     run.request_stop()

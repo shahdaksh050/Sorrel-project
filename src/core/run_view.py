@@ -101,6 +101,17 @@ class Usage:
 
 
 @dataclass(frozen=True)
+class ProvisionalFinding:
+    """A finding seen while a run is still going. Deliberately carries no
+    evidence or check marks: checks, the run-level correction and the audits are
+    attached after the loop, so anything shown here may still change."""
+
+    finding_id: str
+    kind: str
+    headline: str
+
+
+@dataclass(frozen=True)
 class HowWeGotHere:
     """The decisions and work-arounds behind the answer (the Details audit trail)."""
 
@@ -132,6 +143,8 @@ class RunView:
     insights: tuple[str, ...]
     reasoning: str
     how: HowWeGotHere = field(default_factory=HowWeGotHere)
+    #: Always empty on a view built from a finished run; live runs show their own.
+    provisional_findings: tuple[ProvisionalFinding, ...] = ()
 
 
 # ── coercion helpers ─────────────────────────────────────────────────────────
@@ -174,6 +187,11 @@ def _dict_tuple(value: Any) -> tuple[dict[str, Any], ...]:
 # ── selection and verdict ────────────────────────────────────────────────────
 
 
+def is_headline_finding(layer: Any, kind: Any) -> bool:
+    """Whether a finding with this layer and kind is a headline candidate."""
+    return layer in _HEADLINE_LAYERS and kind not in _NON_HEADLINE_KINDS
+
+
 def select_headline_findings(
     findings: tuple[dict[str, Any], ...] | list[dict[str, Any]],
 ) -> tuple[dict[str, Any], ...]:
@@ -181,11 +199,7 @@ def select_headline_findings(
 
     The single copy of the selection the Answers tab used to build inline.
     """
-    picked = [
-        f
-        for f in findings
-        if f.get("layer") in _HEADLINE_LAYERS and f.get("kind") not in _NON_HEADLINE_KINDS
-    ]
+    picked = [f for f in findings if is_headline_finding(f.get("layer"), f.get("kind"))]
     return tuple(picked[:MAX_HEADLINE_FINDINGS])
 
 

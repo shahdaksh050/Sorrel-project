@@ -143,7 +143,7 @@ the owner and is not touched by this plan.
 | Tabs | Four tabs: Answers, Charts, Details, Downloads. Charts is a flat list of panels with a half and full width rule | `app.py:1377`, `ui/tabs/` |
 | Answers | Finding cards with the check row, a run-level "N of M findings held up" banner (only when audits ran), recommendations, a model stamp, a technical expander. The Charts tab panels do not show check rows | `ui/tabs/answers_tab.py:109-135`, `ui/components/cards.py:123` |
 | Theme default | First session follows the OS theme | `app.py:152` |
-| Landing | Marketing-template landing in one inline file of about 120 KB, still including the FAQ section | `ui/landing.py`, `ui/landing_component/index.html` |
+| Landing | Marketing-template landing in one inline file of about 120 KB. FAQ and pricing markup are already removed; dead CSS for both remains, and visible jargon is still to be audited | `ui/landing.py`, `ui/landing_component/index.html` |
 | Landing prototype | `frontend-landing/` is a near copy of the same page plus unused TypeScript | `frontend-landing/` |
 | Plate and cinematic | Plate in `ui/pipeline_3d.py` and `ui/assets/pipeline_3d.*`; cinematic export in `ui/cinematic_3d.py` and `ui/assets/cinematic_3d.*` | as listed |
 
@@ -194,7 +194,7 @@ Added after the owner's answer on hosting facts:
 | 2026-10-02 | Live findings: option B, an optional `on_finding_callback` with a provisional "Found so far" list (no check marks, labelled as subject to change). Full `analyze_iter()` stays deferred | Should tier, and it needs the run to move to a worker thread first (the run is synchronous in the committed tree). Provisional findings carry no check row; `RunView.provisional_findings` is empty once the run completes |
 | 2026-10-02 | The demo runs from a laptop, with a hosted link as a backup. The deadline date is not yet known | Hosted-safety fixes stay in but are lower priority; the viva fallback in section 2d (pre-recorded run, offline sample) matters more |
 | 2026-10-02 | The visual direction board is skipped; the current buff-green palette stays, with the "Guided Evidence" rules | Supersedes the earlier "palette is open". Section 3's board gate is waived; the plan's rules for type, spacing, status marks and motion still apply |
-| 2026-10-02 | Landing page: copy fixes only (remove pricing tiers, FAQ, jargon and unsupported claims); keep the existing page and 3D scene | The Phase 3 rebuild moves to Later |
+| 2026-10-02 | Landing page: copy fixes only (remove dead pricing and FAQ CSS, jargon and unsupported claims; the FAQ and pricing markup is already gone); keep the existing page and 3D scene | The Phase 3 rebuild moves to Later |
 | 2026-10-02 | Next batch (batch 2): `RunView`, "How we got here", answers-first ordering, `.streamlit/config.toml` fix, removal of `ui/animations.py`. The worker-thread run with Stop is batch 3 | Phase 1b B and Phase 4 core, plus the Phase 1 theme-file item |
 
 ## 2d. Scope for a final-year project

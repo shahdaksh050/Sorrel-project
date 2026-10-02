@@ -747,6 +747,10 @@ iframe {{
 [data-testid="stMetricValue"], [data-testid="stMetricValue"] * {{ color: var(--ink) !important; }}
 [data-testid="stFileUploaderDropzoneInstructions"] * {{ color: var(--graphite) !important; }}
 [data-testid="stTooltipIcon"] svg {{ color: var(--graphite) !important; }}
+[data-baseweb="input"], [data-baseweb="base-input"], [data-baseweb="textarea"] {{
+    background: var(--sheet) !important; border-color: var(--rule) !important;
+}}
+[data-testid="stTextInput"] button, [data-testid="stNumberInput"] button {{ color: var(--ink) !important; }}
 [data-testid="stNumberInput"] input {{ background: var(--sheet) !important; color: var(--ink) !important; }}
 [data-testid="stNumberInput"] button {{ background: var(--sheet) !important; color: var(--ink) !important; }}
 </style>

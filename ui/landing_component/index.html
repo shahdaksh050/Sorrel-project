@@ -1898,8 +1898,7 @@
   <!-- Scroll effects (line-by-line headline reveal, the developer band opening, gentle parallax on
        the proof artifacts). Plain classic script, transform / opacity / clip-path only. Not part of
        the 3D module on purpose: if three.js is slow to load the headings must not wait for it.
-       The hero headline is revealed here, once per session (the hero island is no longer used on
-       this page). Reduced motion: none of this runs. -->
+       The hero headline is revealed here, once per session. Reduced motion: none of this runs. -->
   <script>
     (function initScrollEffects() {
       'use strict';
@@ -3199,8 +3198,6 @@
 
     // The console's session theme arrives as the `theme` render arg. Adopt it on the first render
     // only; after that the page owns its theme (a toggle here writes back to the session).
-    // The `islands_url` render arg is still sent by Python and is deliberately ignored: the
-    // landing page no longer loads the hero island.
     let hostThemeApplied = false;
     window.addEventListener('message', (event) => {
       const data = event.data;

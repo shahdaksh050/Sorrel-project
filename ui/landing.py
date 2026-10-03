@@ -74,13 +74,7 @@ def show_landing_page() -> bool:
     """, unsafe_allow_html=True)
 
     # Render the component. The JS sends {"enter": bool, "theme": "day" | "night"}.
-    # `islands_url` is still passed, but the Sorrel landing page does not load the hero island
-    # (its scroll-effects script reveals the headline), so the page ignores it.
-    from ui.components.islands import island_base_url
-
-    value = _landing_component(
-        theme=theme, islands_url=island_base_url("hero"), key="landing_narrative", default=None
-    )
+    value = _landing_component(theme=theme, key="landing_narrative", default=None)
 
     if isinstance(value, dict):
         chosen = value.get("theme")

@@ -15,4 +15,3 @@ final_report.json
 **/*.md
 !docker/README.md
 
-ui/islands/node_modules

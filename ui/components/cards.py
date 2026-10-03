@@ -138,53 +138,6 @@ _STAGE_WORDS: dict[str, str] = {
 }
 
 
-def stage_card(num: str, name: str, status: str, detail: str = "", is_new: bool = False) -> str:
-    """One row of the stage timeline: number, name, and a status word with a shape."""
-    cls = {
-        "done": "done",
-        "active": "active",
-        "skipped": "skip",
-        "error": "err",
-    }.get(status, "")
-    if is_new and status != "pending":
-        cls += " is-new"
-    det = f'<span class="detail">{html.escape(str(detail))}</span>' if detail else ""
-    word = _STAGE_WORDS.get(status, "○ Waiting")
-    return (
-        f'<li class="sc {cls.strip()}">'
-        f'<span class="sc-num">{num.zfill(2)}</span>'
-        f'<span class="nm">{html.escape(str(name))}{det}</span>'
-        f'<span class="st">{html.escape(word)}</span></li>'
-    )
-
-
-def render_steps_list(stage_log: list[tuple[str, str, str]], seen_stages: set[str]) -> str:
-    """Render the primary, always-visible numbered timeline of the seven stages.
-
-    One polite status sentence announces the stage in progress, instead of making the
-    whole list a live region that a screen reader would read out again on every update.
-    """
-    log_map = {n: (s, d) for n, s, d in stage_log}
-    rows: list[str] = []
-    active: tuple[str, str] | None = None
-    for num, name in STAGE_DEFS:
-        status, detail = log_map.get(num, ("pending", ""))
-        is_new = False
-        if status != "pending" and num not in seen_stages:
-            is_new = True
-            seen_stages.add(num)
-        if status == "active" and active is None:
-            active = (num, name)
-        rows.append(stage_card(num, name, status, detail, is_new))
-    status_line = (
-        f'<p class="sr-only" role="status">Working on step {html.escape(active[0])} of {len(STAGE_DEFS)}: '
-        f"{html.escape(active[1])}</p>"
-        if active
-        else ""
-    )
-    return f'{status_line}<ol class="stage-list">{"".join(rows)}</ol>'
-
-
 def render_stepper(stage_log: list[tuple[str, str, str]]) -> str:
     """The seven stages as one even row: a numbered dot, a short name and a status word with a shape.
 

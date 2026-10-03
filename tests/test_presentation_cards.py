@@ -44,36 +44,6 @@ def test_workspace_styles_keep_motion_and_embedding_scoped() -> None:
 # ── The Sorrel workspace: shape plus words, folded figures, shelf rows ────────────────────────────────
 
 
-def test_every_stage_status_is_a_shape_and_a_word() -> None:
-    from ui.components.cards import stage_card
-
-    expected = {
-        "done": "✓ Done",
-        "active": "● Working",
-        "skipped": "– Skipped",
-        "error": "! Stopped",
-        "pending": "○ Waiting",
-    }
-    for status, word in expected.items():
-        out = stage_card("3", "Running the Numbers", status)
-        assert f'<span class="st">{word}</span>' in out
-        assert '<span class="sc-num">03</span>' in out
-
-
-def test_the_timeline_lists_all_seven_stages_and_announces_only_the_active_one() -> None:
-    from ui.components.cards import STAGE_DEFS, render_steps_list
-
-    seen: set[str] = set()
-    out = render_steps_list([("1", "done", ""), ("2", "active", "reading <b>")], seen)
-    assert out.count('<li class="sc') == len(STAGE_DEFS) == 7
-    assert out.count('role="status"') == 1
-    assert "Working on step 2 of 7: Understanding Your Question" in out
-    assert "reading &lt;b&gt;" in out and "reading <b>" not in out
-    assert "aria-live" not in out
-    assert seen == {"1", "2"}
-    assert 'role="status"' not in render_steps_list([("1", "done", "")], set())
-
-
 def test_a_flagged_gauge_always_says_so_in_words() -> None:
     from ui.components.cards import gauge
 

@@ -849,33 +849,9 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     line-height: 1.5; overflow-wrap: anywhere; }}
 .step-notes-empty {{ color: var(--graphite); font-size: var(--text-sm); margin: 0; }}
 
-/* ── Stage timeline: number, name, and a status with a shape and a word ── */
-.stage-list {{
-    list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
-    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
-}}
-.sc {{ display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 12px; align-items: center;
-      padding: 13px 18px; border-bottom: 1px solid var(--rule-faint);
-      font-size: var(--text-sm); color: var(--graphite); }}
-.sc:last-child {{ border-bottom: none; }}
-.sc .sc-num {{ font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--graphite); }}
-.sc .nm {{ color: var(--graphite); font-size: var(--text-sm); }}
-.sc .detail {{ display: block; margin-top: 2px; font-size: var(--text-xs); color: var(--graphite); }}
-.sc .st {{ font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .06em;
-          text-transform: uppercase; color: var(--graphite); white-space: nowrap; }}
-.sc.done .nm {{ color: var(--ink); }}
-.sc.done .st {{ color: var(--positive); }}
-.sc.active {{ background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--pen); }}
-.sc.active .nm {{ color: var(--ink); font-weight: 600; }}
-.sc.active .st {{ color: var(--accent-text); }}
-.sc.skip .nm {{ color: var(--graphite); }}
-.sc.err {{ box-shadow: inset 3px 0 0 var(--accent); }}
-.sc.err .nm {{ color: var(--ink); }}
-.sc.err .st {{ color: var(--accent); }}
-
-/* A row that has just entered the list is not animated: the workspace has no motion. The class
-   stays on the markup (it marks a row seen once), and these rules keep it inert. */
-.sc.is-new, .prov-item.is-new {{ animation: none; }}
+/* A found-so-far item that has just appeared carries `is-new` on its markup (it marks one seen once);
+   this rule keeps the class styled, and it does not animate. */
+.prov-item.is-new {{ animation: none; }}
 .check-row.animate .check {{ animation: none; }}
 
 /* ── Annotations: Insight / Do / Risk, hairline cards with a mono tag ── */
@@ -936,8 +912,6 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 @media (max-width: 600px) {{
     .agent-grid {{ grid-template-columns: 1fr; }}
     .side-head {{ margin: 1.2rem 0 .5rem; }}
-    .sc {{ grid-template-columns: 36px minmax(0, 1fr); }}
-    .sc .st {{ grid-column: 2; }}
 }}
 
 /* ── Audited-entry check row (FrontendPlan.md section 5): a shape and words on every check ── */
@@ -1088,7 +1062,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 /* Higher contrast: heavier outlines, no tinted surfaces standing in for borders. */
 @media (prefers-contrast: more) {{
     :focus-visible {{ outline-width: 3px !important; }}
-    .finding-card, .bento-card, .gauge, .exec-directive, .datum, .trust-strip, .stage-list, .agent-card,
+    .finding-card, .bento-card, .gauge, .exec-directive, .datum, .trust-strip, .stepper, .agent-card,
     [data-testid="stExpander"], [class*="st-key-artifact_"] {{ border-color: var(--rule-strong) !important; }}
     .check, .run-banner {{ border: 1px solid currentColor; }}
 }}

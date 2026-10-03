@@ -177,6 +177,42 @@ def test_the_workspace_stylesheet_has_no_motion_gradient_or_red_for_errors(monke
     assert "var(--accent)" in alert and "var(--risk)" not in alert
 
 
+def _button_rule(css: str, testid: str) -> str:
+    """The body of the rule for `button[data-testid="stBaseButton-<testid>"]`."""
+    at = css.index(f'button[data-testid="stBaseButton-{testid}"] {{')
+    return css[at : css.index("}", at)]
+
+
+def test_segmented_controls_take_their_colours_from_the_tokens_in_both_themes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In Night the native control painted a light selected segment under light text: the label vanished."""
+    import re
+
+    import streamlit as st
+    from ui import styles as ui_styles
+
+    from src.core.design_tokens import palette
+    from tests.test_contrast import contrast
+
+    for theme in ("day", "night"):
+        emitted: list[str] = []
+        monkeypatch.setattr(st, "markdown", lambda body, sink=emitted, **kwargs: sink.append(body))
+        monkeypatch.setattr(st, "get_option", lambda key: "")
+        monkeypatch.setattr(st, "session_state", {"theme": theme})
+        ui_styles.inject_theme_css()
+        css = emitted[0]
+
+        selected, other = _button_rule(css, "segmented_controlActive"), _button_rule(css, "segmented_control")
+        # Colours are tokens, never a literal, so Night follows the page.
+        assert "background: var(--pen)" in selected and "color: var(--accent-ink)" in selected
+        assert "background: var(--sheet)" in other and "color: var(--ink-2)" in other
+        assert not re.search(r"#[0-9a-fA-F]{3,8}", selected + other)
+        assert "button * { color: inherit !important; }" in css  # the label inherits whatever element holds it
+        # and the pairs those tokens resolve to are readable in this theme
+        p = palette(theme)  # type: ignore[arg-type]
+        assert contrast(p["accent_ink"], p["pen"]) >= 4.5
+        assert contrast(p["ink_2"], p["sheet"]) >= 4.5
+
+
 def test_visible_naming_is_sorrel() -> None:
     app = (ROOT / "app.py").read_text(encoding="utf-8")
     assert 'page_title="Sorrel"' in app

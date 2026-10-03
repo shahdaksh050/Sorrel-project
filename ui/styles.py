@@ -1015,6 +1015,20 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 [data-testid="stTextInput"] button, [data-testid="stNumberInput"] button {{ color: var(--ink) !important; }}
 [data-testid="stNumberInput"] input {{ background: var(--stock) !important; color: var(--ink) !important; }}
 [data-testid="stNumberInput"] button {{ background: var(--stock) !important; color: var(--ink) !important; }}
+/* Segmented controls (Day / Night, "With an AI summary"). The native theme is fixed Day, so in Night its
+   selected segment painted a light fill under light text and the label vanished. Both states take their
+   colours from the tokens: the selected one is the green pen with the button-label colour (9.6:1 in Day,
+   5.3:1 in Night), the other is a card with body text. The words inside inherit, whatever element holds them. */
+[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_control"] {{
+    background: var(--sheet) !important; color: var(--ink-2) !important; border-color: var(--rule-strong) !important;
+}}
+[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_control"]:hover {{
+    border-color: var(--graphite) !important; color: var(--ink) !important;
+}}
+[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] {{
+    background: var(--pen) !important; color: var(--accent-ink) !important; border-color: var(--pen) !important;
+}}
+[data-testid="stButtonGroup"] button * {{ color: inherit !important; }}
 /* ── Evidence inspector (Answers): ranked findings beside the selected one ── */
 .st-key-selected_finding [role="radiogroup"] {{ gap: 8px; }}
 .st-key-selected_finding [role="radiogroup"] > label {{

@@ -749,6 +749,8 @@ def render_governance(gov: dict[str, Any]) -> None:
 
     if not gov.get("code_execution_enabled", True):
         st.caption("AI-written code was switched off for this run.")
+    elif gov.get("code_execution_blocker"):
+        st.caption(f"AI-written code could not run in this analysis. {gov['code_execution_blocker']}")
     backends = [b for b in gov.get("sandbox_backends") or [] if b != "refused"]
     if "subprocess" in backends:
         note = ", some runs used Docker" if "docker" in backends else ""

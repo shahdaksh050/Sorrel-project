@@ -69,7 +69,7 @@ from src.core.governance import (
     AUDIT_SUBDIR,
     LOCAL_PROVIDERS,
     CodeGovernor,
-    code_execution_enabled,
+    code_execution_available,
     local_only,
     max_llm_tokens_per_run,
 )
@@ -854,7 +854,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             # Registered after the tool list and draft plan are built, so
             # library tools are listed once — in the per-cycle "Tools you
             # created" block, like any generated tool.
-            if code_execution_enabled():
+            if code_execution_available():
                 from src.core.tool_factory import tool_library_enabled
 
                 if tool_library_enabled():

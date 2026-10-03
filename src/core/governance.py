@@ -55,6 +55,23 @@ def code_execution_enabled() -> bool:
     return os.getenv("ENABLE_CODE_EXECUTION", default).strip().lower() not in ("0", "false", "no")
 
 
+def code_execution_blocker() -> str | None:
+    """Why code cannot run on this machine right now even though it is switched
+    on (Docker demanded but unavailable), or None. Kept separate from
+    `code_execution_enabled`, which stays the operator's intent."""
+    if not code_execution_enabled():
+        return None
+    from src.core.sandbox import sandbox_blocker  # lazy: sandbox pulls in psutil
+
+    return sandbox_blocker()
+
+
+def code_execution_available() -> bool:
+    """Code is switched on AND a sandbox is able to run it. This, not the bare
+    switch, decides whether the planner is offered the code-running tools."""
+    return code_execution_enabled() and code_execution_blocker() is None
+
+
 def max_code_executions() -> int:
     try:
         return max(0, int(os.getenv("MAX_CODE_EXECUTIONS", "40")))
@@ -156,6 +173,8 @@ class CodeGovernor:
         """Why the next code execution must not run, or None if it may."""
         if not code_execution_enabled():
             return "Code execution is disabled for this deployment (ENABLE_CODE_EXECUTION=false)."
+        if (blocker := code_execution_blocker()) is not None:
+            return f"Code execution is unavailable: {blocker}"
         if self.executions >= max_code_executions():
             return (
                 f"The code-execution budget for this run ({max_code_executions()}) is spent. "
@@ -224,6 +243,7 @@ class CodeGovernor:
             "local_only": local_only(),
             "llm_audit_log": str(llm_audit) if llm_audit.exists() else None,
             "code_execution_enabled": code_execution_enabled(),
+            "code_execution_blocker": code_execution_blocker(),
             "code_executions": self.executions,
             "code_failures": self.failures,
             "code_refusals": self.refusals,

@@ -114,3 +114,5 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
 | :--- | :--- | :--- | :--- |
 | UI-1 | Claude Code | code done, unverified (Phases 0 to 5 and the static parts of 6) | Phase 0 and Phase 1 of the UI revamp plan: top bar, mode control in the task area, collapsed Settings, new fonts. Awaiting Checkpoint 1 (needs the user's go-ahead to run the app). |
 | UI-2 | Claude Code | waiting for Checkpoint 1 | Phases 2 to 7. |
+| UI-3 | Antigravity (Gemini) | Complete (Proposal & Prototype) | Verdacert UI breakdown & adaptation plan: docs/VerdacertInspirationPlan.md, interactive prototype in docs/prototypes/verdacert_dsa_preview.html |
+

@@ -14,7 +14,7 @@ from typing import Any
 
 from src.core.controller_common import _MAX_STEPS_PER_CYCLE, ControllerState, console
 from src.core.governance import (
-    code_execution_enabled,
+    code_execution_available,
 )
 from src.core.memory import AnalysisStep, ToolResult
 from src.core.profiler import DatasetProfile
@@ -133,7 +133,7 @@ class PlanMixin(ControllerState):
             tool_name, cleaned = hit
             if (
                 getattr(self.tool_registry.get(tool_name), "executes_code", False)
-                and not code_execution_enabled()
+                and not code_execution_available()
             ):
                 rejected.append(tool_name)
                 continue

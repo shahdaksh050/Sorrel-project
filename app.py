@@ -933,6 +933,15 @@ with st.sidebar:
                 "you don't trust."
             ),
         )
+        if enable_code and require_isolation:
+            from src.core.sandbox import DockerSandbox
+
+            if not DockerSandbox.is_available():
+                st.warning(
+                    "Docker isn't running here, so no AI-written code will run. Start Docker "
+                    "Desktop and build the image once (`docker build -t dsa-sandbox:latest .`), "
+                    "or turn this switch off to use the subprocess sandbox."
+                )
 
     has_file = st.session_state["preview_df"] is not None
     # A key is only needed when the AI narrative is on: the no-AI run is fully

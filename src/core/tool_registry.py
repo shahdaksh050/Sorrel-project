@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from src.core.governance import code_execution_enabled
+from src.core.governance import code_execution_available
 
 #: Parameters the controller/tool fills in itself (BaseTool.prepare_params) —
 #: never required from the planner and never "unknown".
@@ -178,7 +178,7 @@ class ToolRegistry:
             if s > 0.0
             and not (getattr(t, "requires_ml", False) and not use_ml)
             and not (getattr(t, "requires_llm", False) and not use_llm)
-            and not (getattr(t, "executes_code", False) and not code_execution_enabled())
+            and not (getattr(t, "executes_code", False) and not code_execution_available())
         ]
         relevant.sort(key=lambda ts: ts[1], reverse=True)
         return [t for t, _ in relevant]

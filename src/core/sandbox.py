@@ -716,7 +716,7 @@ class DockerSandbox(SandboxBackend):
                     ["docker", "info"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    timeout=2.0,
+                    timeout=8.0,  # Docker Desktop on Windows often takes >2 s to answer
                 )
                 ok = res.returncode == 0
             except Exception:
@@ -894,6 +894,35 @@ def isolation_required() -> bool:
     return os.environ.get("SANDBOX_REQUIRE_ISOLATION", default).strip().lower() in ("1", "true", "yes")
 
 
+def isolation_demand(backend_name: str | None = None) -> str | None:
+    """Which setting demands the Docker sandbox, or None when nothing does.
+    Named so a refusal can tell the user what to change, not just that it
+    happened."""
+    if (backend_name or os.environ.get("SANDBOX_BACKEND", "")).strip().lower() == "docker":
+        return "SANDBOX_BACKEND=docker"
+    if not isolation_required():
+        return None
+    if os.environ.get("SANDBOX_REQUIRE_ISOLATION", "").strip():
+        return 'SANDBOX_REQUIRE_ISOLATION=true (the "Require container isolation" switch)'
+    return "DSA_HOSTED=true"
+
+
+def sandbox_blocker() -> str | None:
+    """Why AI-written code cannot run right now, or None when it can: Docker
+    is demanded (`isolation_demand`) but not installed/running, and the
+    unisolated subprocess backend is never used as a stand-in. Cached with
+    `DockerSandbox.is_available`, so it is cheap to ask per plan step."""
+    demand = isolation_demand()
+    if demand is None or DockerSandbox.is_available():
+        return None
+    return (
+        f"{demand} requires the Docker sandbox, but Docker is not installed or its daemon "
+        "is not running, and the subprocess backend is never used as a fallback. Start "
+        "Docker and build the image once (`docker build -t dsa-sandbox:latest .`), or "
+        "turn the Docker requirement off to run code in the subprocess sandbox."
+    )
+
+
 def get_sandbox_backend(backend_name: str | None = None) -> SandboxBackend | None:
     """
     Return the active sandbox backend strategy.
@@ -908,8 +937,7 @@ def get_sandbox_backend(backend_name: str | None = None) -> SandboxBackend | Non
     or isolation is required (`isolation_required()`) but Docker is
     unavailable — the caller must refuse to execute, not fall back.
     """
-    target = (backend_name or os.environ.get("SANDBOX_BACKEND", "")).strip().lower()
-    if target == "docker" or isolation_required():
+    if isolation_demand(backend_name) is not None:
         # Explicitly requested (or required) Docker that is down: refuse
         # rather than silently downgrade to the unisolated subprocess.
         return DockerSandbox() if DockerSandbox.is_available() else None
@@ -950,10 +978,8 @@ def run_sandboxed(
             status="error", result=None, finding=None, stdout="",
             error_type="isolation_unavailable", traceback=None,
             hint=(
-                "Code execution is disabled: the Docker sandbox was requested "
-                "(SANDBOX_BACKEND=docker or SANDBOX_REQUIRE_ISOLATION) but Docker is "
-                "unavailable, and the unisolated subprocess backend will not be used "
-                "instead. Start Docker or use the built-in tools."
+                f"Code execution is disabled: {sandbox_blocker() or 'the Docker sandbox is unavailable.'} "
+                "Or use the built-in tools."
             ),
             duration_ms=0.0, backend="refused",
         )

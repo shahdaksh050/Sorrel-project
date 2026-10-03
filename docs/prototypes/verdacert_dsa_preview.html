@@ -1,0 +1,3083 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="day">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sorrel: data analysis that checks its own findings</title>
+  <meta name="description" content="Sorrel (the DSA Agent project) is a final-year project: a seven-stage data analysis assistant that runs Python tools on your table, checks its own findings, and says what it could not verify.">
+  <meta name="keywords" content="data analysis assistant, checked findings, cross-validation, overfit warnings, plain-language report">
+  <meta name="author" content="DSA Agent Team">
+  <link rel="canonical" href="https://dsa-agent.local/">
+  <meta property="og:title" content="Sorrel: data analysis that checks its own findings">
+  <meta property="og:description" content="Ask a question of your table. Python tools do the calculations, and every finding shows the checks it passed or failed.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://dsa-agent.local/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Sorrel: data analysis that checks its own findings">
+  <meta name="twitter:description" content="Python tools do the calculations, and every finding shows the checks it passed or failed.">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "name": "Sorrel",
+        "alternateName": "DSA Agent",
+        "applicationCategory": "DeveloperApplication, DataScienceApplication",
+        "operatingSystem": "Windows, macOS, Linux",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "description": "A final-year project: a seven-stage data analysis assistant that checks its own findings and reports what it could not verify."
+      }
+    ]
+  }
+  </script>
+  
+  <!-- Typography: Geist (UI Sans), Newsreader (Editorial Serif), Geist Mono (Technical Mono) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" rel="stylesheet">
+  
+  <!-- Three.js for 3D Pipeline Visualization -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- The original landing page uses Anime.js for reversible panel and scroll choreography. -->
+  <script src="../../ui/landing_component/vendor/anime.min.js"></script>
+
+  <style>
+    /* ==========================================================================
+       VERDACERT DESIGN SYSTEM TOKENS FOR AGENTIC DATA ANALYSIS
+       ========================================================================== */
+    :root {
+      /* Day Theme (Default — Warm Unbleached Legal Paper Stock) */
+      --bg: #f7f4ed;
+      --bg-alt: #efeae0;
+      --bg-deep: #12241a;
+      --paper: #fffdf7;
+      --paper-elevated: #ffffff;
+      
+      --ink: #1a1a17;
+      --ink-2: #3a3a35;
+      --ink-3: #66665e;
+      --ink-4: #9a9a90;
+      
+      --rule: #d9d3c4;
+      --rule-soft: #e6e0d1;
+      
+      --accent: #1f4634;        /* British Racing / Forest Green seal */
+      --accent-deep: #15311f;   /* Hover state */
+      --accent-soft: #e4ebe5;   /* Mint / Sage badge background */
+      --accent-ink: #f7f4ed;    /* Cream text on green */
+      
+      --positive: #24643c;
+      --warning: #a35a18;
+      --danger: #8a3a2a;        /* Terracotta warning */
+      --accent-text: #1f4634;   /* text on paper and on --accent-soft */
+      --danger-text: #8a3a2a;   /* text meaning "this may not hold" */
+
+      --sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --serif: 'Newsreader', Georgia, serif;
+      --mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+
+      --radius: 4px;            /* Crisp, authoritative rectangular radius */
+      --radius-sm: 2px;
+      --radius-pill: 999px;
+      
+      --maxw: 1220px;
+      --nav-h: 68px;
+    }
+
+    [data-theme="night"] {
+      /* Night Theme (Carbon Ledger Stock) */
+      --bg: #141712;
+      --bg-alt: #1a1e17;
+      --bg-deep: #0d120e;
+      --paper: #1c2219;
+      --paper-elevated: #22291e;
+      
+      --ink: #edf0e4;
+      --ink-2: #c4c9b6;
+      --ink-3: #8a927d;
+      --ink-4: #5a6150;
+      
+      --rule: #2a3324;
+      --rule-soft: #20271b;
+      
+      --accent: #326d48;
+      --accent-deep: #3d8257;
+      --accent-soft: #1c2b20;
+      --accent-ink: #edf0e4;
+      
+      --positive: #4ca167;
+      --warning: #d48239;
+      --danger: #cf5544;
+      --accent-text: #7fc79a;
+      --danger-text: #e8826a;
+    }
+
+    /* CSS Reset */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 15px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      transition: background-color 0.3s ease, color 0.3s ease;
+      overflow-x: hidden;
+    }
+
+    .container {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 0 32px;
+    }
+
+    /* ── Sticky Frosted Header ── */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      height: var(--nav-h);
+      background: var(--bg);
+      background: color-mix(in srgb, var(--bg) 88%, transparent);
+      backdrop-filter: saturate(140%) blur(12px);
+      -webkit-backdrop-filter: saturate(140%) blur(12px);
+      border-bottom: 1px solid var(--rule-soft);
+      transition: background 0.3s ease, border-color 0.3s ease;
+    }
+    .nav-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      height: 100%;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 600;
+      font-size: 15.5px;
+      letter-spacing: -0.01em;
+      color: var(--ink);
+      text-decoration: none;
+    }
+    .brand-seal {
+      width: 24px;
+      height: 24px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      border-radius: 3px;
+      display: grid;
+      place-items: center;
+      font-size: 12.5px;
+      font-weight: 700;
+    }
+    
+    /* View Switcher */
+    .view-switcher {
+      display: flex;
+      background: var(--bg-alt);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      padding: 3px;
+      gap: 2px;
+    }
+    .view-btn {
+      background: transparent;
+      border: none;
+      padding: 6px 14px;
+      font-family: var(--sans);
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--ink-3);
+      cursor: pointer;
+      border-radius: 3px;
+      transition: all 0.15s ease;
+    }
+    .view-btn.active,
+    .view-btn[aria-pressed="true"] {
+      background: var(--paper);
+      color: var(--ink);
+      box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+      font-weight: 600;
+    }
+
+    .nav-right {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    /* Theme Toggle */
+    .theme-toggle-btn {
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      color: var(--ink);
+      padding: 6px 10px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: 12.5px;
+      font-family: var(--mono);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .theme-toggle-btn:hover {
+      border-color: var(--ink);
+    }
+
+    /* ── Buttons, Badges & Pills ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      height: 44px;
+      padding: 0 20px;
+      font-size: 14.5px;
+      font-weight: 500;
+      letter-spacing: -0.01em;
+      border-radius: var(--radius);
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+      border: 1px solid transparent;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: var(--accent-ink);
+    }
+    .btn-primary:hover {
+      background: var(--accent-deep);
+    }
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid var(--rule);
+      color: var(--ink);
+    }
+    .btn-ghost:hover {
+      border-color: var(--ink);
+    }
+    .btn-lg {
+      height: 52px;
+      padding: 0 26px;
+      font-size: 15.5px;
+    }
+    .btn-sm {
+      height: 36px;
+      padding: 0 14px;
+      font-size: 13.5px;
+    }
+    .btn-primary:hover .arrow-icon {
+      transform: translateX(3px);
+    }
+    .arrow-icon {
+      transition: transform 0.15s ease;
+    }
+
+    .cert-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      background: var(--accent-soft);
+      color: var(--accent-text);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border-radius: 999px;
+    }
+    .cert-pill .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    /* ── Typography Scale ── */
+    .eyebrow {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-3);
+      display: block;
+      margin-bottom: 14px;
+    }
+    .h-display {
+      font-size: clamp(2.3rem, 4.2vw, 3.4rem);
+      line-height: 1.15;
+      font-weight: 600;
+      letter-spacing: -0.025em;
+      color: var(--ink);
+      margin-bottom: 22px;
+    }
+    .h-display .serif-it {
+      font-family: var(--serif);
+      font-style: italic;
+      font-weight: 400;
+      color: var(--accent-text);
+    }
+    .lede {
+      font-size: 17.5px;
+      line-height: 1.55;
+      color: var(--ink-2);
+      margin-bottom: 34px;
+      max-width: 62ch;
+    }
+    .h-section {
+      font-size: clamp(1.8rem, 3.2vw, 2.4rem);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+      color: var(--ink);
+    }
+
+    /* ==========================================================================
+       SURFACE 1: LANDING PAGE & 3D SHOWCASE
+       ========================================================================== */
+    #surface-landing {
+      display: block;
+    }
+
+    /* Hero */
+    .hero {
+      padding: 72px 0 68px;
+      border-bottom: 1px solid var(--rule);
+    }
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.95fr;
+      gap: 64px;
+      align-items: start;
+    }
+    .hero-ctas {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 44px;
+    }
+    /* Hero Concrete Preview Artifact */
+    .doc-stack {
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+    }
+    .doc-stack-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--rule);
+      margin-bottom: 14px;
+    }
+    .doc-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      margin-bottom: 16px;
+    }
+    .doc-table th {
+      text-align: left;
+      padding: 6px 8px;
+      color: var(--ink-3);
+      border-bottom: 1px solid var(--rule);
+      font-weight: 500;
+    }
+    .doc-table td {
+      padding: 6px 8px;
+      color: var(--ink-2);
+      border-bottom: 1px dotted var(--rule-soft);
+    }
+    .doc-table tr:last-child td {
+      border-bottom: none;
+    }
+    .arrow-split {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 8px 0;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      color: var(--ink-3);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .arrow-split::before, .arrow-split::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--rule-soft);
+    }
+    .doc-cert-box {
+      border: 1px solid var(--accent);
+      background: color-mix(in srgb, var(--accent) 5%, transparent);
+      padding: 14px 16px;
+      border-radius: var(--radius);
+    }
+    .doc-cert-head {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-text);
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .doc-cert-claim {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--ink);
+      line-height: 1.4;
+      margin-bottom: 8px;
+    }
+    .doc-cert-stats {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--ink-2);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+/* ── Signature Deliverable Showcase ── */
+    .showcase-sec {
+      padding: 90px 0;
+      border-bottom: 1px solid var(--rule);
+    }
+    .sample-wrap {
+      background: var(--bg-alt);
+      border-radius: 6px;
+      padding: 48px;
+    }
+    .sample-grid {
+      display: grid;
+      grid-template-columns: 1fr 64px 1fr;
+      align-items: stretch;
+    }
+    .sample-doc {
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: 3px;
+      padding: 32px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .sample-doc-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--rule);
+    }
+    .sample-doc-head h4 {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .sample-doc-title {
+      font-size: 16px;
+      font-weight: 600;
+      text-align: center;
+      padding: 4px 0;
+      border-bottom: 1px dashed var(--rule-soft);
+    }
+    .sample-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding-bottom: 8px;
+      border-bottom: 1px dotted var(--rule-soft);
+      font-size: 13px;
+    }
+    .sample-row .lbl {
+      color: var(--ink-3);
+    }
+    .sample-row .val {
+      font-family: var(--mono);
+      font-weight: 500;
+      color: var(--ink);
+    }
+    .sample-arrow-col {
+      display: grid;
+      place-items: center;
+      position: relative;
+    }
+    .sample-arrow-col::before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: var(--rule);
+    }
+    .arrow-badge {
+      width: 44px;
+      height: 44px;
+      background: var(--accent);
+      color: var(--bg);
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      position: relative;
+      z-index: 2;
+    }
+    .cert-block {
+      margin-top: auto;
+      border: 1px solid var(--accent);
+      background: color-mix(in srgb, var(--accent) 4%, transparent);
+      padding: 16px 18px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .cert-block-title {
+      font-family: var(--mono);
+      font-size: 10.5px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-weight: 600;
+      color: var(--accent-text);
+      margin-bottom: 8px;
+    }
+    .cert-sig-row {
+      display: flex;
+      justify-content: space-between;
+      border-top: 1px solid var(--rule);
+      padding-top: 10px;
+      margin-top: 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--ink-3);
+    }
+
+    /* Exact figures stay available, folded away for readers who do not need them. */
+    .tech-note { font-size: 12.5px; color: var(--ink-3); }
+    .tech-note summary {
+      display: inline-block;
+      cursor: pointer;
+      font: 500 11.5px/1.4 var(--mono);
+      letter-spacing: 0.04em;
+      color: var(--ink-2);
+    }
+    .tech-note summary:hover { color: var(--ink); }
+    .tech-note p {
+      margin-top: 8px;
+      font: 400 11.5px/1.55 var(--mono);
+      color: var(--ink-3);
+    }
+
+    /* ── Capability Grid (Inspired by Verdacert Language Grid) ── */
+    .capabilities-sec {
+      padding: 80px 0;
+      border-bottom: 1px solid var(--rule);
+    }
+    .cap-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border: 1px solid var(--rule);
+    }
+    .cap-card {
+      background: var(--paper);
+      padding: 32px 28px;
+      border-right: 1px solid var(--rule);
+      border-bottom: 1px solid var(--rule);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      position: relative;
+    }
+    .cap-card:nth-child(3n) {
+      border-right: none;
+    }
+    .cap-card:nth-last-child(-n+3) {
+      border-bottom: none;
+    }
+    .cap-formula {
+      font-family: var(--serif);
+      font-style: italic;
+      font-size: 28px;
+      color: var(--accent-text);
+      line-height: 1;
+      text-align: right;
+    }
+    .cap-card h3 {
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--ink);
+    }
+    .cap-card p {
+      font-size: 13.5px;
+      color: var(--ink-2);
+      line-height: 1.5;
+    }
+    .cap-meta {
+      margin-top: auto;
+      padding-top: 12px;
+      border-top: 1px solid var(--rule-soft);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--ink-3);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    /* ── Developer & Agentic Band (Green Coordinate Paper) ── */
+    /* Colours come from the --band-* tokens next to the pipeline card's: the band
+       and the card share one background (--stage-bg), warm in day, dark in night. */
+    .agents-band {
+      background-color: var(--stage-bg);
+      background-image:
+        linear-gradient(var(--band-grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--band-grid) 1px, transparent 1px);
+      background-size: 32px 32px;
+      color: var(--band-ink);
+      padding: 90px 0;
+      border-bottom: 1px solid var(--rule);
+    }
+    .agents-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 64px;
+      align-items: center;
+    }
+    .agents-band .eyebrow {
+      color: rgba(var(--band-ink-rgb), 0.7);
+    }
+    .agents-band h2 {
+      font-size: clamp(2rem, 3.6vw, 2.8rem);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.2;
+      margin-bottom: 20px;
+    }
+    .agents-band p {
+      color: rgba(var(--band-ink-rgb), 0.8);
+      font-size: 16px;
+      line-height: 1.6;
+      margin-bottom: 36px;
+      max-width: 58ch;
+    }
+    .band-actions {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .agents-band .band-btn-primary {
+      background: var(--band-btn-bg);
+      color: var(--band-btn-ink);
+    }
+    .agents-band .band-btn-primary:hover {
+      background: var(--band-btn-bg-hover);
+    }
+    .agents-band .band-btn-ghost {
+      color: var(--band-strong);
+      border-color: var(--band-ghost-border);
+    }
+    .agents-band .band-btn-ghost:hover {
+      border-color: var(--band-strong);
+    }
+    .stats-matrix {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 28px 36px;
+    }
+    .stat-box {
+      border-top: 1px solid var(--band-rule);
+      padding-top: 14px;
+    }
+    .stat-val {
+      font-family: var(--mono);
+      font-size: 32px;
+      font-weight: 600;
+      color: var(--band-strong);
+      margin-bottom: 4px;
+    }
+    .stat-lbl {
+      font-size: 13px;
+      color: rgba(var(--band-ink-rgb), 0.78);
+      line-height: 1.4;
+    }
+
+    /* ==========================================================================
+       SURFACE 2: WORKSPACE
+       The original workspace's structure (set up, run, results as Answers /
+       Charts / Details / Downloads, settings with safe defaults) in the Sorrel
+       look. DESIGN.md rules apply here: no gradients or glow, no hover on
+       anything that cannot be clicked, --danger only for "this may not hold".
+       ========================================================================== */
+    #surface-workspace {
+      display: none;
+      padding: 32px 0 88px;
+    }
+    /* Author display rules (grid, flex) would otherwise beat the browser's [hidden]. */
+    [hidden] { display: none !important; }
+
+    /* Header: the headline, a readout of the run, and the actions */
+    .ws-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .ws-head h1 {
+      font-size: clamp(1.7rem, 3vw, 2.3rem);
+      font-weight: 600;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+    }
+    .ws-head h1 .hero-file {
+      font-family: var(--serif);
+      font-style: italic;
+      font-weight: 400;
+      color: var(--accent-text);
+    }
+    .ws-head-sub { margin-top: 8px; max-width: 58ch; color: var(--ink-2); font-size: 15.5px; line-height: 1.55; }
+    .ws-head-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    .datum {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      margin-bottom: 24px;
+    }
+    .datum .cell { padding: 10px 16px; border-left: 1px solid var(--rule); min-width: 0; }
+    .datum .cell:first-child { border-left: 0; }
+    .datum .k {
+      font: 500 10.5px/1.2 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-3);
+    }
+    .datum .v { margin-top: 4px; font-size: 14.5px; font-weight: 600; overflow-wrap: anywhere; }
+
+    /* Layout: settings rail (opened on request) beside the main column */
+    .ws-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; align-items: start; }
+    .ws-layout.with-settings { grid-template-columns: 300px minmax(0, 1fr); }
+    .ws-main { min-width: 0; display: flex; flex-direction: column; gap: 24px; }
+
+    /* Settings rail */
+    .ws-settings {
+      position: sticky;
+      top: calc(var(--nav-h) + 16px);
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      padding: 18px;
+      max-height: calc(100vh - var(--nav-h) - 32px);
+      overflow: auto;
+    }
+    .ws-settings-title { font-size: 15px; font-weight: 600; }
+    .ws-settings-sub { margin: 4px 0 12px; font-size: 12.5px; color: var(--ink-3); line-height: 1.45; }
+    .set-group { border-top: 1px solid var(--rule-soft); }
+    .set-group > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 12px 0;
+      font: 600 11.5px/1.3 var(--mono);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--ink-2);
+      display: flex;
+      justify-content: space-between;
+    }
+    .set-group > summary::-webkit-details-marker { display: none; }
+    .set-group > summary::after { content: "+"; color: var(--ink-3); }
+    .set-group[open] > summary::after { content: "–"; }
+    .set-group > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .set-body { display: flex; flex-direction: column; gap: 12px; padding-bottom: 16px; }
+    .field label, .field .label {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--ink-2);
+    }
+    .field .hint { margin-top: 5px; font-size: 12px; line-height: 1.45; color: var(--ink-3); }
+    .ws-input, .ws-select, .ws-textarea {
+      width: 100%;
+      font: 400 14px/1.4 var(--sans);
+      color: var(--ink);
+      background: var(--bg);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      padding: 9px 11px;
+    }
+    .ws-textarea { min-height: 96px; resize: vertical; }
+    .ws-input:focus-visible, .ws-select:focus-visible, .ws-textarea:focus-visible,
+    .ws-tab:focus-visible, .ws-btn-link:focus-visible, .finding-item:focus-visible,
+    .dropzone:focus-visible, .seg-btn:focus-visible, .switch input:focus-visible + .track {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13.5px; cursor: pointer; }
+    .switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+    .switch .track {
+      flex: none;
+      position: relative;
+      width: 36px;
+      height: 20px;
+      border-radius: 999px;
+      background: var(--rule);
+      border: 1px solid var(--ink-4);
+    }
+    .switch .track::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--paper);
+      border: 1px solid var(--ink-3);
+    }
+    .switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+    .switch input:checked + .track::after { left: 18px; border-color: var(--paper); }
+    .switch input:disabled + .track { opacity: 0.45; }
+    .radio-row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .radio-row label {
+      margin: 0;
+      padding: 6px 12px;
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      font-size: 13px;
+      color: var(--ink-2);
+      cursor: pointer;
+    }
+    .radio-row input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+    .radio-row input:checked + span { color: var(--ink); font-weight: 600; }
+    .radio-row label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+    .radio-row label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* The one primary task: file, question, mode, run */
+    .ws-task, .ws-card {
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+    }
+    .ws-task { padding: 8px 28px 28px; }
+    .ws-step { padding: 22px 0; border-bottom: 1px solid var(--rule-soft); display: flex; flex-direction: column; gap: 12px; }
+    .ws-step:last-child { border-bottom: 0; padding-bottom: 0; }
+    .step-head { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; }
+    .step-n {
+      width: 22px;
+      height: 22px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--accent);
+      color: var(--accent-ink);
+      font: 600 12px/1 var(--mono);
+    }
+    .file-row { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 16px; }
+    .dropzone {
+      appearance: none;
+      width: 100%;
+      min-height: 112px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 16px;
+      background: var(--bg);
+      border: 1.5px dashed var(--ink-4);
+      border-radius: var(--radius);
+      color: var(--ink);
+      font: 500 14px/1.4 var(--sans);
+      cursor: pointer;
+      text-align: center;
+    }
+    .dropzone .sub { font-size: 12.5px; font-weight: 400; color: var(--ink-3); }
+    .sample-choice { padding: 14px 16px; background: var(--bg); border: 1px solid var(--rule); border-radius: var(--radius); }
+    .sample-choice .t { font-size: 13.5px; font-weight: 600; }
+    .sample-choice p { margin: 4px 0 10px; font-size: 12.5px; line-height: 1.45; color: var(--ink-3); }
+    .file-identity {
+      padding: 10px 14px;
+      background: var(--accent-soft);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius);
+      color: var(--accent-text);
+      font-size: 13.5px;
+    }
+    .notice-list { margin: 8px 0 0 18px; font-size: 12.5px; line-height: 1.55; color: var(--ink-2); }
+    .ws-fold > summary { cursor: pointer; font-size: 13px; font-weight: 500; color: var(--ink-2); }
+    .ws-fold > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .ws-fold-body { margin-top: 8px; font-size: 12.5px; line-height: 1.55; color: var(--ink-3); }
+    .seg { display: inline-flex; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--bg); padding: 3px; gap: 3px; }
+    .seg-btn {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      padding: 8px 16px;
+      border-radius: 3px;
+      font: 500 13.5px/1 var(--sans);
+      color: var(--ink-2);
+      cursor: pointer;
+    }
+    .seg-btn[aria-checked="true"] { background: var(--paper); color: var(--ink); font-weight: 600; box-shadow: inset 0 0 0 1px var(--accent); }
+    .ws-caption { font-size: 12.5px; line-height: 1.5; color: var(--ink-3); }
+    .ws-run-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    .ws-btn-link {
+      appearance: none;
+      background: none;
+      border: 0;
+      padding: 0;
+      font: 500 13px/1.4 var(--sans);
+      color: var(--accent-text);
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+    /* Dataset preview (before a run) */
+    .ws-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .ws-h2 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+    .ws-h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+    .ws-section-head .eyebrow { margin: 0; }
+    .gauges { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .gauge { padding: 14px 16px; background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); }
+    .gauge .k { font: 500 10.5px/1.2 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
+    .gauge .v { margin-top: 6px; font: 600 24px/1.1 var(--mono); }
+    .gauge .s { margin-top: 4px; font-size: 12px; color: var(--ink-3); }
+    .gauge.flag .s { color: var(--warning); font-weight: 600; }
+    .table-scroll { overflow: auto; max-height: 300px; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper); }
+    .data-table { width: 100%; border-collapse: collapse; font: 400 12px/1.4 var(--mono); }
+    .data-table th, .data-table td { padding: 7px 12px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--rule-soft); }
+    .data-table thead th { position: sticky; top: 0; background: var(--bg-alt); font-weight: 600; color: var(--ink-2); z-index: 1; }
+    .data-table td.num { text-align: right; }
+    .two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+
+    /* Running: a stage timeline and a skeleton shaped like the Answers tab */
+    .stage-list { list-style: none; display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); }
+    .sc { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 13px 18px; border-bottom: 1px solid var(--rule-soft); }
+    .sc:last-child { border-bottom: 0; }
+    .sc-num { font: 500 12px/1 var(--mono); color: var(--ink-3); }
+    .sc .nm { font-size: 14.5px; color: var(--ink-3); }
+    .sc .st { font: 600 11px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+    .sc.done .nm { color: var(--ink); }
+    .sc.done .st { color: var(--positive); }
+    .sc.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+    .sc.active .nm { color: var(--ink); font-weight: 600; }
+    .sc.active .st { color: var(--accent-text); }
+    .skeleton { padding: 20px; background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); display: flex; flex-direction: column; gap: 12px; }
+    .sk { background: var(--bg-alt); border-radius: 3px; }
+    .sk.line { height: 12px; }
+    .sk.band { height: 44px; }
+    .sk.box { height: 120px; }
+
+    /* Failed */
+    .ws-alert {
+      display: flex;
+      gap: 12px;
+      padding: 16px 18px;
+      background: color-mix(in srgb, var(--warning) 10%, var(--paper));
+      border: 1px solid var(--warning);
+      border-radius: var(--radius);
+      font-size: 14.5px;
+      line-height: 1.55;
+    }
+    .ws-alert .mark { flex: none; font: 700 15px/1.4 var(--mono); color: var(--warning); }
+    .ws-note {
+      padding: 12px 16px;
+      background: var(--bg-alt);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      font-size: 13.5px;
+      color: var(--ink-2);
+      line-height: 1.5;
+    }
+    .mono { font-family: var(--mono); }
+
+    /* Results: tabs with a clear active state (no full-width pill bar) */
+    .ws-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--rule); overflow-x: auto; }
+    .ws-tab {
+      appearance: none;
+      background: none;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      padding: 12px 18px;
+      font: 500 14.5px/1 var(--sans);
+      color: var(--ink-3);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .ws-tab:hover { color: var(--ink); }
+    .ws-tab[aria-selected="true"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+    .ws-tabpanel { padding-top: 24px; display: flex; flex-direction: column; gap: 28px; }
+    .ws-tabpanel:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+
+    /* Answers */
+    .directive { padding: 20px 24px; background: var(--paper); border: 1px solid var(--rule); border-left: 3px solid var(--accent); border-radius: var(--radius); }
+    .directive .eyebrow { margin-bottom: 6px; }
+    .directive p { font-size: 17px; line-height: 1.55; color: var(--ink); }
+    .run-banner { padding: 14px 18px; border: 1px solid var(--accent); background: var(--accent-soft); color: var(--accent-text); border-radius: var(--radius); font-size: 15.5px; font-weight: 600; }
+    .run-banner.caution { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 9%, var(--paper)); color: var(--ink); }
+    .run-banner .sub { display: block; margin-top: 4px; font-size: 13.5px; font-weight: 500; color: var(--ink-2); }
+    .evidence { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr); gap: 20px; align-items: start; }
+    .finding-list { display: flex; flex-direction: column; gap: 8px; }
+    .finding-item {
+      appearance: none;
+      text-align: left;
+      width: 100%;
+      padding: 14px 16px;
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      font: 500 14px/1.4 var(--sans);
+      color: var(--ink);
+      cursor: pointer;
+    }
+    .finding-item:hover { border-color: var(--ink-3); }
+    .finding-item[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+    .finding-item .fs { display: block; margin-bottom: 4px; font: 600 11px/1.2 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+    .fs.ok { color: var(--positive); }
+    .fs.risk { color: var(--danger-text); }
+    .fs.note { color: var(--ink-3); }
+    .finding-pane { padding: 22px 24px; background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); display: flex; flex-direction: column; gap: 14px; }
+    .finding-pane h3 { font-size: 19px; font-weight: 600; line-height: 1.35; }
+    .finding-pane p { font-size: 14.5px; line-height: 1.6; color: var(--ink-2); }
+    .chart-box { background: var(--bg); border: 1px solid var(--rule); border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+    .chart-svg { width: 100%; height: 130px; }
+    .chart-axis { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--ink-3); }
+    .chart-cap { font-size: 11.5px; color: var(--ink-3); }
+    .care-list, .do-list { display: flex; flex-direction: column; gap: 10px; }
+    .cc, .rc { display: flex; gap: 12px; padding: 14px 16px; background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); font-size: 14.5px; line-height: 1.55; color: var(--ink-2); }
+    .cc .mk, .rc .mk { flex: none; font: 600 11px/1.6 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+    .cc .mk { color: var(--danger-text); }
+    .cc.note .mk { color: var(--ink-3); }
+    .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+    .rc .mk { color: var(--accent-text); }
+    .cc b, .rc b { color: var(--ink); }
+    .search-row { display: flex; gap: 10px; }
+    .search-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+    .search-hit { padding: 10px 14px; border-left: 3px solid var(--positive); background: var(--paper); border-radius: 0 var(--radius) var(--radius) 0; font-size: 14px; line-height: 1.5; }
+
+    /* Charts */
+    .chart-panel { padding: 22px 24px; background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 24px; }
+    .chart-panel .take { display: flex; flex-direction: column; gap: 12px; }
+    .chart-panel h3 { font-size: 17px; font-weight: 600; line-height: 1.4; }
+    .chart-panel p { font-size: 14.5px; line-height: 1.6; color: var(--ink-2); }
+    .chart-src { font-size: 12px; color: var(--ink-3); }
+
+    /* Details: an audit trail */
+    .audit { background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); }
+    .audit-head { padding: 16px 22px; border-bottom: 1px solid var(--rule); background: var(--bg-alt); }
+    .audit-head p { margin-top: 2px; font-size: 13px; color: var(--ink-3); }
+    .audit dl { display: flex; flex-direction: column; }
+    .audit .row { display: grid; grid-template-columns: minmax(160px, 0.7fr) minmax(0, 2fr); gap: 20px; padding: 14px 22px; border-bottom: 1px solid var(--rule-soft); font-size: 14px; line-height: 1.55; }
+    .audit .row:last-child { border-bottom: 0; }
+    .audit dt { font-weight: 600; color: var(--ink); }
+    .audit dd { color: var(--ink-2); }
+    .audit ul { margin: 6px 0 0 18px; font-size: 13px; color: var(--ink-3); line-height: 1.55; }
+    .record { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .record th, .record td { padding: 8px 22px; text-align: left; border-bottom: 1px solid var(--rule-soft); }
+    .record th { font: 600 11px/1.2 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); }
+    .record td.num { text-align: right; font-family: var(--mono); }
+
+    /* Downloads: an artifact shelf */
+    .shelf { display: flex; flex-direction: column; gap: 8px; }
+    .shelf-group { font: 600 11px/1.2 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); margin: 8px 0 2px; }
+    .artifact { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto auto; gap: 16px; align-items: center; padding: 14px 18px; background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); }
+    .artifact .ty { font: 600 11px/1 var(--mono); letter-spacing: 0.06em; text-align: center; padding: 6px 0; border: 1px solid var(--rule); border-radius: 3px; color: var(--ink-2); background: var(--bg); }
+    .artifact .nm { font: 600 14px/1.3 var(--mono); overflow-wrap: anywhere; }
+    .artifact .why { margin-top: 3px; font-size: 13px; color: var(--ink-3); line-height: 1.45; }
+    .artifact .sz { font: 400 12px/1 var(--mono); color: var(--ink-3); white-space: nowrap; }
+    .artifact.off { background: var(--bg-alt); }
+    .avail { font: 600 11px/1 var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--positive); }
+    .avail.off { color: var(--ink-3); }
+
+    /* Responsive adjustments */
+    @media (max-width: 960px) {
+      .hero-grid, .sample-grid, .agents-grid { grid-template-columns: 1fr; }
+      .ws-layout.with-settings, .evidence, .chart-panel, .two-col, .file-row { grid-template-columns: 1fr; }
+      .ws-settings { position: static; max-height: none; }
+      .gauges { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .audit .row { grid-template-columns: 1fr; gap: 4px; }
+      .artifact { grid-template-columns: 56px minmax(0, 1fr); }
+      .artifact .sz, .artifact .avail, .artifact .btn { grid-column: 2; justify-self: start; }
+      .datum { grid-template-columns: 1fr; }
+      .datum .cell { border-left: 0; border-top: 1px solid var(--rule); }
+      .datum .cell:first-child { border-top: 0; }
+      .cap-grid {
+        grid-template-columns: 1fr;
+      }
+      .cap-card {
+        border-right: none !important;
+      }
+      .sample-arrow-col {
+        display: none;
+      }
+    }
+
+    /* ==========================================================================
+       LANDING STRUCTURE (follows the original landing page's narrative)
+       skip link, prototype bar, header, trust strip, audited entries,
+       comparison, closing CTA, footer
+       ========================================================================== */
+    .skip-link {
+      position: absolute;
+      left: 16px;
+      top: -48px;
+      z-index: 300;
+      padding: 10px 16px;
+      background: var(--accent);
+      color: var(--accent-ink);
+      border-radius: var(--radius);
+      font-weight: 600;
+      transition: top 0.15s ease;
+    }
+    .skip-link:focus { top: 12px; }
+
+    /* Prototype-only control: switches between the two surfaces. Not part of the product page. */
+    .proto-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 6px 16px;
+      background: var(--bg-alt);
+      border-bottom: 1px solid var(--rule-soft);
+      font: 500 11px/1 var(--mono);
+      letter-spacing: 0.04em;
+      color: var(--ink-3);
+    }
+    .proto-bar .view-btn { padding: 4px 10px; font-size: 12px; }
+    .proto-bar { flex-wrap: wrap; }
+
+    /* Brand: italic serif wordmark with a small seal */
+    .brand-seal {
+      font-family: var(--serif);
+      font-style: italic;
+      font-weight: 500;
+      font-size: 17px;
+      line-height: 1;
+      padding-bottom: 2px;
+    }
+    .brand-name {
+      font-family: var(--serif);
+      font-style: italic;
+      font-weight: 500;
+      font-size: 23px;
+      letter-spacing: -0.01em;
+      line-height: 1;
+    }
+    .brand-badge {
+      padding: 2px 8px;
+      border: 1px solid var(--rule);
+      border-radius: var(--radius-pill);
+      font: 500 11px/1.4 var(--sans);
+      color: var(--ink-3);
+    }
+
+    .nav-links { display: flex; align-items: center; gap: 28px; list-style: none; }
+    .nav-link { font-size: 14px; color: var(--ink-2); text-decoration: none; transition: color 0.15s ease; }
+    .nav-link:hover { color: var(--ink); }
+
+    /* Hero: three plain trust lines, as on the original page */
+    .trust-strip {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-top: 22px;
+      border-top: 1px solid var(--rule);
+      font-size: 13px;
+      color: var(--ink-3);
+    }
+    .trust-strip li { display: flex; gap: 10px; align-items: baseline; }
+    .trust-check { color: var(--positive); font-weight: 700; }
+
+    /* Audited entries: a finding sentence, then the checks it passed or failed */
+    .audited-col { display: flex; flex-direction: column; gap: 16px; }
+    .audited-entry {
+      padding: 22px 24px;
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: 3px;
+    }
+    .audited-entry-headline { font-size: 16px; font-weight: 600; line-height: 1.4; margin-bottom: 12px; }
+    .check-row { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+    .check { display: inline-flex; gap: 6px; align-items: baseline; font-size: 13.5px; font-weight: 600; }
+    .check.ok { color: var(--positive); }
+    .check.risk { color: var(--danger-text); }
+    .check.note { color: var(--ink-3); font-weight: 500; }
+    .audited-entry-verdict {
+      padding: 14px 18px;
+      background: var(--accent-soft);
+      border: 1px solid var(--accent);
+      border-radius: var(--radius);
+      color: var(--accent-text);
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .center-cta { display: flex; justify-content: center; margin-top: 32px; }
+
+    /* Comparison: two columns, hairlines, a shape and a word on every row */
+    .comparison-sec { padding: 90px 0; border-bottom: 1px solid var(--rule); }
+    .compare-grid { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--rule); margin-top: 40px; }
+    .compare-col { padding: 32px 32px 36px; background: var(--paper); }
+    .compare-col + .compare-col { border-left: 1px solid var(--rule); }
+    .compare-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 16px;
+      margin-bottom: 22px;
+      border-bottom: 1px solid var(--rule);
+    }
+    .compare-head h3 { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+    .compare-tag {
+      padding: 3px 10px;
+      border: 1px solid currentColor;
+      border-radius: var(--radius-pill);
+      font: 600 11px/1.4 var(--sans);
+    }
+    .compare-tag.risk { color: var(--danger-text); }
+    .compare-tag.ok { color: var(--positive); }
+    .compare-list { list-style: none; display: flex; flex-direction: column; gap: 16px; }
+    .compare-list li { display: flex; gap: 12px; align-items: baseline; font-size: 14.5px; line-height: 1.55; color: var(--ink-2); }
+    .compare-list b { color: var(--ink); }
+    .compare-mark { font-weight: 700; }
+    .compare-mark.risk { color: var(--danger-text); }
+    .compare-mark.ok { color: var(--positive); }
+
+    /* Closing CTA with the plain data-path statement */
+    .cta-sec { padding: 90px 0; }
+    .cta-banner {
+      padding: 56px 40px;
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      text-align: center;
+    }
+    .cta-banner .h-section { margin-bottom: 14px; }
+    .cta-banner .lede { margin: 0 auto 30px; }
+    .cta-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 14px; margin-bottom: 26px; }
+    .data-path { max-width: 66ch; margin: 0 auto; font-size: 13px; line-height: 1.6; color: var(--ink-3); }
+
+    /* Footer */
+    .site-footer { padding: 70px 0 36px; border-top: 1px solid var(--rule); font-size: 13.5px; color: var(--ink-3); }
+    .footer-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 40px; margin-bottom: 48px; }
+    .footer-brand p { margin-top: 14px; max-width: 34ch; line-height: 1.6; }
+    .footer-col h4 { margin-bottom: 14px; font-size: 13px; font-weight: 600; color: var(--ink); }
+    .footer-col ul { list-style: none; display: flex; flex-direction: column; gap: 9px; }
+    .footer-col a { color: inherit; text-decoration: none; transition: color 0.15s ease; }
+    .footer-col a:hover { color: var(--accent-text); }
+    .footer-bottom {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding-top: 24px;
+      border-top: 1px solid var(--rule);
+      font-size: 12.5px;
+    }
+
+    @media (max-width: 960px) {
+      .nav-links { display: none; }
+      .compare-grid { grid-template-columns: 1fr; }
+      .compare-col + .compare-col { border-left: none; border-top: 1px solid var(--rule); }
+      .footer-grid { grid-template-columns: 1fr 1fr; }
+      .cta-banner { padding: 40px 22px; }
+    }
+    @media (max-width: 720px) {
+      .brand-badge { display: none; }
+      .nav-right .btn { padding: 0 12px; }
+      #theme-label { display: none; }
+    }
+    @media (max-width: 600px) {
+      .footer-grid { grid-template-columns: 1fr; }
+      .footer-bottom { flex-direction: column; }
+    }
+
+    /* ==========================================================================
+       PIPELINE CARD THEME TOKENS
+       Day: a warm sand card on the paper page, with dark ink tokens.
+       Night: the dark forest card, unchanged.
+       The CSS above and the 3D scene (verdacert_dsa_original_3d.js) both read
+       these, so chrome and tokens cannot drift apart. Hex only: JS parses them.
+       ========================================================================== */
+    :root {
+      /* the same warm tone as the "audited entry" panel (--bg-alt) */
+      --stage-bg: #efeae0;
+      --stage-surround: #d9d3c4;  /* the page's own --rule tone: one step deeper than the card, no more saturated */
+      --band-ink: #1a1a17;
+      --band-ink-rgb: 26, 26, 23;
+      --band-strong: #1a1a17;
+      --band-grid: rgba(26, 26, 23, 0.07);
+      --band-rule: rgba(26, 26, 23, 0.22);
+      --band-ghost-border: rgba(26, 26, 23, 0.5);
+      --band-btn-bg: #1f4634;
+      --band-btn-bg-hover: #15311f;
+      --band-btn-ink: #f7f4ed;
+      --stage-tag-bg: #fffdf7;
+      --stage-ink: #1a1a17;
+      --stage-ink-rgb: 26, 26, 23;
+      --stage-focus: #1f4634;
+      --stage-token-paper: #bcb6a9; /* same hue as the card, less saturated: visible, but quieter than the inks */
+      --stage-token-pen: #1f4634;
+      --stage-token-accent: #a35a18;
+      --stage-token-positive: #24643c;
+      --stage-token-graphite: #66665e; /* the page's --ink-3 */
+      --stage-token-risk: #8a3a2a;
+      --stage-grid: #a99d80;
+      --stage-grid-opacity: 0.22; /* lines land close to the page's --rule tone on the card */
+      --stage-pill-border: rgba(26, 26, 23, 0.5);
+      --stage-btn-border: rgba(26, 26, 23, 0.5);
+      --stage-panel-border: #bfb28d;
+    }
+    [data-theme="night"] {
+      --stage-bg: #0d120e;
+      --stage-surround: #1a1e17;  /* a step lighter than the card */
+      --stage-tag-bg: #0d120e;
+      --stage-ink: #f4efe1;
+      --stage-ink-rgb: 244, 239, 225;
+      --stage-focus: #8fd1a8;
+      --stage-token-paper: #f4efe1;
+      --stage-token-pen: #8fd1a8;
+      --stage-token-accent: #e0a458;
+      --stage-token-positive: #5fbf85;
+      --stage-token-graphite: #8fa396;
+      --stage-token-risk: #ee8f78;
+      --stage-grid: #5b8a70;
+      --stage-grid-opacity: 0.16;
+      --stage-pill-border: rgba(244, 239, 225, 0.32);
+      --stage-btn-border: rgba(244, 239, 225, 0.26);
+      --stage-panel-border: #2a3324;
+      --band-ink: #f7f4ed;
+      --band-ink-rgb: 247, 244, 237;
+      --band-strong: #ffffff;
+      --band-grid: rgba(255, 255, 255, 0.05);
+      --band-rule: rgba(255, 255, 255, 0.15);
+      --band-ghost-border: rgba(255, 255, 255, 0.3);
+      --band-btn-bg: #ffffff;
+      --band-btn-bg-hover: #ffffff;
+      --band-btn-ink: #0d120e;
+    }
+
+    /* ==========================================================================
+       PIPELINE TRACK — pinned 4-stage scroll
+       The card is ALWAYS full size. Its collapsed "window" look is a clip-path
+       inset driven from JS, so scrolling never triggers layout and the WebGL
+       canvas never resizes. No blur, glow or shadow sits over the canvas.
+       ========================================================================== */
+    html { scroll-behavior: auto; }
+
+    .solare-intro-header {
+      padding: 96px 0 40px;
+      text-align: center;
+      background: var(--bg);
+      position: relative;
+      z-index: 8;
+    }
+    .solare-intro-header .h-section { margin-bottom: 14px; }
+    .solare-intro-header .h-section .serif-it {
+      font-family: var(--serif);
+      font-style: italic;
+      font-weight: 400;
+      color: var(--accent-text);
+    }
+
+    /* The track is a band of its own tone, so the closed card reads as a lighter
+       window set into it. Longer than the stages alone need: it also holds a
+       still beat before the card opens and after it closes. */
+    .solare-scrolly-track {
+      position: relative;
+      height: 560vh;
+      background: var(--stage-surround);
+    }
+
+    /* The card always covers the whole viewport. While it is collapsed the
+       clip-path keeps it clear of the nav; once it is full size the nav slides
+       away (see setCardGeometry in verdacert_dsa_original_3d.js). */
+    .nav {
+      transform: translate3d(0, var(--nav-shift, 0px), 0);
+      will-change: transform;
+    }
+    .nav:focus-within { --nav-shift: 0px !important; }
+
+    .solare-sticky-wrapper {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      height: 100dvh;
+      overflow: hidden;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    /* Step 0: what the closed window is about to show. It sits in the strip under
+       the window and fades as the window opens. */
+    .solare-prelude {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: max(20%, 84px);
+      z-index: 2;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 0 clamp(16px, 4vw, 48px);
+      text-align: center;
+      color: var(--stage-ink);
+      pointer-events: none;
+    }
+    .prelude-file {
+      font: 500 12px/1.3 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--stage-ink);
+    }
+    .prelude-line {
+      max-width: 62ch;
+      text-wrap: balance;
+      font: 400 14px/1.45 var(--sans);
+      color: rgba(var(--stage-ink-rgb), 0.82);
+    }
+    .prelude-cue {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font: 500 11px/1 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: rgba(var(--stage-ink-rgb), 0.78);
+    }
+    .prelude-cue .track-line {
+      position: relative;
+      width: 72px;
+      height: 1px;
+      background: rgba(var(--stage-ink-rgb), 0.28);
+    }
+    .prelude-cue .track-line i {
+      position: absolute;
+      inset: 0;
+      background: var(--stage-ink);
+      transform: scaleX(0);
+      transform-origin: left center;
+    }
+    .prelude-cue .track-line.full i { transform: scaleX(1); }
+    .solare-outro { opacity: 0; }
+    @media (max-width: 760px) {
+      .prelude-line { font-size: 13px; }
+      .prelude-file { font-size: 11px; }
+    }
+
+    /* Viewfinder corners around the closed card. A sibling of the card, because
+       the card is clipped. JS moves them with transform only (setCardGeometry). */
+    .solare-crop {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      pointer-events: none;
+      opacity: 1;
+    }
+    .solare-crop i {
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      border: 0 solid rgba(var(--stage-ink-rgb), 0.55);
+    }
+    .solare-crop .tl { left: 0; top: 0; border-top-width: 1.5px; border-left-width: 1.5px; }
+    .solare-crop .tr { right: 0; top: 0; border-top-width: 1.5px; border-right-width: 1.5px; }
+    .solare-crop .bl { left: 0; bottom: 0; border-bottom-width: 1.5px; border-left-width: 1.5px; }
+    .solare-crop .br { right: 0; bottom: 0; border-bottom-width: 1.5px; border-right-width: 1.5px; }
+
+    .solare-card-window {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--stage-bg);
+      color: var(--stage-ink);
+      overflow: hidden;
+      pointer-events: auto;
+      contain: layout paint;
+      will-change: clip-path, transform;
+      backface-visibility: hidden;
+    }
+
+    /* ── Top bar: one row, stage pills only ── */
+    .solare-window-bar {
+      position: relative;
+      z-index: 20;
+      flex: none;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 clamp(16px, 4vw, 48px);
+      border-bottom: 1px solid rgba(var(--stage-ink-rgb), 0.12);
+      background: var(--stage-bg);
+    }
+    .pipe-title {
+      font: 500 12px/1 var(--mono);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: rgba(var(--stage-ink-rgb), 0.7);
+      white-space: nowrap;
+    }
+    .solare-stage-pills { display: flex; gap: 4px; }
+    .stage-nav-pill {
+      appearance: none;
+      display: inline-flex;
+      align-items: baseline;
+      gap: 7px;
+      padding: 7px 12px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: var(--radius);
+      color: rgba(var(--stage-ink-rgb), 0.76);
+      font: 500 13px/1 var(--sans);
+      cursor: pointer;
+      transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+    }
+    .stage-nav-pill .n { font: 500 11px/1 var(--mono); opacity: 0.7; }
+    .stage-nav-pill:hover { color: var(--stage-ink); }
+    .stage-nav-pill:active { background: rgba(var(--stage-ink-rgb), 0.12); }
+    .stage-nav-pill.active {
+      color: var(--stage-ink);
+      background: rgba(var(--stage-ink-rgb), 0.08);
+      border-color: var(--stage-pill-border);
+    }
+    .stage-nav-pill:focus-visible,
+    .telemetry-btn:focus-visible { outline: 2px solid var(--stage-focus); outline-offset: 2px; }
+
+    /* ── Stage area: canvas + panel share one box ── */
+    .pipe-area { position: relative; flex: 1 1 auto; min-height: 0; }
+
+    .solare-canvas-wrap { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+    #solare-webgl-canvas,
+    #solare-leader-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    #solare-leader-canvas { z-index: 5; }
+
+    .solare-webgl-fallback {
+      position: absolute;
+      top: 50%;
+      left: 66%;
+      width: min(360px, 80vw);
+      transform: translate(-50%, -50%);
+      padding: 18px 20px;
+      border: 1px solid rgba(var(--stage-ink-rgb), 0.2);
+      border-radius: var(--radius);
+      color: rgba(var(--stage-ink-rgb), 0.8);
+      font: 500 13px/1.55 var(--sans);
+      text-align: center;
+    }
+
+    /* Projected label that follows a 3D point: a flat hairline tag, no blur or pulse */
+    .solare-hud-pin {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 10;
+      opacity: 0;
+      pointer-events: none;
+      will-change: transform, opacity;
+      transition: opacity 0.25s ease;
+    }
+    .solare-hud-tag {
+      display: inline-block;
+      padding: 6px 12px;
+      background: var(--stage-tag-bg);
+      border: 1px solid var(--stage-focus);
+      border-radius: var(--radius);
+      color: var(--stage-ink);
+      font: 500 12px/1.2 var(--mono);
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+
+    /* ── Narrative panel: solid paper, hairline, one row of facts ── */
+    .solare-stage-panel-wrap {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: clamp(20px, 7vw, 120px);
+      width: min(440px, 40vw);
+      display: grid;
+      align-items: center;
+      z-index: 12;
+      pointer-events: none;
+    }
+    .solare-stage-panel {
+      grid-area: 1 / 1;
+      padding: 28px;
+      background: var(--paper);
+      color: var(--ink);
+      border: 1px solid var(--stage-panel-border);
+      border-radius: var(--radius);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: auto;
+    }
+    .solare-stage-panel.active { opacity: 1; visibility: visible; }
+    .solare-stage-panel.leaving { visibility: visible; }
+
+    .panel-step-badge { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+    .panel-num { font: italic 400 30px/1 var(--serif); color: var(--accent-text); }
+    .panel-step-label {
+      font: 600 11px/1 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ink-3);
+    }
+    .panel-title {
+      margin-bottom: 12px;
+      font-size: clamp(1.6rem, 2.5vw, 2.25rem);
+      font-weight: 600;
+      line-height: 1.12;
+      letter-spacing: -0.025em;
+      text-wrap: balance;
+    }
+    .panel-title .serif-it { font-family: var(--serif); font-style: italic; font-weight: 400; color: var(--accent-text); }
+    .panel-desc {
+      margin-bottom: 20px;
+      font-size: 14.5px;
+      line-height: 1.6;
+      color: var(--ink-2);
+      text-wrap: pretty;
+    }
+    .panel-facts { list-style: none; border-top: 1px solid var(--rule); }
+    .panel-facts li {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 9px 0;
+      border-bottom: 1px solid var(--rule-soft);
+      font-size: 13px;
+      color: var(--ink-2);
+    }
+    .panel-facts li:last-child { border-bottom: none; padding-bottom: 0; }
+    .panel-facts b { font: 500 12px/1.5 var(--mono); color: var(--ink); text-align: right; }
+    [data-theme="night"] .panel-num,
+    [data-theme="night"] .panel-title .serif-it { color: var(--positive); }
+
+    /* ── Footer: stage label, thin progress line, prev / next ── */
+    .solare-telemetry-bar {
+      flex: none;
+      height: 52px;
+      display: grid;
+      grid-template-columns: 1fr minmax(120px, 320px) auto;
+      align-items: center;
+      gap: 24px;
+      padding: 0 clamp(16px, 4vw, 48px);
+      border-top: 1px solid rgba(var(--stage-ink-rgb), 0.12);
+      background: var(--stage-bg);
+      color: rgba(var(--stage-ink-rgb), 0.78);
+      font: 13px/1.3 var(--sans);
+    }
+    .telemetry-item { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+    .telemetry-bold { color: var(--stage-ink); font-weight: 600; white-space: nowrap; }
+    #telemetry-sub-tag { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pipe-progress { position: relative; height: 2px; background: rgba(var(--stage-ink-rgb), 0.16); overflow: hidden; }
+    .pipe-progress i {
+      position: absolute;
+      inset: 0;
+      background: var(--stage-focus);
+      transform: scaleX(0);
+      transform-origin: 0 50%;
+    }
+    .telemetry-controls { display: flex; gap: 8px; }
+    .telemetry-btn {
+      appearance: none;
+      padding: 6px 12px;
+      background: transparent;
+      border: 1px solid var(--stage-btn-border);
+      border-radius: var(--radius);
+      color: rgba(var(--stage-ink-rgb), 0.85);
+      font: 500 12px/1 var(--sans);
+      cursor: pointer;
+      transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+    }
+    .telemetry-btn:hover { color: var(--stage-ink); border-color: rgba(var(--stage-ink-rgb), 0.6); }
+    .telemetry-btn:active { background: rgba(var(--stage-ink-rgb), 0.12); }
+
+    @media (max-width: 960px) {
+      .pipe-title, #telemetry-sub-tag, .pipe-progress { display: none; }
+      .solare-window-bar { justify-content: center; }
+      .solare-stage-pills { width: 100%; justify-content: space-between; }
+      .stage-nav-pill { padding: 7px 8px; font-size: 12px; }
+      .stage-nav-pill .n { display: none; }
+      .solare-stage-panel-wrap {
+        left: 16px;
+        right: 16px;
+        width: auto;
+        align-items: end;
+        padding-bottom: 16px;
+      }
+      .solare-stage-panel { padding: 18px; }
+      .panel-num { font-size: 24px; }
+      .panel-title { font-size: clamp(1.4rem, 6vw, 1.9rem); }
+      .panel-desc {
+        display: -webkit-box;
+        overflow: hidden;
+        margin-bottom: 0;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+      }
+      .panel-facts { display: none; }
+      .solare-telemetry-bar { grid-template-columns: 1fr auto; }
+      .solare-webgl-fallback { top: 28%; left: 16px; right: 16px; width: auto; transform: none; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .stage-nav-pill, .telemetry-btn, .solare-hud-pin { transition: none; }
+    }
+  
+    /* Colour changes with the theme, so the chrome eases instead of snapping. */
+    .solare-card-window,
+    .solare-window-bar,
+    .solare-telemetry-bar,
+    .solare-hud-tag {
+      transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+    }
+
+    /* ==========================================================================
+       SCROLL EFFECTS (see verdacert_dsa_scroll_fx.js) and TOAST
+       ========================================================================== */
+    /* Line reveal: each word slides up from behind its own line mask. Only
+       applies once JS has split the text, so no-JS and reduced-motion show it plain. */
+    .js-fx .rv .w {
+      display: inline-block;
+      overflow: hidden;
+      vertical-align: top;
+      padding-bottom: 0.14em;
+      margin-bottom: -0.14em;
+    }
+    .js-fx .rv .w > i {
+      display: inline-block;
+      font-style: inherit;
+      transform: translate3d(0, 112%, 0);
+      transition: transform 0.9s cubic-bezier(0.16, 1, 0.3, 1);
+      transition-delay: calc(var(--line, 0) * 90ms + var(--k, 0) * 14ms);
+    }
+    .js-fx .rv.in .w > i { transform: none; }
+
+    /* The dark band opens like the pipeline card; the paper page shows through its rounded corners. */
+    .agents-band { will-change: clip-path; }
+    .doc-stack, .sample-doc { will-change: transform; }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 24px;
+      z-index: 200;
+      max-width: min(480px, calc(100vw - 32px));
+      padding: 10px 16px;
+      background: var(--paper);
+      color: var(--ink);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      font-size: 13.5px;
+      opacity: 0;
+      transform: translate(-50%, 8px);
+      pointer-events: none;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+    @media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
+  </style>
+</head>
+<body>
+
+  <a class="skip-link" href="#surface-landing">Skip to content</a>
+
+  <!-- Prototype scaffolding only: switches between the two surfaces. Not part of the product page. -->
+  <div class="proto-bar">
+    <span>Prototype view</span>
+    <div class="view-switcher">
+      <button class="view-btn active" id="btn-view-landing" onclick="switchView('landing')">Landing</button>
+      <button class="view-btn" id="btn-view-workspace" onclick="switchView('workspace')">Workspace</button>
+    </div>
+    <div class="view-switcher" id="ws-states" role="group" aria-label="Preview a workspace state (prototype only)" hidden>
+      <button type="button" class="view-btn" data-ws="empty" aria-pressed="true">Empty</button>
+      <button type="button" class="view-btn" data-ws="file" aria-pressed="false">File loaded</button>
+      <button type="button" class="view-btn" data-ws="running" aria-pressed="false">Running</button>
+      <button type="button" class="view-btn" data-ws="results" aria-pressed="false">Results</button>
+      <button type="button" class="view-btn" data-ws="failed" aria-pressed="false">Failed</button>
+    </div>
+  </div>
+
+  <!-- Sticky Frosted Header -->
+  <header class="nav">
+    <div class="container nav-inner">
+      <a href="#" class="brand" aria-label="Sorrel, back to top">
+        <span class="brand-seal" aria-hidden="true">s</span>
+        <span class="brand-name">Sorrel</span>
+        <span class="brand-badge">Student project</span>
+      </a>
+
+      <nav aria-label="Main navigation">
+        <ul class="nav-links">
+          <li><a href="#workflow" class="nav-link">How it works</a></li>
+          <li><a href="#audited-entry" class="nav-link">How it checks itself</a></li>
+          <li><a href="#comparison" class="nav-link">Why Sorrel</a></li>
+          <li><a href="#features" class="nav-link">Analyses</a></li>
+        </ul>
+      </nav>
+
+      <div class="nav-right">
+        <button class="theme-toggle-btn" id="btn-theme-toggle" onclick="toggleTheme()" aria-label="Switch between day and night mode">
+          <span id="theme-icon">☼</span>
+          <span id="theme-label">Day Mode</span>
+        </button>
+        <a href="#cta" class="btn btn-primary btn-sm" id="nav-launch-btn" data-enter>Open the workspace</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ==========================================================================
+       SURFACE 1: LANDING & SOLARE-STYLE 3D SCROLLYTELLING
+       ========================================================================== -->
+  <main id="surface-landing">
+    <!-- Hero Section -->
+    <section class="hero" id="hero">
+      <div class="container hero-grid">
+        <div>
+          <span class="eyebrow">— A data analysis assistant</span>
+          <h1 class="h-display">
+            We check every <span class="serif-it">answer</span> twice.
+          </h1>
+          <p class="lede">
+            Give it a dataset and a question in plain English. It plans the analysis, runs the tests, checks its own conclusions, and tells you which findings held up and which need more data.
+          </p>
+          <div class="hero-ctas">
+            <button class="btn btn-primary btn-lg" id="hero-enter-btn" data-enter>
+              Open the workspace
+              <svg class="arrow-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </button>
+            <a href="#audited-entry" class="btn btn-ghost btn-lg" id="hero-explore-btn">See how it checks itself</a>
+          </div>
+          <ul class="trust-strip trust-list">
+            <li><span class="trust-check" aria-hidden="true">✓</span> Your file is processed on the server for your session</li>
+            <li><span class="trust-check" aria-hidden="true">✓</span> Models are scored on held-out data, not training accuracy</li>
+            <li><span class="trust-check" aria-hidden="true">✓</span> Findings show the checks that were run on them</li>
+          </ul>
+        </div>
+
+        <!-- Concrete preview: real rows and a real finding from output/aq_final -->
+        <aside class="doc-stack" data-parallax="0.04">
+          <div class="doc-stack-head">
+            <span style="font-family: var(--mono); font-size: 11px; color: var(--ink-3);">A sample table: air-quality readings, 9,471 rows</span>
+            <span class="cert-pill"><span class="dot"></span> Computed</span>
+          </div>
+          <table class="doc-table">
+            <thead>
+              <tr><th>Date</th><th>Time</th><th>Carbon monoxide</th><th>Benzene</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>10 Mar 2004</td><td>18:00</td><td>2.6</td><td>11.9</td></tr>
+              <tr><td>10 Mar 2004</td><td>19:00</td><td>2.0</td><td>9.4</td></tr>
+              <tr><td>10 Mar 2004</td><td>20:00</td><td>2.2</td><td>9.0</td></tr>
+            </tbody>
+          </table>
+
+          <div class="arrow-split">Worked out by the tool, no AI summary</div>
+
+          <div class="doc-cert-box">
+            <div class="doc-cert-head">Finding from this run</div>
+            <div class="doc-cert-claim">Carbon monoxide and benzene rise and fall together</div>
+            <div class="doc-cert-stats">
+              <span>readings used: <b>7,344</b></span>
+              <span>link: <b>very strong</b></span>
+              <span>luck: <b>very unlikely</b></span>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ==========================================================================
+         PIPELINE TRACK: four pinned stages. Tokens morph between formations;
+         the card opens from a window to the full viewport and closes again.
+         ========================================================================== -->
+    <section class="solare-intro-header" id="workflow">
+      <div class="container">
+        <span class="eyebrow">— How a run works</span>
+        <h2 class="h-section">The pipeline, <span class="serif-it">stage by stage</span>.</h2>
+      </div>
+    </section>
+
+    <section id="pipeline-scrolly-section" class="solare-scrolly-track">
+      <div class="solare-sticky-wrapper">
+        <div class="solare-card-window" id="solare-card">
+
+          <div class="solare-window-bar">
+            <span class="pipe-title">Analysis pipeline</span>
+            <div class="solare-stage-pills" role="tablist" aria-label="Pipeline stages">
+              <button type="button" class="stage-nav-pill active" data-stage="0" onclick="jumpToStage(0)"><span class="n">1</span>Read</button>
+              <button type="button" class="stage-nav-pill" data-stage="1" onclick="jumpToStage(1)"><span class="n">2</span>Profile</button>
+              <button type="button" class="stage-nav-pill" data-stage="2" onclick="jumpToStage(2)"><span class="n">3</span>Run</button>
+              <button type="button" class="stage-nav-pill" data-stage="3" onclick="jumpToStage(3)"><span class="n">4</span>Check</button>
+            </div>
+          </div>
+
+          <div class="pipe-area">
+            <div class="solare-canvas-wrap">
+              <canvas id="solare-webgl-canvas" data-engine="original" role="img" aria-label="Illustration: each token stands for a row of a table, and the tokens regroup as the table is read, profiled, analysed and checked."></canvas>
+              <canvas id="solare-leader-canvas" aria-hidden="true"></canvas>
+              <p id="solare-webgl-fallback" class="solare-webgl-fallback" hidden>
+                The 3D illustration is unavailable. The four text panels still describe each stage.
+              </p>
+              <div id="solare-hud-pin" class="solare-hud-pin" aria-hidden="true">
+                <div class="solare-hud-tag"><span id="solare-hud-text">Your file as rows of a table</span></div>
+              </div>
+            </div>
+
+            <div class="solare-stage-panel-wrap">
+              <div class="solare-stage-panel active" data-stage="0" id="solare-panel-0">
+                <div class="panel-step-badge"><span class="panel-num">01</span><span class="panel-step-label">Reading your file</span></div>
+                <h3 class="panel-title">Your table, <span class="serif-it">read and checked</span>.</h3>
+                <p class="panel-desc">Before any analysis runs, the file's type and size are checked and every column is profiled for its type, missing values and duplicates.</p>
+                <ul class="panel-facts">
+                  <li><span>File type and size</span><b>Checked</b></li>
+                  <li><span>Missing values and duplicates</span><b>Profiled</b></li>
+                  <li><span>Personal-data columns</span><b>Kept out of AI prompts</b></li>
+                </ul>
+              </div>
+
+              <div class="solare-stage-panel" data-stage="1" id="solare-panel-1">
+                <div class="panel-step-badge"><span class="panel-num">02</span><span class="panel-step-label">Profiling</span></div>
+                <h3 class="panel-title">Distributions and <span class="serif-it">unusual values</span>.</h3>
+                <p class="panel-desc">Each numeric column is scanned with a distribution-aware rule. Unusual values are flagged in the results and saved to a separate flagged copy. Nothing is deleted.</p>
+                <ul class="panel-facts">
+                  <li><span>Methods</span><b>IQR, z-score, isolation forest</b></li>
+                  <li><span>Skipped columns</span><b>IDs, flags, ordinals</b></li>
+                  <li><span>Original data</span><b>Unchanged</b></li>
+                </ul>
+              </div>
+
+              <div class="solare-stage-panel" data-stage="2" id="solare-panel-2">
+                <div class="panel-step-badge"><span class="panel-num">03</span><span class="panel-step-label">Choosing and running tools</span></div>
+                <h3 class="panel-title">A bounded plan, then <span class="serif-it">tools that do the math</span>.</h3>
+                <p class="panel-desc">Your question and the data profile become a short plan of Python tool calls. Statistics and models come from deterministic code, not from the language model's arithmetic.</p>
+                <ul class="panel-facts">
+                  <li><span>Random seed</span><b>42</b></li>
+                  <li><span>Code the AI writes</span><b>Restricted sandbox</b></li>
+                  <li><span>Container isolation</span><b>Optional (Docker)</b></li>
+                </ul>
+              </div>
+
+              <div class="solare-stage-panel" data-stage="3" id="solare-panel-3">
+                <div class="panel-step-badge"><span class="panel-num">04</span><span class="panel-step-label">Checks and report</span></div>
+                <h3 class="panel-title">Strict checks before <span class="serif-it">the report</span>.</h3>
+                <p class="panel-desc">Models are ranked on held-out data, not on training accuracy. A large gap between training and test scores raises an overfit warning.</p>
+                <ul class="panel-facts">
+                  <li><span>Model ranking</span><b>Cross-validated score</b></li>
+                  <li><span>Overfit warning</span><b>Train-test gap above 0.10</b></li>
+                  <li><span>Many tests at once</span><b>Benjamini-Hochberg</b></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <div class="solare-telemetry-bar" aria-live="polite">
+            <div class="telemetry-item">
+              <span id="telemetry-stage-tag" class="telemetry-bold">Stage 1 of 4</span>
+              <span id="telemetry-sub-tag">Each token stands for a row of your table</span>
+            </div>
+            <div class="pipe-progress" aria-hidden="true"><i id="telemetry-fill"></i></div>
+            <div class="telemetry-controls">
+              <button type="button" class="telemetry-btn" id="btn-prev-stage" title="Previous stage (Arrow Up)">Previous</button>
+              <button type="button" class="telemetry-btn" id="btn-next-stage" title="Next stage (Arrow Down)">Next</button>
+            </div>
+          </div>
+
+        </div>
+        <div class="solare-crop" id="solare-crop" aria-hidden="true"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+        <div class="solare-prelude" id="solare-prelude">
+          <span class="prelude-file">Raw input data</span>
+          <p class="prelude-line">A table comes in. Each cube stands for a row of it. The scene is an illustration, not your data.</p>
+          <span class="prelude-cue">Scroll to open <span class="track-line" aria-hidden="true"><i id="prelude-fill"></i></span></span>
+        </div>
+        <div class="solare-prelude solare-outro" id="solare-outro">
+          <span class="prelude-file">Checked output</span>
+          <p class="prelude-line">A report comes out, and each finding shows the checks it passed or failed. Next: one real finding, with its checks.</p>
+          <span class="prelude-cue">Keep scrolling <span class="track-line full" aria-hidden="true"><i></i></span></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Audited entry: a real finding sentence followed by the checks it passed or failed. -->
+    <section class="showcase-sec container" id="audited-entry">
+      <div class="sec-head">
+        <span class="eyebrow">— The signature: the audited entry</span>
+        <h2 class="h-section">Every answer comes with its own checks.</h2>
+        <p class="lede">Not a black box, and not a technical tab you have to go looking for. Each finding is a plain sentence, followed by the checks it passed or failed. These come from a real run on a public air-quality table (9,471 hourly readings, no AI summary), not from your data.</p>
+      </div>
+
+      <div class="sample-wrap">
+        <div class="sample-grid">
+          <article class="sample-doc" data-parallax="-0.04">
+            <div class="sample-doc-head">
+              <h4>What the tool worked out</h4>
+              <span style="font-family: var(--mono); font-size: 11px; color: var(--ink-3);">Two readings compared</span>
+            </div>
+            <div class="sample-doc-title">Carbon monoxide and benzene</div>
+            <div class="sample-row"><span class="lbl">Hours compared</span><span class="val">7,344 of 9,471</span></div>
+            <div class="sample-row"><span class="lbl">How closely they move together</span><span class="val">Very closely (0.93 of 1)</span></div>
+            <div class="sample-row"><span class="lbl">Could it be luck?</span><span class="val">Very unlikely</span></div>
+            <div class="sample-row"><span class="lbl">Typical change</span><span class="val">About 4.8 more benzene for each extra 1 of carbon monoxide</span></div>
+            <div style="margin-top: auto; padding: 12px; background: var(--bg); border: 1px solid var(--rule); border-radius: var(--radius); font-size: 12.5px; color: var(--ink-2);">
+              <b>Hours left out:</b> 2,127 hours are missing a reading for one of the two, so they were not counted.
+            </div>
+            <details class="tech-note">
+              <summary>Details for analysts</summary>
+              <p>Pearson r = 0.9311, p &lt; 0.001. Fitted slope 4.82 &micro;g/m&sup3; of benzene (C6H6(GT)) per mg/m&sup3; of carbon monoxide (CO(GT)). 7,344 of 9,471 rows used; 2,127 had a gap in one of the two columns.</p>
+            </details>
+          </article>
+
+          <div class="sample-arrow-col">
+            <div class="arrow-badge">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </div>
+          </div>
+
+          <div class="audited-col" data-parallax="0.04">
+            <article class="audited-entry">
+              <p class="audited-entry-headline">Carbon monoxide and benzene rise and fall together, very strongly.</p>
+              <div class="check-row">
+                <span class="check ok"><span aria-hidden="true">✓</span> Very unlikely to be luck</span>
+                <span class="check ok"><span aria-hidden="true">✓</span> 7,344 readings</span>
+                <span class="check note"><span aria-hidden="true">○</span> A pattern, not proof of cause</span>
+              </div>
+            </article>
+            <article class="audited-entry">
+              <p class="audited-entry-headline">The readings may form 2 groups, but the split is weak and may not be real.</p>
+              <div class="check-row">
+                <span class="check risk"><span aria-hidden="true">!</span> The groups overlap a lot</span>
+                <span class="check ok"><span aria-hidden="true">✓</span> All 9,471 readings used</span>
+                <span class="check note"><span aria-hidden="true">○</span> A loose pattern, not clear-cut groups</span>
+              </div>
+              <details class="tech-note" style="margin-top: 12px;">
+                <summary>Details for analysts</summary>
+                <p>k-means with 2 clusters over 13 features; silhouette score 0.294. Cluster sizes 3,288 and 6,183.</p>
+              </details>
+            </article>
+            <p class="audited-entry-verdict">From this run: 1 of the 2 findings shown held up. 1 is a weak pattern.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="center-cta">
+        <button class="btn btn-primary btn-lg" id="enter-btn" data-enter>Open the workspace</button>
+      </div>
+    </section>
+
+    <!-- Comparison: problem versus solution, same claims as the original page -->
+    <section class="comparison-sec container" id="comparison">
+      <div class="sec-head">
+        <span class="eyebrow">— Why Sorrel</span>
+        <h2 class="h-section">Checked results, not just fluent ones.</h2>
+        <p class="lede">A chat model can write fluent numbers that were never computed. Sorrel computes with Python tools, compares the written summary against them, and says what it could not verify.</p>
+      </div>
+
+      <div class="compare-grid">
+        <div class="compare-col">
+          <div class="compare-head">
+            <h3>Chat LLMs and spreadsheets</h3>
+            <span class="compare-tag risk">Watch out</span>
+          </div>
+          <ul class="compare-list">
+            <li><span class="compare-mark risk" aria-hidden="true">✕</span><span><b>Invented arithmetic:</b> a chat model can write plausible numbers that were never calculated from your rows.</span></li>
+            <li><span class="compare-mark risk" aria-hidden="true">✕</span><span><b>Leakage between train and test:</b> when training and test rows are mixed, accuracy looks far better than it will be on new data.</span></li>
+            <li><span class="compare-mark risk" aria-hidden="true">✕</span><span><b>Unchecked methods:</b> a spreadsheet applies whatever formula was typed, even when the test does not fit the data.</span></li>
+            <li><span class="compare-mark risk" aria-hidden="true">✕</span><span><b>Hard to repeat:</b> prompts can give a different answer on each try, so two sessions may not agree.</span></li>
+          </ul>
+        </div>
+        <div class="compare-col">
+          <div class="compare-head">
+            <h3>What Sorrel does</h3>
+            <span class="compare-tag ok">Checks built in</span>
+          </div>
+          <ul class="compare-list">
+            <li><span class="compare-mark ok" aria-hidden="true">✓</span><span><b>Python does the math:</b> calculations run as Python code (pandas, SciPy, scikit-learn), not as prompt arithmetic.</span></li>
+            <li><span class="compare-mark ok" aria-hidden="true">✓</span><span><b>Overfitting checks:</b> models are scored on held-out data, and a train-test gap above 0.10 raises a warning.</span></li>
+            <li><span class="compare-mark ok" aria-hidden="true">✓</span><span><b>Raw rows stay out of prompts:</b> only compact metadata and tool summaries go to the AI model, never the full table. Switch AI off and nothing is sent to a provider.</span></li>
+            <li><span class="compare-mark ok" aria-hidden="true">✓</span><span><b>Repeatable by design:</b> random steps use fixed seeds, and each run writes Markdown and JSON reports you can inspect.</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- Analyses: what the tools cover, tied to the four pipeline stages -->
+    <section class="capabilities-sec container" id="features">
+      <div class="sec-head">
+        <span class="eyebrow">— What it can analyse</span>
+        <h2 class="h-section">Analysis routines built in.</h2>
+        <p class="lede">Each routine is Python code with its own sanity checks, not a prompt.</p>
+      </div>
+
+      <div class="cap-grid">
+        <div class="cap-card">
+          <div class="cap-formula">r = 0.93</div>
+          <h3>Related measures</h3>
+          <p>Pairwise Pearson and Spearman matrices, collinearity detection and dimensionality reduction.</p>
+          <div class="cap-meta">Run: correlation matrix</div>
+        </div>
+        <div class="cap-card">
+          <div class="cap-formula">19:00 peak</div>
+          <h3>Trends and daily cycles</h3>
+          <p>Mann-Kendall trend checks, seasonal decomposition and time-ordered validation splits.</p>
+          <div class="cap-meta">Run: time series</div>
+        </div>
+        <div class="cap-card">
+          <div class="cap-formula">1.5 IQR</div>
+          <h3>Outlier robustness</h3>
+          <p>Isolation forests and interquartile-range checks help show whether a finding is driven by a few extreme rows.</p>
+          <div class="cap-meta">Profile: outlier checks</div>
+        </div>
+        <div class="cap-card">
+          <div class="cap-formula">cv_mean</div>
+          <h3>Model ranking on held-out data</h3>
+          <p>Random forest, Ridge and gradient boosting are scored with cross-validation. Tree depth is capped at 6 by default.</p>
+          <div class="cap-meta">Check: model ranking</div>
+        </div>
+        <div class="cap-card">
+          <div class="cap-formula">BH FDR</div>
+          <h3>Multiple-testing correction</h3>
+          <p>The Benjamini-Hochberg adjustment limits false discoveries when a run tests many pairs at once.</p>
+          <div class="cap-meta">Check: multiple tests</div>
+        </div>
+        <div class="cap-card">
+          <div class="cap-formula">HMAC</div>
+          <h3>Signed model files</h3>
+          <p>Saved models carry an HMAC signature. The loader refuses an unsigned or altered model file.</p>
+          <div class="cap-meta">Check: saved models</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Developer band: the sandbox limits that are real defaults -->
+    <section class="agents-band">
+      <div class="container agents-grid">
+        <div>
+          <span class="eyebrow">— For developers and researchers</span>
+          <h2>Analysis you can audit, from an engine that runs code in a restricted sandbox.</h2>
+          <p>
+            Language models are unreliable at arithmetic, so the math runs in Python. Code the AI writes passes a static policy check and runs in a restricted subprocess, with optional Docker isolation. Every run is recorded in a JSON audit log.
+          </p>
+          <div class="band-actions">
+            <button class="btn btn-primary band-btn-primary" data-enter>Open the workspace</button>
+            <a href="https://github.com/shahdaksh050/agentic-data-analysis" target="_blank" rel="noopener noreferrer" class="btn btn-ghost band-btn-ghost">View source on GitHub</a>
+          </div>
+        </div>
+
+        <div class="stats-matrix">
+          <div class="stat-box">
+            <div class="stat-val">45s</div>
+            <div class="stat-lbl">Wall-clock limit for each piece of AI-written code</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-val">1024 MB</div>
+            <div class="stat-lbl">Process-tree memory cap before the run is stopped</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-val">0</div>
+            <div class="stat-lbl">Network calls allowed to sandboxed Python workers</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-val">SHA-256</div>
+            <div class="stat-lbl">Hash logged for every LLM call and code execution</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Closing CTA, with the plain statement of where the data goes -->
+    <section class="cta-sec container" id="cta">
+      <div class="cta-banner">
+        <span class="eyebrow">— Try it</span>
+        <h2 class="h-section">Ask a question of your own table.</h2>
+        <p class="lede">Add your file, ask your question in plain English, and get a report where each finding shows its checks and untraced numbers are marked.</p>
+        <div class="cta-actions">
+          <button class="btn btn-primary btn-lg" id="cta-launch-btn" data-enter>Open the workspace</button>
+          <a href="https://github.com/shahdaksh050/agentic-data-analysis" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-lg">View source on GitHub</a>
+        </div>
+        <p class="data-path" id="data-path">Where your data goes: your file is processed on the server for your session and deleted when you start a new analysis. Summaries of the data are sent to the AI provider you choose, unless you switch AI off. This is an academic project. Do not upload sensitive data.</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- ==========================================================================
+       SURFACE 2: WORKSPACE
+       ========================================================================== -->
+  <main id="surface-workspace" class="container" data-ws-state="empty">
+
+    <!-- Header: headline, readout of the run, actions -->
+    <div class="ws-head">
+      <div>
+        <span class="eyebrow" id="ws-eyebrow">Workspace</span>
+        <h1 id="ws-title">Start with the data.</h1>
+        <p class="ws-head-sub" id="ws-sub">Add a spreadsheet, ask a question, and get an answer with the checks that back it up.</p>
+      </div>
+      <div class="ws-head-actions">
+        <button type="button" class="btn btn-ghost btn-sm" id="ws-settings-btn" aria-expanded="false" aria-controls="ws-settings">Settings</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="ws-new-btn" hidden>New analysis</button>
+      </div>
+    </div>
+
+    <div class="datum" id="ws-datum" hidden aria-label="State of this analysis">
+      <div class="cell"><div class="k">State</div><div class="v" id="datum-state">Ready</div></div>
+      <div class="cell"><div class="k">File</div><div class="v" id="datum-file">None loaded</div></div>
+      <div class="cell"><div class="k">Analysis</div><div class="v" id="datum-mode">AI summary</div></div>
+    </div>
+
+    <div class="ws-layout" id="ws-layout">
+
+      <!-- Settings: every control has a safe default; the analysis runs without opening this -->
+      <aside class="ws-settings" id="ws-settings" aria-label="Settings" hidden>
+        <div class="ws-settings-title">Settings</div>
+        <p class="ws-settings-sub">Everything here has a safe default. You can run without opening it.</p>
+
+        <details class="set-group" open>
+          <summary>Connect an AI</summary>
+          <div class="set-body">
+            <div class="field">
+              <label for="ws-provider">Provider</label>
+              <select class="ws-select" id="ws-provider">
+                <option>OpenAI</option><option>Anthropic</option><option>Gemini</option><option>Groq</option>
+                <option>Openrouter</option><option>Nvidia</option><option>Local / offline</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="ws-key">API key</label>
+              <input class="ws-input" id="ws-key" type="password" autocomplete="off" placeholder="sk-...">
+              <p class="hint" id="ws-key-hint">No key yet. Get one at platform.openai.com/api-keys.</p>
+            </div>
+            <div class="field">
+              <label for="ws-model">Model</label>
+              <select class="ws-select" id="ws-model"><option>default</option></select>
+            </div>
+            <div class="field">
+              <label for="ws-reasoning">Reasoning mode</label>
+              <select class="ws-select" id="ws-reasoning">
+                <option>Adaptive (Recommended)</option><option>Fast (Low Reasoning)</option><option>Deep (High Reasoning)</option>
+              </select>
+              <p class="hint">Adaptive balances speed and depth. Fast prioritises speed. Deep spends more time checking ambiguous results.</p>
+            </div>
+          </div>
+        </details>
+
+        <details class="set-group">
+          <summary>Advanced analysis</summary>
+          <div class="set-body">
+            <label class="switch"><span>Machine learning</span><input type="checkbox" id="ws-ml" checked><span class="track" aria-hidden="true"></span></label>
+            <p class="hint">On: trains models, clusters, and runs PCA. Off: skips every model-fitting step. Statistical tests, correlations and the domain analyses still run, and this is the biggest speed-up available.</p>
+            <div class="field">
+              <span class="label" id="ws-thorough-label">How thorough</span>
+              <div class="radio-row" role="radiogroup" aria-labelledby="ws-thorough-label">
+                <label><input type="radio" name="ws-thorough" value="Quick"><span>Quick</span></label>
+                <label><input type="radio" name="ws-thorough" value="Thorough" checked><span>Thorough</span></label>
+                <label><input type="radio" name="ws-thorough" value="Deep"><span>Deep</span></label>
+              </div>
+              <p class="hint">Quick finds the headline answer fast. Thorough double-checks it. Deep explores more before settling.</p>
+            </div>
+            <label class="switch"><span>Break hard questions into smaller ones</span><input type="checkbox" id="ws-rlm"><span class="track" aria-hidden="true"></span></label>
+          </div>
+        </details>
+
+        <details class="set-group" open>
+          <summary>Safety</summary>
+          <div class="set-body">
+            <div class="field">
+              <label for="ws-mincell">Minimum group size</label>
+              <input class="ws-input" id="ws-mincell" type="number" min="1" max="50" value="5">
+              <p class="hint">Groups smaller than this are combined so individuals can't be identified.</p>
+            </div>
+            <label class="switch"><span>Allow AI-written code</span><input type="checkbox" id="ws-code" checked><span class="track" aria-hidden="true"></span></label>
+            <p class="hint">On: the planner may write and run its own analysis code in the sandbox. Off: only the built-in tools run.</p>
+            <div class="field">
+              <label for="ws-coderuns">Max code runs per analysis</label>
+              <input class="ws-input" id="ws-coderuns" type="number" min="0" value="40">
+            </div>
+            <label class="switch"><span>Require container isolation</span><input type="checkbox" id="ws-iso"><span class="track" aria-hidden="true"></span></label>
+            <p class="hint">On: code runs only in the Docker sandbox and is refused if Docker is unavailable. Turn on whenever the data or question comes from someone you don't trust.</p>
+          </div>
+        </details>
+      </aside>
+
+      <div class="ws-main">
+
+        <!-- Set up: the one primary task (empty and file-loaded states) -->
+        <section class="ws-sec ws-task" data-states="empty file" aria-label="Set up your analysis">
+
+          <div class="ws-step">
+            <div class="step-head"><span class="step-n" aria-hidden="true">1</span> Add your file</div>
+            <div id="ws-file-empty" class="file-row">
+              <button type="button" class="dropzone" id="ws-dropzone">
+                <span>Choose a CSV, TSV or Excel file</span>
+                <span class="sub">or drop it here</span>
+              </button>
+              <div class="sample-choice">
+                <div class="t">No file handy?</div>
+                <p>Use the bundled sample: a real air-quality table. It is not your data.</p>
+                <button type="button" class="btn btn-ghost btn-sm" id="ws-sample-btn">Use sample data</button>
+              </div>
+            </div>
+            <div id="ws-file-loaded" hidden>
+              <div class="file-identity"><b>AirQualityUCI.csv</b> is loaded: 9,471 rows, 15 columns.</div>
+              <details class="ws-fold" style="margin-top: 10px;">
+                <summary>10 file notices (auto-repaired)</summary>
+                <ul class="notice-list"><li>A column with no name was given one so the file could be read.</li><li>2 empty columns were dropped.</li><li>PT08.S1(CO): 366 values of -200 were treated as missing (3.9% of its readings).</li><li>NMHC(GT): 8,443 values of -200 were treated as missing (90.2% of its readings).</li><li>PT08.S2(NMHC): 366 values of -200 were treated as missing (3.9% of its readings).</li><li>NOx(GT): 1,639 values of -200 were treated as missing (17.5% of its readings).</li><li>PT08.S3(NOx): 366 values of -200 were treated as missing (3.9% of its readings).</li><li>NO2(GT): 1,642 values of -200 were treated as missing (17.5% of its readings).</li><li>PT08.S4(NO2): 366 values of -200 were treated as missing (3.9% of its readings).</li><li>PT08.S5(O3): 366 values of -200 were treated as missing (3.9% of its readings).</li></ul>
+                <p class="ws-fold-body">A value of -200 appears to be this file's placeholder for "no reading".</p>
+              </details>
+            </div>
+            <details class="ws-fold">
+              <summary>More formats and related tables</summary>
+              <p class="ws-fold-body">Other formats are read too (Parquet, JSON, Stata, SPSS and more). Related tables such as customers or products are joined automatically on shared IDs.</p>
+            </details>
+          </div>
+
+          <div class="ws-step">
+            <div class="step-head"><span class="step-n" aria-hidden="true">2</span> Ask your question</div>
+            <div class="field">
+              <label for="ws-question">What do you want to know? (optional, plain English)</label>
+              <textarea class="ws-textarea" id="ws-question" placeholder="e.g. What's driving this result? Which rows are the outliers, and why?"></textarea>
+            </div>
+            <div class="field">
+              <label for="ws-target">Target column</label>
+              <select class="ws-select" id="ws-target"><option>Let the assistant decide</option><option>Date</option><option>Time</option><option>CO(GT)</option><option>PT08.S1(CO)</option><option>NMHC(GT)</option><option>C6H6(GT)</option><option>PT08.S2(NMHC)</option><option>NOx(GT)</option><option>PT08.S3(NOx)</option><option>NO2(GT)</option><option>PT08.S4(NO2)</option><option>PT08.S5(O3)</option><option>T</option><option>RH</option><option>AH</option></select>
+              <p class="hint">Choose the outcome to predict, or let the assistant identify a useful target.</p>
+            </div>
+          </div>
+
+          <div class="ws-step">
+            <div class="step-head"><span class="step-n" aria-hidden="true">3</span> Choose how to answer</div>
+            <div class="seg" role="radiogroup" aria-label="How to answer">
+              <button type="button" class="seg-btn" role="radio" aria-checked="true" data-mode="ai">With an AI summary</button>
+              <button type="button" class="seg-btn" role="radio" aria-checked="false" data-mode="noai">Without an AI summary</button>
+            </div>
+            <p class="ws-caption" id="ws-mode-caption">An AI writes the plan and the summary from a controlled description of your data, not the raw file.</p>
+          </div>
+
+          <div class="ws-step">
+            <div class="step-head"><span class="step-n" aria-hidden="true">4</span> Run</div>
+            <div class="ws-run-row">
+              <button type="button" class="btn btn-primary" id="ws-run-btn" disabled>Run analysis</button>
+              <button type="button" class="ws-btn-link" id="ws-noai-btn" hidden>Run without an AI summary instead</button>
+            </div>
+            <p class="ws-caption" id="ws-run-caption">Add a file above, or use the bundled sample beside the uploader.</p>
+          </div>
+        </section>
+
+        <!-- File loaded: the preview the app shows before a run -->
+        <section class="ws-sec" data-states="file" aria-label="Dataset preview" hidden>
+          <div class="ws-section-head">
+            <h2 class="ws-h2">Dataset preview</h2>
+            <span class="eyebrow">AirQualityUCI.csv</span>
+          </div>
+          <div class="gauges" style="margin-top: 14px;">
+            <div class="gauge"><div class="k">Rows</div><div class="v">9,471</div></div><div class="gauge"><div class="k">Columns</div><div class="v">15</div></div><div class="gauge flag"><div class="k">Missing cells</div><div class="v">15,264</div><div class="s">! Some cells are empty</div></div><div class="gauge"><div class="k">Numeric columns</div><div class="v">8</div></div>
+          </div>
+          <h3 class="ws-h3" style="margin-top: 22px;">First 10 rows</h3>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="First 10 rows of the file, scrollable">
+            <table class="data-table"><thead><tr><th scope="col">Date</th><th scope="col">Time</th><th scope="col">CO(GT)</th><th scope="col">PT08.S1(CO)</th><th scope="col">NMHC(GT)</th><th scope="col">C6H6(GT)</th><th scope="col">PT08.S2(NMHC)</th><th scope="col">NOx(GT)</th><th scope="col">PT08.S3(NOx)</th><th scope="col">NO2(GT)</th><th scope="col">PT08.S4(NO2)</th><th scope="col">PT08.S5(O3)</th><th scope="col">T</th><th scope="col">RH</th><th scope="col">AH</th></tr></thead><tbody><tr><td>10/03/2004</td><td>18.00.00</td><td>2,6</td><td>1360.0</td><td>150.0</td><td>11,9</td><td>1046.0</td><td>166.0</td><td>1056.0</td><td>113.0</td><td>1692.0</td><td>1268.0</td><td>13,6</td><td>48,9</td><td>0,7578</td></tr><tr><td>10/03/2004</td><td>19.00.00</td><td>2</td><td>1292.0</td><td>112.0</td><td>9,4</td><td>955.0</td><td>103.0</td><td>1174.0</td><td>92.0</td><td>1559.0</td><td>972.0</td><td>13,3</td><td>47,7</td><td>0,7255</td></tr><tr><td>10/03/2004</td><td>20.00.00</td><td>2,2</td><td>1402.0</td><td>88.0</td><td>9,0</td><td>939.0</td><td>131.0</td><td>1140.0</td><td>114.0</td><td>1555.0</td><td>1074.0</td><td>11,9</td><td>54,0</td><td>0,7502</td></tr><tr><td>10/03/2004</td><td>21.00.00</td><td>2,2</td><td>1376.0</td><td>80.0</td><td>9,2</td><td>948.0</td><td>172.0</td><td>1092.0</td><td>122.0</td><td>1584.0</td><td>1203.0</td><td>11,0</td><td>60,0</td><td>0,7867</td></tr><tr><td>10/03/2004</td><td>22.00.00</td><td>1,6</td><td>1272.0</td><td>51.0</td><td>6,5</td><td>836.0</td><td>131.0</td><td>1205.0</td><td>116.0</td><td>1490.0</td><td>1110.0</td><td>11,2</td><td>59,6</td><td>0,7888</td></tr><tr><td>10/03/2004</td><td>23.00.00</td><td>1,2</td><td>1197.0</td><td>38.0</td><td>4,7</td><td>750.0</td><td>89.0</td><td>1337.0</td><td>96.0</td><td>1393.0</td><td>949.0</td><td>11,2</td><td>59,2</td><td>0,7848</td></tr><tr><td>11/03/2004</td><td>00.00.00</td><td>1,2</td><td>1185.0</td><td>31.0</td><td>3,6</td><td>690.0</td><td>62.0</td><td>1462.0</td><td>77.0</td><td>1333.0</td><td>733.0</td><td>11,3</td><td>56,8</td><td>0,7603</td></tr><tr><td>11/03/2004</td><td>01.00.00</td><td>1</td><td>1136.0</td><td>31.0</td><td>3,3</td><td>672.0</td><td>62.0</td><td>1453.0</td><td>76.0</td><td>1333.0</td><td>730.0</td><td>10,7</td><td>60,0</td><td>0,7702</td></tr><tr><td>11/03/2004</td><td>02.00.00</td><td>0,9</td><td>1094.0</td><td>24.0</td><td>2,3</td><td>609.0</td><td>45.0</td><td>1579.0</td><td>60.0</td><td>1276.0</td><td>620.0</td><td>10,7</td><td>59,7</td><td>0,7648</td></tr><tr><td>11/03/2004</td><td>03.00.00</td><td>0,6</td><td>1010.0</td><td>19.0</td><td>1,7</td><td>561.0</td><td></td><td>1705.0</td><td></td><td>1235.0</td><td>501.0</td><td>10,3</td><td>60,2</td><td>0,7517</td></tr></tbody></table>
+          </div>
+          <p class="ws-caption" style="margin-top: 8px;">Shown as the file holds them. CO is carbon monoxide, C6H6 is benzene, NOx is nitrogen oxides, T is temperature, RH is relative humidity and AH is absolute humidity.</p>
+          <h3 class="ws-h3" style="margin-top: 22px;">Column types and missing values</h3>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Column types and missing values, scrollable">
+            <table class="data-table"><thead><tr><th scope="col">Column</th><th scope="col">Type</th><th scope="col" style="text-align:right;">Missing</th></tr></thead><tbody><tr><td>Date</td><td>text</td><td class="num">114</td></tr><tr><td>Time</td><td>text</td><td class="num">114</td></tr><tr><td>CO(GT)</td><td>text</td><td class="num">114</td></tr><tr><td>PT08.S1(CO)</td><td>number</td><td class="num">480</td></tr><tr><td>NMHC(GT)</td><td>number</td><td class="num">8,557</td></tr><tr><td>C6H6(GT)</td><td>text</td><td class="num">114</td></tr><tr><td>PT08.S2(NMHC)</td><td>number</td><td class="num">480</td></tr><tr><td>NOx(GT)</td><td>number</td><td class="num">1,753</td></tr><tr><td>PT08.S3(NOx)</td><td>number</td><td class="num">480</td></tr><tr><td>NO2(GT)</td><td>number</td><td class="num">1,756</td></tr><tr><td>PT08.S4(NO2)</td><td>number</td><td class="num">480</td></tr><tr><td>PT08.S5(O3)</td><td>number</td><td class="num">480</td></tr><tr><td>T</td><td>text</td><td class="num">114</td></tr><tr><td>RH</td><td>text</td><td class="num">114</td></tr><tr><td>AH</td><td>text</td><td class="num">114</td></tr></tbody></table>
+          </div>
+        </section>
+
+        <!-- Running: a stage timeline and a skeleton shaped like the Answers tab -->
+        <section class="ws-sec" data-states="running" aria-label="Progress" hidden>
+          <p class="sr-only" id="ws-status" role="status"></p>
+          <ol class="stage-list" id="ws-stages"></ol>
+          <div class="ws-run-row" style="margin-top: 14px;">
+            <button type="button" class="btn btn-ghost btn-sm" id="ws-stop-btn">Stop</button>
+            <span class="ws-caption">Usually one to three minutes. Findings appear as they are found and may change until the run ends.</span>
+          </div>
+          <div class="skeleton" aria-hidden="true" style="margin-top: 22px;">
+            <div class="sk line" style="width: 28%;"></div>
+            <div class="sk band"></div>
+            <div class="sk line" style="width: 70%;"></div>
+            <div class="sk line" style="width: 54%;"></div>
+            <div class="sk box"></div>
+          </div>
+        </section>
+
+        <!-- Failed -->
+        <section class="ws-sec" data-states="failed" aria-label="The analysis did not finish" hidden>
+          <div class="ws-alert" role="alert">
+            <span class="mark" aria-hidden="true">!</span>
+            <div>The analysis did not finish. The model did not answer. Check the key, the model name and the account, then try again. Start a new analysis when you are ready.</div>
+          </div>
+          <details class="ws-fold" style="margin-top: 14px;">
+            <summary>Technical details</summary>
+            <p class="ws-fold-body">In the real app, the provider's own error message appears here, as the raw text it returned.</p>
+          </details>
+        </section>
+
+        <!-- Results -->
+        <section class="ws-sec" data-states="results" aria-label="Results" hidden>
+          <p class="ws-note" role="note"><b>This is a real analysis of the bundled sample file</b> (<span class="mono">data/AirQualityUCI.csv</span>), run without the AI narrative. It is not your data.</p>
+
+          <div class="ws-tabs" role="tablist" aria-label="Results" id="ws-tabs" style="margin-top: 20px;">
+            <button type="button" class="ws-tab" role="tab" id="tab-answers" aria-controls="panel-answers" aria-selected="true">Answers</button>
+            <button type="button" class="ws-tab" role="tab" id="tab-charts" aria-controls="panel-charts" aria-selected="false" tabindex="-1">Charts</button>
+            <button type="button" class="ws-tab" role="tab" id="tab-details" aria-controls="panel-details" aria-selected="false" tabindex="-1">Details</button>
+            <button type="button" class="ws-tab" role="tab" id="tab-downloads" aria-controls="panel-downloads" aria-selected="false" tabindex="-1">Downloads</button>
+          </div>
+
+          <!-- ANSWERS: summary, verdict, evidence, caveats, next action, then supporting figures -->
+          <div class="ws-tabpanel" id="panel-answers" role="tabpanel" aria-labelledby="tab-answers" tabindex="0">
+            <div class="directive">
+              <span class="eyebrow">Summary</span>
+              <p>This run had no AI summary. The plan came from the table's own profile, and the findings come straight from the tools' output.</p>
+            </div>
+
+            <div class="run-banner caution">1 of 2 checked findings held up.
+              <span class="sub">1 is a weak pattern.</span>
+              <span class="sub">1 headline finding was not checked.</span>
+            </div>
+
+            <div>
+              <h2 class="ws-h2" style="margin-bottom: 14px;">What we found</h2>
+              <div class="evidence">
+                <div class="finding-list" role="group" aria-label="Findings, ranked">
+                  <button type="button" class="finding-item" data-find="0" aria-pressed="true"><span class="fs ok"><span aria-hidden="true">✓</span> Held up</span>Carbon monoxide and benzene rise and fall together, very strongly.</button>
+                  <button type="button" class="finding-item" data-find="1" aria-pressed="false"><span class="fs risk"><span aria-hidden="true">!</span> Weak pattern</span>The readings may form 2 groups, but the split is weak and may not be real.</button>
+                  <button type="button" class="finding-item" data-find="2" aria-pressed="false"><span class="fs note"><span aria-hidden="true">○</span> Not checked</span>Nitrogen oxides stepped up from about 125 to 333 from 8 September 2004.</button>
+                </div>
+
+                <div>
+                  <article class="finding-pane ws-pane" data-find="0">
+                    <h3>Carbon monoxide and benzene rise and fall together, very strongly.</h3>
+                    <div class="check-row">
+                      <span class="check ok"><span aria-hidden="true">✓</span> Very unlikely to be luck</span>
+                      <span class="check ok"><span aria-hidden="true">✓</span> 7,344 readings</span>
+                      <span class="check note"><span aria-hidden="true">○</span> A pattern, not proof of cause</span>
+                    </div>
+                    <p>In the 7,344 hourly readings where both were measured, hours with more carbon monoxide usually had more benzene too. This shows that the two move together. It does not show that one causes the other.</p>
+                    <div class="chart-box"><svg class="chart-svg" viewBox="0 0 300 120" role="img" aria-label="Schematic: dots climb from lower left to upper right, so more carbon monoxide goes with more benzene.">
+                <line x1="30" y1="10" x2="30" y2="100" stroke="var(--rule)" stroke-width="1.5"/>
+                <line x1="30" y1="100" x2="280" y2="100" stroke="var(--rule)" stroke-width="1.5"/>
+                <g fill="var(--accent)">
+                  <circle cx="50" cy="85" r="2.5" opacity="0.6"/><circle cx="70" cy="78" r="2.5" opacity="0.6"/>
+                  <circle cx="95" cy="70" r="2.5" opacity="0.7"/><circle cx="120" cy="58" r="2.5" opacity="0.7"/>
+                  <circle cx="150" cy="48" r="2.5" opacity="0.8"/><circle cx="180" cy="40" r="2.5" opacity="0.8"/>
+                  <circle cx="210" cy="32" r="2.5" opacity="0.9"/><circle cx="240" cy="22" r="2.5" opacity="0.9"/>
+                </g>
+                <line x1="35" y1="92" x2="260" y2="18" stroke="var(--positive)" stroke-width="2" stroke-dasharray="4,2"/>
+              </svg><div class="chart-axis"><span>Less carbon monoxide</span><span>Benzene rises too</span><span>More carbon monoxide</span></div></div>
+                    <p class="chart-cap">A schematic of the pattern, not the real points. 2,127 hours with a missing reading were left out.</p>
+                    <details class="tech-note"><summary>Details for analysts</summary><p>Pearson r = 0.9311, p &lt; 0.001. Fitted slope 4.82 &micro;g/m&sup3; of benzene (C6H6(GT)) per mg/m&sup3; of carbon monoxide (CO(GT)). 7,344 of 9,471 rows used.</p></details>
+                  </article>
+
+                  <article class="finding-pane ws-pane" data-find="1" hidden>
+                    <h3>The readings may form 2 groups, but the split is weak and may not be real.</h3>
+                    <div class="check-row">
+                      <span class="check risk"><span aria-hidden="true">!</span> The groups overlap a lot</span>
+                      <span class="check ok"><span aria-hidden="true">✓</span> All 9,471 readings used</span>
+                      <span class="check note"><span aria-hidden="true">○</span> A loose pattern, not clear-cut groups</span>
+                    </div>
+                    <p>Sorrel looked for groups of similar hours and found 2, one of about 3,300 hours and one of about 6,200. They overlap a lot, so the split may not be real. The larger group has lower nitrogen oxide on average (150, against 235 overall).</p>
+                    <div class="chart-box"><svg class="chart-svg" viewBox="0 0 300 120" role="img" aria-label="Schematic: two groups of dots, squares and circles, that overlap heavily."><g fill="var(--ink-3)" opacity="0.85"><rect x="78" y="68" width="5" height="5"/><rect x="90" y="50" width="5" height="5"/><rect x="98" y="78" width="5" height="5"/><rect x="106" y="58" width="5" height="5"/><rect x="113" y="43" width="5" height="5"/><rect x="118" y="73" width="5" height="5"/><rect x="126" y="60" width="5" height="5"/><rect x="94" y="64" width="5" height="5"/><rect x="133" y="50" width="5" height="5"/><rect x="103" y="88" width="5" height="5"/><rect x="138" y="70" width="5" height="5"/><rect x="86" y="82" width="5" height="5"/></g><g fill="var(--accent)" opacity="0.85"><circle cx="150" cy="58" r="2.8"/><circle cx="160" cy="42" r="2.8"/><circle cx="168" cy="70" r="2.8"/><circle cx="176" cy="52" r="2.8"/><circle cx="184" cy="66" r="2.8"/><circle cx="192" cy="46" r="2.8"/><circle cx="200" cy="60" r="2.8"/><circle cx="172" cy="84" r="2.8"/><circle cx="156" cy="76" r="2.8"/><circle cx="208" cy="72" r="2.8"/><circle cx="190" cy="82" r="2.8"/><circle cx="164" cy="56" r="2.8"/><circle cx="146" cy="66" r="2.8"/></g></svg><div class="chart-axis"><span>■ Group A (about 3,300 hours)</span><span>● Group B (about 6,200 hours)</span></div></div>
+                    <p class="chart-cap">A schematic: in the real data the groups overlap a lot.</p>
+                    <details class="tech-note"><summary>Details for analysts</summary><p>k-means with 2 clusters over 13 features; silhouette score 0.294. Cluster sizes 3,288 and 6,183. Mean NOx(GT) 150 in the larger cluster against 235 overall.</p></details>
+                  </article>
+
+                  <article class="finding-pane ws-pane" data-find="2" hidden>
+                    <h3>Nitrogen oxides stepped up from about 125 to 333 from 8 September 2004.</h3>
+                    <div class="check-row">
+                      <span class="check ok"><span aria-hidden="true">✓</span> A lasting change, not a one-day blip</span>
+                      <span class="check note"><span aria-hidden="true">○</span> No significance test was run on this one</span>
+                    </div>
+                    <p>The average daily level of nitrogen oxides sat near 125 before 8 September 2004 and near 333 after it, a rise of about 166%. The data shows when it changed, not why.</p>
+                    <div class="chart-box"><svg class="chart-svg" viewBox="0 0 300 120" role="img" aria-label="Two bars: the average daily level of nitrogen oxides was about 125 before 8 September 2004 and about 333 after."><line x1="30" y1="100" x2="280" y2="100" stroke="var(--rule)" stroke-width="1.5"/><rect x="70" y="70" width="60" height="30" fill="var(--ink-3)" opacity="0.85"/><rect x="170" y="20" width="60" height="80" fill="var(--accent)" opacity="0.9"/><text x="100" y="64" text-anchor="middle" font-size="11" fill="var(--ink-2)">about 125</text><text x="200" y="14" text-anchor="middle" font-size="11" fill="var(--ink-2)">about 333</text></svg><div class="chart-axis"><span>Before 8 Sep 2004</span><span>From 8 Sep 2004</span></div></div>
+                    <p class="chart-cap">Average daily level, drawn to scale from the run's two figures.</p>
+                    <details class="tech-note"><summary>Details for analysts</summary><p>NOx(GT): level before 125.12, after 332.85 (+166%), change detected at 2004-09-08, z = 50.45.</p></details>
+                  </article>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h2 class="ws-h2" style="margin-bottom: 14px;">Be careful about</h2>
+              <div class="care-list">
+                <div class="cc"><span class="mk">Risk</span><div><b>Some columns are mostly empty.</b> The nonmethane hydrocarbon column (NMHC) is 90% missing, so anything built on it is weak. Across the whole table, 13% of cells are missing and 113 rows are duplicates (1.2%).</div></div>
+                <div class="cc note"><span class="mk">Note</span><div><b>Prediction was declined.</b> Sorrel considered predicting absolute humidity (AH), but the signal was too weak (25% confidence, under the 40% needed), so it described the data instead.</div></div>
+                <div class="cc note"><span class="mk">Note</span><div><b>10 of 11 questions were considered but not answered.</b>
+                  <details class="ws-fold" style="margin-top: 8px;"><summary>What wasn't answered, and why</summary>
+                    <ul class="notice-list"><li>Is average &#x27;CO(GT)&#x27; trending or seasonal over time, and what changed most recently?</li><li>Is average &#x27;PT08.S1(CO)&#x27; trending or seasonal over time, and what changed most recently?</li><li>Is average &#x27;NMHC(GT)&#x27; trending or seasonal over time, and what changed most recently?</li><li>Where is &#x27;AH&#x27; heading over the next periods?</li><li>What was the most recent period-over-period change in average &#x27;CO(GT)&#x27;?</li><li>What was the most recent period-over-period change in average &#x27;PT08.S1(CO)&#x27;?</li><li>Are there anomalous readings or sudden level shifts in &#x27;CO(GT)&#x27;?</li><li>Are there anomalous readings or sudden level shifts in &#x27;PT08.S1(CO)&#x27;?</li><li>Are there anomalous readings or sudden level shifts in &#x27;NMHC(GT)&#x27;?</li><li>Could &#x27;AH&#x27; be predicted? — declined: Candidate target &#x27;AH&#x27; reached only 25% confidence (below the 40% autonomy floor) — too weak a signal to commit to modelling; proceeding with descriptive EDA instead.</li></ul>
+                  </details></div></div>
+                <div class="cc note"><span class="mk">Note</span><div><b>How we read your data.</b> The file was read as semicolon-separated text (UTF-8). Values of -200 were treated as "no reading", and dates and times were joined into one date-time.</div></div>
+              </div>
+            </div>
+
+            <div>
+              <h2 class="ws-h2" style="margin-bottom: 14px;">What to do</h2>
+              <div class="do-list">
+                <div class="rc"><span class="mk">Do</span><div>Turn the AI narrative on to get these same findings interpreted and prioritised in plain language.</div></div>
+              </div>
+            </div>
+
+            <div>
+              <h2 class="ws-h2" style="margin-bottom: 14px;">At a glance</h2>
+              <div class="datum" style="margin-bottom: 0;" aria-label="At a glance">
+                <div class="cell"><div class="k">Data quality</div><div class="v">83/100</div></div>
+                <div class="cell"><div class="k">Rows analysed</div><div class="v">9,471</div></div>
+                <div class="cell"><div class="k">Caveats flagged</div><div class="v">2</div></div>
+              </div>
+            </div>
+
+            <div>
+              <h2 class="ws-h2" style="margin-bottom: 6px;">Search the written findings</h2>
+              <p class="ws-caption" style="margin-bottom: 10px;">A keyword search over the 12 written findings. It is not a chat, and it does not run a new analysis.</p>
+              <div class="search-row">
+                <label class="sr-only" for="ws-search">Search the written findings</label>
+                <input class="ws-input" id="ws-search" type="search" placeholder="e.g. benzene">
+              </div>
+              <div class="search-results" id="ws-search-results" aria-live="polite"></div>
+            </div>
+          </div>
+
+          <!-- CHARTS: each panel pairs a chart with a plain takeaway and the same check row -->
+          <div class="ws-tabpanel" id="panel-charts" role="tabpanel" aria-labelledby="tab-charts" tabindex="0" hidden>
+            <article class="chart-panel">
+              <div class="chart-box"><svg class="chart-svg" viewBox="0 0 300 120" role="img" aria-label="Schematic: dots climb from lower left to upper right, so more carbon monoxide goes with more benzene.">
+                <line x1="30" y1="10" x2="30" y2="100" stroke="var(--rule)" stroke-width="1.5"/>
+                <line x1="30" y1="100" x2="280" y2="100" stroke="var(--rule)" stroke-width="1.5"/>
+                <g fill="var(--accent)">
+                  <circle cx="50" cy="85" r="2.5" opacity="0.6"/><circle cx="70" cy="78" r="2.5" opacity="0.6"/>
+                  <circle cx="95" cy="70" r="2.5" opacity="0.7"/><circle cx="120" cy="58" r="2.5" opacity="0.7"/>
+                  <circle cx="150" cy="48" r="2.5" opacity="0.8"/><circle cx="180" cy="40" r="2.5" opacity="0.8"/>
+                  <circle cx="210" cy="32" r="2.5" opacity="0.9"/><circle cx="240" cy="22" r="2.5" opacity="0.9"/>
+                </g>
+                <line x1="35" y1="92" x2="260" y2="18" stroke="var(--positive)" stroke-width="2" stroke-dasharray="4,2"/>
+              </svg><div class="chart-axis"><span>Less carbon monoxide</span><span>More carbon monoxide</span></div><p class="chart-cap">A schematic of the pattern, not the real points.</p></div>
+              <div class="take">
+                <h3>Carbon monoxide and benzene rise and fall together.</h3>
+                <p>When one is high, the other usually is too. That does not show that one causes the other.</p>
+                <div class="check-row">
+                  <span class="check ok"><span aria-hidden="true">✓</span> Very unlikely to be luck</span>
+                  <span class="check ok"><span aria-hidden="true">✓</span> 7,344 readings</span>
+                  <span class="check note"><span aria-hidden="true">○</span> A pattern, not proof of cause</span>
+                </div>
+                <p class="chart-src">Worked out by the correlation step of this run.</p>
+              </div>
+            </article>
+            <article class="chart-panel">
+              <div class="chart-box"><svg class="chart-svg" viewBox="0 0 300 120" role="img" aria-label="Schematic: two groups of dots, squares and circles, that overlap heavily."><g fill="var(--ink-3)" opacity="0.85"><rect x="78" y="68" width="5" height="5"/><rect x="90" y="50" width="5" height="5"/><rect x="98" y="78" width="5" height="5"/><rect x="106" y="58" width="5" height="5"/><rect x="113" y="43" width="5" height="5"/><rect x="118" y="73" width="5" height="5"/><rect x="126" y="60" width="5" height="5"/><rect x="94" y="64" width="5" height="5"/><rect x="133" y="50" width="5" height="5"/><rect x="103" y="88" width="5" height="5"/><rect x="138" y="70" width="5" height="5"/><rect x="86" y="82" width="5" height="5"/></g><g fill="var(--accent)" opacity="0.85"><circle cx="150" cy="58" r="2.8"/><circle cx="160" cy="42" r="2.8"/><circle cx="168" cy="70" r="2.8"/><circle cx="176" cy="52" r="2.8"/><circle cx="184" cy="66" r="2.8"/><circle cx="192" cy="46" r="2.8"/><circle cx="200" cy="60" r="2.8"/><circle cx="172" cy="84" r="2.8"/><circle cx="156" cy="76" r="2.8"/><circle cx="208" cy="72" r="2.8"/><circle cx="190" cy="82" r="2.8"/><circle cx="164" cy="56" r="2.8"/><circle cx="146" cy="66" r="2.8"/></g></svg><div class="chart-axis"><span>■ Group A</span><span>● Group B</span></div><p class="chart-cap">A schematic: in the real data the groups overlap a lot.</p></div>
+              <div class="take">
+                <h3>The readings may form 2 groups, but the split is weak.</h3>
+                <p>The groups overlap a lot, so treat this as a loose pattern, not as two clear-cut kinds of hour.</p>
+                <div class="check-row">
+                  <span class="check risk"><span aria-hidden="true">!</span> The groups overlap a lot</span>
+                  <span class="check ok"><span aria-hidden="true">✓</span> All 9,471 readings used</span>
+                  <span class="check note"><span aria-hidden="true">○</span> A loose pattern, not clear-cut groups</span>
+                </div>
+                <p class="chart-src">Worked out by the grouping step of this run.</p>
+              </div>
+            </article>
+            <article class="chart-panel">
+              <div class="chart-box"><svg class="chart-svg" viewBox="0 0 300 120" role="img" aria-label="Two bars: the average daily level of nitrogen oxides was about 125 before 8 September 2004 and about 333 after."><line x1="30" y1="100" x2="280" y2="100" stroke="var(--rule)" stroke-width="1.5"/><rect x="70" y="70" width="60" height="30" fill="var(--ink-3)" opacity="0.85"/><rect x="170" y="20" width="60" height="80" fill="var(--accent)" opacity="0.9"/><text x="100" y="64" text-anchor="middle" font-size="11" fill="var(--ink-2)">about 125</text><text x="200" y="14" text-anchor="middle" font-size="11" fill="var(--ink-2)">about 333</text></svg><div class="chart-axis"><span>Before 8 Sep 2004</span><span>From 8 Sep 2004</span></div><p class="chart-cap">Average daily level, drawn to scale from the run's two figures.</p></div>
+              <div class="take">
+                <h3>Nitrogen oxides stepped up from about 125 to 333.</h3>
+                <p>The average daily level jumped on 8 September 2004 and stayed high. The data shows when it changed, not why.</p>
+                <div class="check-row">
+                  <span class="check ok"><span aria-hidden="true">✓</span> A lasting change, not a one-day blip</span>
+                  <span class="check note"><span aria-hidden="true">○</span> No significance test was run on this one</span>
+                </div>
+                <p class="chart-src">Worked out by the change-detection step of this run.</p>
+              </div>
+            </article>
+          </div>
+
+          <!-- DETAILS: an audit trail, plain language first -->
+          <div class="ws-tabpanel" id="panel-details" role="tabpanel" aria-labelledby="tab-details" tabindex="0" hidden>
+            <section class="audit" aria-labelledby="how-title">
+              <div class="audit-head"><h2 class="ws-h3" id="how-title" style="margin: 0;">How we got here</h2><p>The decisions this run made, in plain words.</p></div>
+              <dl>
+                <div class="row"><dt>AI summary</dt><dd>Off. This run had no AI summary, so no AI provider was contacted. AI calls: 0.</dd></div>
+                <div class="row"><dt>The plan</dt><dd>A standard plan chosen from the table's own profile, not written by an AI.</dd></div>
+                <div class="row"><dt>Prediction</dt><dd>Declined. Predicting absolute humidity (AH) reached only 25% confidence, under the 40% needed, so Sorrel described the data instead.</dd></div>
+                <div class="row"><dt>Questions</dt><dd>11 considered, 1 answered, 10 not answered. They are listed under "Be careful about" on the Answers tab.</dd></div>
+                <div class="row"><dt>Numbers it could not trace</dt><dd>None recorded. With no AI-written text, there was nothing to check against the tools' output.</dd></div>
+                <div class="row"><dt>Files delivered</dt><dd>A report (HTML and Markdown), a cleaned copy of the data, a copy with unusual readings flagged, the grouping model, and the full results as JSON. See the Downloads tab.</dd></div>
+                <div class="row"><dt>Time</dt><dd>3.4 seconds across the ten analysis steps.</dd></div>
+              </dl>
+            </section>
+
+            <section class="audit" aria-labelledby="data-title">
+              <div class="audit-head"><h2 class="ws-h3" id="data-title" style="margin: 0;">Your data and the checks</h2><p>How the file was read, repaired and profiled.</p></div>
+              <dl>
+                <div class="row"><dt>How the file was read</dt><dd>A CSV file in UTF-8, with a semicolon between values (detected automatically). 2 empty columns were dropped.</dd></div>
+                <div class="row"><dt>Data quality</dt><dd>83 out of 100.
+                  <ul><li>13% of all cells are missing.</li><li>113 duplicate rows (1.2%).</li><li>The NMHC column is 90% missing.</li></ul></dd></div>
+                <div class="row"><dt>Repairs</dt><dd>12 repairs. Dates and times were joined into one date-time. The CO, benzene, temperature and humidity columns were read as numbers (9,357 values each). Values of -200 were treated as missing.</dd></div>
+                <div class="row"><dt>Unusual readings</dt><dd>Flagged in a separate copy of the data. Nothing was removed from the original.</dd></div>
+              </dl>
+            </section>
+
+            <section class="audit" aria-labelledby="safety-title">
+              <div class="audit-head"><h2 class="ws-h3" id="safety-title" style="margin: 0;">Safety and audit</h2><p>What ran, and what was refused.</p></div>
+              <dl>
+                <div class="row"><dt>AI-written code</dt><dd>0 runs, 0 failures, 0 refusals (a budget of 40 was available).</dd></div>
+                <div class="row"><dt>AI calls</dt><dd>0 calls, 0 tokens.</dd></div>
+              </dl>
+            </section>
+
+            <details class="audit">
+              <summary class="audit-head" style="cursor: pointer; font-size: 14px; font-weight: 600;">Step-by-step record (technical)</summary>
+              <table class="record">
+                <thead><tr><th scope="col">Step</th><th scope="col">What it did</th><th scope="col" style="text-align:right;">Seconds</th></tr></thead>
+                <tbody><tr><td class="mono">ingest_dataset</td><td>Read the file</td><td class="num">0.14</td></tr><tr><td class="mono">clean_data</td><td>Cleaned and repaired the data</td><td class="num">0.06</td></tr><tr><td class="mono">detect_outliers</td><td>Flagged unusual readings</td><td class="num">0.20</td></tr><tr><td class="mono">correlation_analysis</td><td>Looked for readings that move together</td><td class="num">0.34</td></tr><tr><td class="mono">time_series_analysis</td><td>Looked for trends over time</td><td class="num">0.32</td></tr><tr><td class="mono">dimensionality_analysis</td><td>Looked for the main directions in the data</td><td class="num">0.09</td></tr><tr><td class="mono">change_analysis</td><td>Looked for recent changes</td><td class="num">0.01</td></tr><tr><td class="mono">anomaly_analysis</td><td>Looked for sudden shifts and spikes</td><td class="num">0.04</td></tr><tr><td class="mono">cluster_data</td><td>Looked for groups of similar hours</td><td class="num">2.23</td></tr><tr><td class="mono">generate_report</td><td>Wrote the report</td><td class="num">0.01</td></tr></tbody>
+              </table>
+            </details>
+          </div>
+
+          <!-- DOWNLOADS: an artifact shelf -->
+          <div class="ws-tabpanel" id="panel-downloads" role="tabpanel" aria-labelledby="tab-downloads" tabindex="0" hidden>
+            <div class="shelf">
+              <div class="shelf-group">Report</div>
+              <div class="artifact"><span class="ty">HTML</span><div><div class="nm">report.html</div><div class="why">The readable report. Opens in a browser and prints cleanly.</div></div><span class="sz">143 KB</span><button type="button" class="btn btn-ghost btn-sm" onclick="showToast('Prototype: the real app downloads report.html here.')">Download</button></div><div class="artifact"><span class="ty">MD</span><div><div class="nm">AirQualityUCI_report.md</div><div class="why">The same report as plain Markdown text.</div></div><span class="sz">18 KB</span><button type="button" class="btn btn-ghost btn-sm" onclick="showToast('Prototype: the real app downloads AirQualityUCI_report.md here.')">Download</button></div><div class="artifact"><span class="ty">JSON</span><div><div class="nm">final_report.json</div><div class="why">The findings and their checks, as data.</div></div><span class="sz">44 KB</span><button type="button" class="btn btn-ghost btn-sm" onclick="showToast('Prototype: the real app downloads final_report.json here.')">Download</button></div>
+              <div class="shelf-group">Data</div>
+              <div class="artifact"><span class="ty">CSV</span><div><div class="nm">AirQualityUCI_cleaned.csv</div><div class="why">Your table after the repairs, ready to reuse.</div></div><span class="sz">905 KB</span><button type="button" class="btn btn-ghost btn-sm" onclick="showToast('Prototype: the real app downloads AirQualityUCI_cleaned.csv here.')">Download</button></div><div class="artifact"><span class="ty">CSV</span><div><div class="nm">AirQualityUCI_cleaned_outliers_flagged.csv</div><div class="why">The same table with unusual readings flagged. Nothing is removed.</div></div><span class="sz">961 KB</span><button type="button" class="btn btn-ghost btn-sm" onclick="showToast('Prototype: the real app downloads AirQualityUCI_cleaned_outliers_flagged.csv here.')">Download</button></div><div class="artifact"><span class="ty">JSON</span><div><div class="nm">dashboard.json</div><div class="why">The chart definitions behind the Charts tab.</div></div><span class="sz">244 KB</span><button type="button" class="btn btn-ghost btn-sm" onclick="showToast('Prototype: the real app downloads dashboard.json here.')">Download</button></div><div class="artifact"><span class="ty">JSON</span><div><div class="nm">AirQualityUCI_raw.json</div><div class="why">The full technical result of the run.</div></div><span class="sz">288 KB</span><button type="button" class="btn btn-ghost btn-sm" onclick="showToast('Prototype: the real app downloads AirQualityUCI_raw.json here.')">Download</button></div>
+              <div class="shelf-group">Models</div>
+              <div class="artifact"><span class="ty">PKL</span><div><div class="nm">kmeans.pkl</div><div class="why">The grouping model from this run.</div></div><span class="sz">40 KB</span><button type="button" class="btn btn-ghost btn-sm" onclick="showToast('Prototype: the real app downloads kmeans.pkl here.')">Download</button></div>
+              <div class="shelf-group">Optional: 3D presentation</div>
+              <div class="artifact off">
+                <span class="ty">HTML</span>
+                <div><div class="nm">3D presentation</div><div class="why">A standalone page that replays the analysis in 3D.</div></div>
+                <span class="avail off">Not made for this run</span>
+                <button type="button" class="btn btn-ghost btn-sm" disabled>Download</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a href="#" class="brand" aria-label="Sorrel, back to top">
+            <span class="brand-seal" aria-hidden="true">s</span>
+            <span class="brand-name">Sorrel</span>
+          </a>
+          <p>Sorrel is the working name of DSA Agent, a final-year project: a seven-stage data analysis assistant that checks its own findings.</p>
+        </div>
+        <div class="footer-col">
+          <h4>Explore</h4>
+          <ul>
+            <li><a href="#workflow">How it works</a></li>
+            <li><a href="#audited-entry">How it checks itself</a></li>
+            <li><a href="#comparison">Why Sorrel</a></li>
+            <li><a href="#features">Analyses</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Resources</h4>
+          <ul>
+            <li><a href="https://github.com/shahdaksh050/agentic-data-analysis" target="_blank" rel="noopener noreferrer">Documentation</a></li>
+            <li><a href="https://github.com/shahdaksh050/agentic-data-analysis" target="_blank" rel="noopener noreferrer">GitHub repository</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Project</h4>
+          <ul>
+            <li><a href="#data-path">Where your data goes</a></li>
+            <li>MIT License</li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>&copy; 2026 DSA Agent project. Distributed under the MIT License.</span>
+        <span>Academic project, not for sensitive data</span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- ==========================================================================
+       INTERACTIVE JAVASCRIPT
+       (Solare Scroll Expansion Physics + Three.js 4-Stage Morph Engine)
+       ========================================================================== -->
+  <script>
+    // ── Smoothstep Helper ─────────────────────────────────────────────────────
+    function smoothstep(min, max, value) {
+      const x = Math.max(0, Math.min(1, (value - min) / (max - min)));
+      return x * x * (3 - 2 * x);
+    }
+
+    // ── View Switching Logic ──────────────────────────────────────────────────
+    function switchView(viewName) {
+      const landing = document.getElementById('surface-landing');
+      const workspace = document.getElementById('surface-workspace');
+      const btnLanding = document.getElementById('btn-view-landing');
+      const btnWorkspace = document.getElementById('btn-view-workspace');
+
+      document.getElementById('ws-states').hidden = viewName !== 'workspace';
+      if (viewName === 'workspace') {
+        landing.style.display = 'none';
+        workspace.style.display = 'block';
+        btnLanding.classList.remove('active');
+        btnWorkspace.classList.add('active');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        workspace.style.display = 'none';
+        landing.style.display = 'block';
+        btnWorkspace.classList.remove('active');
+        btnLanding.classList.add('active');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    }
+
+    // ── Theme Switching ───────────────────────────────────────────────────────
+    function toggleTheme() {
+      const html = document.documentElement;
+      const current = html.getAttribute('data-theme');
+      const next = current === 'night' ? 'day' : 'night';
+      html.setAttribute('data-theme', next);
+
+      document.getElementById('theme-icon').textContent = next === 'night' ? '☽' : '☼';
+      document.getElementById('theme-label').textContent = next === 'night' ? 'Night Mode' : 'Day Mode';
+      
+      if (window.__solareThree) {
+        window.__solareThree.updateTheme(next);
+      }
+    }
+
+    // ── Landing glue: the original page's single CTA path, Enter shortcut and anchor glide ──
+    (function landingGlue() {
+      const landing = document.getElementById('surface-landing');
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      let glide = null;
+
+      function glideTo(targetY) {
+        if (glide) { glide.pause(); glide = null; }
+        const y = Math.max(0, targetY);
+        if (window.anime && !reduce) {
+          const pos = { y: window.scrollY };
+          glide = window.anime({
+            targets: pos,
+            y: y,
+            duration: 800,
+            easing: 'cubicBezier(0.25, 0.1, 0.25, 1)',
+            update: () => window.scrollTo(0, pos.y),
+            complete: () => { glide = null; }
+          });
+        } else {
+          window.scrollTo({ top: y, behavior: reduce ? 'auto' : 'smooth' });
+        }
+      }
+      ['wheel', 'touchstart'].forEach((type) => window.addEventListener(type, () => {
+        if (glide) { glide.pause(); glide = null; }
+      }, { passive: true }));
+
+      // Every "Open the workspace" control takes the same path.
+      document.querySelectorAll('[data-enter]').forEach((el) => {
+        el.addEventListener('click', (event) => { event.preventDefault(); switchView('workspace'); });
+      });
+      window.addEventListener('keydown', (event) => {
+        const active = document.activeElement;
+        if (active && active !== document.body) return;
+        if (landing.style.display === 'none') return;
+        if (event.code === 'Enter' || event.code === 'NumpadEnter') { event.preventDefault(); switchView('workspace'); }
+      });
+
+      // In-page links glide with the sticky header's height as the offset.
+      document.querySelectorAll('a[href^="#"]').forEach((link) => {
+        const hash = link.getAttribute('href');
+        if (link.classList.contains('skip-link') || link.hasAttribute('data-enter')) return;
+        link.addEventListener('click', (event) => {
+          const target = hash === '#' ? null : document.querySelector(hash);
+          if (hash !== '#' && !target) return;
+          event.preventDefault();
+          const go = () => {
+            const nav = document.querySelector('.nav');
+            const offset = nav ? nav.offsetHeight : 0;
+            glideTo(target ? target.getBoundingClientRect().top + window.scrollY - offset : 0);
+          };
+          if (landing.style.display === 'none') {
+            switchView('landing');
+            window.requestAnimationFrame(go);
+          } else {
+            go();
+          }
+        });
+      });
+    })();
+
+    // ── Non-blocking status message (replaces alert()) ───────────────────────
+    function showToast(message) {
+      const toast = document.getElementById('toast');
+      if (!toast) return;
+      toast.textContent = message;
+      toast.classList.add('show');
+      clearTimeout(showToast.timer);
+      showToast.timer = setTimeout(() => toast.classList.remove('show'), 3600);
+    }
+
+    // ── Workspace: states, settings, run, tabs, findings, search ──────────────
+    // Five states mirror the original app: empty, file loaded, running, results, failed.
+    // A real run always ends in "results"; "failed" is reachable from the prototype bar.
+    const WS = {
+      state: 'empty',
+      mode: 'ai',          // 'ai' | 'noai'
+      timer: null,
+      step: 4,             // the stage that is active while running (8 = all done)
+      stages: [
+        'Reading Your File', 'Understanding Your Question', 'Running the Numbers', 'Making Sense of It',
+        'Double-Checking', 'Solving the Tricky Parts', 'Writing Your Report'
+      ]
+    };
+    const wsEl = (id) => document.getElementById(id);
+    const wsAll = (selector) => Array.from(document.querySelectorAll(selector));
+    const wsHasFile = () => WS.state !== 'empty';
+    const wsHasKey = () => wsEl('ws-key').value.trim().length > 0;
+    const wsCanRun = () => wsHasFile() && (WS.mode === 'noai' || wsHasKey());
+
+    function wsRenderStages() {
+      const list = wsEl('ws-stages');
+      list.innerHTML = WS.stages.map((name, index) => {
+        const number = index + 1;
+        const status = number < WS.step ? 'done' : number === WS.step ? 'active' : 'wait';
+        const word = status === 'done' ? '✓ Done' : status === 'active' ? '● Working' : '○ Waiting';
+        return `<li class="sc ${status}"><span class="sc-num">${String(number).padStart(2, '0')}</span>` +
+          `<span class="nm">${name}</span><span class="st">${word}</span></li>`;
+      }).join('');
+      // One polite status line instead of a live list, so a screen reader hears one sentence per step.
+      const active = Math.min(WS.step, 7);
+      wsEl('ws-status').textContent = `Working on step ${active} of 7: ${WS.stages[active - 1]}`;
+    }
+
+    function wsRender() {
+      const main = wsEl('surface-workspace');
+      main.dataset.wsState = WS.state;
+      wsAll('#surface-workspace [data-states]').forEach((el) => {
+        el.hidden = !el.dataset.states.split(' ').includes(WS.state);
+      });
+      wsAll('#ws-states [data-ws]').forEach((btn) => btn.setAttribute('aria-pressed', String(btn.dataset.ws === WS.state)));
+
+      const heads = {
+        empty:   ['Workspace', 'Start with the data.', 'Add a spreadsheet, ask a question, and get an answer with the checks that back it up.'],
+        file:    ['Workspace', 'Start with the data.', 'Add a spreadsheet, ask a question, and get an answer with the checks that back it up.'],
+        running: ['Workspace', 'Analysing <span class="hero-file">AirQualityUCI.csv</span>', ''],
+        results: ['Workspace', 'Results for <span class="hero-file">AirQualityUCI.csv</span>', ''],
+        failed:  ['Workspace', 'Could not finish <span class="hero-file">AirQualityUCI.csv</span>', '']
+      }[WS.state];
+      wsEl('ws-eyebrow').textContent = heads[0];
+      wsEl('ws-title').innerHTML = heads[1];
+      wsEl('ws-sub').textContent = heads[2];
+      wsEl('ws-sub').hidden = !heads[2];
+
+      const inRun = ['running', 'results', 'failed'].includes(WS.state);
+      wsEl('ws-new-btn').hidden = !inRun;
+      wsEl('ws-datum').hidden = !(wsHasFile());
+      wsEl('datum-state').textContent = {
+        empty: 'Ready', file: 'Ready', results: 'Done', failed: 'Stopped at step 2',
+        running: `Working on step ${Math.min(WS.step, 7)} of 7`
+      }[WS.state];
+      wsEl('datum-file').textContent = wsHasFile() ? 'AirQualityUCI.csv' : 'None loaded';
+      // A run of the bundled sample is always no-AI. The failed state is an example of an AI run.
+      wsEl('datum-mode').textContent = (WS.state === 'running' || WS.state === 'results')
+        ? 'No AI (deterministic)'
+        : (WS.state === 'failed' ? 'AI summary' : (WS.mode === 'noai' ? 'No AI (deterministic)' : 'AI summary'));
+
+      // Set-up panel
+      wsEl('ws-file-empty').hidden = wsHasFile();
+      wsEl('ws-file-loaded').hidden = !wsHasFile();
+      wsAll('.seg-btn').forEach((btn) => btn.setAttribute('aria-checked', String(btn.dataset.mode === WS.mode)));
+      wsEl('ws-mode-caption').textContent = WS.mode === 'ai'
+        ? 'An AI writes the plan and the summary from a controlled description of your data, not the raw file.'
+        : 'Private and deterministic. No key or network call is needed.';
+      const canRun = wsCanRun();
+      wsEl('ws-run-btn').disabled = !canRun;
+      wsEl('ws-noai-btn').hidden = !(wsHasFile() && WS.mode === 'ai' && !wsHasKey());
+      wsEl('ws-run-caption').textContent = !wsHasFile()
+        ? 'Add a file above, or use the bundled sample beside the uploader.'
+        : (WS.mode === 'ai' && !wsHasKey())
+          ? 'An AI summary needs an API key. Add one in Settings.'
+          : 'Usually one to three minutes. Findings appear as they are found and may change until the run ends.';
+
+      if (WS.state === 'running') wsRenderStages();
+    }
+
+    function setWsState(state) {
+      clearInterval(WS.timer);
+      WS.timer = null;
+      WS.state = state;
+      if (state === 'running') WS.step = Math.min(WS.step, 7) || 4;
+      wsRender();
+      if (state === 'results') wsSelectTab('answers', false);
+    }
+
+    function wsLoadSample() {
+      WS.mode = 'noai'; // the sample is always a no-AI run, as in the real app
+      setWsState('file');
+      showToast('Sample loaded: a real air-quality table. It is not your data.');
+    }
+
+    function wsStartRun() {
+      if (!wsCanRun()) return;
+      WS.step = 1;
+      setWsState('running');
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      WS.timer = setInterval(() => {
+        WS.step += 1;
+        if (WS.step > 7) {
+          setWsState('results');
+          return;
+        }
+        wsRender();
+      }, reduce ? 250 : 700);
+    }
+
+    // ── Tabs: a real tablist (arrow keys, Home and End) ───────────────────────
+    function wsSelectTab(name, focus) {
+      wsAll('#ws-tabs [role="tab"]').forEach((tab) => {
+        const on = tab.id === `tab-${name}`;
+        tab.setAttribute('aria-selected', String(on));
+        tab.tabIndex = on ? 0 : -1;
+        if (on && focus) tab.focus();
+      });
+      wsAll('.ws-tabpanel').forEach((panel) => { panel.hidden = panel.id !== `panel-${name}`; });
+    }
+    (function wsInit() {
+      const tabs = wsAll('#ws-tabs [role="tab"]');
+      tabs.forEach((tab, index) => {
+        tab.addEventListener('click', () => wsSelectTab(tab.id.replace('tab-', ''), false));
+        tab.addEventListener('keydown', (event) => {
+          const last = tabs.length - 1;
+          let next = null;
+          if (event.key === 'ArrowRight') next = index === last ? 0 : index + 1;
+          else if (event.key === 'ArrowLeft') next = index === 0 ? last : index - 1;
+          else if (event.key === 'Home') next = 0;
+          else if (event.key === 'End') next = last;
+          if (next === null) return;
+          event.preventDefault();
+          wsSelectTab(tabs[next].id.replace('tab-', ''), true);
+        });
+      });
+
+      // Findings: a ranked list; the chosen one shows its checks and chart beside it
+      wsAll('.finding-item').forEach((item) => {
+        item.addEventListener('click', () => {
+          wsAll('.finding-item').forEach((other) => other.setAttribute('aria-pressed', String(other === item)));
+          wsAll('.finding-pane').forEach((pane) => { pane.hidden = pane.dataset.find !== item.dataset.find; });
+        });
+      });
+
+      // Settings rail
+      const settingsBtn = wsEl('ws-settings-btn');
+      settingsBtn.addEventListener('click', () => {
+        const rail = wsEl('ws-settings');
+        const open = rail.hidden;
+        rail.hidden = !open;
+        wsEl('ws-layout').classList.toggle('with-settings', open);
+        settingsBtn.setAttribute('aria-expanded', String(open));
+      });
+
+      // Set-up controls
+      wsEl('ws-dropzone').addEventListener('click', () => {
+        WS.mode = 'noai';
+        setWsState('file');
+        showToast("Prototype: your file is not read here, so the sample is loaded instead.");
+      });
+      wsEl('ws-sample-btn').addEventListener('click', wsLoadSample);
+      wsAll('.seg-btn').forEach((btn) => btn.addEventListener('click', () => { WS.mode = btn.dataset.mode; wsRender(); }));
+      wsEl('ws-key').addEventListener('input', wsRender);
+      wsEl('ws-noai-btn').addEventListener('click', () => { WS.mode = 'noai'; wsRender(); });
+      wsEl('ws-run-btn').addEventListener('click', wsStartRun);
+      wsEl('ws-stop-btn').addEventListener('click', () => {
+        setWsState('file');
+        showToast('Run stopped. In the real app, the steps finished so far are kept.');
+      });
+      wsEl('ws-new-btn').addEventListener('click', () => setWsState('file'));
+      wsEl('ws-code').addEventListener('change', (event) => {
+        wsEl('ws-coderuns').disabled = !event.target.checked;
+        wsEl('ws-iso').disabled = !event.target.checked;
+      });
+      wsEl('ws-provider').addEventListener('change', (event) => {
+        const hints = {
+          'OpenAI': ['sk-...', 'No key yet. Get one at platform.openai.com/api-keys.'],
+          'Anthropic': ['sk-ant-...', 'No key yet. Get one at console.anthropic.com/settings/keys.'],
+          'Gemini': ['from aistudio.google.com/apikey', 'No key yet. Get one at aistudio.google.com/apikey.'],
+          'Groq': ['gsk_...', 'No key yet. Get one at console.groq.com/keys.'],
+          'Openrouter': ['sk-or-...', 'No key yet. Get one at openrouter.ai/keys.'],
+          'Nvidia': ['nvapi-...', 'No key yet. Get one at build.nvidia.com.'],
+          'Local / offline': ['usually not required', 'A local server needs no key. No data leaves your machine.']
+        }[event.target.value];
+        wsEl('ws-key').placeholder = hints[0];
+        wsEl('ws-key-hint').textContent = hints[1];
+      });
+
+      // Prototype bar: preview any state
+      wsAll('#ws-states [data-ws]').forEach((btn) => btn.addEventListener('click', () => {
+        const target = btn.dataset.ws;
+        if (target === 'running') WS.step = 4;
+        setWsState(target);
+      }));
+
+      // Keyword search over the written findings
+      const FINDINGS = [{"t": "Nitrogen oxides stepped up from about 125 to 333 (average per day) starting 8 September 2004, a rise of about 166%.", "a": "NOx(GT) stepped up from about 125 to 333 (average per day) starting 2004-09-08 (+166%)."}, {"t": "Nitrogen oxides spiked on 23 November 2004: 847, against about 407 expected.", "a": "NOx(GT) spiked in 2004-11-23: 847 vs about 407 expected (+108%)."}, {"t": "Nitrogen oxides spiked on 16 December 2004: 786, against about 350 expected.", "a": "NOx(GT) spiked in 2004-12-16: 786 vs about 350 expected (+125%)."}, {"t": "Carbon monoxide, hydrocarbons, benzene and the hydrocarbon sensor all move together, very closely.", "a": "CO(GT), NMHC(GT), C6H6(GT) and PT08.S2(NMHC) move together (r between 0.88 and 0.98)"}, {"t": "The carbon monoxide sensor and the ozone sensor move together, very closely.", "a": "PT08.S1(CO) and PT08.S5(O3) move together (r=0.90)"}, {"t": "The hydrocarbon sensor peaks at 19:00 (1,201) and is lowest at 04:00 (631), about 1.9 times higher in the evening. Weekends run 14% lower.", "a": "PT08.S2(NMHC) peaks at 19:00 (1,201) and is lowest at 04:00 (631), about 1.9x higher in the evening; weekends run 14% lower"}, {"t": "Benzene peaks at 19:00 (17.7) and is lowest at 04:00 (2.92), about 6.1 times higher in the evening. Weekends run 35% lower.", "a": "C6H6(GT) peaks at 19:00 (17.7) and is lowest at 04:00 (2.92), about 6.1x higher in the evening; weekends run 35% lower"}, {"t": "6 of the 13 measurements carry 95% of the variation in the data.", "a": "6 of 13 features capture 95% of the variance"}, {"t": "The larger group (6,183 rows, 65.3% of the data) has lower nitrogen oxides on average: 150, against 235 overall.", "a": "Largest segment (cluster_1, 6,183 rows, 65.3% of data) stands out on 'NOx(GT)' (mean 150 vs 235 overall)"}, {"t": "The readings may split into 2 groups, but the split is weak and may not be real.", "a": "Data may split into 2 segments, but separation is weak and may be an artefact (silhouette=0.294)"}, {"t": "The carbon monoxide sensor and benzene move together, closely.", "a": "PT08.S1(CO) and C6H6(GT) move together (r=0.88)"}, {"t": "Benzene and the hydrocarbon sensor move together, very closely.", "a": "C6H6(GT) and PT08.S2(NMHC) move together (r=0.98)"}];
+      const results = wsEl('ws-search-results');
+      wsEl('ws-search').addEventListener('input', (event) => {
+        const words = event.target.value.toLowerCase().split(/\s+/).filter(Boolean);
+        results.textContent = '';
+        if (!words.length) return;
+        // Match the plain sentence plus the column codes it came from, so both "benzene" and "C6H6" find it.
+        const hits = FINDINGS.filter((item) => {
+          const haystack = `${item.t} ${item.a}`.toLowerCase();
+          return words.every((word) => haystack.includes(word));
+        }).map((item) => item.t);
+        if (!hits.length) {
+          const none = document.createElement('p');
+          none.className = 'ws-caption';
+          none.textContent = 'No written finding mentions that.';
+          results.appendChild(none);
+          return;
+        }
+        hits.forEach((text) => {
+          const hit = document.createElement('div');
+          hit.className = 'search-hit';
+          hit.textContent = `Based on what was found: ${text}`;
+          results.appendChild(hit);
+        });
+      });
+
+      wsRender();
+    })();
+
+  </script>
+  <script src="verdacert_dsa_scroll_fx.js"></script>
+  <script src="verdacert_dsa_original_3d.js"></script>
+</body>
+</html>

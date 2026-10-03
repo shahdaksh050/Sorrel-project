@@ -1,5 +1,5 @@
 /**
- * Beautiful 3D Frontend: Three.js + fullPage.js + Anime.js v4 Master Architecture
+ * Beautiful 3D Frontend: Three.js + section pager + Anime.js v4 Master Architecture
  * Unified 6-Stage Autonomous Data Analysis Cinematic Continuous Journey
  *
  * 7 Architectural Pillars (Verified Implementation):
@@ -12,7 +12,7 @@
  * 7. Strict GPU Performance Budget (DPR <= 2.0, InstancedMesh single-draw-call Matter & Link fields)
  */
 
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import * as THREE from '__THREE_ESM_URL__';
 import { engine, animate, stagger, cubicBezier } from '__ANIME_ESM_URL__';
 
 // Accurate Cubic Bezier (0.22, 1, 0.36, 1) Solver (Defect 5 Fix)
@@ -1204,12 +1204,11 @@ function syncQuickPills(stageIdx) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* FULLPAGE.JS SNAP SCROLLING                                                 */
+/* SECTION PAGER (first-party; the fullpage names are kept for compatibility) */
 /* -------------------------------------------------------------------------- */
 try {
   if (window.fullpage) {
     new fullpage('#fullpage', {
-      licenseKey: 'gplv3-license',
       css3: true,
       scrollingSpeed: MOTION.dur.stage, // Unified duration token (Defect 12 Fix)
       easingcss3: 'cubic-bezier(0.22, 1, 0.36, 1)',

@@ -383,7 +383,7 @@ def build_cinematic_document(
 ) -> str:
     """Assemble the self-contained HTML document for the 6-Section 3D Cinematic Experience.
 
-    Inlines HTML structure, styles, Three.js scene, fullPage.js choreography,
+    Inlines HTML structure, styles, the Three.js scene, the section pager,
     and Anime.js v4 unified animation loop.
     """
     if state_dict is None:
@@ -408,6 +408,10 @@ def build_cinematic_document(
         anime_b64 = base64.b64encode(anime_esm_code.encode("utf-8")).decode("utf-8")
         anime_url = f"data:text/javascript;base64,{anime_b64}"
 
+        # Inline Three.js (a single self-contained module, so a data URL imports cleanly)
+        three_code = (root / "static/vendor/three/three.module.js").read_text("utf-8")
+        three_url = "data:text/javascript;base64," + base64.b64encode(three_code.encode("utf-8")).decode("utf-8")
+
         # Inline Fonts
         font_css = (root / "static/vendor/fonts/ledger-fonts.css").read_text("utf-8")
         def replace_font_url(m):
@@ -420,16 +424,20 @@ def build_cinematic_document(
         font_links = f"<style>{font_css}</style>"
     else:
         anime_url = static_url("vendor/anime/4.5.0/anime.esm.min.js")
+        three_url = static_url("vendor/three/three.module.js")
         font_links = f'<link rel="stylesheet" href="{static_url("vendor/fonts/ledger-fonts.css")}">'
 
-    scene_script = _read_asset("cinematic_3d.js").replace(
-        "__ANIME_ESM_URL__", anime_url
+    scene_script = (
+        _read_asset("cinematic_3d.js")
+        .replace("__ANIME_ESM_URL__", anime_url)
+        .replace("__THREE_ESM_URL__", three_url)
     )
 
     return (
         html_template
         .replace("__FONT_LINKS__", font_links)
         .replace("__CINEMATIC_STATE_JSON__", state_json)
+        .replace("__SECTION_PAGER_SCRIPT__", _read_asset("section_pager.js"))
         .replace("__CINEMATIC_SCENE_SCRIPT__", scene_script)
     )
 

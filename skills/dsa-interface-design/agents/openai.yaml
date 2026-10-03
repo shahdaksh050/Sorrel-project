@@ -1,0 +1,4 @@
+interface:
+  display_name: "DSA Interface Design"
+  short_description: "Evidence-first Streamlit interface craft"
+  default_prompt: "Use $dsa-interface-design to improve this DSA Agent interface without compromising evidence or accessibility."

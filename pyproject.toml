@@ -36,7 +36,7 @@ dependencies = [
     "xgboost>=2.0.0,<3",
     "openai>=1.30.0,<2",
     "anthropic>=0.25.0,<1",
-    "streamlit>=1.49.0,<2",
+    "streamlit>=1.57.0,<2",
     "rich>=13.7.0,<14",
     "python-dotenv>=1.0.0,<2",
 ]

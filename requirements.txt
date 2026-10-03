@@ -27,7 +27,7 @@ openai>=1.30.0
 anthropic>=0.25.0
 
 # --- UI & CLI ---
-streamlit>=1.49.0   # width='stretch', st.container(key=...), theme font/radius tokens
+streamlit>=1.57.0   # st.segmented_control, st.context.theme, width="stretch", Components v2
 rich>=13.7.0
 
 # --- Environment & Config ---

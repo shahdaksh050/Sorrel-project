@@ -54,7 +54,8 @@ def test_every_font_file_the_stylesheet_names_exists_and_is_local() -> None:
 
 def test_the_families_the_console_uses_are_declared() -> None:
     css = (FONT_DIR / "ledger-fonts.css").read_text(encoding="utf-8")
-    assert "font-family: 'Baloo 2'" in css and "font-family: 'Mukta'" in css
+    for family in ("Bricolage Grotesque", "Public Sans", "IBM Plex Mono", "Baloo 2", "Mukta"):
+        assert f"font-family: '{family}'" in css
 
 
 def test_static_folder_holds_only_public_assets() -> None:

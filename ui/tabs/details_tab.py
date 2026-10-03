@@ -1,5 +1,5 @@
 """
-Details Tab (Statistical & ML Lab, Ingestion, Profiling, Agent Run Trace, Governance).
+Details tab: how the answer was reached, in increasing technical depth (data, methods, governance, raw record).
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def render_details_tab(
     prof: dict[str, Any] | None,
     run_view: RunView | None = None,
 ) -> None:
-    """Render Tier 4: Statistical & ML Lab, Detailed Audit & Inspection."""
+    """Render Tier 4: Statistical & ML Lab, Detailed audit and inspection."""
     clean_out = find_tool(tool_results, "clean_data")
     outlier_out = find_tool(tool_results, "detect_outliers")
     stat_out = find_tool(tool_results, "select_statistical_test")
@@ -39,13 +39,13 @@ def render_details_tab(
         if how_html:
             st.markdown(how_html, unsafe_allow_html=True)
 
-    st.markdown("## Case Log")
-    st.caption("A sequential record of technical checks performed on this dataset.")
+    st.markdown("## Your data and the checks")
+    st.caption("What was done to the file and which analyses ran, from plain summary to technical detail.")
 
     profile_status = st.session_state.get("profile_status")
     if isinstance(profile_status, str) and profile_status.startswith("failed"):
         st.warning(
-            "Running in degraded mode — profiling failed, so dataset-nature "
+            "Running in degraded mode: profiling failed, so dataset-nature "
             f"tools (time-series, text, geo...) were unavailable. Reason: {profile_status[8:]}"
         )
 
@@ -53,7 +53,7 @@ def render_details_tab(
     coercions = st.session_state.get("coercions")
     if read_report or coercions:
         with st.container(border=True):
-            st.markdown("### 1. Data Ingestion & Repair")
+            st.markdown("### How the file was read and repaired")
             if read_report:
                 rr_bits = [
                     f"format `{read_report.get('format')}`",
@@ -89,7 +89,7 @@ def render_details_tab(
     prof = prof or st.session_state.get("profile")
     if prof:
         with st.container(border=True):
-            st.markdown("### 2. Profiling")
+            st.markdown("### Column profile")
             prows = [
                 {
                     "Column": c.get("name"),
@@ -105,7 +105,7 @@ def render_details_tab(
 
     if clean_out:
         with st.container(border=True):
-            st.markdown("### 3. Data Cleaning")
+            st.markdown("### Cleaning")
             c1, c2, c3 = st.columns(3)
             c1.metric("Strategy used", clean_out.get("strategy_used", "—"))
             c2.metric("Missing values before", clean_out.get("missing_before", "—"))
@@ -113,7 +113,7 @@ def render_details_tab(
 
     if outlier_out:
         with st.container(border=True):
-            st.markdown("### 4. Outlier Detection")
+            st.markdown("### Unusual rows")
             c1, c2 = st.columns(2)
             c1.metric("Unusual rows found", outlier_out.get("total_outliers", "—"))
             c2.metric("Share of all rows", f"{outlier_out.get('outlier_percentage','—')}%")
@@ -128,7 +128,7 @@ def render_details_tab(
 
     if stat_out:
         with st.container(border=True):
-            st.markdown("### 5. Statistical Tests")
+            st.markdown("### Statistical test")
             c1, c2, c3 = st.columns(3)
             c1.metric("Test used", stat_out.get("test_name", "—"))
             c2.metric("p-value", format_p(stat_out.get("p_value")))
@@ -137,7 +137,7 @@ def render_details_tab(
 
     if train_out:
         with st.container(border=True):
-            st.markdown("### 6. Model Training & Evaluation")
+            st.markdown("### Models")
             mt2 = train_out.get("models_trained", {})
             best2 = train_out.get("best_model", "")
             task2 = train_out.get("task_type", "classification")
@@ -191,19 +191,26 @@ def render_details_tab(
                     st.dataframe(safe_df(pd.DataFrame(cr_rows)), width="stretch")
 
     with st.container(border=True):
-        st.markdown("### 7. Domain-Specific Analyses")
-        st.caption("Segmentation, trends, text, and geography — run when your data called for them.")
+        st.markdown("### Analyses specific to your data")
+        st.caption("Segmentation, trends, text and geography, run when your data called for them.")
         render_other_findings(tool_results)
 
-    with st.expander("8. Run Trace — how the agents worked through this", expanded=False):
-        st.caption("Each helper does one job, and hands off to the next.")
+    gov = report.get("governance")
+    if gov:
+        with st.container(border=True):
+            st.markdown("### Safety and audit")
+            st.caption("What AI-written code ran, where it ran, and what was refused.")
+            render_governance(gov)
+
+    with st.expander("Step-by-step record (technical)", expanded=False):
+        st.caption("Each step does one job and hands off to the next.")
         st.markdown(
             render_agent_grid(st.session_state.get("stage_log", []), tool_results, report),
             unsafe_allow_html=True,
         )
 
-        st.markdown("#### What Was Said, Step by Step")
-        st.caption("A record of what each helper passed to the next, and when.")
+        st.markdown("#### What each step passed on")
+        st.caption("A record of what each step passed to the next, and when.")
         st.markdown(
             render_handoff_stream(st.session_state.get("progress_lines", []), tool_results),
             unsafe_allow_html=True,
@@ -211,7 +218,7 @@ def render_details_tab(
 
         sub_results = report.get("rlm_sub_results")
         if sub_results:
-            st.markdown("#### How the Tricky Parts Were Split Up")
+            st.markdown("#### How hard questions were split up")
             st.caption("Big questions got broken into smaller ones so nothing got lost.")
             for s_idx, sub in enumerate(sub_results, 1):
                 with st.expander(
@@ -219,10 +226,3 @@ def render_details_tab(
                     expanded=False,
                 ):
                     st.json(sub)
-
-    gov = report.get("governance")
-    if gov:
-        with st.container(border=True):
-            st.markdown("### 9. Governance & audit")
-            st.caption("What AI-written code ran, where it ran, and what was refused.")
-            render_governance(gov)

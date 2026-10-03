@@ -19,6 +19,7 @@ import html
 import os
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 from typing import Any, cast
@@ -44,8 +45,8 @@ st.set_page_config(
     page_title="Agentic Data Analysis",
     page_icon="🧾",
     layout="wide",
-    # "auto": open on a desktop, collapsed on a phone, where an open sidebar covers the page.
-    initial_sidebar_state="auto",
+    # Settings are one level deeper than the task (file, question, run), so the sidebar starts closed.
+    initial_sidebar_state="collapsed",
 )
 
 # ── Landing Page (Phase 2 Narrative) ─────────────────────────────────────────
@@ -225,6 +226,7 @@ def _reset_pipeline() -> None:
     else:
         _remove_run_dir(st.session_state.get("tmp_dir"))
     st.session_state.pop("current_summary_path", None)
+    st.session_state.pop("_cinema_pres_html", None)
     for k in ("stage_log", "analysis_done", "analysis_error",
               "final_report", "tool_results", "metadata", "profile",
               "dashboard", "tmp_dir", "progress_lines", "llm_warning",
@@ -240,6 +242,20 @@ def _set_stage(num: str, status: str, detail: str = "") -> None:
     ]
     log.append((num, status, detail))
     st.session_state["stage_log"] = log
+
+
+def _plain_llm_error(raw: str, default: str = "The model did not answer. Check the key, the model name and the account, then try again.") -> str:
+    """One plain sentence for the common provider failures; the raw text stays in a disclosure."""
+    low = raw.lower()
+    if any(k in low for k in ("401", "invalid api key", "incorrect api key", "unauthorized", "authentication")):
+        return "The API key was not accepted. Check that it is correct and belongs to this provider."
+    if any(k in low for k in ("429", "quota", "insufficient", "credit", "billing", "rate limit")):
+        return "The account is out of credit or has hit its rate limit. Add credit or wait, then try again."
+    if any(k in low for k in ("404", "not found", "does not exist", "unknown model")):
+        return "The provider does not know this model name. Pick another model or check the spelling."
+    if any(k in low for k in ("timeout", "timed out", "connection", "resolve", "unreachable", "refused")):
+        return "The provider could not be reached. Check the network connection, or the server URL for a local model."
+    return default
 
 
 def _fold_run(run: ActiveRun) -> None:
@@ -287,9 +303,13 @@ def _run_progress() -> None:
     elif snap.stop_requested:
         sub = "Stopping. The step in progress finishes first, then a partial report is written."
     else:
-        sub = snap.note or "Usually 1–3 minutes, depending on the dataset and the model."
+        sub = snap.note or "Usually one to three minutes, depending on the dataset and the model."
+    _elapsed = int(time.monotonic() - st.session_state.get("_run_started", time.monotonic()))
+    _active = next((n for n, status, _ in snap.stage_log if status == "active"), None)
+    _where = f"Step {_active} of 7. " if _active else ""
     st.markdown(
-        f'<div class="run-banner">Running the analysis<span class="sub">{html.escape(sub)}</span></div>',
+        f'<div class="run-banner">Running the analysis<span class="sub">'
+        f"{html.escape(_where)}Elapsed {_elapsed // 60}:{_elapsed % 60:02d}. {html.escape(sub)}</span></div>",
         unsafe_allow_html=True,
     )
     st.markdown(_render_steps_list(list(snap.stage_log), st.session_state["seen_stages"]), unsafe_allow_html=True)
@@ -439,6 +459,55 @@ _workspace_state = (
     else "failed" if st.session_state.get("analysis_error")
     else None
 )
+
+def _use_no_ai_mode() -> None:
+    """on_click handler: runs before the rerun, so it may set the mode widget's state."""
+    st.session_state["analysis_mode"] = _MODE_NO_AI
+
+
+def _on_theme_change() -> None:
+    """on_change handler: the CSS injection at the top of the next run reads the new theme."""
+    pick = st.session_state.get("theme_ctl")
+    if pick in ("Day", "Night"):
+        st.session_state["theme"] = pick.lower()
+
+
+_MODE_AI = "With an AI summary"
+_MODE_NO_AI = "Without an AI summary"
+
+# ── Top bar: where am I, what state is the data in, theme ─────────────────────
+_cur_theme = st.session_state.get("theme", "day")
+_bar_name, _bar_state, _bar_theme = st.columns([0.3, 0.5, 0.2], vertical_alignment="center")
+_bar_name.markdown('<div class="topbar-name">Agentic Data Analysis</div>', unsafe_allow_html=True)
+_bar_file = st.session_state.get("preview_name")
+_bar_state.markdown(
+    '<div class="topbar-state">'
+    + (
+        f"<b>{html.escape(str(_bar_file))}</b>"
+        + {"running": " is being analysed", "done": ": results ready", "failed": ": run stopped"}.get(
+            _workspace_state or "", ": ready to run"
+        )
+        if _bar_file
+        else "No dataset yet"
+    )
+    + ' <span class="topbar-hint">Settings: open the arrow at the top left.</span></div>',
+    unsafe_allow_html=True,
+)
+with _bar_theme:
+    # on_change, not an in-script st.rerun(): a rerun here would stop the script before the file
+    # uploader and the other widgets below are drawn, Streamlit would drop their state, and the
+    # uploader's disappearance would reset the whole analysis.
+    # The initial value goes in session state, not `default=`: a default that changes with the theme
+    # would change the widget's identity and reset it.
+    st.session_state.setdefault("theme_ctl", "Night" if _cur_theme == "night" else "Day")
+    st.segmented_control(
+        "Theme",
+        ["Day", "Night"],
+        key="theme_ctl",
+        label_visibility="collapsed",
+        on_change=_on_theme_change,
+    )
+
 _hero_box = st.container()
 # Before a run the inputs are the page's one task; once there is a run they tuck away.
 _inputs_box = (
@@ -450,32 +519,41 @@ _inputs_box = (
 with st.sidebar:
     st.markdown(
         '<div class="side-brand">'
-        '<div class="side-title">Agentic Data Analysis</div>'
-        '<div class="side-sub">Your friendly assistant for making sense of data.</div></div>',
+        '<div class="side-title">Settings</div>'
+        '<div class="side-sub">Everything here has a safe default. You can run without opening it.</div></div>',
         unsafe_allow_html=True,
     )
-
-    # ── Theme Selector ────────────────────────────────────────────────────────
-    _cur_theme = st.session_state.get("theme", "day")
-    theme_sel = st.selectbox(
-        "Theme",
-        ["Day Mode", "Night Mode"],
-        index=0 if _cur_theme == "day" else 1,
-        help="Switch between a bright look for daytime and a cozy dark look for night.",
-    )
-    _new_theme = "night" if theme_sel == "Night Mode" else "day"
-    if _new_theme != _cur_theme:
-        st.session_state["theme"] = _new_theme
-        st.rerun()
 
     with _inputs_box:
         # ── Upload ────────────────────────────────────────────────────────────────
         st.markdown('<div class="step-head"><span class="step-n">1</span> Add your file</div>', unsafe_allow_html=True)
-        uploaded = st.file_uploader(
-            "CSV, TSV or Excel",
-            type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
-            label_visibility="collapsed",
-        )
+        _upload_col, _sample_col = st.columns([0.72, 0.28], gap="medium")
+        with _upload_col:
+            uploaded = st.file_uploader(
+                "CSV, TSV or Excel",
+                type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
+                label_visibility="collapsed",
+            )
+        with _sample_col:
+            st.markdown(
+                '<div class="sample-choice"><div class="sample-title">No file handy?</div>'
+                '<p>Run a real analysis of a bundled customer-churn file. It is not your data.</p></div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("Use sample data", key="btn_sample_data"):
+                _sample = ROOT / "data" / "sample_customer_churn.csv"
+                if _sample.exists():
+                    _sample_bytes = _sample.read_bytes()
+                    _sample_df, _sample_report = read_any_bytes(_sample_bytes, _sample.name)
+                    st.session_state["preview_df"] = _sample_df
+                    st.session_state["preview_read_report"] = _sample_report
+                    st.session_state["preview_bytes"] = _sample_bytes
+                    st.session_state["preview_name"] = _sample.name
+                    st.session_state["orig_name"] = _sample.name
+                    st.session_state["from_uploader"] = False
+                    st.session_state["_sample_run"] = True
+                    st.rerun()
+                st.error("The bundled sample file is missing from this install.")
 
         # Persist to session_state immediately on upload / clear on removal.
         # Every upload passes through src.core.security before touching disk:
@@ -523,6 +601,14 @@ with st.sidebar:
                 st.session_state["theme"] = _theme
                 st.session_state["from_uploader"] = False
 
+        _loaded = st.session_state.get("preview_df")
+        if isinstance(_loaded, pd.DataFrame):
+            st.markdown(
+                f'<div class="file-identity"><b>{html.escape(str(st.session_state.get("preview_name") or ""))}</b>'
+                f" is loaded: {len(_loaded):,} rows, {len(_loaded.columns)} columns.</div>",
+                unsafe_allow_html=True,
+            )
+
         _notes: list[str] = st.session_state.get("preview_notes") or []
         if _notes:
             _items = "".join(f"<li>{html.escape(str(n))}</li>" for n in _notes)
@@ -532,13 +618,17 @@ with st.sidebar:
                 unsafe_allow_html=True,
             )
 
-        st.caption("Related tables (optional): customers, products... joined automatically on shared IDs.")
-        related_uploads = st.file_uploader(
-            "Related tables",
-            type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
-            accept_multiple_files=True,
-            label_visibility="collapsed",
-        )
+        with st.expander("More formats and related tables"):
+            st.caption(
+                "Other formats are read too (Parquet, JSON, Stata, SPSS and more). Related tables "
+                "such as customers or products are joined automatically on shared IDs."
+            )
+            related_uploads = st.file_uploader(
+                "Related tables",
+                type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
+                accept_multiple_files=True,
+                label_visibility="collapsed",
+            )
         join_choices: dict[int, dict[str, Any]] = (
             _join_review(related_uploads) if related_uploads and st.session_state.get("preview_bytes") else {}
         )
@@ -553,18 +643,52 @@ with st.sidebar:
                  "and address it directly in the final report.",
         )
 
-        target_col = st.text_input(
+        _target_options = ["Let the assistant decide"]
+        _target_frame = st.session_state.get("preview_df")
+        if isinstance(_target_frame, pd.DataFrame):
+            _target_options.extend(str(column) for column in _target_frame.columns)
+        _target_choice = st.selectbox(
             "Target column",
-            placeholder="e.g. outcome or price (blank = auto)",
+            _target_options,
+            help="Choose the outcome to predict, or let the assistant identify a useful target.",
+        )
+        target_col = "" if _target_choice == _target_options[0] else _target_choice
+
+        # The one place the analysis mode is chosen (the sidebar only reports it), so there is a
+        # single widget and a single session key.
+        st.markdown('<div class="step-head"><span class="step-n">3</span> Choose how to answer</div>', unsafe_allow_html=True)
+        _analysis_mode = st.segmented_control(
+            "Analysis mode",
+            [_MODE_AI, _MODE_NO_AI],
+            default=_MODE_AI,
+            key="analysis_mode",
+            label_visibility="collapsed",
+            help="Without an AI summary the analysis is deterministic: no key, no network call, "
+                 "and your data never reaches an AI provider.",
+        )
+        use_llm = _analysis_mode != _MODE_NO_AI
+        st.caption(
+            "An AI writes the plan and the summary from a controlled description of your data, "
+            "not the raw file."
+            if use_llm
+            else "Private and deterministic. No key or network call is needed."
         )
 
-    # ── LLM Provider ──────────────────────────────────────────────────────────
-    st.markdown('<div class="side-head">LLM Provider</div>', unsafe_allow_html=True)
+    # ── Connect an AI ─────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="side-head">Analysis mode</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "With an AI summary. Change this in the main area." if use_llm
+        else "Without an AI summary. Change this in the main area."
+    )
+    st.markdown('<div class="side-head">Connect an AI</div>', unsafe_allow_html=True)
     provider = st.selectbox(
         "Provider",
         ["openai", "anthropic", "gemini", "groq", "openrouter", "nvidia"]
         + ([] if _HOSTED else ["local"]),
-        format_func=lambda p: "Local / offline" if p == "local" else p,
+        format_func=lambda p: "Local / offline" if p == "local" else p.title(),
     )
 
     local_base_url = ""
@@ -607,6 +731,20 @@ with st.sidebar:
     # environment key is only a convenience for a single-user local run.
     _env_key = "" if _HOSTED else os.getenv(f"{provider.upper()}_API_KEY", "")
     _effective_key = api_key.strip() or _env_key
+    _key_url = {
+        "openai": "platform.openai.com/api-keys",
+        "anthropic": "console.anthropic.com/settings/keys",
+        "gemini": "aistudio.google.com/apikey",
+        "groq": "console.groq.com/keys",
+        "openrouter": "openrouter.ai/keys",
+        "nvidia": "build.nvidia.com",
+    }.get(provider)
+    if api_key.strip():
+        st.caption("Key entered.")
+    elif _env_key:
+        st.caption("Using the key set in this machine's environment.")
+    elif _key_url:
+        st.caption(f"No key yet. Get one at {_key_url}.")
     _dyn_models = _get_dynamic_models(
         provider,
         api_key=_effective_key,
@@ -642,7 +780,7 @@ with st.sidebar:
         active_dyn_models = paid_models
 
     model_options = [m["model"] for m in active_dyn_models]
-    model_labels = {m["model"]: m["label"] for m in active_dyn_models}
+    model_labels = {m["model"]: m["model"] + (" (free)" if m.get("is_free") else "") for m in active_dyn_models}
 
     if not model_options:
         model_options = ["default"]
@@ -670,37 +808,26 @@ with st.sidebar:
         final_model = model_sel
 
     # ── Reasoning Mode ────────────────────────────────────────────────────────
-    reasoning_mode = st.selectbox(
-        "Reasoning Mode",
-        ["Adaptive (Recommended)", "Fast (Low Reasoning)", "Deep (High Reasoning)"],
-        index=0,
-        help=(
-            "Adaptive: dynamically scales reasoning effort, low during routine exploratory steps, "
-            "higher when anomalies or statistical conflicts occur, and thorough for final synthesis.\n"
-            "Fast: forces minimal reasoning effort across all cycles for maximum execution speed.\n"
-            "Deep: uses full reasoning depth across all cycles."
-        ),
-    )
+    with st.expander("AI and model options", expanded=False):
+        reasoning_mode = st.selectbox(
+            "Reasoning mode",
+            ["Adaptive (Recommended)", "Fast (Low Reasoning)", "Deep (High Reasoning)"],
+            index=0,
+            help=(
+                "Adaptive balances speed and depth. Fast prioritises speed. "
+                "Deep spends more time checking ambiguous results."
+            ),
+        )
     # Passed to the run with its other settings, never through os.environ.
     reasoning_effort = (
         "low" if "Fast" in reasoning_mode else "high" if "Deep" in reasoning_mode else "adaptive"
     )
 
-    # ── Engine ────────────────────────────────────────────────────────────────
+    # ── Advanced analysis ─────────────────────────────────────────────────────
     # The two capability switches. Both default on; either can be turned off
     # independently, and the analysis still runs end to end and still writes a
     # full report — that is the point of them.
-    st.markdown('<div class="side-head">Engine</div>', unsafe_allow_html=True)
-    use_llm = st.toggle(
-        "AI narrative (LLM)",
-        value=True,
-        help=(
-            "On: the LLM plans the analysis and writes the narrative.\n"
-            "Off: fully deterministic, the plan comes from the data profile "
-            "and domain detection, and the report is built from tool output. "
-            "No network calls, no API key needed, and much faster."
-        ),
-    )
+    st.markdown('<div class="side-head">Advanced analysis</div>', unsafe_allow_html=True)
     use_ml = st.toggle(
         "Machine learning",
         value=True,
@@ -722,33 +849,35 @@ with st.sidebar:
     test_pct = 20
     n_cv = 5
     if use_ml:
-        # IMPROVEMENTS.md 7.16 — genuinely wired, not just informational.
-        # `TrainModelTool.requires_context` (ml_pipeline.py) reads these back
-        # from memory context and fills them into the actual train_model
-        # call whenever the planner leaves them empty (the same fallback-fill
-        # mechanism target_column already used) — so moving these sliders
-        # really does change what gets trained, not just what's displayed.
-        thorough = st.toggle(
-            "Thorough tuning (slower)",
-            value=False,
-            help=(
-                "Off (default): models train with their default hyperparameters, fast.\n"
-                "On: searches hyperparameters per model before picking the best "
-                "one, meaningfully slower (measured: ~20s extra at 20k rows) "
-                "but can improve accuracy."
-            ),
-        )
-        tune_hyperparameters = thorough
-
-        if _cuda_available():
-            st.caption("**GPU acceleration**: CUDA detected. XGBoost models will train on GPU (`device='cuda'`).")
-        else:
-            st.caption("**Compute**: CPU mode (multi-core parallel training).")
-
         with st.expander("Advanced model settings"):
+            tune_hyperparameters = st.toggle(
+                "Thorough tuning (slower)",
+                value=False,
+                help="Searches model parameters before training. It can improve accuracy but takes longer.",
+            )
             max_depth = st.slider("Max tree depth (Random Forest / XGBoost)", 2, 15, 6)
             test_pct = st.slider("Test split %", 10, 40, 20, step=5)
             n_cv = st.slider("CV folds (k)", 3, 10, 5)
+
+    # "Thorough" reproduces the previous default (min=1, max=5); Quick and Deep
+    # scale the same min/max iteration knobs the controller already takes.
+    thoroughness = st.radio(
+        "How thorough",
+        ["Quick", "Thorough", "Deep"],
+        index=1,
+        horizontal=True,
+        help="Quick finds the headline answer fast. Thorough double-checks it. Deep explores more before settling.",
+    )
+    min_iter, max_iter = {
+        "Quick":    (1, 2),
+        "Thorough": (1, 5),
+        "Deep":     (2, 15),
+    }[thoroughness]
+    enable_rlm = st.toggle(
+        "Break hard questions into smaller ones",
+        value=False,
+        help="Splits a complex question into smaller sub-questions it can tackle one at a time. Turn on for deep exploration; keep off for the fastest runtime.",
+    )
 
     # ── Privacy and code execution ────────────────────────────────────────────
     # Operator controls (AGENTS.md "Operator controls"). On a shared deployment
@@ -758,7 +887,7 @@ with st.sidebar:
     from src.core.governance import code_execution_enabled
     from src.core.privacy import min_cell_size
 
-    st.markdown('<div class="side-head">Privacy</div>', unsafe_allow_html=True)
+    st.markdown('<div class="side-head">Safety</div>', unsafe_allow_html=True)
     min_cell: int = min_cell_size()
     enable_code: bool = True
     max_code_runs: int = 40
@@ -768,7 +897,6 @@ with st.sidebar:
             f"Groups smaller than {min_cell} are combined so individuals can't be identified. "
             "Set by the server."
         )
-        st.markdown('<div class="side-head">Code execution</div>', unsafe_allow_html=True)
         st.caption(
             "AI-written code is "
             + ("allowed in a restricted sandbox." if code_execution_enabled() else "switched off on this server.")
@@ -779,7 +907,6 @@ with st.sidebar:
                                        value=min_cell, step=1))
         st.caption("Groups smaller than this are combined so individuals can't be identified")
 
-        st.markdown('<div class="side-head">Code execution</div>', unsafe_allow_html=True)
         enable_code = st.toggle(
             "Allow AI-written code",
             value=True,
@@ -807,32 +934,10 @@ with st.sidebar:
             ),
         )
 
-    # ── Analysis Settings ─────────────────────────────────────────────────────
-    st.markdown('<div class="side-head">Analysis Settings</div>', unsafe_allow_html=True)
-    # "Thorough" reproduces the previous default (min=1, max=5); Quick and Deep
-    # scale the same min/max iteration knobs the controller already takes.
-    thoroughness = st.radio(
-        "How thorough",
-        ["Quick", "Thorough", "Deep"],
-        index=1,
-        horizontal=True,
-        help="Quick finds the headline answer fast. Thorough double-checks it. Deep explores more before settling.",
-    )
-    min_iter, max_iter = {
-        "Quick":    (1, 2),
-        "Thorough": (1, 5),
-        "Deep":     (2, 15),
-    }[thoroughness]
-    enable_rlm = st.toggle(
-        "Break hard questions into smaller ones",
-        value=False,
-        help="Splits a complex question into smaller sub-questions it can tackle one at a time. Turn on for deep exploration; keep off for the fastest runtime.",
-    )
-
     has_file = st.session_state["preview_df"] is not None
     # A key is only needed when the AI narrative is on: the no-AI run is fully
     # deterministic and makes no network call.
-    has_key  = bool(api_key.strip()) or provider == "local" or not use_llm
+    has_key  = bool(_effective_key) or provider == "local" or not use_llm
     can_run  = (
         has_file and has_key
         and not st.session_state["analysis_done"]
@@ -840,18 +945,22 @@ with st.sidebar:
     )
 
 with _inputs_box:
-    st.markdown('<div class="step-head"><span class="step-n">3</span> Run</div>', unsafe_allow_html=True)
+    st.markdown('<div class="step-head"><span class="step-n">4</span> Run</div>', unsafe_allow_html=True)
     run_clicked = st.button(
         "Run analysis",
         disabled=not can_run,
         type="primary",
         key="btn_run_analysis",
+        width="stretch",
     )
     if not has_file:
-        st.caption("Add a file above, or try the bundled sample below.")
+        st.caption("Add a file above, or use the bundled sample beside the uploader.")
     elif not has_key and not st.session_state["analysis_done"]:
+        st.caption("An AI summary needs an API key. Add one in Settings (the arrow at the top left).")
+        st.button("Run without an AI summary instead", key="btn_no_ai_instead", on_click=_use_no_ai_mode)
+    elif has_file and not st.session_state["analysis_done"] and _active_run() is None:
         st.caption(
-            "Add your API key in the settings sidebar to enable the run, or switch the AI narrative off."
+            "Usually one to three minutes. Findings appear as they are found and may change until the run ends."
         )
 
 
@@ -859,7 +968,8 @@ with _inputs_box:
 # MAIN AREA — header
 # ══════════════════════════════════════════════════════════════════════════════
 with _hero_box:
-    hero_text, hero_plate = st.columns([0.46, 0.54], gap="large",
+    # Before there is a run the plate has nothing to show, so the headline gets the width.
+    hero_text, hero_plate = st.columns([0.46, 0.54] if _workspace_state else [0.85, 0.15], gap="large",
                                        vertical_alignment="center")
 
     # Once there is a file or a run, the page is a workspace, not a landing page: the marketing
@@ -879,18 +989,18 @@ with _hero_box:
                 st.rerun()
         else:
             st.markdown(
-                '<div class="hero">'
-                '<h1>We check every answer twice.</h1>'
-                '<p class="hero-sub">Upload any spreadsheet: sales, survey, sports, science, '
-                'whatever you\'ve got. Your assistant studies it, tests its own conclusions, '
-                'and tells you which patterns are real, and which are just luck.</p></div>',
+                '<div class="hero workspace-welcome">'
+                '<h1>Start with the data.</h1>'
+                '<p class="hero-sub">Add a spreadsheet, ask a question, and get an answer with the '
+                'checks that back it up.</p></div>',
                 unsafe_allow_html=True,
             )
-        _hero_cinema_on = st.session_state.get("show_cinematic_hero", False)
-        _hero_btn_txt = "Standard 3D Plate" if _hero_cinema_on else "3D Cinematic Showcase"
-        if st.button(_hero_btn_txt, key="btn_toggle_hero_cinema"):
-            st.session_state["show_cinematic_hero"] = not _hero_cinema_on
-            st.rerun()
+        if _workspace_state:
+            _hero_cinema_on = st.session_state.get("show_cinematic_hero", False)
+            _hero_btn_txt = "Standard progress view" if _hero_cinema_on else "Open 3D progress view"
+            if st.button(_hero_btn_txt, key="btn_toggle_hero_cinema"):
+                st.session_state["show_cinematic_hero"] = not _hero_cinema_on
+                st.rerun()
 
     # The plate: a live technical drawing of the run, ruled off the headline and
     # running past the container edge. The pipeline executes further down this same
@@ -903,6 +1013,13 @@ with _hero_box:
     # The datum line under the hero carries the run's readings, filled at the same
     # time as the plate.
     datum_slot = st.empty()
+
+
+if _workspace_state == "failed":
+    _failure_reason = str(st.session_state.get("analysis_error") or "Unknown error")
+    st.error(f"The analysis did not finish. {_plain_llm_error(_failure_reason, 'Something stopped it part way through.')} Start a new analysis when you are ready.")
+    with st.expander("Technical details"):
+        st.code(_failure_reason, language=None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1029,14 +1146,12 @@ if (run_clicked or _sample_run) and st.session_state.get("_run") is None:
         _set_stage("2", "error", "LLM unreachable")
         st.session_state["analysis_error"] = _ping_err
         st.error(
-            f"Could not reach the model, so the analysis did not start. "
-            f"Provider `{provider}`, model `{final_model}`."
+            f"The analysis did not start. {_plain_llm_error(_ping_err)} "
+            f"(Provider {provider}, model {final_model}.)"
         )
-        st.code(_ping_err, language=None)
-        st.info(
-            "Check that the model ID exists on this provider, that the API key "
-            "is valid, and that the account has credits. Then run it again."
-        )
+        with st.expander("Technical details"):
+            st.code(_ping_err, language=None)
+        st.caption("You can also run without an AI summary: no key is needed.")
         _draw_pipeline_rig(pipeline_slot)  # the hero slot must not stay empty
         st.stop()
 
@@ -1067,6 +1182,7 @@ if (run_clicked or _sample_run) and st.session_state.get("_run") is None:
         )
     )
     st.session_state["_run"] = _new_run
+    st.session_state["_run_started"] = time.monotonic()
     _new_run.start()
     # Re-render once so the sidebar (Run disabled, New analysis offered) already
     # reflects the active run; the fragment below takes over from here.
@@ -1084,7 +1200,10 @@ _errored = any(s == "error" for _, s, _ in st.session_state["stage_log"])
 _running = any(s == "active" for _, s, _ in st.session_state["stage_log"])
 
 _run_active = _active_run() is not None
-if (st.session_state.get("analysis_done") or _errored or _running) and not _run_active:
+if not _workspace_state:
+    steps_list_slot.empty()
+    pipeline_slot.empty()
+elif (st.session_state.get("analysis_done") or _errored or _running) and not _run_active:
     steps_list_slot.markdown(_render_steps_list(st.session_state["stage_log"], set()), unsafe_allow_html=True)
     with pipeline_slot.container():
         with st.expander("Show how it's working", expanded=False):
@@ -1117,9 +1236,12 @@ _model_cell = "No AI (deterministic)" if _ran_without_ai else (final_model if "f
 _cells = [
     ("State", _status_str),
     ("File", st.session_state.get("preview_name") or "None loaded"),
-    ("Model", _model_cell),
+    ("Analysis", _model_cell),
 ]
-datum_slot.markdown(_datum(_cells), unsafe_allow_html=True)
+if _workspace_state or st.session_state.get("preview_name"):
+    datum_slot.markdown(_datum(_cells), unsafe_allow_html=True)
+else:
+    datum_slot.empty()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1186,10 +1308,12 @@ if st.session_state.get("analysis_done"):
         )
 
     with tab_dash:
+        _rv = st.session_state.get("run_view")
         render_charts_tab(
             dashboard=dash,
             report=report,
             vega_cfg=vega_cfg,
+            findings=list(_rv.findings) if _rv is not None else None,
         )
 
     with tab_lab:
@@ -1216,40 +1340,17 @@ if (preview_df is None
         and not st.session_state["stage_log"]):
     st.markdown(
         '<div class="empty">'
-        '<h2>Let\'s see what your data shows.</h2>'
-        '<p>Add a CSV or Excel file above, tell us what you\'d like to know, and run it. '
-        'Your helpers will study the data, test their answers, and double-check '
-        'everything before showing you the results. An API key is only needed for the '
-        'AI-written summary; the analysis itself runs without one.</p>'
+        '<h2>What happens next</h2>'
+        '<ol class="next-steps">'
+        '<li>Your file is read and profiled, and problems are repaired where it is safe to.</li>'
+        '<li>Analyses run, and each finding is checked before it is called reliable.</li>'
+        '<li>You get an answer, the evidence for it, and what is still uncertain.</li>'
+        '</ol>'
+        '<p>An API key is only needed for the AI-written summary. The analysis itself runs without one.</p>'
         '</div>',
         unsafe_allow_html=True,
     )
-    st.markdown("#### Meet Your Helpers")
-    st.markdown(_render_agent_grid([]), unsafe_allow_html=True)
-    st.write("")
-    st.caption(
-        "Runs the bundled customer sample through the real analysis, "
-        "with no API key and no AI narrative."
-    )
-    if st.button("Try it with sample data", type="primary"):
-        _sample = ROOT / "data" / "sample_customer_churn.csv"
-        if _sample.exists():
-            _sample_bytes = _sample.read_bytes()
-            _sample_df, _sample_report = read_any_bytes(_sample_bytes, _sample.name)
-            st.session_state["preview_df"] = _sample_df
-            st.session_state["preview_read_report"] = _sample_report
-            st.session_state["preview_bytes"] = _sample_bytes
-            st.session_state["preview_name"] = _sample.name
-            st.session_state["orig_name"] = _sample.name
-            st.session_state["from_uploader"] = False
-            st.session_state["_sample_run"] = True
-            st.rerun()
-        else:
-            st.error("The bundled sample file is missing from this install (data/sample_customer_churn.csv).")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MICRO-INTERACTIONS (Phase 3)
 # ══════════════════════════════════════════════════════════════════════════════
-from ui.animations import inject_micro_interactions
-
-inject_micro_interactions()

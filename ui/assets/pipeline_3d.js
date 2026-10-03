@@ -941,42 +941,12 @@ function bindCadButtons() {
   if (btnCinema) {
     btnCinema.addEventListener("click", () => {
       setCadActive(btnCinema);
-      if (window.anime) {
-        if (typeof window.anime.animate === "function") {
-          window.anime.animate(orbit, {
-            theta: [0.42, 0.95, -0.45, 0.42],
-            phi: [1.16, 0.75, 1.25, 1.16],
-            duration: 7000,
-            ease: "easeInOutSine",
-            onUpdate: () => {
-              drag.theta = 0;
-              drag.phi = 0;
-              invalidate();
-            },
-            onComplete: () => {
-              if (btnIso) setCadActive(btnIso);
-            },
-          });
-        } else if (typeof window.anime === "function") {
-          window.anime({
-            targets: orbit,
-            theta: [0.42, 0.95, -0.45, 0.42],
-            phi: [1.16, 0.75, 1.25, 1.16],
-            duration: 7000,
-            easing: "easeInOutSine",
-            update: () => {
-              drag.theta = 0;
-              drag.phi = 0;
-              invalidate();
-            },
-            complete: () => {
-              if (btnIso) setCadActive(btnIso);
-            },
-          });
-        }
-      } else {
-        tweenCamera(0.65, 0.9);
-      }
+      // One animation engine for the scene: a GSAP timeline through three keyframes, about seven seconds.
+      const sweep = { onUpdate: () => { drag.theta = 0; drag.phi = 0; invalidate(); } };
+      gsap.timeline({ onComplete: () => { if (btnIso) setCadActive(btnIso); } })
+        .to(orbit, { theta: 0.95, phi: 0.75, duration: 2.33, ease: "sine.inOut", ...sweep })
+        .to(orbit, { theta: -0.45, phi: 1.25, duration: 2.33, ease: "sine.inOut", ...sweep })
+        .to(orbit, { theta: 0.42, phi: 1.16, duration: 2.34, ease: "sine.inOut", ...sweep });
     });
   }
   if (btnReset) {

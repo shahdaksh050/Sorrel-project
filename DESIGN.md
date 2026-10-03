@@ -44,21 +44,11 @@ To maintain contrast safety without mutating the backend `src/core/design_tokens
 ### Known Contrast Limitations:
 - The `report.html` standalone export and the 3D pipeline scenes currently inherit the Night `--risk` text contrast issue (4.04:1).
 
-## 3. The Gradient Exception
+## 3. Gradients
 
-Gradients are generally **forbidden** on surfaces, buttons, and backgrounds. The UI must remain flat to preserve the Ledger aesthetic.
+Gradients are **forbidden** in the workspace: no glow, spotlight, conic border or pointer-following effect on any surface, and no hover effect on anything that cannot be clicked (amended 2026-10-03; the earlier "Gradient Exception" list is withdrawn).
 
-**Exceptions:** Gradients are allowed *only* for the following ambient effects:
-1. **Spotlight Beam** (e.g. Hero background).
-2. **Glowing Effect** (e.g. Active step in progress, or around a `--risk` finding).
-3. **Hover Border Gradient** (e.g. Focus rings).
-4. **Card Spotlight** (e.g. Pointer-following glow).
-
-**Constraints on allowed gradients:**
-- Must derive from existing tokens (`--pen`, `--accent`, `--risk`) with low alpha (`color-mix` or `rgba`).
-- Never placed behind running text at more than a faint tint (ensuring WCAG AA contrast).
-- Never applied to data-dense views (tables or charts).
-- Must be **static (no motion)** under `@media (prefers-reduced-motion: reduce)`.
+**Exception:** the landing page may use one ambient gradient effect, derived from existing tokens at low alpha, with a solid fallback, never behind running text beyond a faint tint, and static under `prefers-reduced-motion`.
 
 ## 4. Reduced Motion & Accessibility
 
@@ -68,7 +58,11 @@ Gradients are generally **forbidden** on surfaces, buttons, and backgrounds. The
 
 ## 5. UI Islands Contract
 
-The **Hero** section is the *only* approved React island. Progress, Findings, and other UI elements must remain native HTML/CSS.
-- The Hero island receives state as plain text properties from Python. 
-- Island rendering must gracefully fail or skip rendering if the built bundle is missing.
-- Island sources **must never inject raw HTML** (`dangerouslySetInnerHTML` is forbidden). All LLM output and dataset text is rendered as React text nodes to prevent XSS.
+Native HTML/CSS is the default for progress, findings and every other element. Islands are optional and isolated, and none is needed to upload, run, read a finding or export.
+
+- The **Hero** is the approved React island. It receives state as plain text properties from Python, skips rendering if its bundle is missing, and never injects raw HTML (`dangerouslySetInnerHTML` is forbidden; all LLM and dataset text is rendered as text nodes).
+- The **pipeline view** is the second approved island (Streamlit Components v2, not React; amendment pending the Phase 6 spike). It is mounted once, receives stage data from Python on each progress tick, and applies deltas without rebuilding the scene. Three.js owns the single render loop, all assets are vendored (no CDN), data is written with `textContent`, and a text timeline with the same information stays on the page.
+
+## 6. Typography (2026-10-03)
+
+Bricolage Grotesque (headings), Public Sans (text) and IBM Plex Mono (literal column names, values, hashes, audit IDs only), self-hosted under `static/vendor/fonts/`. One scale in `ui/styles.py`: 13, 16, 20, 25, 31, 40, 56 px as `--text-xs` to `--text-4xl` in `rem`, with `--text-sm` (15 px) for dense UI text. Metrics use tabular figures. Baloo 2 and Mukta remain only in the landing page, cinematic export and HTML report until those move over.

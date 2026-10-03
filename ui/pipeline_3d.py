@@ -86,8 +86,9 @@ def _asset(name: str) -> str:
 def _embed(document: str, height: int) -> None:
     """Mount ``document`` in a sandboxed iframe.
 
-    ``st.iframe`` is the current API and ``components.html`` is deprecated, but
-    requirements.txt still allows streamlit>=1.35, which predates ``st.iframe``.
+    ``st.iframe`` is the current API and ``components.html`` is deprecated. The
+    ``hasattr`` guard stays for environments that install an older Streamlit than
+    requirements.txt asks for.
     """
     if hasattr(st, "iframe"):
         st.iframe(document, height=height)
@@ -128,7 +129,6 @@ def build_document(stages: Sequence[Stage], theme: str = "day") -> str:
         _asset("pipeline_3d.html")
         .replace("__FONT_LINKS__", f'<link rel="stylesheet" href="{static_url("vendor/fonts/ledger-fonts.css")}">')
         .replace("__GSAP_URL__", static_url("vendor/gsap/3.15.0/gsap.min.js"))
-        .replace("__ANIME_UMD_URL__", static_url("vendor/anime/4.5.0/anime.umd.min.js"))
         .replace("__STATE_JSON__", state_json)
         .replace("__SCENE_SCRIPT__", f"window.__THREE_URLS__ = {three_urls};\n" + _asset("pipeline_3d.js"))
     )

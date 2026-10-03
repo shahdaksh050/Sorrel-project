@@ -8,8 +8,6 @@
   <!-- Fonts: Warm Ledger Typography -->
 __FONT_LINKS__
   
-  <!-- fullPage.js CSS -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/fullPage.js/4.0.22/fullpage.min.css">
   
   <style>
     /* -------------------------------------------------------------------------- */
@@ -33,8 +31,8 @@ __FONT_LINKS__
       --lift: 0 16px 40px rgba(0, 0, 0, 0.55);
       --lift-sm: 0 6px 20px rgba(0, 0, 0, 0.4);
       
-      --sans: 'Mukta', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      --heading: 'Mukta', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --sans: 'Public Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --heading: 'Bricolage Grotesque', 'Public Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
       --mono: 'JetBrains Mono', Consolas, ui-monospace, monospace;
 
       /* MOTION CONTRACT (Single source of timing mirrored with JS MOTION) */
@@ -443,9 +441,10 @@ __FONT_LINKS__
       box-shadow: 0 0 12px var(--pen-glow);
     }
 
-    /* LAYER 2: fullPage.js Presentation Container */
+    /* LAYER 2: section pager container */
     #fullpage {
       position: relative;
+      height: auto;
       z-index: 10;
       pointer-events: none;
     }
@@ -624,7 +623,18 @@ __FONT_LINKS__
       border: 1px solid rgba(79, 195, 247, 0.3);
     }
 
-    /* Fullpage Nav custom overrides */
+
+    /* Section navigation dots (markup from section_pager.js) */
+    #fp-nav { position: fixed; right: 18px; top: 50%; transform: translateY(-50%); z-index: 60; pointer-events: auto; }
+    #fp-nav ul { list-style: none; margin: 0; padding: 0; }
+    #fp-nav li { position: relative; width: 14px; height: 14px; margin: 10px 0; }
+    #fp-nav a { display: block; width: 100%; height: 100%; position: relative; }
+    #fp-nav a span { position: absolute; left: 4px; top: 4px; width: 6px; height: 6px; border-radius: 50%; }
+    #fp-nav a:focus-visible { outline: 2px solid var(--pen); outline-offset: 2px; border-radius: 50%; }
+    #fp-nav .fp-tooltip { position: absolute; right: 22px; top: -4px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .2s ease; }
+    #fp-nav li:hover .fp-tooltip, #fp-nav li:focus-within .fp-tooltip { opacity: 1; }
+
+    /* Section nav custom overrides */
     #fp-nav ul li a span, .fp-slidesNav ul li a span {
       background: var(--graphite) !important;
       transition: all 0.3s ease !important;
@@ -1388,8 +1398,10 @@ __FONT_LINKS__
     }
   </script>
 
-  <!-- External Library CDNs (fullPage.js; anime.js v4 imported directly in ES module) -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/fullPage.js/4.0.22/fullpage.min.js"></script>
+  <!-- First-party section pager (replaces fullPage.js, which was GPLv3 and loaded from a CDN). Three.js and anime.js are imported by the scene module from local or inlined URLs. -->
+  <script>
+__SECTION_PAGER_SCRIPT__
+  </script>
   
   <!-- 3D Cinematic Scene Script Module -->
   <script type="module">

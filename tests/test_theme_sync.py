@@ -66,7 +66,7 @@ def test_committed_file_is_in_sync() -> None:
 
 def test_sync_leaves_hand_edited_keys_alone() -> None:
     text = CONFIG.read_text(encoding="utf-8")
-    edited = text.replace('baseRadius = "14px"', 'baseRadius = "9px"')
+    edited = text.replace('baseRadius = "12px"', 'baseRadius = "9px"')
     assert 'baseRadius = "9px"' in script.sync(edited)
 
 

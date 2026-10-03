@@ -18,15 +18,50 @@ from src.core.run_view import RunView, build_run_view
 from ui.components.cards import (
     find_chart_by_id,
     find_tool,
+    finding_state,
     gap_is_risky,
     md_text,
     render_dashboard_chart,
     render_data_understanding,
     render_defect_stamp,
-    render_finding_card,
+    render_evidence_html,
     render_run_compare,
     search_findings,
+    state_label,
 )
+
+
+@st.fragment
+def _evidence_inspector(
+    findings: list[dict[str, Any]],
+    chart_by_finding: dict[str, dict[str, Any]],
+    vega_cfg: dict[str, Any],
+) -> None:
+    """Ranked findings beside the selected one's evidence. A fragment, so choosing a finding does not rerun the page."""
+    ids = [str(f.get("finding_id") or f"finding-{i}") for i, f in enumerate(findings)]
+    if st.session_state.get("selected_finding") not in ids:
+        st.session_state["selected_finding"] = ids[0]
+    labels = {
+        fid: f"{plainify(str(f.get('headline', '')))} ({state_label(finding_state(f))})"
+        for fid, f in zip(ids, findings, strict=True)
+    }
+    left, right = st.columns([5, 7], gap="large")
+    with left:
+        chosen = st.radio(
+            "Findings, most important first",
+            ids,
+            format_func=lambda fid: labels[fid],
+            key="selected_finding",
+        )
+    finding = findings[ids.index(chosen)]
+    with right:
+        with st.container(border=True, key="evidence_panel"):
+            st.markdown(render_evidence_html(finding), unsafe_allow_html=True)
+            chart = chart_by_finding.get(str(finding.get("finding_id") or ""))
+            if chart:
+                render_dashboard_chart(chart, vega_cfg)
+            else:
+                st.caption("This finding has no chart. The checks above are its evidence.")
 
 
 def render_answers_tab(
@@ -82,19 +117,25 @@ def render_answers_tab(
         )
     elif answer:
         st.markdown(
-            f'<div class="exec-directive"><p class="dir-content">{answer}</p></div>',
+            f'<div class="exec-directive"><h2>Summary</h2>'
+            f'<p class="dir-content">{answer}</p></div>',
             unsafe_allow_html=True,
         )
 
-    # 2. Verdict. Only when audits actually ran: a "0 of 0" would claim a check
-    # that did not happen.
-    verdict = view.verdict
-    if verdict is not None:
+    # 2. Verdict, counted from the findings listed below so the number and the list always agree.
+    # Only when a check actually ran: a "0 of 0" would claim a check that did not happen.
+    headline = list(view.headline_findings)
+    states = [finding_state(f) for f in headline]
+    checked = sum(1 for x in states if x != "unchecked")
+    held = sum(1 for x in states if x == "held")
+    needs_more = sum(1 for x in states if x == "needs_more")
+    not_checked = len(states) - checked
+    if checked:
         sub_lines = []
-        if verdict.needs_more > 0:
-            sub_lines.append(
-                f"{verdict.needs_more} need{'s' if verdict.needs_more == 1 else ''} more data."
-            )
+        if needs_more:
+            sub_lines.append(f"{needs_more} need{'s' if needs_more == 1 else ''} more data.")
+        if not_checked:
+            sub_lines.append(f"{not_checked} headline finding{' was' if not_checked == 1 else 's were'} not checked.")
         if gap_val is not None:
             sub_lines.append(
                 "The model held up on new data."
@@ -102,23 +143,18 @@ def render_answers_tab(
                 else "The model may have memorised examples, see below."
             )
         st.markdown(
-            f'<div class="run-banner">{verdict.held_up} of {verdict.audited} '
-            f'finding{"s" if verdict.audited != 1 else ""} held up.'
+            f'<div class="run-banner{" ok" if needs_more == 0 else " caution"}">'
+            f'{held} of {checked} checked finding{"s" if checked != 1 else ""} held up.'
             + "".join(f'<span class="sub">{html.escape(s)}</span>' for s in sub_lines)
             + "</div>",
             unsafe_allow_html=True,
         )
 
-    # 3. Evidence: the findings and their check rows.
+    # 3. Evidence: a ranked list on the left, the selected finding with its chart and checks beside it.
     st.markdown("## What we found")
-    if view.headline_findings:
-        dash_finding_ids: set[str] = {
-            str(c["finding_id"]) for c in (dash or []) if c.get("finding_id")
-        }
-        cards_html = []
-        for i, f in enumerate(view.headline_findings):
-            cards_html.append(render_finding_card(f, dash_finding_ids, is_primary=(i == 0)))
-        st.markdown(f'<div class="bento-grid">{"".join(cards_html)}</div>', unsafe_allow_html=True)
+    if headline:
+        dash_by_finding = {str(c["finding_id"]): c for c in (dash or []) if c.get("finding_id")}
+        _evidence_inspector(headline, dash_by_finding, vega_cfg)
     else:
         # No cards to lead with: promote whatever analysis actually ran. With
         # cards present this line would only repeat the first one.
@@ -245,7 +281,7 @@ def render_answers_tab(
 <div class="kpi-gauge-card">
 <div class="kpi-gauge-label">Data Quality</div>
 <div class="kpi-ring-wrap">
-<svg width="140" height="140" viewBox="0 0 140 140" style="position: absolute; top: 0; left: 0; transform: rotate(-90deg); overflow: visible; filter: drop-shadow(0 4px 6px rgba(0,0,0,0.1));">
+<svg class="kpi-ring-svg" width="140" height="140" viewBox="0 0 140 140">
 <circle cx="70" cy="70" r="56" fill="none" stroke="var(--rule-faint)" stroke-width="12" />
 <circle cx="70" cy="70" r="56" fill="none" stroke="{radial_color}" stroke-width="12" stroke-linecap="round" stroke-dasharray="351.86" stroke-dashoffset="{351.86 - (351.86 * q / 100)}" class="anime-gauge" data-q="{q}" />
 </svg>

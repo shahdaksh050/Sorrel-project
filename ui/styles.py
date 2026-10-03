@@ -67,11 +67,22 @@ def inject_theme_css() -> None:
 
 :root {{
     {theme_vars}
-    --radius:      14px;
+    --radius:      12px;
+    --radius-control: 8px;
     --radius-pill: 999px;
 
-    --sans:    'Mukta', ui-sans-serif, 'Segoe UI', system-ui, sans-serif;
-    --heading: 'Baloo 2', 'Mukta', ui-sans-serif, sans-serif;
+    --sans:    'Public Sans', ui-sans-serif, 'Segoe UI', system-ui, sans-serif;
+    --heading: 'Bricolage Grotesque', 'Public Sans', ui-sans-serif, 'Segoe UI', system-ui, sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
+    --text-xs: .8125rem;
+    --text-sm: .9375rem;
+    --text-base: 1rem;
+    --text-lg: 1.25rem;
+    --text-xl: 1.5625rem;
+    --text-2xl: 1.9375rem;
+    --text-3xl: 2.5rem;
+    --text-4xl: 3.5rem;
+    --ease-in-out: cubic-bezier(.4, 0, .2, 1);
 }}
 
 @media (prefers-reduced-motion: reduce) {{
@@ -80,9 +91,11 @@ def inject_theme_css() -> None:
         --dur-base: 0ms !important;
         --dur-slow: 0ms !important;
     }}
-    * {{
-        animation: none !important;
-        transition: none !important;
+    *, *::before, *::after {{
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: .01ms !important;
     }}
 }}
 
@@ -109,6 +122,11 @@ header[data-testid="stHeader"] {{ background: transparent; }}
 }}
 .block-container {{ max-width: 1180px; padding-top: 2.2rem; }}
 html, body, .stApp, [class*="css"] {{ font-family: var(--sans); color: var(--ink); }}
+/* Figures line up in columns: tabular numerals on every metric and table. */
+.gauge .v, .datum .v, .kpi-ring-num, .kpi-tile .v, .trust-cell .v,
+[data-testid="stMetricValue"], [data-testid="stDataFrame"], .run-banner {{
+    font-variant-numeric: tabular-nums;
+}}
 hr {{ border: none; border-top: 1px solid var(--rule) !important; }}
 a {{ color: var(--pen) !important; text-underline-offset: 3px; font-weight: 600; }}
 
@@ -118,7 +136,7 @@ section[data-testid="stSidebar"] {{
     background-image: none;
 }}
 section[data-testid="stSidebar"] .stSlider label,
-section[data-testid="stSidebar"] label p {{ font-size: 13.5px; color: var(--graphite); font-weight: 600; }}
+section[data-testid="stSidebar"] label p {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 600; }}
 
 ::-webkit-scrollbar {{ width: 10px; height: 10px; }}
 ::-webkit-scrollbar-thumb {{ background: var(--rule); border-radius: 6px; border: 2px solid var(--stock); }}
@@ -130,22 +148,22 @@ h1, h2, h3, h4, h5, h6 {{
     letter-spacing: -.01em;
     color: var(--ink);
 }}
-h1 {{ font-weight: 800 !important; }}
-h2 {{ font-weight: 700 !important; font-size: 27px !important; line-height: 1.15; }}
-h3 {{ font-weight: 700 !important; font-size: 19px !important; }}
+h1 {{ font-weight: 700 !important; font-size: var(--text-2xl) !important; line-height: 1.08; }}
+h2 {{ font-weight: 700 !important; font-size: var(--text-xl) !important; line-height: 1.2; }}
+h3 {{ font-weight: 700 !important; font-size: var(--text-lg) !important; line-height: 1.25; }}
 /* Section headings inside a tab keep the earlier visual size at their corrected level. */
-[data-baseweb="tab-panel"] h2 {{ font-size: 21px !important; }}
-[data-baseweb="tab-panel"] h3 {{ font-size: 17px !important; }}
-[data-baseweb="tab-panel"] .exec-directive h2 {{ font-size: 27px !important; }}
-h4 {{ font-weight: 700 !important; font-size: 15.5px !important; letter-spacing: 0; }}
-.stMarkdown p, .stMarkdown li {{ font-size: 15.5px; line-height: 1.65; max-width: 72ch; }}
+[data-baseweb="tab-panel"] h2 {{ font-size: var(--text-lg) !important; }}
+[data-baseweb="tab-panel"] h3 {{ font-size: var(--text-base) !important; }}
+[data-baseweb="tab-panel"] .exec-directive h2 {{ font-size: var(--text-xl) !important; }}
+h4 {{ font-weight: 700 !important; font-size: var(--text-base) !important; letter-spacing: 0; }}
+.stMarkdown p, .stMarkdown li {{ font-size: var(--text-base); line-height: 1.6; max-width: 68ch; }}
 code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 [data-testid="stMetricValue"] {{ font-family: var(--heading) !important; font-weight: 700; color: var(--ink) !important; }}
 [data-testid="stMetricLabel"] * {{ color: var(--graphite) !important; }}
 [data-testid="stFileUploader"] section {{ background: var(--sheet) !important; border: 1px dashed var(--rule) !important; }}
 [data-testid="stFileUploader"] section * {{ color: var(--ink) !important; }}
 [data-testid="stFileUploader"] small {{ color: var(--graphite) !important; }}
-.stExpander {{ border-color: var(--rule) !important; background: var(--sheet) !important; }}
+.stExpander {{ border-color: var(--rule-faint) !important; background: var(--sheet) !important; }}
 .stExpander summary {{ color: var(--ink) !important; }}
 
 /* ── Quick Facts bar ── */
@@ -156,66 +174,71 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .datum .cell {{ padding: .7rem 1.2rem; margin-right: 0;
                border-right: 1px solid var(--rule-faint); }}
 .datum .cell:last-child {{ border-right: none; }}
-.datum .k {{ font-size: 12px; color: var(--graphite); font-weight: 600; }}
-.datum .v {{ font-family: var(--sans); font-size: 14px; font-weight: 700; color: var(--ink); margin-top: 2px; }}
+.datum .k {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 600; }}
+.datum .v {{ font-family: var(--sans); font-size: var(--text-sm); font-weight: 700; color: var(--ink); margin-top: 2px; }}
 
 /* ── Section head ── */
 .sect {{ margin: 2.2rem 0 1.1rem; border-bottom: 2px solid var(--rule);
         padding-bottom: .5rem; }}
 .sect:first-child {{ margin-top: .4rem; }}
 .sect h2, .sect h3 {{ margin: 0; padding: 0; }}
-.sect .note {{ font-size: 13px; color: var(--graphite); margin-top: .3rem; }}
+.sect .note {{ font-size: var(--text-xs); color: var(--graphite); margin-top: .3rem; }}
 
 /* ── Chart panels ── */
 .chart-title {{
-    font-family: var(--heading); font-size: 1.1rem !important; font-weight: 700 !important;
+    font-family: var(--heading); font-size: var(--text-lg) !important; font-weight: 700 !important;
     color: var(--ink); margin: 0 0 .5rem; padding: 0;
 }}
-.chart-desc {{ font-size: .9rem; color: var(--graphite); margin-top: .5rem; line-height: 1.4; }}
+.chart-desc {{ font-size: var(--text-sm); color: var(--graphite); margin-top: .5rem; line-height: 1.4; }}
 
 /* ── Primary task steps (file, question, run) ── */
 .step-head {{
     display: flex; align-items: center; gap: .55rem; margin: 1rem 0 .4rem;
-    font-family: var(--heading); font-weight: 700; font-size: 1.1rem; color: var(--ink);
+    font-family: var(--heading); font-weight: 700; font-size: var(--text-lg); color: var(--ink);
 }}
 .step-head:first-child {{ margin-top: .2rem; }}
 .step-n {{
     display: inline-grid; place-items: center; width: 1.6rem; height: 1.6rem; border-radius: 50%;
-    background: var(--pen); color: var(--sheet); font-size: .85rem; font-weight: 800;
+    background: var(--pen); color: var(--sheet); font-size: var(--text-xs); font-weight: 800;
 }}
-.file-notices {{ margin: .3rem 0 .7rem; font-size: 13px; color: var(--graphite); }}
+.file-identity {{ margin: .4rem 0 .2rem; font-size: var(--text-sm); color: var(--graphite); overflow-wrap: anywhere; }}
+.file-identity b {{ color: var(--ink); }}
+.file-notices {{ margin: .3rem 0 .7rem; font-size: var(--text-xs); color: var(--graphite); }}
 .file-notices summary {{ cursor: pointer; font-weight: 600; min-height: 24px; }}
 .file-notices ul {{ margin: .3rem 0 0; padding-left: 1.2rem; line-height: 1.5; }}
 
 /* ── Hero ── */
 .hero {{ padding: .2rem 0 1rem; }}
 .hero h1 {{
-    font-size: clamp(36px, 5.6vw, 64px);
-    font-weight: 800;
-    line-height: 1.04;
+    font-size: clamp(2rem, 3.8vw, 3.5rem);
+    font-weight: 700;
+    line-height: 1.08;
     letter-spacing: -.02em;
     margin: 0;
-    max-width: 15ch;
-    animation: riseIn 650ms cubic-bezier(.16,.84,.34,1) both;
+    max-width: 18ch;
 }}
 @keyframes riseIn {{
     from {{ opacity: 0; transform: translateY(10px); }}
     to   {{ opacity: 1; transform: translateY(0); }}
 }}
 .hero .hero-sub {{
-    color: var(--graphite); font-size: 16px; line-height: 1.6;
+    color: var(--graphite); font-size: var(--text-base); line-height: 1.6;
     margin: 1rem 0 0; max-width: 54ch;
 }}
 @media (prefers-reduced-motion: reduce) {{ .hero h1 {{ animation: none; }} }}
 .hero.compact {{ padding: .4rem 0 .6rem; }}
 .hero.compact .hero-eyebrow {{
-    font-size: 12.5px; font-weight: 700; letter-spacing: .04em; color: var(--pen); margin-bottom: .35rem;
+    font-size: var(--text-xs); font-weight: 700; letter-spacing: .04em; color: var(--pen); margin-bottom: .35rem;
 }}
 .hero.compact h1 {{
-    font-size: clamp(26px, 3.4vw, 40px); line-height: 1.12; max-width: none; letter-spacing: -.01em;
+    font-size: clamp(1.625rem, 3.4vw, 2.5rem); line-height: 1.12; max-width: none; letter-spacing: -.01em;
     animation: none; overflow-wrap: anywhere;
 }}
 .hero.compact .hero-file {{ color: var(--graphite); font-weight: 700; font-size: .62em; display: inline-block; overflow-wrap: anywhere; }}
+.workspace-welcome {{ border-bottom: 1px solid var(--rule); margin-bottom: 1.25rem; }}
+.sample-choice {{ padding: .65rem .1rem .3rem; }}
+.sample-choice .sample-title {{ color: var(--ink); font-size: var(--text-sm); font-weight: 700; }}
+.sample-choice p {{ color: var(--graphite); font-size: var(--text-xs); line-height: 1.45; margin: .2rem 0 .5rem; }}
 
 .st-key-plate {{ padding-left: 16px; margin-right: -2.8rem; }}
 /* The 3D plate is an optional extra; on a phone it would push the inputs off the first screen.
@@ -238,18 +261,18 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 
 /* ── Sidebar masthead & Theme controls ── */
 .side-brand {{ margin: .1rem 0 .8rem; }}
-.side-title {{ font-family: var(--heading); font-weight: 800; font-size: 18px;
+.side-title {{ font-family: var(--heading); font-weight: 800; font-size: var(--text-lg);
               line-height: 1.15; color: var(--ink); }}
-.side-sub {{ font-size: 12.5px; color: var(--graphite); margin-top: 4px;
+.side-sub {{ font-size: var(--text-xs); color: var(--graphite); margin-top: 4px;
             max-width: 26ch; line-height: 1.45; }}
-.side-head {{ font-family: var(--sans); font-weight: 700; font-size: 12.5px;
+.side-head {{ font-family: var(--sans); font-weight: 700; font-size: var(--text-xs);
              color: var(--graphite); margin: 1.5rem 0 .6rem; }}
 .side-head:first-of-type {{ margin-top: .5rem; }}
 
 /* ── Buttons ── */
 .stButton button, .stDownloadButton button {{
-    font-family: var(--sans); font-weight: 700; font-size: 14.5px;
-    border-radius: var(--radius-pill) !important; letter-spacing: 0;
+    font-family: var(--sans); font-weight: 700; font-size: var(--text-sm);
+    border-radius: var(--radius-control) !important; letter-spacing: 0;
     transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
 }}
 .stButton button[kind="primary"], .stDownloadButton button[kind="primary"] {{
@@ -259,8 +282,9 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .stButton button[kind="primary"]:hover:enabled,
 .stDownloadButton button[kind="primary"]:hover:enabled {{
     background: var(--pen); color: var(--sheet);
-    transform: translateY(-2px); box-shadow: var(--lift), 0 0 15px var(--glow);
+    box-shadow: var(--lift-sm);
 }}
+.stButton button:active:enabled, .stDownloadButton button:active:enabled {{ transform: scale(.98); }}
 .stButton button[kind="primary"]:disabled {{
     background: var(--sheet-alt); color: var(--graphite);
     border: 1px dashed var(--rule); box-shadow: none;
@@ -272,7 +296,6 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .stButton button[kind="secondary"]:hover:enabled,
 .stDownloadButton button[kind="secondary"]:hover:enabled {{
     background: var(--sheet-alt); color: var(--ink); border-color: var(--pen);
-    transform: translateY(-1px);
 }}
 :focus-visible {{ outline: 2px solid var(--pen) !important; outline-offset: 2px; }}
 .stButton button:focus-visible, .stDownloadButton button:focus-visible {{
@@ -294,28 +317,25 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 }}
 [data-testid="stTabs"] [role="tab"]:last-child {{ margin-right: 0 !important; }}
 [data-testid="stTabs"] [role="tab"]:focus, [data-testid="stTabs"] [role="tab"]:focus-visible {{ outline: none !important; }}
-[data-testid="stTabs"] [role="tab"] p {{ font-size: 14.5px; font-weight: 700;
+[data-testid="stTabs"] [role="tab"] p {{ font-size: var(--text-sm); font-weight: 700;
                                  color: var(--graphite) !important; letter-spacing: 0; margin: 0 !important;
                                  position: relative; z-index: 2;
                                  transition: color var(--dur-base) var(--ease-out); }}
 [data-testid="stTabs"] [role="tab"]:hover p {{ color: var(--ink) !important; }}
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ background-color: transparent !important; }}
+/* The selected tab paints itself: the label can never sit on a background that failed to render
+   (Streamlit's own highlight bar and bottom rule are hidden, their markup changes between releases). */
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ background-color: var(--pen) !important; box-shadow: var(--lift-sm); }}
 [data-testid="stTabs"] [role="tab"][aria-selected="true"] p {{ color: var(--sheet) !important; }}
-[data-testid="stTabs"] .react-aria-SelectionIndicator {{
-    height: calc(100% - 12px) !important;
-    top: 6px !important; bottom: 6px !important;
-    border-radius: var(--radius-pill) !important;
-    background-color: var(--pen) !important;
-    z-index: 0 !important;
-    box-shadow: var(--lift-sm);
-    transition: transform var(--dur-base) var(--ease-in-out), width var(--dur-base) var(--ease-in-out) !important;
-}}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"]:hover p {{ color: var(--sheet) !important; }}
+[data-testid="stTabs"] .react-aria-SelectionIndicator,
+[data-testid="stTabs"] [data-baseweb="tab-highlight"],
+[data-testid="stTabs"] [data-baseweb="tab-border"] {{ display: none !important; }}
 [data-testid="stTabs"] [data-testid="stTabPanel"] {{ padding-top: 1.5rem; }}
 
 /* ── 3D & Viewport Enhancements ── */
 /* The plate (FrontendPlan.md 2.8 keeps this one's elevation permanently) — no
    hover-lift, since the iframe is not a link or a Streamlit callback target. */
-iframe {{
+.st-key-plate iframe {{
     border-radius: var(--radius);
     border: 1px solid var(--rule) !important;
     background: transparent !important;
@@ -325,13 +345,11 @@ iframe {{
 /* ── Inputs ── */
 [data-testid="stFileUploaderDropzone"] {{
     background: var(--sheet-alt); border: 2px dashed var(--rule-strong); border-radius: var(--radius);
-    transition: all var(--dur-fast) var(--ease-out);
+    transition: border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
 }}
 [data-testid="stFileUploaderDropzone"]:hover {{
     border-color: var(--pen);
     background: var(--sheet);
-    box-shadow: var(--lift), 0 0 15px var(--glow);
-    transform: translateY(-2px);
 }}
 [data-testid="stFileUploader"] button {{
     background: var(--sheet) !important; border: 1px solid var(--rule) !important; color: var(--ink) !important;
@@ -345,7 +363,7 @@ iframe {{
 [data-testid="stSelectbox"] div[data-baseweb="select"] > div {{
     border-radius: 10px; border: 1px solid var(--rule);
     background: var(--sheet); color: var(--ink);
-    transition: all var(--dur-fast) var(--ease-out);
+    transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }}
 [data-testid="stTextInput"] input::placeholder,
 [data-testid="stTextArea"] textarea::placeholder {{
@@ -362,59 +380,19 @@ iframe {{
     border-color: var(--graphite);
 }}
 
-/* ── Skeletons & Empty States ── */
-.skeleton {{
-    background: var(--sheet-alt);
-    animation: pulse 1.5s infinite ease-in-out;
-    border-radius: var(--radius);
-}}
-@keyframes pulse {{
-    0%, 100% {{ opacity: 0.6; }}
-    50% {{ opacity: 1; }}
-}}
-.skeleton-text {{ height: 1em; width: 100%; border-radius: 4px; margin-bottom: 0.5rem; }}
-.skeleton-card {{ height: 120px; width: 100%; }}
-
-.empty-state {{
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    padding: 3rem 1.5rem; text-align: center;
-    background: var(--sheet-alt); border: 1px dashed var(--rule-strong);
-    border-radius: var(--radius); color: var(--graphite);
-}}
-.empty-state .icon {{ font-size: 32px; margin-bottom: 1rem; opacity: 0.8; }}
-.empty-state .title {{ font-family: var(--heading); font-size: 18px; color: var(--ink); font-weight: 600; margin-bottom: 0.5rem; }}
-
 
 /* ── Stat tile ── */
-@property --angle {{ syntax: '<angle>'; initial-value: 0deg; inherits: false; }}
-@keyframes spin {{ to {{ --angle: 360deg; }} }}
-
-.gauge {{ background: var(--sheet); border: 1px solid transparent;
+.gauge {{ background: var(--sheet); border: 1px solid var(--rule-faint);
          border-radius: var(--radius);
-         padding: 1rem 1.1rem; height: 100%; min-height: 96px; position: relative;
-         transition: transform var(--dur-fast) var(--ease-out); z-index: 1; }}
-.gauge::before {{
-    content: ""; position: absolute; inset: -1px; z-index: -1;
-    border-radius: var(--radius);
-    background: conic-gradient(from var(--angle), transparent 60%, var(--pen), var(--accent), transparent);
-    opacity: 0; transition: opacity var(--dur-base) var(--ease-out);
-}}
-.gauge:hover::before, .gauge:focus-within::before {{
-    opacity: 1; animation: spin 3s linear infinite;
-}}
-.gauge::after {{
-    content: ""; position: absolute; inset: 0; z-index: -1;
-    border-radius: var(--radius); background: var(--sheet);
-}}
-.gauge:hover {{ transform: translateY(-1px); }}
+         padding: 1rem 1.1rem; height: 100%; min-height: 96px; }}
 
-.gauge .v {{ font-family: var(--heading); font-size: 26px; font-weight: 700;
+.gauge .v {{ font-family: var(--heading); font-size: var(--text-xl); font-weight: 700;
             line-height: 1.1; letter-spacing: -.01em; color: var(--ink);
             overflow-wrap: anywhere; }}
-.gauge.long .v   {{ font-size: 19px; }}
-.gauge.longer .v {{ font-size: 14.5px; line-height: 1.25; }}
-.gauge .k {{ font-size: 12.5px; color: var(--graphite); margin-top: .4rem; font-weight: 600; }}
-.gauge .s {{ font-size: 11.5px; color: var(--graphite); margin-top: 2px; }}
+.gauge.long .v   {{ font-size: var(--text-lg); }}
+.gauge.longer .v {{ font-size: var(--text-sm); line-height: 1.25; }}
+.gauge .k {{ font-size: var(--text-xs); color: var(--graphite); margin-top: .4rem; font-weight: 600; }}
+.gauge .s {{ font-size: var(--text-xs); color: var(--graphite); margin-top: 2px; }}
 .gauge.flag {{ border-color: var(--risk); background: color-mix(in srgb, var(--risk) 8%, var(--sheet)); }}
 .gauge.flag::after {{ background: color-mix(in srgb, var(--risk) 8%, var(--sheet)); }}
 .gauge.flag .v {{ color: var(--risk); }}
@@ -429,15 +407,15 @@ iframe {{
     box-shadow: var(--lift-sm);
 }}
 .defect-stamp .stamp-tag {{
-    font-family: var(--sans); font-size: 12px; font-weight: 700;
+    font-family: var(--sans); font-size: var(--text-xs); font-weight: 700;
     color: var(--risk); display: block; margin-bottom: 4px;
 }}
 .defect-stamp .stamp-title {{
-    font-family: var(--heading); font-size: 18px; font-weight: 800; color: var(--risk);
+    font-family: var(--heading); font-size: var(--text-lg); font-weight: 800; color: var(--risk);
     margin-bottom: 6px;
 }}
 .defect-stamp .stamp-desc {{
-    font-size: 14.5px; line-height: 1.58; color: var(--ink); max-width: 68ch;
+    font-size: var(--text-sm); line-height: 1.58; color: var(--ink); max-width: 68ch;
 }}
 
 .cert-stamp {{
@@ -449,23 +427,23 @@ iframe {{
     box-shadow: var(--lift-sm);
 }}
 .cert-stamp .stamp-tag {{
-    font-family: var(--sans); font-size: 12px; font-weight: 700;
+    font-family: var(--sans); font-size: var(--text-xs); font-weight: 700;
     color: var(--pen); display: block; margin-bottom: 4px;
 }}
 .cert-stamp .stamp-title {{
-    font-family: var(--heading); font-size: 18px; font-weight: 800; color: var(--pen);
+    font-family: var(--heading); font-size: var(--text-lg); font-weight: 800; color: var(--pen);
     margin-bottom: 6px;
 }}
 .cert-stamp .stamp-desc {{
-    font-size: 14.5px; line-height: 1.58; color: var(--ink); max-width: 68ch;
+    font-size: var(--text-sm); line-height: 1.58; color: var(--ink); max-width: 68ch;
 }}
 
 /* ── Finding cards (Answers tab, IMPROVEMENTS.md 7.15) ── */
 .finding-card {{
-    border-left: 4px solid var(--pen); margin: 0 0 .9rem;
+    margin: 0 0 .9rem;
 }}
 .finding-headline {{
-    font-family: var(--heading); font-size: 17px; font-weight: 700;
+    font-family: var(--heading); font-size: var(--text-lg); font-weight: 700;
     color: var(--ink); line-height: 1.4;
 }}
 
@@ -475,24 +453,24 @@ iframe {{
     background: var(--sheet); border-radius: var(--radius);
     padding: .9rem 1.2rem; flex: 1; min-width: 160px;
 }}
-.trust-cell .k {{ font-size: 12px; color: var(--graphite); font-weight: 600;
+.trust-cell .k {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 600;
                   text-transform: uppercase; letter-spacing: .5px; }}
-.trust-cell .v {{ font-family: var(--heading); font-size: 24px; font-weight: 800;
+.trust-cell .v {{ font-family: var(--heading); font-size: var(--text-xl); font-weight: 800;
                   color: var(--ink); margin-top: .3rem; }}
 
 /* ── How the agent read the data (Answers tab) ── */
 .du {{
     background: var(--sheet); border-radius: var(--radius);
     padding: .9rem 1.2rem; margin: 0 0 1.5rem;
-    font-size: 14.5px; line-height: 1.6; color: var(--ink); max-width: 74ch;
+    font-size: var(--text-sm); line-height: 1.6; color: var(--ink); max-width: 74ch;
 }}
-.du .k {{ font-size: 12px; color: var(--graphite); font-weight: 600;
+.du .k {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 600;
           text-transform: uppercase; letter-spacing: .5px; margin-right: .4rem; }}
 .du .note {{ color: var(--graphite); }}
 
 /* ── Sandbox isolation badge (Details tab) ── */
 .iso-badge {{
-    display: inline-block; font-family: var(--sans); font-size: 12px; font-weight: 700;
+    display: inline-block; font-family: var(--sans); font-size: var(--text-xs); font-weight: 700;
     padding: 3px 8px; border-radius: 4px; margin: 0 0 .75rem;
 }}
 .iso-badge.ok {{ color: var(--positive); background: color-mix(in srgb, var(--positive) 15%, transparent); }}
@@ -506,28 +484,28 @@ iframe {{
     flex: 1; min-width: 250px; display: flex; flex-direction: column; align-items: center;
     justify-content: center; position: relative; overflow: hidden;
 }}
-.kpi-gauge-label {{ font-size: 14px; color: var(--graphite); font-weight: 700;
+.kpi-gauge-label {{ font-size: var(--text-sm); color: var(--graphite); font-weight: 700;
                     margin-bottom: 1.5rem; text-transform: uppercase; letter-spacing: 1px; }}
 .kpi-ring-wrap {{ position: relative; width: 140px; height: 140px;
                   display: flex; align-items: center; justify-content: center; }}
 .kpi-ring-value {{ display: flex; flex-direction: column; align-items: center;
                    margin-top: 6px; z-index: 10; }}
-.kpi-ring-num {{ font-family: var(--heading); font-size: 38px; font-weight: 800;
+.kpi-ring-num {{ font-family: var(--heading); font-size: var(--text-3xl); font-weight: 800;
                  color: var(--ink); line-height: 1; }}
-.kpi-ring-sub {{ font-size: 11px; font-weight: 700; color: var(--graphite);
+.kpi-ring-sub {{ font-size: var(--text-xs); font-weight: 700; color: var(--graphite);
                  text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }}
 .kpi-tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
               gap: 1rem; flex: 2; min-width: 300px; }}
 .kpi-tile {{ background: var(--sheet); padding: 1.5rem; border-radius: var(--radius);
              display: flex; flex-direction: column; justify-content: center; }}
 .kpi-tile.flagged {{ border: 1px solid var(--risk); }}
-.kpi-tile .k {{ font-size: 12px; color: var(--graphite); font-weight: 600;
+.kpi-tile .k {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 600;
                text-transform: uppercase; letter-spacing: .5px; }}
-.kpi-tile .v {{ font-family: var(--heading); font-size: 24px; font-weight: 700;
+.kpi-tile .v {{ font-family: var(--heading); font-size: var(--text-xl); font-weight: 700;
                color: var(--ink); margin-top: 0.5rem; }}
-.kpi-tile .v.big {{ font-size: 32px; font-weight: 800; margin-top: 0.2rem; }}
+.kpi-tile .v.big {{ font-size: var(--text-2xl); font-weight: 800; margin-top: 0.2rem; }}
 .kpi-tile .v.risk {{ color: var(--risk); }}
-.kpi-tile .s {{ font-size: 12px; color: var(--graphite); margin-top: 4px; }}
+.kpi-tile .s {{ font-size: var(--text-xs); color: var(--graphite); margin-top: 4px; }}
 
 /* ── Team grid & cards ── */
 .agent-grid {{
@@ -599,12 +577,12 @@ iframe {{
 .agent-role {{
     font-family: var(--heading);
     font-weight: 700;
-    font-size: 14.5px;
+    font-size: var(--text-sm);
     color: var(--ink);
 }}
 .agent-badge {{
     font-family: var(--sans);
-    font-size: 12px;
+    font-size: var(--text-xs);
     font-weight: 700;
     padding: 2px 8px;
     border-radius: 999px;
@@ -623,51 +601,35 @@ iframe {{
 }}
 .bento-card, .finding-card {{
     background: var(--sheet);
+    border: 1px solid var(--rule-faint);
     border-radius: var(--radius);
     padding: 1.2rem;
-    position: relative;
-    overflow: hidden;
 }}
-.bento-card::before, .finding-card::before {{
-    content: "";
-    position: absolute;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: radial-gradient(
-        600px circle at var(--mx, -9999px) var(--my, -9999px),
-        color-mix(in srgb, var(--pen) 8%, transparent),
-        transparent 40%
-    );
-    z-index: 0;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity var(--dur-base) var(--ease-out);
-}}
-.bento-card:hover::before, .finding-card:hover::before {{
-    opacity: 1;
-}}
-.bento-card.flagged::before, .finding-card.flagged::before {{
-    background: radial-gradient(
-        600px circle at var(--mx, -9999px) var(--my, -9999px),
-        color-mix(in srgb, var(--risk) 10%, transparent),
-        transparent 40%
-    );
-}}
-.bento-card > *, .finding-card > * {{
-    position: relative;
-    z-index: 1;
-}}
-.bento-card.full-width {{
+.bento-card.full-width, .finding-card.full-width {{
     grid-column: 1 / -1;
 }}
+.finding-card.flagged {{ border-color: var(--risk); }}
+.finding-detail {{ color: var(--graphite); font-size: var(--text-xs); line-height: 1.5; margin-top: .4rem; }}
+.finding-chart-note {{ color: var(--pen); font-size: var(--text-xs); font-weight: 700; margin-top: .55rem; }}
+.agent-card {{ position: relative; overflow: hidden; display: flex; flex-direction: column; }}
+.agent-details {{ padding: 1rem; cursor: pointer; width: 100%; }}
+.agent-summary {{ list-style: none; display: flex; flex-direction: column; }}
+.agent-header {{ display: flex; justify-content: space-between; align-items: center; width: 100%; }}
+.agent-role {{ font-weight: 700; color: var(--ink); display: flex; align-items: center; gap: 8px; }}
+.agent-more {{ margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed var(--rule); font-size: var(--text-sm); }}
+.agent-more-rule {{ margin-bottom: .5rem; }}
+.agent-more-found {{ color: var(--pen); font-weight: 600; }}
+.kpi-ring-svg {{ position: absolute; top: 0; left: 0; transform: rotate(-90deg); overflow: visible;
+                filter: drop-shadow(0 4px 6px color-mix(in srgb, var(--ink) 12%, transparent)); }}
 .agent-desc {{
-    font-size: 12.5px;
+    font-size: var(--text-xs);
     line-height: 1.5;
     color: var(--graphite);
     margin: 5px 0 9px;
 }}
 .agent-metric {{
     font-family: var(--sans);
-    font-size: 11.5px;
+    font-size: var(--text-xs);
     font-weight: 600;
     color: var(--graphite);
     background: var(--sheet-alt);
@@ -698,13 +660,13 @@ iframe {{
 }}
 .handoff-meta {{
     font-family: var(--sans);
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--pen);
     font-weight: 700;
     margin-bottom: 2px;
 }}
 .handoff-text {{
-    font-size: 14.5px;
+    font-size: var(--text-sm);
     line-height: 1.55;
     color: var(--ink);
 }}
@@ -712,34 +674,34 @@ iframe {{
 /* ── Executive Directive ── */
 .exec-directive {{
     background: var(--sheet);
-    border-left: 4px solid var(--pen);
+    border: 1px solid var(--rule-faint);
     border-radius: var(--radius);
     padding: 1.3rem 1.5rem;
     margin-bottom: 1.5rem;
 }}
 .exec-directive .dir-label {{
     font-family: var(--sans);
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--pen);
     font-weight: 700;
     margin-bottom: 5px;
 }}
 .exec-directive .dir-content {{
-    font-size: 15.5px;
+    font-size: var(--text-base);
     line-height: 1.65;
     color: var(--ink);
 }}
 
 /* ── Cards ── */
 [data-testid="stExpander"] {{
-    background: var(--sheet) !important; border: 1px solid var(--rule) !important;
-    border-radius: var(--radius); box-shadow: var(--lift-sm);
+    background: var(--sheet) !important; border: 1px solid var(--rule-faint) !important;
+    border-radius: var(--radius); box-shadow: none;
 }}
-[data-testid="stExpander"] summary {{ font-weight: 700; font-size: 14.5px; color: var(--ink) !important; }}
+[data-testid="stExpander"] summary {{ font-weight: 700; font-size: var(--text-sm); color: var(--ink) !important; }}
 [data-testid="stExpander"] summary:hover {{ color: var(--pen) !important; }}
 [data-testid="stCode"] pre, pre {{
     background: var(--code-bg) !important; border: 1px solid var(--rule);
-    border-radius: 10px; font-size: 12.5px; color: var(--ink) !important;
+    border-radius: 10px; font-size: var(--text-xs); color: var(--ink) !important;
 }}
 [data-testid="stAlert"] {{ border-radius: var(--radius); }}
 [data-testid="stAlertContainer"] {{
@@ -747,7 +709,7 @@ iframe {{
     border-left: 4px solid var(--graphite);
     padding: .6rem .8rem .6rem 1.1rem; color: var(--ink) !important;
 }}
-[data-testid="stAlertContainer"] p {{ color: inherit !important; font-size: 14.5px; }}
+[data-testid="stAlertContainer"] p {{ color: inherit !important; font-size: var(--text-sm); }}
 [data-testid="stAlertContainer"] svg {{ fill: currentColor; }}
 [data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) {{
     border-left-color: var(--positive); color: var(--positive) !important;
@@ -763,18 +725,18 @@ iframe {{
 /* ── Steps list ── */
 .sc {{ display: flex; align-items: center; gap: 12px;
       padding: .6rem .2rem; border-bottom: 1px solid var(--rule-faint);
-      font-size: 14.5px; color: var(--graphite); }}
-.sc .sc-num {{ font-family: var(--sans); font-size: 12px; font-weight: 700; color: var(--ink);
+      font-size: var(--text-sm); color: var(--graphite); }}
+.sc .sc-num {{ font-family: var(--sans); font-size: var(--text-xs); font-weight: 700; color: var(--ink);
               flex: none; width: 1.8em; height: 1.8em; display: flex; align-items: center;
               justify-content: center; border-radius: 50%; background: var(--rule); border: 1px solid transparent; }}
 .sc .nm {{ color: var(--ink); font-weight: 600; }}
-.sc .detail {{ margin-left: auto; font-size: 12px;
+.sc .detail {{ margin-left: auto; font-size: var(--text-xs);
               color: var(--graphite); text-align: right; padding-left: 1rem; }}
 .sc.done  .sc-num {{ background: var(--pen); color: var(--sheet); }}
 .sc.active .sc-num {{ background: var(--pen); color: var(--sheet); }}
 .sc.active {{ background: color-mix(in srgb, var(--pen) 6%, transparent); border-radius: 10px; }}
 .sc.active .nm::after {{ content: " — working"; font-weight: 400;
-                        color: var(--pen); font-size: 12.5px; }}
+                        color: var(--pen); font-size: var(--text-xs); }}
 .sc.skip  .sc-num {{ background: var(--sheet-alt); color: var(--graphite); border: 1px solid var(--rule); }}
 .sc.skip .nm {{ color: var(--graphite); font-weight: 400; }}
 .sc.err   .sc-num {{ background: var(--risk); }}
@@ -792,14 +754,14 @@ iframe {{
 .ic, .rc, .wc {{
     border-left: 3px solid var(--rule); border-radius: 0 10px 10px 0;
     padding: .5rem .8rem .5rem 1rem;
-    margin: 0 0 .75rem; font-size: 15px; line-height: 1.6; max-width: 74ch;
+    margin: 0 0 .75rem; font-size: var(--text-sm); line-height: 1.6; max-width: 74ch;
     color: var(--ink); background: var(--sheet-alt);
 }}
 .ic {{ border-left-color: var(--graphite); }}
 .rc {{ border-left-color: var(--pen); }}
 .wc {{ border-left-color: var(--risk); color: var(--risk); background: color-mix(in srgb, var(--risk) 6%, var(--sheet-alt)); }}
 .ic .mk, .rc .mk, .wc .mk {{
-    font-family: var(--sans); font-size: 11.5px; font-weight: 700; color: var(--graphite);
+    font-family: var(--sans); font-size: var(--text-xs); font-weight: 700; color: var(--graphite);
     display: block; margin-bottom: 2px;
 }}
 .rc .mk {{ color: var(--pen); }}
@@ -807,24 +769,30 @@ iframe {{
 
 .reason {{ background: var(--sheet);
           border-radius: var(--radius); padding: 1.3rem 1.5rem;
-          font-size: 15.5px; color: var(--ink); line-height: 1.72; max-width: 72ch; }}
+          font-size: var(--text-base); color: var(--ink); line-height: 1.72; max-width: 72ch; }}
 
 .run-banner {{ border-radius: var(--radius);
               background: color-mix(in srgb, var(--pen) 10%, var(--sheet)); padding: .8rem 1.1rem;
-              color: var(--pen); font-size: 14.5px; font-weight: 700;
+              color: var(--pen); font-size: var(--text-sm); font-weight: 700;
               margin: .4rem 0 1.2rem; }}
+.run-banner.ok {{ background: color-mix(in srgb, var(--positive) 10%, var(--sheet)); color: var(--positive); }}
+.run-banner.caution {{ background: color-mix(in srgb, var(--accent) 12%, var(--sheet)); color: var(--ink); }}
 .run-banner .sub {{ display: block; font-weight: 500; color: var(--graphite);
-                   font-size: 13px; margin-top: 2px; }}
+                   font-size: var(--text-xs); margin-top: 2px; }}
 
-.empty {{ padding: 3rem 0 3.5rem; max-width: 58ch; }}
-.empty h2 {{ font-size: clamp(28px, 4vw, 42px); font-family: var(--heading);
-            font-weight: 800; line-height: 1.05;
-            margin: 0 0 1rem; }}
-.empty p {{ color: var(--graphite); font-size: 16px; line-height: 1.62; margin: 0; }}
-.empty .steps {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2rem; }}
-.empty .steps div {{ background: var(--sheet); border: 1px solid var(--rule);
-                     border-radius: var(--radius-pill); padding: .4rem 1rem;
-                     font-size: 13px; font-weight: 600; color: var(--graphite); }}
+.empty {{ padding: 1.5rem 0 2.5rem; max-width: 62ch; }}
+.empty h2 {{ font-size: var(--text-xl); font-family: var(--heading);
+            font-weight: 700; line-height: 1.15; margin: 0 0 .75rem; }}
+.empty p {{ color: var(--graphite); font-size: var(--text-base); line-height: 1.6; margin: 0; }}
+.empty .next-steps {{ margin: 0 0 1rem; padding-left: 1.25rem; color: var(--ink);
+                      font-size: var(--text-base); line-height: 1.6; }}
+.empty .next-steps li {{ margin-bottom: .3rem; }}
+
+/* ── Top bar ── */
+.topbar-name {{ font-family: var(--heading); font-weight: 700; font-size: var(--text-base); color: var(--ink); }}
+.topbar-state {{ color: var(--graphite); font-size: var(--text-sm); overflow-wrap: anywhere; }}
+.topbar-state b {{ color: var(--ink); font-weight: 700; }}
+.topbar-hint {{ display: block; font-size: var(--text-xs); }}
 
 @media (max-width: 600px) {{
     .datum {{ flex-direction: column; }}
@@ -836,7 +804,7 @@ iframe {{
 
 /* ── Audited-entry check row (FrontendPlan.md section 5) ── */
 .check-row {{ display: flex; flex-wrap: wrap; gap: .9rem; margin-top: .6rem; }}
-.check {{ font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }}
+.check {{ font-size: var(--text-xs); font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }}
 .check.ok {{ color: var(--positive); }}
 .check.risk {{ color: var(--risk); }}
 .check.note {{ color: var(--graphite); font-weight: 500; }}
@@ -856,26 +824,26 @@ iframe {{
 /* ── "How we got here" (Details): hairline-ruled blocks, tokens only ── */
 .how-we-got-here {{ margin: 0 0 2rem; max-width: 1100px; }}
 .how-title {{ font-family: var(--heading); margin: 0 0 .25rem; }}
-.how-lede {{ color: var(--graphite); font-size: 14.5px; line-height: 1.55; margin: 0 0 1rem; }}
+.how-lede {{ color: var(--graphite); font-size: var(--text-sm); line-height: 1.55; margin: 0 0 1rem; }}
 .how-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 2.5rem; }}
 .how-block {{ border-top: 1px solid var(--rule); padding: .9rem 0 1.1rem; min-width: 0; }}
-.how-h {{ font-size: 15px; font-weight: 700; margin: 0 0 .15rem; color: var(--ink); }}
-.how-note {{ font-size: 13px; color: var(--graphite); line-height: 1.5; margin: 0 0 .6rem; }}
-.how-lead {{ font-size: 15px; font-weight: 600; color: var(--ink); line-height: 1.5; margin: 0 0 .4rem; }}
-.how-text {{ font-size: 14.5px; color: var(--ink); line-height: 1.6; margin: 0 0 .5rem; overflow-wrap: anywhere; }}
-.how-sub {{ font-size: 12.5px; font-weight: 700; color: var(--graphite); margin: .6rem 0 .2rem; }}
-.how-list {{ margin: 0 0 .4rem; padding-left: 1.1rem; font-size: 14px; line-height: 1.55; color: var(--ink); overflow-wrap: anywhere; }}
-.how-more {{ font-size: 13px; color: var(--graphite); margin: 0; }}
-.how-tag {{ font-size: 12px; font-weight: 700; color: var(--graphite); }}
+.how-h {{ font-size: var(--text-sm); font-weight: 700; margin: 0 0 .15rem; color: var(--ink); }}
+.how-note {{ font-size: var(--text-xs); color: var(--graphite); line-height: 1.5; margin: 0 0 .6rem; }}
+.how-lead {{ font-size: var(--text-sm); font-weight: 600; color: var(--ink); line-height: 1.5; margin: 0 0 .4rem; }}
+.how-text {{ font-size: var(--text-sm); color: var(--ink); line-height: 1.6; margin: 0 0 .5rem; overflow-wrap: anywhere; }}
+.how-sub {{ font-size: var(--text-xs); font-weight: 700; color: var(--graphite); margin: .6rem 0 .2rem; }}
+.how-list {{ margin: 0 0 .4rem; padding-left: 1.1rem; font-size: var(--text-sm); line-height: 1.55; color: var(--ink); overflow-wrap: anywhere; }}
+.how-more {{ font-size: var(--text-xs); color: var(--graphite); margin: 0; }}
+.how-tag {{ font-size: var(--text-xs); font-weight: 700; color: var(--graphite); }}
 .how-tag.supported {{ color: var(--positive); }}
 .how-tag.refuted {{ color: var(--risk); }}
 /* ── "Found so far, may change" (live run): hairline block, tokens only ── */
 .prov {{ border-top: 1px solid var(--rule); padding: .8rem 0 .4rem; margin: .8rem 0; max-width: 100%; }}
-.prov-h {{ font-size: 15px; font-weight: 700; margin: 0 0 .15rem; color: var(--ink); }}
-.prov-note {{ font-size: 13px; color: var(--graphite); line-height: 1.5; margin: 0 0 1rem; }}
-.prov-list {{ margin: 0; padding-left: 1.1rem; font-size: 14px; line-height: 1.55; color: var(--ink); overflow-wrap: anywhere; }}
-.prov-kind {{ font-size: 12px; font-weight: 700; color: var(--graphite); display: block; margin-bottom: 4px; }}
-.prov-count {{ font-size: 13px; color: var(--graphite); margin: .4rem 0 0; }}
+.prov-h {{ font-size: var(--text-sm); font-weight: 700; margin: 0 0 .15rem; color: var(--ink); }}
+.prov-note {{ font-size: var(--text-xs); color: var(--graphite); line-height: 1.5; margin: 0 0 1rem; }}
+.prov-list {{ margin: 0; padding-left: 1.1rem; font-size: var(--text-sm); line-height: 1.55; color: var(--ink); overflow-wrap: anywhere; }}
+.prov-kind {{ font-size: var(--text-xs); font-weight: 700; color: var(--graphite); display: block; margin-bottom: 4px; }}
+.prov-count {{ font-size: var(--text-xs); color: var(--graphite); margin: .4rem 0 0; }}
 /* ── Native widget text follows the page tokens ──
    Streamlit's native theme is fixed (.streamlit/config.toml, Day palette), so in
    Night mode its own text colours would be dark on a dark page. These rules take
@@ -895,5 +863,44 @@ iframe {{
 [data-testid="stTextInput"] button, [data-testid="stNumberInput"] button {{ color: var(--ink) !important; }}
 [data-testid="stNumberInput"] input {{ background: var(--sheet) !important; color: var(--ink) !important; }}
 [data-testid="stNumberInput"] button {{ background: var(--sheet) !important; color: var(--ink) !important; }}
+/* ── Evidence inspector (Answers) ── */
+.st-key-selected_finding [role="radiogroup"] {{ gap: 0; }}
+.st-key-selected_finding [role="radiogroup"] > label {{
+    padding: .7rem .25rem; border-bottom: 1px solid var(--rule-faint); margin: 0; align-items: flex-start;
+}}
+.st-key-selected_finding [role="radiogroup"] > label:last-child {{ border-bottom: none; }}
+.st-key-selected_finding [role="radiogroup"] p {{ font-size: var(--text-sm); line-height: 1.45; }}
+.st-key-evidence_panel {{ background: var(--sheet); border-radius: var(--radius); }}
+.evidence-head {{ display: flex; flex-direction: column; align-items: flex-start; gap: .5rem; margin-bottom: .4rem; }}
+.evidence-title {{ font-family: var(--heading); font-size: var(--text-lg); font-weight: 700; line-height: 1.25; margin: 0; padding: 0; }}
+.evidence-detail {{ color: var(--graphite); font-size: var(--text-sm); line-height: 1.55; max-width: 68ch; margin: .4rem 0 .6rem; }}
+.evidence-none, .evidence-source {{ color: var(--graphite); font-size: var(--text-xs); margin: .4rem 0; }}
+.evidence-caveats {{ font-size: var(--text-sm); color: var(--ink); margin: .6rem 0; }}
+.evidence-caveats ul {{ margin: .25rem 0 0; padding-left: 1.2rem; color: var(--graphite); line-height: 1.5; }}
+.verdict-mark {{
+    display: inline-flex; align-items: center; font-size: var(--text-xs); font-weight: 700;
+    padding: .15rem .65rem; border-radius: var(--radius-pill); border: 1px solid currentColor; background: var(--sheet);
+}}
+.verdict-mark.held {{ color: var(--positive); }}
+.verdict-mark.needs_more {{ color: var(--risk-text); }}
+.verdict-mark.unchecked {{ color: var(--graphite); border-style: dashed; }}
+
+/* ── Accessibility states ── */
+/* Touch: every control is at least 44 px tall. */
+@media (pointer: coarse) {{
+    .stButton button, .stDownloadButton button, [data-testid="stTabs"] [role="tab"],
+    [data-testid="stExpander"] summary, [data-testid="stButtonGroup"] button {{ min-height: 44px; }}
+}}
+/* Higher contrast: heavier outlines, no tinted surfaces standing in for borders. */
+@media (prefers-contrast: more) {{
+    :focus-visible {{ outline-width: 3px !important; }}
+    .finding-card, .bento-card, .gauge, .exec-directive, [data-testid="stExpander"] {{ border-color: var(--rule-strong) !important; }}
+    .check, .run-banner {{ border: 1px solid currentColor; }}
+}}
+/* Reduced transparency: nothing translucent sits behind text. */
+@media (prefers-reduced-transparency: reduce) {{
+    .finding-card, .bento-card, .run-banner, .check, .agent-badge {{ background: var(--sheet) !important; }}
+    * {{ backdrop-filter: none !important; }}
+}}
 </style>
 """, unsafe_allow_html=True)

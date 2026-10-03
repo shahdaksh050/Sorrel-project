@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 import streamlit as st
@@ -126,26 +127,94 @@ def render_datum(cells: list[tuple[str, str]]) -> str:
 _CHECK_CSS: dict[str, str] = {"pass": "ok", "fail": "risk", "neutral": "note"}
 
 
+_LONG_DECIMAL = re.compile(r"(?<![\w.])-?\d+\.\d{3,}(?![\w.])")
+
+
+def round_for_reading(text: str) -> str:
+    """Round long decimals in prose for display (1,201.1968 reads as 1,201). The finding keeps its original values.
+
+    Magnitude sets the precision: 100 and above shows no decimals, 10 and above one, 1 and above
+    two, below 1 three. Values under 0.001 (p-values) are left alone so they are not rounded to zero.
+    """
+    def _round(match: re.Match[str]) -> str:
+        value = float(match.group(0))
+        magnitude = abs(value)
+        if 0 < magnitude < 0.001:
+            return match.group(0)
+        if magnitude >= 100:
+            return f"{value:,.0f}"
+        if magnitude >= 10:
+            return f"{value:.1f}"
+        return f"{value:.2f}" if magnitude >= 1 else f"{value:.3f}"
+
+    return _LONG_DECIMAL.sub(_round, text)
+
+
+FindingState = Literal["held", "needs_more", "unchecked"]
+
+#: The three verdicts. Each carries a word and a different shape, so colour is never the only cue.
+_STATE_WORD: dict[FindingState, str] = {
+    "held": "Held up", "needs_more": "Needs more data", "unchecked": "Not checked",
+}
+_STATE_MARK: dict[FindingState, str] = {"held": "●", "needs_more": "⊗", "unchecked": "○"}
+
+
+def finding_state(finding: dict[str, Any]) -> FindingState:
+    """Held up, needs more data, or not checked, from the finding's own check marks.
+
+    A check that did not run leaves no mark, and a finding whose only mark is the neutral
+    "pattern, not proof" note was not checked either: absence of a check is never a failure.
+    """
+    marks = [c for c in audited_checks(finding.get("evidence")) if c.state != "neutral"]
+    if not marks:
+        return "unchecked"
+    return "needs_more" if any(c.state == "fail" for c in marks) else "held"
+
+
+def state_label(state: FindingState) -> str:
+    """Shape and word for a verdict, as plain text (for radio options and captions)."""
+    return f"{_STATE_MARK[state]} {_STATE_WORD[state]}"
+
+
+def render_evidence_html(finding: dict[str, Any]) -> str:
+    """The selected finding's evidence: headline, verdict, plain detail, checks that ran, caveats, source."""
+    state = finding_state(finding)
+    headline = html.escape(plainify(str(finding.get("headline", ""))))
+    detail = round_for_reading(plainify(str(finding.get("detail") or "")))
+    checks = audited_checks(finding.get("evidence"))
+    marks = "".join(
+        f'<span class="check {_CHECK_CSS[c.state]}">{GLYPH[c.state]} {html.escape(c.label)}</span>' for c in checks
+    )
+    caveats = "".join(
+        f"<li>{html.escape(plainify(str(c)))}</li>" for c in (finding.get("caveats") or [])[:4]
+    )
+    source = str(finding.get("source_tool") or "").replace("_", " ")
+    return (
+        f'<div class="evidence-head"><span class="verdict-mark {state}">{html.escape(state_label(state))}</span>'
+        f'<h3 class="evidence-title">{headline}</h3></div>'
+        + (f'<p class="evidence-detail">{html.escape(detail)}</p>' if detail else "")
+        + (f'<div class="check-row">{marks}</div>' if marks else '<p class="evidence-none">No check ran on this finding.</p>')
+        + (f'<div class="evidence-caveats"><b>Be careful</b><ul>{caveats}</ul></div>' if caveats else "")
+        + (f'<p class="evidence-source">Found by: {html.escape(source)}.</p>' if source else "")
+    )
+
+
 def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str], is_primary: bool = False) -> str:
     """One sentence card for a top-ranked Finding, with its audited-entry check row."""
     headline = html.escape(plainify(str(finding.get("headline", ""))))
     detail = finding.get("detail")
     caveats = finding.get("caveats") or []
-    sub_text = (
+    sub_text = round_for_reading(
         plainify(str(detail))
         if detail
         else plainify(str(caveats[0]))
         if caveats
         else describe_uncertainty(finding) or ""
     )
-    sub_html = (
-        f'<div style="font-size:13px;color:var(--graphite);margin-top:4px;">{html.escape(sub_text)}</div>'
-        if sub_text
-        else ""
-    )
+    sub_html = f'<div class="finding-detail">{html.escape(sub_text)}</div>' if sub_text else ""
     xref = ""
     if finding.get("finding_id") and finding["finding_id"] in chart_finding_ids:
-        xref = '<div style="font-size:12px;color:var(--pen);margin-top:6px;font-weight:600;">→ see chart in the Charts tab</div>'
+        xref = '<div class="finding-chart-note">Chart available in the Charts tab.</div>'
     checks = audited_checks(finding.get("evidence"))
     check_html = ""
     is_flagged = False
@@ -335,19 +404,19 @@ def render_agent_grid(
 
         cards_html.append(
             f"""
-        <div class="{card_cls}" style="position: relative; overflow: hidden; display: flex; flex-direction: column;">
-            <details style="padding: 1rem; cursor: pointer; width: 100%;">
-                <summary style="list-style: none; display: flex; flex-direction: column; outline: none;">
-                    <div class="agent-header" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                        <span class="agent-role" style="font-weight: 700; color: var(--ink); display: flex; align-items: center; gap: 8px;">{ag['icon']} {ag['name']}</span>
+        <div class="{card_cls} agent-card">
+            <details class="agent-details">
+                <summary class="agent-summary">
+                    <div class="agent-header">
+                        <span class="agent-role">{ag['icon']} {ag['name']}</span>
                         <span class="agent-badge {badge_cls}">{badge_txt}</span>
                     </div>
-                    <div class="agent-desc" style="margin-top: 0.5rem; color: var(--graphite); font-size: 0.95rem;">{ag['desc']}</div>
-                    <div class="agent-metric" style="margin-top: 0.5rem; font-size: 0.85rem; color: var(--graphite); font-weight: 600;">Role: {ag['role']} · Tool: {ag['tool']}</div>
+                    <div class="agent-desc">{ag['desc']}</div>
+                    <div class="agent-metric">Role: {ag['role']}. Tool: {ag['tool']}</div>
                 </summary>
-                <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed var(--rule); font-size: 0.95rem;">
-                    <div style="margin-bottom: 0.5rem;"><strong>Rule:</strong> {ag['desc']}</div>
-                    <div style="color: var(--pen); font-weight: 600;"><strong>Found:</strong> {html.escape(str(agent_output))}</div>
+                <div class="agent-more">
+                    <div class="agent-more-rule"><strong>Rule:</strong> {ag['desc']}</div>
+                    <div class="agent-more-found"><strong>Found:</strong> {html.escape(str(agent_output))}</div>
                 </div>
             </details>
         </div>
@@ -514,13 +583,18 @@ def _render_chart_data(spec: dict[str, Any]) -> None:
         st.dataframe(safe_df(pd.DataFrame(shown)), width="stretch")
 
 
-def render_dashboard_chart(ch: dict[str, Any], vega_cfg: dict[str, Any]) -> None:
-    """Render one dashboard panel (title, chart, caption/description)."""
+def render_dashboard_chart(ch: dict[str, Any], vega_cfg: dict[str, Any], finding_note: str = "") -> None:
+    """Render one dashboard panel (title, chart, caption/description).
+
+    `finding_note` says which finding the chart supports and its verdict, when there is one.
+    """
     with st.container(border=True):
         st.markdown(
             f'<h4 class="chart-title">{html.escape(str(ch.get("title", "")))}</h4>',
             unsafe_allow_html=True,
         )
+        if finding_note:
+            st.caption(finding_note)
         spec = dict(ch.get("spec", {}))
         spec.setdefault("background", "transparent")
         spec.setdefault("config", vega_cfg)

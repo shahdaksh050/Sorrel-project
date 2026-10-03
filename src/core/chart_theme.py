@@ -120,8 +120,8 @@ CATEGORY_RANGE_NIGHT: list[str] = [
     "#c86e92",   # 6. Rose
 ]
 
-FONT_HEADING = "Baloo 2, 'Mukta', sans-serif"
-FONT_BODY = "Mukta, 'Segoe UI', sans-serif"
+FONT_HEADING = "Bricolage Grotesque, 'Public Sans', sans-serif"
+FONT_BODY = "Public Sans, 'Segoe UI', sans-serif"
 
 
 #: Round 8 (8.4) — Vega-Lite format-string fragments keyed by `unit_hint`

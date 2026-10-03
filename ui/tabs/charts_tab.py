@@ -7,28 +7,42 @@ from typing import Any
 
 import streamlit as st
 
-from ui.components.cards import render_dashboard_chart
+from src.core.plain_language import plainify
+from ui.components.cards import finding_state, render_dashboard_chart, state_label
 
 
 def render_charts_tab(
     dashboard: list[dict[str, Any]] | None,
     report: dict[str, Any],
     vega_cfg: dict[str, Any],
+    findings: list[dict[str, Any]] | None = None,
 ) -> None:
     """Render Tier 3: Dynamic Visual Dashboard."""
+    by_id = {str(f["finding_id"]): f for f in (findings or []) if f.get("finding_id")}
+
+    def note(ch: dict[str, Any]) -> str:
+        """Which finding a chart supports, with its verdict, so a chart is never an unexplained picture."""
+        f = by_id.get(str(ch.get("finding_id") or ""))
+        if f is None:
+            return ""
+        return f"Evidence for: {plainify(str(f.get('headline', '')))} ({state_label(finding_state(f))})"
+
     if dashboard:
-        st.caption("Built automatically to fit your data — the most important panels lead.")
+        st.caption(
+            "Charts are chosen to fit your data, most important first. "
+            "A chart tied to a finding says which one and whether it held up."
+        )
 
         def flush(pending: list[dict[str, Any]]) -> None:
             """Two panels per row; a lone last panel takes the full width."""
             for j in range(0, len(pending), 2):
                 row = pending[j : j + 2]
                 if len(row) == 1:
-                    render_dashboard_chart(row[0], vega_cfg)
+                    render_dashboard_chart(row[0], vega_cfg, note(row[0]))
                     continue
                 for col, ch in zip(st.columns(2), row, strict=True):
                     with col:
-                        render_dashboard_chart(ch, vega_cfg)
+                        render_dashboard_chart(ch, vega_cfg, note(ch))
 
         # Ranking order is kept. Only the lead chart and charts that need width (time series,
         # survival curves, anything marked "wide") span the page; the rest sit two to a row, so
@@ -39,7 +53,7 @@ def render_charts_tab(
             if spans_page:
                 flush(pending)
                 pending = []
-                render_dashboard_chart(ch, vega_cfg)
+                render_dashboard_chart(ch, vega_cfg, note(ch))
             else:
                 pending.append(ch)
         flush(pending)

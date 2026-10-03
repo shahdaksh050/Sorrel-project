@@ -34,7 +34,7 @@ __FONT_LINKS__
       --lift-sm: 0 6px 20px rgba(0, 0, 0, 0.4);
       
       --sans: 'Mukta', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      --heading: 'Baloo 2', 'Mukta', sans-serif;
+      --heading: 'Mukta', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
       --mono: 'JetBrains Mono', Consolas, ui-monospace, monospace;
 
       /* MOTION CONTRACT (Single source of timing mirrored with JS MOTION) */
@@ -66,8 +66,8 @@ __FONT_LINKS__
     }
 
     /* Day Mode Strict High-Contrast Text Overrides */
-    html.theme-day .section-title { color: #3a2b1e !important; }
-    html.theme-day .section-desc { color: #5a4a3a !important; }
+    html.theme-day .section-title { color: #3a2b1e !important; text-shadow: none !important; }
+    html.theme-day .section-desc { color: #5a4a3a !important; text-shadow: none !important; }
     html.theme-day .card-title { color: #2e2015 !important; }
     html.theme-day .card-body { color: #4e3f32 !important; }
     html.theme-day .datum-value { color: #3a2b1e !important; }
@@ -763,9 +763,95 @@ __FONT_LINKS__
       }
     }
 
-    /* COMPACT MODE (workspace hero box): the brand block collides with section text at this size */
+    /* COMPACT MODE (workspace hero box <= 520px height) */
     html.compact .brand-badge {
-      display: none;
+      display: none !important;
+    }
+    html.compact .quick-nav {
+      top: 6px !important;
+      padding: 2px 6px !important;
+      gap: 3px !important;
+      max-width: 95vw !important;
+    }
+    html.compact .quick-pill {
+      font-size: 10px !important;
+      padding: 2px 7px !important;
+    }
+    html.compact .corner-actions {
+      top: 6px !important;
+      right: 10px !important;
+      gap: 4px !important;
+    }
+    html.compact .icon-btn {
+      width: 26px !important;
+      height: 26px !important;
+    }
+    html.compact .icon-btn svg {
+      width: 13px !important;
+      height: 13px !important;
+    }
+    html.compact .section {
+      padding: 40px 20px 18px 24px !important;
+    }
+    html.compact .section-content-wrapper {
+      max-width: 50vw !important;
+    }
+    html.compact .section-badge {
+      font-size: 9px !important;
+      letter-spacing: 0.08em !important;
+      margin-bottom: 2px !important;
+    }
+    html.compact .section-title {
+      font-size: clamp(16px, 2.4vw, 22px) !important;
+      margin-bottom: 4px !important;
+      line-height: 1.15 !important;
+    }
+    html.compact .section-desc {
+      font-size: 11.5px !important;
+      line-height: 1.35 !important;
+      margin-bottom: 8px !important;
+      max-width: 48ch !important;
+    }
+    html.compact .cards-grid {
+      gap: 6px !important;
+    }
+    html.compact .glass-card {
+      padding: 8px 12px !important;
+      border-radius: 10px !important;
+    }
+    html.compact .card-label {
+      font-size: 8.5px !important;
+      margin-bottom: 2px !important;
+    }
+    html.compact .card-title {
+      font-size: 13px !important;
+      margin-bottom: 2px !important;
+    }
+    html.compact .card-body {
+      font-size: 11px !important;
+      line-height: 1.3 !important;
+    }
+    html.compact .metric-huge {
+      font-size: 20px !important;
+    }
+    html.compact .metric-unit {
+      font-size: 10px !important;
+    }
+    html.compact .metric-row {
+      margin-top: 3px !important;
+      gap: 4px !important;
+    }
+    html.compact .pill-tag {
+      font-size: 9.5px !important;
+      padding: 1px 6px !important;
+    }
+    html.compact .hud-tag {
+      font-size: 9px !important;
+      padding: 2px 7px !important;
+    }
+    html.compact .mini-table th, html.compact .mini-table td {
+      padding: 3px 6px !important;
+      font-size: 10.5px !important;
     }
 
     /* STEP 0 (compact mode only): centered title + scroll hint beneath the unformed particle cloud.
@@ -916,8 +1002,8 @@ __FONT_LINKS__
         <button class="pill-btn active" onclick="fullpage_api.moveTo('overview')">01 Overview</button>
         <button class="pill-btn" onclick="fullpage_api.moveTo('ingestion')">02 Ingestion</button>
         <button class="pill-btn" onclick="fullpage_api.moveTo('stats')">03 Statistics</button>
-        <button class="pill-btn" onclick="fullpage_api.moveTo('pipeline')">04 ML Pipeline</button>
-        <button class="pill-btn" onclick="fullpage_api.moveTo('diagnostics')">05 Overfit Guard</button>
+        <button class="pill-btn" id="nav-pill-pipeline" onclick="fullpage_api.moveTo('pipeline')">04 ML Pipeline</button>
+        <button class="pill-btn" id="nav-pill-diagnostics" onclick="fullpage_api.moveTo('diagnostics')">05 Overfit Guard</button>
         <button class="pill-btn" onclick="fullpage_api.moveTo('report')">06 Executive</button>
       </div>
     </div>
@@ -1074,65 +1160,67 @@ __FONT_LINKS__
     <!-- SECTION 4: Stage 4 ML Pipeline & Stratified Folds -->
     <section class="section" data-anchor="pipeline">
       <div class="section-content-wrapper">
-        <div class="section-badge">STAGE 04 // MACHINE LEARNING PIPELINE</div>
-        <h2 class="section-title">Stratified Decision Manifolds</h2>
-        <p class="section-desc">
+        <div class="section-badge" id="sec4-badge">STAGE 04 // MACHINE LEARNING PIPELINE</div>
+        <h2 class="section-title" id="sec4-title">Stratified Decision Manifolds</h2>
+        <p class="section-desc" id="sec4-desc">
           Models compete under 5-Fold Stratified Cross-Validation. Primary ranking relies strictly on out-of-fold generalization, 
           never on training memorization. Translucent hyperplanes slice through feature space.
         </p>
 
         <div class="cards-grid">
           <div class="glass-card" id="card-stage-04">
-            <div class="card-label">Champion Model</div>
+            <div class="card-label" id="sec4-card1-label">Champion Model</div>
             <div class="card-title" id="ml-best-name">GradientBoostingClassifier</div>
-            <div class="card-body">
+            <div class="card-body" id="sec4-card1-body">
               Demonstrated highest out-of-fold generalization with tightest stability envelope across all 5 test partitions.
             </div>
-            <div class="metric-row">
+            <div class="metric-row" id="sec4-card1-metric">
               <span class="metric-huge" id="ml-best-cv">92.4%</span>
-              <span class="metric-unit">5-Fold CV Accuracy (±1.4%)</span>
+              <span class="metric-unit" id="sec4-card1-unit">5-Fold CV Accuracy (±1.4%)</span>
             </div>
           </div>
 
-          <div class="glass-card">
-            <div class="card-label">Cross-Validation Tournament</div>
-            <div class="card-title">Model Generalization Matrix</div>
-            <table class="mini-table" id="models-table">
-              <thead>
-                <tr>
-                  <th>Model</th>
-                  <th>CV Mean</th>
-                  <th>Std</th>
-                  <th>Train/Test Gap</th>
-                </tr>
-              </thead>
-              <tbody id="models-tbody">
-                <tr class="best-row">
-                  <td>GradientBoosting ★</td>
-                  <td>92.4%</td>
-                  <td>±1.4%</td>
-                  <td>3.2%</td>
-                </tr>
-                <tr>
-                  <td>RandomForest</td>
-                  <td>90.8%</td>
-                  <td>±1.8%</td>
-                  <td>5.1%</td>
-                </tr>
-                <tr>
-                  <td>LogisticRegression(L2)</td>
-                  <td>86.5%</td>
-                  <td>±2.1%</td>
-                  <td>1.8%</td>
-                </tr>
-                <tr>
-                  <td>DecisionTree</td>
-                  <td>81.2%</td>
-                  <td>±3.4%</td>
-                  <td style="color: var(--risk);">12.8% ⚠️</td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="glass-card" id="sec4-card2">
+            <div class="card-label" id="sec4-card2-label">Cross-Validation Tournament</div>
+            <div class="card-title" id="sec4-card2-title">Model Generalization Matrix</div>
+            <div id="sec4-card2-content">
+              <table class="mini-table" id="models-table">
+                <thead>
+                  <tr>
+                    <th>Model</th>
+                    <th>CV Mean</th>
+                    <th>Std</th>
+                    <th>Train/Test Gap</th>
+                  </tr>
+                </thead>
+                <tbody id="models-tbody">
+                  <tr class="best-row">
+                    <td>GradientBoosting ★</td>
+                    <td>92.4%</td>
+                    <td>±1.4%</td>
+                    <td>3.2%</td>
+                  </tr>
+                  <tr>
+                    <td>RandomForest</td>
+                    <td>90.8%</td>
+                    <td>±1.8%</td>
+                    <td>5.1%</td>
+                  </tr>
+                  <tr>
+                    <td>LogisticRegression(L2)</td>
+                    <td>86.5%</td>
+                    <td>±2.1%</td>
+                    <td>1.8%</td>
+                  </tr>
+                  <tr>
+                    <td>DecisionTree</td>
+                    <td>81.2%</td>
+                    <td>±3.4%</td>
+                    <td style="color: var(--risk);">12.8% ⚠️</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
@@ -1141,33 +1229,33 @@ __FONT_LINKS__
     <!-- SECTION 5: Stage 5 Anti-Overfit Guard -->
     <section class="section" data-anchor="diagnostics">
       <div class="section-content-wrapper">
-        <div class="section-badge">STAGE 05 // ANTI-OVERFIT GUARD &amp; VERIFICATION</div>
-        <h2 class="section-title">Generalization Safety Envelope</h2>
-        <p class="section-desc">
+        <div class="section-badge" id="sec5-badge">STAGE 05 // ANTI-OVERFIT GUARD &amp; VERIFICATION</div>
+        <h2 class="section-title" id="sec5-title">Generalization Safety Envelope</h2>
+        <p class="section-desc" id="sec5-desc">
           Automated guard gates compute train-vs-test divergence. A 3D radar diamond envelope illuminates 
           healthy generalization in emerald green, flagging any model exceeding the 10% gap threshold.
         </p>
 
         <div class="cards-grid">
           <div class="glass-card" id="card-stage-05">
-            <div class="card-label">Overfit Audit</div>
-            <div class="card-title">Train-Test Generalization Gap</div>
-            <div class="card-body">
+            <div class="card-label" id="sec5-card1-label">Overfit Audit</div>
+            <div class="card-title" id="sec5-card1-title">Train-Test Generalization Gap</div>
+            <div class="card-body" id="sec5-card1-body">
               The champion model's gap is strictly capped below the 10% threshold. The safety envelope certifies production readiness.
             </div>
             <div class="metric-row">
               <span class="metric-huge" id="guard-gap-val">3.2%</span>
-              <span class="metric-unit">train-test gap (<span id="guard-gap-status" style="color: var(--positive);">SAFE</span>)</span>
+              <span class="metric-unit" id="sec5-card1-unit">train-test gap (<span id="guard-gap-status" style="color: var(--positive);">SAFE</span>)</span>
             </div>
             <div id="overfit-warnings-box" style="margin-top: 8px;">
               <span class="pill-tag safe" id="guard-safe-tag">✓ GAP &lt; 10% CERTIFIED</span>
             </div>
           </div>
 
-          <div class="glass-card">
-            <div class="card-label">Anti-Overfitting Directives</div>
-            <div class="card-title">Enforced Structural Constraints</div>
-            <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+          <div class="glass-card" id="sec5-card2">
+            <div class="card-label" id="sec5-card2-label">Anti-Overfitting Directives</div>
+            <div class="card-title" id="sec5-card2-title">Enforced Structural Constraints</div>
+            <div id="sec5-card2-list" style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
               <div style="display: flex; align-items: center; gap: 8px; font-size: 13px;">
                 <span class="pill-tag safe" style="padding: 2px 6px;">✓</span>
                 <span style="color: var(--ink);"><strong>Tree Depth Capping:</strong> max_depth capped at 6</span>
@@ -1200,7 +1288,7 @@ __FONT_LINKS__
             <div class="card-label">Executive Reasoning</div>
             <div class="card-title">Analytical Conclusion</div>
             <div class="card-body" id="exec-reasoning-text" style="font-size: 13px; line-height: 1.6;">
-              Analysis completed across 5-fold stratified cross-validation. GradientBoosting demonstrated optimal generalizability with 92.4% CV accuracy and a tight 3.2% train-test gap. Outlier detection identified 1.8% anomalous records which were robustly normalized. No unregularized multicollinearity observed.
+              Analysis completed across verified analytical pipeline. Outlier detection identified anomalous records which were robustly handled. Key distributions and correlation vectors were confirmed against raw evidence.
             </div>
           </div>
 
@@ -1208,13 +1296,13 @@ __FONT_LINKS__
             <div class="card-label">Actionable Findings</div>
             <div class="card-title">Key Takeaways</div>
             <ul id="exec-findings-list" style="margin-top: 6px; padding-left: 18px; font-size: 13px; color: var(--ink); line-height: 1.6;">
-              <li>Primary driver of conversion is user session engagement duration (&gt;4.2m).</li>
-              <li>Cross-validation envelope indicates high generalization stability (std: ±1.4%).</li>
-              <li>Tree depth capped at max_depth=6 to strictly prohibit memorizing noise.</li>
+              <li>Feature distributions audited with automated normality and variance tests.</li>
+              <li>Multiple testing controlled via Benjamini-Hochberg false discovery rate.</li>
+              <li>Data integrity verified with zero data leakage.</li>
             </ul>
-            <div style="margin-top: 14px; display: flex; gap: 8px;">
-              <span class="pill-tag safe">✓ EXECUTIVE LEDGER SEALED</span>
-              <span class="pill-tag accent">✓ ZERO HALLUCINATIONS</span>
+            <div style="margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap;">
+              <span class="pill-tag safe" id="exec-held-tag">✓ 4 OF 4 CLAIMS VERIFIED</span>
+              <span class="pill-tag accent" id="exec-zero-tag">✓ DETERMINISTIC REPRODUCIBILITY</span>
             </div>
           </div>
         </div>
@@ -1234,16 +1322,16 @@ __FONT_LINKS__
         <span class="datum-label">STAGE:</span>
         <span class="datum-value pen" id="datum-stage">7 / 7 COMPLETE</span>
       </div>
-      <div class="datum-item">
-        <span class="datum-label">BEST MODEL:</span>
+      <div class="datum-item" id="datum-item-model">
+        <span class="datum-label" id="datum-label-model">BEST MODEL:</span>
         <span class="datum-value" id="datum-model">GradientBoosting</span>
       </div>
-      <div class="datum-item">
-        <span class="datum-label">CV SCORE:</span>
+      <div class="datum-item" id="datum-item-score">
+        <span class="datum-label" id="datum-label-score">CV SCORE:</span>
         <span class="datum-value positive" id="datum-score">92.4%</span>
       </div>
-      <div class="datum-item">
-        <span class="datum-label">GAP:</span>
+      <div class="datum-item" id="datum-item-gap">
+        <span class="datum-label" id="datum-label-gap">GAP:</span>
         <span class="datum-value" id="datum-gap">3.2%</span>
       </div>
     </div>

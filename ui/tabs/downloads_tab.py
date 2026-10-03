@@ -44,6 +44,7 @@ def render_downloads_tab(
                 cinema_pres_html = build_cinematic_document(
                     extract_cinematic_state(st.session_state),
                     theme=st.session_state.get("theme", "night"),
+                    inline_assets=True,
                 )
                 st.download_button(
                     "🎬 Download HTML",

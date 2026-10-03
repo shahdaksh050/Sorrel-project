@@ -10,6 +10,11 @@ import streamlit as st
 from src.core.plain_language import plainify
 from ui.components.cards import finding_state, render_dashboard_chart, state_label
 
+#: One chart height per panel type, so the panels of a row line up: half-width panels share one, and
+#: the full-width panels (the lead chart, time series, anything marked "wide") share a taller one.
+HALF_HEIGHT = 260
+WIDE_HEIGHT = 340
+
 
 def render_charts_tab(
     dashboard: list[dict[str, Any]] | None,
@@ -38,15 +43,18 @@ def render_charts_tab(
         )
 
         def flush(pending: list[dict[str, Any]]) -> None:
-            """Two panels per row; a lone last panel takes the full width."""
+            """Two panels per row, in bordered columns so the two cards are always the same height; a
+            lone last panel takes the full width."""
             for j in range(0, len(pending), 2):
                 row = pending[j : j + 2]
                 if len(row) == 1:
-                    render_dashboard_chart(row[0], vega_cfg, note(row[0]), finding_of(row[0]))
+                    render_dashboard_chart(row[0], vega_cfg, note(row[0]), finding_of(row[0]), height=HALF_HEIGHT)
                     continue
-                for col, ch in zip(st.columns(2), row, strict=True):
+                for col, ch in zip(st.columns(2, border=True), row, strict=True):
                     with col:
-                        render_dashboard_chart(ch, vega_cfg, note(ch), finding_of(ch))
+                        render_dashboard_chart(
+                            ch, vega_cfg, note(ch), finding_of(ch), height=HALF_HEIGHT, framed=False
+                        )
 
         # Ranking order is kept. Only the lead chart and charts that need width (time series,
         # survival curves, anything marked "wide") span the page; the rest sit two to a row, so
@@ -57,7 +65,7 @@ def render_charts_tab(
             if spans_page:
                 flush(pending)
                 pending = []
-                render_dashboard_chart(ch, vega_cfg, note(ch), finding_of(ch))
+                render_dashboard_chart(ch, vega_cfg, note(ch), finding_of(ch), height=WIDE_HEIGHT)
             else:
                 pending.append(ch)
         flush(pending)

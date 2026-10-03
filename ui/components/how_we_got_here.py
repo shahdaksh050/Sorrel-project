@@ -27,6 +27,9 @@ _STATUS_LABELS: dict[str, str] = {
     "inconclusive": "Inconclusive",
 }
 
+#: Every status is a shape and a word; colour only repeats them.
+_STATUS_GLYPHS: dict[str, str] = {"supported": "✓", "refuted": "✕", "inconclusive": "○"}
+
 
 def _e(text: str) -> str:
     return html.escape(text, quote=True)
@@ -45,12 +48,19 @@ def _more(total: int, shown: int) -> str:
     return f'<p class="how-more">and {extra} more.</p>' if extra > 0 else ""
 
 
-def _block(title: str, explainer: str, body: str) -> str:
+def _block(title: str, explainer: str, body: str, kind: str = "") -> str:
+    """One audit row: what it is on the left, what it says on the right.
+
+    `kind` ("risk" or "warn") only tints the small marker beside the title, so a row that needs a
+    second look is visible before it is read; it is never the only signal (the words say it too).
+    """
+    cls = f"how-block {kind}".strip()
     return (
-        '<section class="how-block">'
+        f'<section class="{cls}">'
+        '<div class="how-label">'
         f'<h4 class="how-h">{_e(title)}</h4>'
-        f'<p class="how-note">{_e(explainer)}</p>'
-        f"{body}</section>"
+        f'<p class="how-note">{_e(explainer)}</p></div>'
+        f'<div class="how-body">{body}</div></section>'
     )
 
 
@@ -79,6 +89,7 @@ def _changed(how: HowWeGotHere) -> str:
         "What changed along the way",
         "Where a planned step could not run and something simpler was used instead.",
         body,
+        "warn",
     )
 
 
@@ -96,6 +107,7 @@ def _untraced(how: HowWeGotHere) -> str:
         "Numbers we could not trace",
         "These are marked in the written summary. Do not rely on them without a check.",
         body,
+        "risk",
     )
 
 
@@ -125,7 +137,9 @@ def _ideas(how: HowWeGotHere) -> str:
         f"{n} {_STATUS_LABELS[s].lower()}" for s, n in how.hypothesis_counts if s in _STATUS_LABELS
     )
     rows = "".join(
-        f'<li><span class="how-tag {_e(h.status)}">{_e(_STATUS_LABELS.get(h.status, h.status))}'
+        f'<li><span class="how-tag {_e(h.status)}">'
+        f'<span aria-hidden="true">{_e(_STATUS_GLYPHS.get(h.status, "○"))}</span> '
+        f'{_e(_STATUS_LABELS.get(h.status, h.status))}'
         f"</span> {_e(plainify(h.statement))}</li>"
         for h in how.hypotheses
     )
@@ -136,7 +150,7 @@ def _ideas(how: HowWeGotHere) -> str:
         else ""
     )
     body = (f'<p class="how-lead">{_e(counts)}.</p>' if counts else "") + (
-        f'<ul class="how-list">{rows}</ul>{more}'
+        f'<ul class="how-list how-ideas">{rows}</ul>{more}'
     )
     return _block(
         "Ideas we tested",
@@ -176,9 +190,10 @@ def build_how_html(how: HowWeGotHere) -> str:
         return ""
     return (
         '<div class="how-we-got-here">'
+        '<header class="how-head">'
         '<h3 class="how-title">How we got here</h3>'
         '<p class="how-lede">What the analysis decided, what it had to work around, '
-        "and what it could not verify.</p>"
+        "and what it could not verify.</p></header>"
         f'<div class="how-grid">{blocks}</div>'
         "</div>"
     )

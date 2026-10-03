@@ -3,6 +3,7 @@ Presentation Cards, Gauges, Stamps, and Layout Elements for Streamlit UI.
 """
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import re
@@ -748,29 +749,80 @@ def chart_provenance_html(finding: dict[str, Any] | None) -> str:
     return out
 
 
+def _same_sentence(a: str, b: str) -> bool:
+    """True when two strings say the same thing apart from case, spacing and end punctuation."""
+    def norm(text: str) -> str:
+        return re.sub(r"[\s.]+", " ", text).strip().lower()
+
+    return bool(a) and norm(a) == norm(b)
+
+
+def evidence_line_html(finding: dict[str, Any]) -> str:
+    """One line that says which finding a chart supports: its verdict as a chip, then the finding.
+
+    The chip is a shape and a word (tick, exclamation or circle plus "Held up", "Needs more data" or
+    "Not checked"), tinted by verdict, so the verdict is never colour alone.
+    """
+    state = finding_state(finding)
+    headline = html.escape(plainify(str(finding.get("headline", ""))))
+    return (
+        '<p class="chart-evidence">'
+        f'<span class="verdict-chip {state}"><span aria-hidden="true">{_STATE_MARK[state]}</span> '
+        f"{html.escape(_STATE_WORD[state])}</span>"
+        f'<span class="ev-text">{headline}</span></p>'
+    )
+
+
+def _fit_height(spec: dict[str, Any], height: int | None) -> dict[str, Any]:
+    """Give a single or layered chart the panel's height, unless it needs more.
+
+    Charts that set no height get the panel height, so the panels of one row match. A chart that sets
+    its own taller height (many categories) keeps it, and one sized by `step` or `container` is left
+    alone: squashing those would make them unreadable.
+    """
+    if not height or not ({"mark", "layer"} & set(spec)) or {"facet", "repeat", "concat"} & set(spec):
+        return spec
+    own = spec.get("height")
+    if own is None or (isinstance(own, int | float) and own < height):
+        return {**spec, "height": height}
+    return spec
+
+
 def render_dashboard_chart(
     ch: dict[str, Any],
     vega_cfg: dict[str, Any],
     finding_note: str = "",
     finding: dict[str, Any] | None = None,
+    *,
+    height: int | None = None,
+    framed: bool = True,
 ) -> None:
     """Render one dashboard panel (title, chart, caption/description).
 
     `finding_note` says which finding the chart supports and its verdict, when there is one.
-    `finding` (optional) adds that finding's check row and where it came from.
+    `finding` (optional) adds that finding's verdict chip, check row and where it came from; when
+    it is given it replaces `finding_note`, and a caption that only repeats the finding is dropped.
+    `height` gives the chart a common height with its neighbours. `framed=False` draws no border of
+    its own, for a panel placed in a bordered column (which keeps a row's cards the same height).
     """
-    with st.container(border=True):
+    with st.container(border=True) if framed else contextlib.nullcontext():
         st.markdown(
             f'<h4 class="chart-title">{html.escape(str(ch.get("title", "")))}</h4>',
             unsafe_allow_html=True,
         )
-        if finding_note:
+        if finding is not None:
+            st.markdown(evidence_line_html(finding), unsafe_allow_html=True)
+        elif finding_note:
             st.caption(finding_note)
-        spec = dict(ch.get("spec", {}))
+        spec = _fit_height(dict(ch.get("spec", {})), height)
         spec.setdefault("background", "transparent")
         spec.setdefault("config", vega_cfg)
         st.vega_lite_chart(spec, width="stretch")
         caption = ch.get("caption")
+        if caption and finding is not None and _same_sentence(
+            plainify(str(caption)), plainify(str(finding.get("headline", "")))
+        ):
+            caption = None
         if caption:
             st.caption(md_text(caption))
         elif ch.get("description"):

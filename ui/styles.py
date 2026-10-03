@@ -227,6 +227,15 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 }}
 .chart-desc {{ font-size: var(--text-sm); color: var(--graphite); margin-top: .5rem; line-height: 1.4; }}
 .chart-src {{ font-size: var(--text-xs); color: var(--graphite); margin: .5rem 0 0; }}
+/* One line per chart: the verdict as a chip (glyph and word), then the finding it supports. */
+.chart-evidence {{ display: flex; align-items: flex-start; gap: 10px; margin: 0 0 .6rem;
+    font-size: var(--text-sm); line-height: 1.45; color: var(--ink-2); }}
+.chart-evidence .ev-text {{ min-width: 0; overflow-wrap: anywhere; }}
+.verdict-chip {{ flex: none; display: inline-block; padding: 1px 8px; border: 1px solid currentColor;
+    border-radius: var(--radius-pill); font-family: var(--mono); font-size: 11px; font-weight: 600;
+    letter-spacing: .04em; text-transform: uppercase; line-height: 1.5; color: var(--graphite); background: var(--sheet); }}
+.verdict-chip.held {{ color: var(--positive); background: color-mix(in srgb, var(--positive) 8%, var(--sheet)); }}
+.verdict-chip.needs_more {{ color: var(--danger-text); background: color-mix(in srgb, var(--risk) 8%, var(--sheet)); }}
 
 /* ── Primary task steps (file, question, mode, run) ── */
 .step-head {{
@@ -949,21 +958,40 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 }}
 
 /* ── "How we got here" (Details): hairline-ruled blocks, tokens only ── */
-.how-we-got-here {{ margin: 0 0 2rem; max-width: 1100px; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius); }}
-.how-title {{ font-family: var(--heading); margin: 0; padding: 16px 22px .2rem; }}
-.how-lede {{ color: var(--graphite); font-size: var(--text-xs); line-height: 1.55; margin: 0; padding: 0 22px 14px; border-bottom: 1px solid var(--rule); background: var(--sheet-alt); }}
-.how-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 2.5rem; padding: 0 22px; }}
-.how-block {{ border-top: 1px solid var(--rule-faint); padding: .9rem 0 1.1rem; min-width: 0; }}
-.how-h {{ font-size: var(--text-sm); font-weight: 600; margin: 0 0 .15rem; color: var(--ink); }}
-.how-note {{ font-size: var(--text-xs); color: var(--graphite); line-height: 1.5; margin: 0 0 .6rem; }}
+/* An audit trail: one row per question, the question on the left and the answer on the right, so the
+   rows line up whatever their length. The header strip spans the whole card. */
+.how-we-got-here {{ margin: 0 0 2rem; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; }}
+.how-head {{ padding: 16px 22px 14px; background: var(--sheet-alt); border-bottom: 1px solid var(--rule); }}
+.how-title {{ font-family: var(--heading); margin: 0 0 .2rem; padding: 0; }}
+.how-lede {{ color: var(--graphite); font-size: var(--text-xs); line-height: 1.55; margin: 0; padding: 0; }}
+.how-grid {{ display: block; padding: 0; }}
+.how-block {{ display: grid; grid-template-columns: minmax(180px, .7fr) minmax(0, 2.3fr); gap: 0 2rem;
+    border-top: 1px solid var(--rule-faint); padding: 1.1rem 22px 1.2rem; min-width: 0; }}
+.how-block:first-child {{ border-top: none; }}
+.how-label, .how-body {{ min-width: 0; }}
+.how-h {{ font-size: var(--text-sm); font-weight: 600; margin: 0 0 .25rem; color: var(--ink); }}
+/* A small square marker in the row's colour: green for a decision, amber for a workaround, brick only
+   for numbers that could not be traced (those may not hold). */
+.how-h::before {{ content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 2px; background: var(--pen); }}
+.how-block.warn .how-h::before {{ background: var(--accent); }}
+.how-block.risk .how-h::before {{ background: var(--risk); }}
+.how-note {{ font-size: var(--text-xs); color: var(--graphite); line-height: 1.5; margin: 0; }}
+@media (max-width: 760px) {{
+    .how-block {{ grid-template-columns: 1fr; gap: .5rem; }}
+}}
 .how-lead {{ font-size: var(--text-sm); font-weight: 600; color: var(--ink); line-height: 1.5; margin: 0 0 .4rem; }}
 .how-text {{ font-size: var(--text-sm); color: var(--ink-2); line-height: 1.6; margin: 0 0 .5rem; overflow-wrap: anywhere; }}
 .how-sub {{ font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--graphite); margin: .6rem 0 .2rem; }}
 .how-list {{ margin: 0 0 .4rem; padding-left: 1.1rem; font-size: var(--text-sm); line-height: 1.55; color: var(--ink-2); overflow-wrap: anywhere; }}
 .how-more {{ font-size: var(--text-xs); color: var(--graphite); margin: 0; }}
-.how-tag {{ font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--graphite); }}
-.how-tag.supported {{ color: var(--positive); }}
-.how-tag.refuted {{ color: var(--danger-text); }}
+/* A chip: a glyph and a word, tinted by status. A refuted idea "does not hold", so it is the brick one. */
+.how-tag {{ display: inline-block; padding: 1px 8px; margin-right: 6px; border: 1px solid currentColor; border-radius: var(--radius-pill);
+    font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--graphite); background: var(--sheet); vertical-align: 1px; }}
+.how-tag.supported {{ color: var(--positive); background: color-mix(in srgb, var(--positive) 8%, var(--sheet)); }}
+.how-tag.refuted {{ color: var(--danger-text); background: color-mix(in srgb, var(--risk) 8%, var(--sheet)); }}
+.how-ideas {{ list-style: none; padding-left: 0; }}
+.how-ideas li {{ margin-bottom: .55rem; }}
 /* ── "Found so far, may change" (live run): hairline block, tokens only ── */
 .prov {{ border-top: 1px solid var(--rule); padding: .8rem 0 .4rem; margin: .8rem 0; max-width: 100%; }}
 .prov-h {{ font-size: var(--text-sm); font-weight: 600; margin: 0 0 .15rem; color: var(--ink); }}

@@ -211,3 +211,29 @@ def test_team_cards_are_one_line_until_opened() -> None:
     summary = grid.split("<summary")[1].split("</summary>")[0]
     assert "agent-line" in summary and "agent-desc" not in summary and "agent-metric" not in summary
     assert grid.count("agent-more") >= 8  # the description and what it found open with each card
+
+
+def test_a_chart_gets_one_evidence_line_with_a_verdict_chip_and_never_repeats_the_finding() -> None:
+    from ui.components.cards import _same_sentence, evidence_line_html
+
+    held = {"headline": "Total duration is <b>rising</b>.", "evidence": {"p_adj": 0.001, "effect": 0.4}}
+    out = evidence_line_html(held)
+    assert 'class="verdict-chip' in out and 'aria-hidden="true"' in out  # a shape and a word
+    assert "&lt;b&gt;rising&lt;/b&gt;" in out and "<b>rising" not in out
+    assert "Not checked" in evidence_line_html({"headline": "x", "evidence": {}})
+    assert _same_sentence("Total duration is rising.", "total  duration is rising")
+    assert not _same_sentence("Total duration is rising.", "Total duration is falling.")
+    assert not _same_sentence("", "")
+
+
+def test_panels_in_a_row_get_one_height_unless_the_chart_needs_more() -> None:
+    from ui.components.cards import _fit_height
+
+    bar = {"mark": "bar", "encoding": {}}
+    assert _fit_height(bar, 260)["height"] == 260
+    assert _fit_height({**bar, "height": 120}, 260)["height"] == 260  # shorter ones are lifted to match
+    assert _fit_height({**bar, "height": 420}, 260)["height"] == 420  # a tall chart keeps its height
+    stepped = {**bar, "height": {"step": 18}}
+    assert _fit_height(stepped, 260) is stepped  # sized by step: left alone
+    assert _fit_height({"facet": {}, "spec": {}}, 260) == {"facet": {}, "spec": {}}
+    assert _fit_height({"hconcat": [], "mark": "bar"}, None) == {"hconcat": [], "mark": "bar"}

@@ -6,10 +6,13 @@ disconnected machine charts were blank and the type fell back to the system
 font. This module reads the vendored copies in `static/` and returns them as
 inline markup:
 
-* fonts: the Latin-subset `@font-face` rules from `static/fonts/ledger-fonts.css`
-  with each `.woff2` embedded as a data URI. Faces that point at identical files
-  (Baloo 2 is one variable font under four weights) are embedded once, with a
-  weight range;
+* fonts: the Latin-subset `@font-face` rules of the Sorrel families (Geist, Geist
+  Mono, Newsreader) from `static/fonts/ledger-fonts.css`, each `.woff2` embedded
+  as a data URI. They are variable fonts: one file carries a whole weight range
+  (`font-weight: 100 900`), which the embedded rule keeps. Faces that point at
+  identical files (a static family declared once per weight) are embedded once,
+  with the range of the weights they were declared at. Other families in that
+  stylesheet are skipped without reading their files;
 * Vega, Vega-Lite and vega-embed: the minified bundles from `static/vendor/vega/`,
   inline, only when the report has charts.
 
@@ -29,11 +32,14 @@ from pathlib import Path
 #: Repo-level `static/` folder (module attribute so tests can point it elsewhere).
 ASSET_ROOT: Path = Path(__file__).resolve().parents[2] / "static"
 
+#: Fallback only, used when the font files are missing: the same three families from Google Fonts.
 FONTS_CDN = (
     '<link rel="preconnect" href="https://fonts.googleapis.com">'
     '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-    '<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800'
-    '&family=Mukta:wght@400;500;600;700&display=swap" rel="stylesheet">'
+    '<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700'
+    "&family=Geist+Mono:wght@400;500;600"
+    "&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500"
+    '&display=swap" rel="stylesheet">'
 )
 
 VEGA_CDN = (
@@ -45,6 +51,10 @@ VEGA_CDN = (
 #: Load order matters: vega-embed needs the other two on the page first.
 _VEGA_FILES = ("vega.min.js", "vega-lite.min.js", "vega-embed.min.js")
 _FONT_CSS = "ledger-fonts.css"
+#: The only families the report embeds. Compared exactly (after unquoting), so "Geist" never matches "Geist Mono".
+_REPORT_FAMILIES = frozenset({"Geist", "Geist Mono", "Newsreader"})
+#: The Latin subset of a face: `name-latin.woff2` (static) or `name-latin-wght-normal|italic.woff2` (variable).
+_LATIN_FILE_RE = re.compile(r"-latin(?:-wght-(?:normal|italic))?\.woff2$")
 _FACE_RE = re.compile(r"@font-face\s*\{(?P<body>[^}]*)\}", re.DOTALL)
 
 
@@ -59,8 +69,13 @@ class ReportAssets:
 
 
 def _prop(body: str, name: str) -> str | None:
-    match = re.search(rf"{name}\s*:\s*([^;]+);", body)
+    match = re.search(rf"(?<![\w-]){name}\s*:\s*([^;]+);", body)
     return match.group(1).strip() if match else None
+
+
+def _weights(value: str | None) -> list[int]:
+    """The weights a `font-weight` value declares: `500` is one, `100 900` is a variable-font range."""
+    return [int(token) for token in (value or "").split() if token.isdigit()]
 
 
 @lru_cache(maxsize=8)
@@ -77,9 +92,9 @@ def _inline_fonts(root: Path) -> str | None:
     for match in _FACE_RE.finditer(css):
         body = match.group("body")
         src = re.search(r"url\(['\"]?([^'\")]+)['\"]?\)", body)
-        family = _prop(body, "font-family")
-        if src is None or family is None or not src.group(1).endswith("-latin.woff2"):
-            continue
+        family = (_prop(body, "font-family") or "").strip("'\"")
+        if src is None or family not in _REPORT_FAMILIES or not _LATIN_FILE_RE.search(src.group(1)):
+            continue  # another family or a non-Latin subset: never read, so it cannot trigger the fallback
         try:
             data = (font_dir / src.group(1)).read_bytes()
         except OSError:
@@ -89,11 +104,9 @@ def _inline_fonts(root: Path) -> str | None:
         face = faces.setdefault(
             key, {"weights": [], "range": _prop(body, "unicode-range") or "", "data": data}
         )
-        weight = _prop(body, "font-weight")
-        if weight and weight.isdigit():
-            weights = face["weights"]
-            assert isinstance(weights, list)
-            weights.append(int(weight))
+        weights = face["weights"]
+        assert isinstance(weights, list)
+        weights.extend(_weights(_prop(body, "font-weight")))
     if not faces:
         return None
 
@@ -105,7 +118,7 @@ def _inline_fonts(root: Path) -> str | None:
         weight_css = str(low) if low == high else f"{low} {high}"
         uri = "data:font/woff2;base64," + base64.b64encode(face["data"]).decode("ascii")
         rule = (
-            f"@font-face{{font-family:{family};font-style:{style};font-weight:{weight_css};"
+            f"@font-face{{font-family:'{family}';font-style:{style};font-weight:{weight_css};"
             f"font-display:swap;src:url({uri}) format('woff2');"
         )
         if face["range"]:

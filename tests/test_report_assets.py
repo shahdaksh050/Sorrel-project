@@ -54,13 +54,65 @@ def test_inline_vega_scripts_load_in_dependency_order() -> None:
     assert scripts[3].startswith("const SPECS")
 
 
+def _rules(doc: str, family: str) -> list[str]:
+    return re.findall(rf"@font-face\{{font-family:'{family}'[^}}]*\}}", doc)
+
+
 def test_identical_font_files_are_embedded_once_with_a_weight_range() -> None:
+    """Sorrel's faces are variable fonts: one file, one rule, the whole weight range."""
     doc = _report([_chart([{"x": 1}])])
-    baloo = re.findall(r"@font-face\{font-family:'Baloo 2'[^}]*\}", doc)
-    mukta = re.findall(r"@font-face\{font-family:'Mukta'[^}]*\}", doc)
-    assert len(baloo) == 1 and "font-weight:500 800" in baloo[0]
-    assert len(mukta) == 4
-    assert all("unicode-range:" in rule for rule in baloo + mukta)
+    geist, mono, newsreader = _rules(doc, "Geist"), _rules(doc, "Geist Mono"), _rules(doc, "Newsreader")
+    assert len(geist) == 1 and "font-weight:100 900" in geist[0]
+    assert len(mono) == 1 and "font-weight:100 900" in mono[0]
+    assert len(newsreader) == 2 and all("font-weight:200 800" in rule for rule in newsreader)
+    assert sorted(re.search(r"font-style:(\w+)", rule).group(1) for rule in newsreader) == [  # type: ignore[union-attr]
+        "italic",
+        "normal",
+    ]
+    assert all("unicode-range:" in rule for rule in geist + mono + newsreader)
+
+
+def test_only_the_sorrel_families_are_embedded() -> None:
+    """The stylesheet still declares the old families until the cleanup; none may reach the report."""
+    fonts = report_assets.report_assets(need_vega=False).fonts_html
+    families = set(re.findall(r"@font-face\{font-family:'([^']+)'", fonts))
+    assert families == {"Geist", "Geist Mono", "Newsreader"}
+    for old in ("Baloo", "Mukta", "Bricolage", "Public Sans", "IBM Plex"):
+        assert old not in fonts
+
+
+def test_faces_declared_per_weight_over_one_file_still_collapse_to_one_ranged_rule(tmp_path: Path) -> None:
+    """The dedupe path the real (variable) files no longer exercise: one file declared at several weights."""
+    fonts = tmp_path / "fonts"
+    fonts.mkdir()
+    (fonts / "geist-latin.woff2").write_bytes(b"wOF2-one-file")
+    (fonts / "newsreader-latin.woff2").write_bytes(b"wOF2-another")
+    faces = "".join(
+        f"@font-face {{ font-family: 'Geist'; font-style: normal; font-weight: {w}; "
+        "src: url('./geist-latin.woff2') format('woff2'); unicode-range: U+0000-00FF; }\n"
+        for w in (400, 600, 700)
+    ) + (
+        "@font-face { font-family: 'Newsreader'; font-style: normal; font-weight: 400; "
+        "src: url('./newsreader-latin.woff2') format('woff2'); unicode-range: U+0000-00FF; }\n"
+        # not a Sorrel family and a file that does not exist: skipped before it is read
+        "@font-face { font-family: 'Baloo 2'; font-weight: 500; "
+        "src: url('./baloo-2-500-latin.woff2') format('woff2'); }\n"
+    )
+    (fonts / "ledger-fonts.css").write_text(faces, encoding="utf-8")
+    assets = report_assets.report_assets(need_vega=False, root=tmp_path)
+    assert assets.offline
+    geist = _rules(assets.fonts_html, "Geist")
+    assert len(geist) == 1 and "font-weight:400 700" in geist[0]
+    newsreader = _rules(assets.fonts_html, "Newsreader")
+    assert len(newsreader) == 1 and "font-weight:400;" in newsreader[0]
+    assert "Baloo" not in assets.fonts_html
+
+
+def test_the_embedded_fonts_are_the_ones_the_report_css_asks_for() -> None:
+    doc = _report([_chart([{"x": 1}])])
+    css = doc[doc.index("<style>", doc.index("</style>")) :]  # the report's own stylesheet, after the font faces
+    assert "'Geist'" in css and "'Newsreader'" in css
+    assert "Baloo" not in css and "Mukta" not in css
 
 
 def test_report_without_charts_embeds_fonts_but_no_vega() -> None:
@@ -94,9 +146,15 @@ def test_each_asset_falls_back_on_its_own(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 def test_a_missing_font_file_uses_the_cdn_not_half_the_fonts(tmp_path: Path) -> None:
     shutil.copytree(STATIC / "fonts", tmp_path / "fonts")
-    (tmp_path / "fonts" / "mukta-600-latin.woff2").unlink()
+    (tmp_path / "fonts" / "newsreader-latin-wght-italic.woff2").unlink()
     assets = report_assets.report_assets(need_vega=False, root=tmp_path)
     assert assets.fonts_html == report_assets.FONTS_CDN and not assets.offline
+
+
+def test_the_cdn_fallback_asks_for_the_sorrel_families_only() -> None:
+    cdn = report_assets.FONTS_CDN
+    assert "family=Geist:" in cdn and "family=Geist+Mono:" in cdn and "family=Newsreader:" in cdn
+    assert "Baloo" not in cdn and "Mukta" not in cdn
 
 
 def test_a_literal_closing_script_tag_in_a_bundle_cannot_end_the_tag_early(tmp_path: Path) -> None:

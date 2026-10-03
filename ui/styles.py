@@ -258,8 +258,8 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 }}
 .stButton button[kind="primary"]:hover:enabled,
 .stDownloadButton button[kind="primary"]:hover:enabled {{
-    background: var(--pen-hover); color: var(--sheet);
-    transform: translateY(-1px); box-shadow: var(--lift);
+    background: var(--pen); color: var(--sheet);
+    transform: translateY(-2px); box-shadow: var(--lift), 0 0 15px var(--glow);
 }}
 .stButton button[kind="primary"]:disabled {{
     background: var(--sheet-alt); color: var(--graphite);
@@ -335,14 +335,49 @@ iframe {{
 [data-testid="stFileUploader"] button:hover {{
     background: var(--sheet-alt) !important; border-color: var(--pen) !important;
 }}
-.stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {{
-    border-radius: 10px !important; border-color: var(--rule) !important;
-    background: var(--sheet) !important; color: var(--ink) !important;
+/* ── Inputs (Polling-safe, no !important) ── */
+[data-testid="stTextInput"] input, 
+[data-testid="stTextArea"] textarea, 
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div {{
+    border-radius: 10px; border: 1px solid var(--rule);
+    background: var(--sheet); color: var(--ink);
+    transition: all var(--dur-fast) var(--ease-out);
 }}
-.stTextInput input::placeholder, .stTextArea textarea::placeholder {{
-    color: var(--graphite) !important; opacity: .9 !important;
+[data-testid="stTextInput"] input::placeholder, 
+[data-testid="stTextArea"] textarea::placeholder {{
+    color: var(--graphite); opacity: .9;
 }}
-.stTextInput input:focus, .stTextArea textarea:focus {{ border-color: var(--pen) !important; }}
+[data-testid="stTextInput"] input:focus, 
+[data-testid="stTextArea"] textarea:focus,
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within {{ 
+    border-color: var(--pen); box-shadow: 0 0 0 1px var(--pen); 
+}}
+[data-testid="stTextInput"] input:hover, 
+[data-testid="stTextArea"] textarea:hover,
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div:hover {{
+    border-color: var(--graphite);
+}}
+
+/* ── Skeletons & Empty States ── */
+.skeleton {{
+    background: linear-gradient(90deg, var(--sheet) 25%, var(--sheet-alt) 50%, var(--sheet) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite linear;
+    border-radius: var(--radius);
+}}
+@keyframes shimmer {{ 0% {{ background-position: 200% 0; }} 100% {{ background-position: -200% 0; }} }}
+.skeleton-text {{ height: 1em; width: 100%; border-radius: 4px; margin-bottom: 0.5rem; }}
+.skeleton-card {{ height: 120px; width: 100%; }}
+
+.empty-state {{
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 3rem 1.5rem; text-align: center;
+    background: var(--sheet-alt); border: 1px dashed var(--rule-strong);
+    border-radius: var(--radius); color: var(--graphite);
+}}
+.empty-state .icon {{ font-size: 32px; margin-bottom: 1rem; opacity: 0.8; }}
+.empty-state .title {{ font-family: var(--heading); font-size: 18px; color: var(--ink); font-weight: 600; margin-bottom: 0.5rem; }}
+
 
 /* ── Stat tile ── */
 @property --angle {{ syntax: '<angle>'; initial-value: 0deg; inherits: false; }}

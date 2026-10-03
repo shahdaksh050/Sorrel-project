@@ -10,7 +10,7 @@ import streamlit as st
 from ui import styles
 
 ROOT = Path(__file__).resolve().parents[1]
-FONT_DIR = ROOT / "static" / "fonts"
+FONT_DIR = ROOT / "static" / "vendor" / "fonts"
 
 
 def test_styles_module_has_no_remote_font_reference() -> None:
@@ -27,9 +27,9 @@ def test_static_serving_is_enabled_in_the_config() -> None:
 
 def test_font_css_url_default_and_with_a_base_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(st, "get_option", lambda key: "")
-    assert styles.font_css_url() == "/app/static/fonts/ledger-fonts.css"
+    assert styles.font_css_url() == "/app/static/vendor/fonts/ledger-fonts.css"
     monkeypatch.setattr(st, "get_option", lambda key: "/dsa/")
-    assert styles.font_css_url() == "/dsa/app/static/fonts/ledger-fonts.css"
+    assert styles.font_css_url() == "/dsa/app/static/vendor/fonts/ledger-fonts.css"
 
 
 def test_injected_css_imports_the_local_stylesheet(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,7 +39,7 @@ def test_injected_css_imports_the_local_stylesheet(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(st, "session_state", {"theme": "day"})
     styles.inject_theme_css()
     css = "\n".join(emitted)
-    assert "@import url('/app/static/fonts/ledger-fonts.css');" in css
+    assert "@import url('/app/static/vendor/fonts/ledger-fonts.css');" in css
     assert "fonts.googleapis" not in css and "fonts.gstatic" not in css
 
 
@@ -59,12 +59,12 @@ def test_the_families_the_console_uses_are_declared() -> None:
 
 def test_static_folder_holds_only_public_assets() -> None:
     """Static serving exposes the whole folder to every visitor."""
-    allowed = {".woff2", ".css", ".js"}
+    allowed = {".woff2", ".css", ".js", ".json"}
     files = [p for p in (ROOT / "static").rglob("*") if p.is_file()]
     assert files
     other = [p for p in files if p.suffix not in allowed]
     # The only other files are the licence texts that ship with vendored libraries.
-    assert all(p.suffix == ".txt" and p.name.upper().startswith("LICENSE") for p in other), [
+    assert all(p.suffix == ".txt" and (p.name.upper().startswith("LICENSE") or p.name.upper() == "OFL.TXT") for p in other), [
         str(p.relative_to(ROOT)) for p in other
     ]
 

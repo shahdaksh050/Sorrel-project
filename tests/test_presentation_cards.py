@@ -150,6 +150,23 @@ def test_audit_heads_and_agent_badges_escape_and_carry_shapes() -> None:
         assert word in grid
 
 
+def _media_blocks(css: str, header: str) -> list[str]:
+    """Every `header { ... }` block in `css`, braces matched, as full text (header included)."""
+    blocks: list[str] = []
+    start = css.find(header)
+    while start != -1:
+        depth, i = 0, css.index("{", start)
+        while True:
+            depth += css[i] == "{"
+            depth -= css[i] == "}"
+            i += 1
+            if depth == 0:
+                break
+        blocks.append(css[start:i])
+        start = css.find(header, i)
+    return blocks
+
+
 def test_the_workspace_stylesheet_has_no_motion_gradient_or_red_for_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     import re
 
@@ -163,8 +180,25 @@ def test_the_workspace_stylesheet_has_no_motion_gradient_or_red_for_errors(monke
     ui_styles.inject_theme_css()
     css = emitted[0]
     assert "gradient" not in css and "drop-shadow" not in css and "blur(" not in css
-    assert not re.search(r"transition\s*:", css)
-    assert "@keyframes" not in css
+    # Motion is allowed as reveals only (expand, collapse, fade): inside the one block that applies when the
+    # browser has NOT asked for reduced motion, at 250 ms or less, never looping, never a hover lift.
+    gated = _media_blocks(css, "@media (prefers-reduced-motion: no-preference)")
+    assert gated, "reveal motion must live in a reduced-motion-gated block"
+    ungated = css
+    for block in gated:
+        ungated = ungated.replace(block, "")
+    assert not re.search(r"transition\s*:", ungated) and "@keyframes" not in ungated
+    assert not re.search(r"animation\s*:\s*(?!none)\S", ungated)  # `animation: none` is fine, any other is not
+    motion = " ".join(gated)
+    assert "infinite" not in motion and "gradient" not in motion
+    for amount, unit in re.findall(r"(?<![\w-])(\d+(?:\.\d+)?)(ms|s)\b", motion):
+        assert float(amount) * (1000 if unit == "s" else 1) <= 250, f"{amount}{unit} is too slow for a reveal"
+    for token in ("fast", "base"):  # the two durations the gated block may use
+        assert int(re.search(rf"--dur-{token}:\s*(\d+)ms", css).group(1)) <= 250  # type: ignore[union-attr]
+    assert "--dur-slow" not in motion
+    assert not re.search(r":hover[^{{}}]*\{{[^}}]*(?:transform|translate|scale|box-shadow)", css)
+    # and reduced motion still wins everywhere
+    assert "@media (prefers-reduced-motion: reduce)" in css and "animation-duration: .01ms" in css
     assert "--risk-text:   var(--danger-text)" in css  # one text colour for "may not hold", both modes
     assert "ff8a8a" not in css
     # Error and warning alerts are amber, never the "may not hold" colour.

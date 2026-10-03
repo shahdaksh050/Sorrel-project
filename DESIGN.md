@@ -54,6 +54,7 @@ Gradients are **forbidden** in the workspace: no glow, spotlight, conic border o
 
 - `@media (prefers-reduced-motion: reduce)` must be respected universally.
 - All animations (hero fade, drifting spotlights, border sweeps) must disable their keyframes or skip motion entirely when reduced motion is preferred.
+- **Workspace motion is reveals only** (amended 2026-10-04). Expanding and collapsing a disclosure, and a short fade or settle when a tab or a status changes, are allowed: 250 ms or less, eased, never looping, and only inside `@media (prefers-reduced-motion: no-preference)`. Still forbidden: hover lift, glow, spotlight, gradient, pulse, bounce, and anything that moves without a user action or a state change. `tests/test_presentation_cards.py` enforces this.
 - Assistive technologies must have access to the final text state immediately (e.g., visually hidden `aria-label` or `sr-only` text blocks).
 
 ## 5. UI Islands Contract

@@ -113,6 +113,25 @@ def inject_theme_css() -> None:
 }}
 
 
+/* ── Reveal motion ──
+   Expand, collapse and fade, nothing else: no hover-lift, no glow, nothing that loops. 250 ms at the
+   most, and only when the browser has not asked for less (the block above zeroes every duration, and
+   this one is gated too). Disclosures (the expanders and the cards that open) ease their height
+   where the browser supports it (Chromium today; elsewhere they simply open at once). */
+@media (prefers-reduced-motion: no-preference) {{
+    :root {{ interpolate-size: allow-keywords; }}
+    details::details-content {{
+        block-size: 0; overflow: clip;
+        transition: block-size var(--dur-base) var(--ease-out), content-visibility var(--dur-base) allow-discrete;
+    }}
+    details[open]::details-content {{ block-size: auto; }}
+    @keyframes revealIn {{ from {{ opacity: 0; transform: translateY(6px); }} to {{ opacity: 1; transform: none; }} }}
+    [data-baseweb="tab-panel"]:not([hidden]) {{ animation: revealIn var(--dur-base) var(--ease-out) both; }}
+    .stepper .step-dot, .stepper .step::after, .step-state, .step-name {{
+        transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, color var(--dur-fast) ease;
+    }}
+}}
+
 /* ── The page ── */
 #MainMenu, footer, .stAppDeployButton {{ visibility: hidden; }}
 header[data-testid="stHeader"] {{ background: transparent; }}

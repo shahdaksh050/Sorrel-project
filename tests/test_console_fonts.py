@@ -54,9 +54,10 @@ def test_every_font_file_the_stylesheet_names_exists_and_is_local() -> None:
 
 def test_the_families_the_console_uses_are_declared() -> None:
     css = (FONT_DIR / "ledger-fonts.css").read_text(encoding="utf-8")
-    # Sorrel type first; the Ledger families stay declared until every file that still names them is ported.
-    for family in ("Geist", "Geist Mono", "Newsreader", "Bricolage Grotesque", "Public Sans", "IBM Plex Mono", "Baloo 2", "Mukta"):
+    for family in ("Geist", "Geist Mono", "Newsreader"):
         assert f"font-family: '{family}'" in css
+    for gone in ("Bricolage Grotesque", "Public Sans", "IBM Plex Mono", "Baloo 2", "Mukta"):
+        assert f"font-family: '{gone}'" not in css
 
 
 def test_workspace_stylesheet_uses_the_sorrel_families_and_not_the_ledger_ones() -> None:

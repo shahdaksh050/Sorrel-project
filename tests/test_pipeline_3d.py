@@ -172,3 +172,78 @@ def test_a_gsap_stand_in_keeps_the_scene_drawing_when_gsap_is_missing() -> None:
     assert "if (window.gsap) return;" in document
     for method in ("timeline", "globalTimeline", "to:", "from:", "set:"):
         assert method in document
+
+
+# ── Sorrel ─────────────────────────────────────────────────────────────────────────────────────
+def _doc(theme: str = "day") -> str:
+    return build_document([Stage("1", "Reading", "done", "")], theme=theme)
+
+
+@pytest.mark.parametrize("theme", ["day", "night"])
+def test_the_document_carries_that_themes_tokens_and_no_placeholder(theme: str) -> None:
+    from src.core import design_tokens
+
+    document = _doc(theme)
+    assert "__ROOT_TOKENS__" not in document
+    for key in ("pen", "stock", "sheet", "accent", "accent_text", "accent_ink", "rule"):
+        css_var = f"--{key.replace('_', '-')}: {design_tokens.palette(theme)[key]};"  # type: ignore[arg-type]
+        assert css_var in document, css_var
+
+
+def test_the_plate_is_set_in_the_sorrel_families_not_the_old_ones() -> None:
+    document = _doc()
+    assert "'Geist'" in document and "'Geist Mono'" in document
+    for old in ("Public Sans", "Bricolage", "IBM Plex", "Baloo", "Mukta"):
+        assert old not in document
+
+
+def test_no_old_ledger_brown_is_left_in_the_plate() -> None:
+    document = _doc()
+    for old in ("#3a2b1e", "#a34f20", "#a33526", "#f7eedd", "#fffbf2", "#8a7660", "rgba(58, 43, 30"):
+        assert old not in document, old
+
+
+def test_a_failed_stage_is_amber_never_the_may_not_hold_brick() -> None:
+    """DESIGN.md: --risk only ever means "this finding may not hold"; a stage error is a generic error."""
+    js = _asset("pipeline_3d.js")
+    assert "C.risk" not in js
+    assert 'if (status === "error") return WARN;' in js
+    html = _asset("pipeline_3d.html")
+    assert "var(--risk)" not in html
+
+
+def test_stage_tokens_are_square_and_flat() -> None:
+    html = _asset("pipeline_3d.html")
+    assert "border-radius: 999px" not in html and "box-shadow" not in html
+    assert "gradient" not in html and "backdrop-filter" not in html
+
+
+def test_nothing_spins_or_flows_at_rest_or_under_reduced_motion() -> None:
+    js = _asset("pipeline_3d.js")
+    assert "!REDUCED_MOTION && activeIndex >= 0" in js
+    assert "activeIndex < 0 || REDUCED_MOTION" in js  # the particle stream
+    assert "core.rotation.y = t *" not in js and "Math.floor(t * 1.5)" not in js  # no continuous spin
+    assert "prefers-reduced-motion: reduce" in _asset("pipeline_3d.html")
+
+
+def test_plate_text_and_marks_meet_contrast_in_both_themes() -> None:
+    from src.core import design_tokens
+
+    def lum(hex_color: str) -> float:
+        def ch(c: int) -> float:
+            v = c / 255
+            return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+        r, g, b = (ch(int(hex_color[i : i + 2], 16)) for i in (1, 3, 5))
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    def ratio(a: str, b: str) -> float:
+        hi, lo = sorted((lum(a), lum(b)), reverse=True)
+        return (hi + 0.05) / (lo + 0.05)
+
+    for theme in ("day", "night"):
+        p = design_tokens.palette(theme)  # type: ignore[arg-type]
+        for fg, bg in (("ink", "sheet"), ("ink_2", "sheet"), ("accent_text", "sheet"), ("accent", "sheet"),
+                       ("graphite", "stock"), ("accent_ink", "pen"), ("ink", "sheet_alt")):
+            assert ratio(p[fg], p[bg]) >= 4.5, f"{theme}: {fg} on {bg}"
+        assert ratio(p["accent_text"], p["stock"]) >= 3.0  # the Night stage ink against the page

@@ -1,9 +1,9 @@
 /**
- * The plate — a warm, friendly 3D view of the seven-step pipeline.
+ * The plate: a calm 3D view of the seven-step pipeline, in the Sorrel inks.
  *
  * - Soft directional lighting and gentle contact shadows for depth.
- * - Fluid data particle stream flowing through active pipeline stages and refinement arcs.
- * - Morphing kinetic modules with stage-specific geometries and mechanical animations.
+ * - A data particle stream that flows only while a stage is running (never at rest or under reduced motion).
+ * - Modules with stage-specific geometries; the running one sways a little, nothing spins.
  * - 3D world-space projected HUD pin callouts.
  * - Interactive perspective toggles (ISO, PLAN, FRONT, RESET).
  * - Full performance gating (dirty flag, visibility check, DPR clamp, teardown).
@@ -15,6 +15,15 @@ const C = STATE.palette || {};
 const STAGES = STATE.stages || [];
 const THEME = STATE.theme || "day";
 const isNight = THEME === "night";
+
+/* Sorrel inks from the Python tokens (the fallbacks are the Day token values, used only if no palette arrived).
+ * PEN is the stage ink. Raw `pen` is a fill: on the Night page it is too dark to read as a line, so Night uses
+ * the token built for that, `accent_text`. WARN (amber) marks a stage that failed to run. Brick (`risk`) means
+ * "this finding may not hold", which is not something a pipeline stage can say, so the plate never uses it. */
+const PEN = (isNight ? C.accent_text : C.pen) || C.pen || "#1f4634";
+const GRAPHITE = C.graphite || "#66665e";
+const SHEET = C.sheet || "#fffdf7";
+const WARN = C.accent || "#a35a18";
 
 const host = document.getElementById("scene");
 const elTitle = document.getElementById("readout-title");
@@ -79,9 +88,9 @@ const xFor = (i) => (i - (STAGES.length - 1) / 2) * GAP;
 const isReached = (s) => s === "done" || s === "active" || s === "error";
 
 function inkFor(status) {
-  if (status === "error") return C.risk || "#a33526";
-  if (status === "done" || status === "active") return C.pen || "#a34f20";
-  return C.graphite || "#8a7660";
+  if (status === "error") return WARN;
+  if (status === "done" || status === "active") return PEN;
+  return GRAPHITE;
 }
 
 const CAGE_OPACITY = {
@@ -156,19 +165,20 @@ host.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
 
-// Warm ambient + directional lighting, like a reading lamp over the desk
+// Neutral paper-white lighting (Sorrel has no tinted lamp); intensities are unchanged from the
+// known-good setup, only the light colours moved off the old brown. The Night ambient is the deep forest band.
 const ambientLight = new THREE.AmbientLight(
-  isNight ? 0x3a2c1c : 0xfaf1de,
+  isNight ? 0x2a3324 : 0xfbf8ee,
   isNight ? 1.1 : 0.85
 );
 scene.add(ambientLight);
 
-const dirLight = new THREE.DirectionalLight(isNight ? 0xffe0b0 : 0xffffff, isNight ? 1.0 : 0.65);
+const dirLight = new THREE.DirectionalLight(isNight ? 0xe9eddc : 0xffffff, isNight ? 1.0 : 0.65);
 dirLight.position.set(6, 12, 8);
 scene.add(dirLight);
 
 const fillLight = new THREE.DirectionalLight(
-  isNight ? 0xf0a24a : 0xecdfc4,
+  isNight ? 0x7fc79a : 0xe4ebe5,
   0.35
 );
 fillLight.position.set(-6, -4, -4);
@@ -257,7 +267,7 @@ function buildCore(index, fillMat, edgeMat) {
 const shadowGeo = keep(new THREE.PlaneGeometry(1.2, 1.2));
 const shadowMat = keep(
   new THREE.MeshBasicMaterial({
-    color: new THREE.Color(isNight ? 0x120d08 : 0x3a2b1e),
+    color: new THREE.Color(isNight ? C.bg_deep || "#0d120e" : C.ink || "#1a1a17"),
     transparent: true,
     opacity: isNight ? 0.22 : 0.09,
     depthWrite: false,
@@ -277,7 +287,7 @@ const nodes = STAGES.map((stage, i) => {
   // Wireframe cage
   const cageMat = keep(
     new THREE.LineBasicMaterial({
-      color: new THREE.Color(C.graphite || "#8a7660"),
+      color: new THREE.Color(GRAPHITE),
       transparent: true,
       opacity: CAGE_OPACITY.pending,
     })
@@ -288,7 +298,7 @@ const nodes = STAGES.map((stage, i) => {
   // Volumetric material for core solid
   const fillMat = keep(
     new THREE.MeshStandardMaterial({
-      color: new THREE.Color(C.sheet || "#fffbf2"),
+      color: new THREE.Color(SHEET),
       roughness: 0.25,
       metalness: 0.35,
       transparent: true,
@@ -301,7 +311,7 @@ const nodes = STAGES.map((stage, i) => {
 
   const edgeMat = keep(
     new THREE.LineBasicMaterial({
-      color: new THREE.Color(C.graphite || "#8a7660"),
+      color: new THREE.Color(GRAPHITE),
       transparent: true,
       opacity: 0.55,
     })
@@ -346,7 +356,7 @@ const links = nodes.slice(0, -1).map((_, i) =>
       new THREE.Vector3(xFor(i) + CAGE / 2, 0, 0),
       new THREE.Vector3(xFor(i + 1) - CAGE / 2, 0, 0)
     ),
-    C.graphite || "#8a7660",
+    GRAPHITE,
     0.42
   )
 );
@@ -357,7 +367,7 @@ const refineArcCurve = new THREE.QuadraticBezierCurve3(
   new THREE.Vector3((xFor(REFINE_FROM) + xFor(REFINE_TO)) / 2, 2.6, 0),
   new THREE.Vector3(xFor(REFINE_TO), CAGE / 2, 0)
 );
-const refineArc = makeStroke(refineArcCurve.getPoints(64), C.graphite || "#8a7660", 0.35);
+const refineArc = makeStroke(refineArcCurve.getPoints(64), GRAPHITE, 0.35);
 
 // Stage 6 RLM recursive satellites
 const satellites = [-1, 1].map((side) => {
@@ -366,7 +376,7 @@ const satellites = [-1, 1].map((side) => {
 
   const fillMat = keep(
     new THREE.MeshStandardMaterial({
-      color: new THREE.Color(C.sheet || "#fffbf2"),
+      color: new THREE.Color(SHEET),
       roughness: 0.28,
       metalness: 0.35,
       transparent: true,
@@ -378,7 +388,7 @@ const satellites = [-1, 1].map((side) => {
   );
   const edgeMat = keep(
     new THREE.LineBasicMaterial({
-      color: new THREE.Color(C.graphite || "#8a7660"),
+      color: new THREE.Color(GRAPHITE),
       transparent: true,
       opacity: 0.5,
     })
@@ -394,7 +404,7 @@ const satellites = [-1, 1].map((side) => {
 
   const tether = makeStroke(
     straight(new THREE.Vector3(xFor(RLM_INDEX), 0, side * (CAGE / 2)), pos.clone()),
-    C.graphite || "#8a7660",
+    GRAPHITE,
     0.3
   );
 
@@ -402,7 +412,7 @@ const satellites = [-1, 1].map((side) => {
 });
 
 // Bench grid plane
-const gridColor = new THREE.Color(C.grid || C.ink || "#3a2b1e");
+const gridColor = new THREE.Color(C.grid || C.ink || "#1a1a17");
 const grid = new THREE.GridHelper(22, 22, gridColor, gridColor);
 grid.position.y = -1.35;
 grid.material.transparent = true;
@@ -418,7 +428,7 @@ const PARTICLE_COUNT = 84;
 const pGeo = keep(new THREE.OctahedronGeometry(0.042, 0));
 const pMat = keep(
   new THREE.MeshBasicMaterial({
-    color: new THREE.Color(C.pen || "#a34f20"),
+    color: new THREE.Color(PEN),
     transparent: true,
     opacity: 0.85,
   })
@@ -440,7 +450,8 @@ const pPos = new THREE.Vector3();
 
 function updateParticles(delta) {
   const reachedCount = STAGES.filter((s) => isReached(s.status)).length;
-  if (reachedCount <= 0) {
+  // The stream is a "working" signal: it flows only while a stage is running, never at rest or under reduced motion.
+  if (reachedCount <= 0 || activeIndex < 0 || REDUCED_MOTION) {
     particleMesh.visible = false;
     return;
   }
@@ -658,13 +669,13 @@ function ink(i, animated) {
 
   if (fillMat && fillMat.emissive) {
     if (stage.status === "active") {
-      fillMat.emissive.copy(new THREE.Color(C.pen || "#a34f20"));
+      fillMat.emissive.copy(new THREE.Color(PEN));
       fillMat.emissiveIntensity = 0.32;
     } else if (stage.status === "done") {
-      fillMat.emissive.copy(new THREE.Color(C.pen || "#a34f20"));
+      fillMat.emissive.copy(new THREE.Color(PEN));
       fillMat.emissiveIntensity = 0.12;
     } else if (stage.status === "error") {
-      fillMat.emissive.copy(new THREE.Color(C.risk || "#a33526"));
+      fillMat.emissive.copy(new THREE.Color(WARN));
       fillMat.emissiveIntensity = 0.42;
     } else {
       fillMat.emissive.setHex(0x000000);
@@ -711,17 +722,17 @@ function inkStructure(animated) {
 
   links.forEach((link, i) => {
     const crossed = reached[i] && reached[i + 1];
-    paint(link.material, crossed ? (C.pen || "#a34f20") : (C.graphite || "#8a7660"), crossed ? 0.9 : 0.42);
+    paint(link.material, crossed ? (PEN) : (GRAPHITE), crossed ? 0.9 : 0.42);
   });
 
   const refined = reached[REFINE_FROM];
-  paint(refineArc.material, refined ? (C.pen || "#a34f20") : (C.graphite || "#8a7660"), refined ? 0.8 : 0.35);
+  paint(refineArc.material, refined ? (PEN) : (GRAPHITE), refined ? 0.8 : 0.35);
 
   const recursed = reached[RLM_INDEX];
   for (const sat of satellites) {
-    paint(sat.edgeMat, recursed ? (C.pen || "#a34f20") : (C.graphite || "#8a7660"), recursed ? 1 : 0.5);
-    paint(sat.fillMat, C.sheet || "#fffbf2", recursed ? 0.92 : 0.1);
-    paint(sat.tether.material, recursed ? (C.pen || "#a34f20") : (C.graphite || "#8a7660"), recursed ? 0.75 : 0.3);
+    paint(sat.edgeMat, recursed ? (PEN) : (GRAPHITE), recursed ? 1 : 0.5);
+    paint(sat.fillMat, SHEET, recursed ? 0.92 : 0.1);
+    paint(sat.tether.material, recursed ? (PEN) : (GRAPHITE), recursed ? 0.75 : 0.3);
   }
 }
 
@@ -1006,28 +1017,29 @@ renderer.setAnimationLoop(() => {
   const t = clock.getElapsedTime();
   const cameraMoving = updateCamera(delta);
 
-  // Active Stage Kinetic Animations
-  if (activeIndex >= 0 && nodes[activeIndex]) {
+  // Active stage: a small, bounded sway while it runs (never a continuous spin, and none at all under
+  // reduced motion). Stages that are not running stay still, so nothing moves at rest.
+  if (!REDUCED_MOTION && activeIndex >= 0 && nodes[activeIndex]) {
     const core = nodes[activeIndex].core;
     switch (activeIndex) {
       case 0: // Ingestion: scan translation
         core.position.y = Math.sin(t * 3) * 0.04;
         break;
-      case 1: // Reasoning: dual crystal rotation
-        core.rotation.y = t * 0.7;
+      case 1: // Reasoning: a slow tilt of the crystal
+        core.rotation.y = Math.sin(t * 0.9) * 0.5;
         core.rotation.x = Math.sin(t * 0.5) * 0.25;
         break;
-      case 2: // Execution: mechanical stepped spin
-        core.rotation.y = Math.floor(t * 1.5) * (Math.PI / 2);
+      case 2: // Execution: a short mechanical ratchet back and forth
+        core.rotation.y = Math.sin(t * 1.5) * 0.35;
         core.rotation.z = Math.sin(t * 4) * 0.08;
         break;
-      case 3: // Interpretation: geodesic precession
-        core.rotation.y = t * 0.5;
-        core.rotation.z = t * 0.3;
+      case 3: // Interpretation: a gentle rock
+        core.rotation.y = Math.sin(t * 0.7) * 0.5;
+        core.rotation.z = Math.sin(t * 0.45) * 0.3;
         break;
-      case 4: // Refinement: gyro precession
-        core.rotation.x = t * 1.2;
-        core.rotation.y = t * 0.8;
+      case 4: // Refinement: the ring tips both ways
+        core.rotation.x = Math.sin(t * 1.2) * 0.6;
+        core.rotation.y = Math.sin(t * 0.8) * 0.6;
         break;
       case 5: // RLM Decomposition: satellite breathing
         satellites.forEach((sat, si) => {
@@ -1050,7 +1062,7 @@ renderer.setAnimationLoop(() => {
     updateHUD(hovered, activeIndex);
   }
 
-  if (!dirty && !cameraMoving && activeIndex < 0 && !particleMesh.visible) return;
+  if (!dirty && !cameraMoving && !particleMesh.visible) return;
   dirty = false;
 
   renderer.render(scene, camera);

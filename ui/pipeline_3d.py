@@ -1,5 +1,5 @@
 """
-The plate — the seven-stage RLM workflow drawn as a live technical drawing.
+The plate: the seven-stage RLM workflow drawn as a live technical drawing, in the Sorrel inks.
 
 The scene itself lives in ``assets/pipeline_3d.js`` (Three.js + GSAP); this
 module is the seam between it and Streamlit. It owns the state contract —
@@ -45,9 +45,11 @@ _ASSETS = Path(__file__).parent / "assets"
 #: Matches the status vocabulary ``app.py`` already writes into ``stage_log``.
 StageStatus = Literal["pending", "active", "done", "skipped", "error"]
 
-#: Day / Night palettes for the warm ledger theme, sourced from the shared token
-#: module. The scene's "grid" key predates `design_tokens`' "rule" naming, so it
-#: is mapped explicitly rather than left missing by a plain dict spread.
+#: Day / Night palettes for the Sorrel theme, sourced from the shared token
+#: module, every token included (the scene reads `accent_text`, `accent_ink`,
+#: `bg_deep` ... as well as the original inks). The scene's "grid" key predates
+#: `design_tokens`' "rule" naming, so it is mapped explicitly rather than left
+#: missing by a plain dict spread.
 PALETTES: dict[str, dict[str, str]] = {
     mode: {**palette, "grid": palette["rule"]}
     for mode, palette in design_tokens.PALETTES.items()
@@ -110,6 +112,7 @@ def build_document(stages: Sequence[Stage], theme: str = "day") -> str:
         A self-contained HTML document, bar the Three.js and GSAP CDN tags.
     """
     palette = PALETTES.get(theme, PALETTES["day"])
+    mode: design_tokens.Mode = "night" if theme == "night" else "day"
     state = {
         "stages": [
             {"num": s.num, "name": s.name, "status": s.status, "detail": s.detail}
@@ -127,6 +130,7 @@ def build_document(stages: Sequence[Stage], theme: str = "day") -> str:
     three_urls = json.dumps([static_url("vendor/three/three.module.js"), _THREE_CDN]).replace("<", "\\u003c")
     return (
         _asset("pipeline_3d.html")
+        .replace("__ROOT_TOKENS__", design_tokens.css_root_block(mode))
         .replace("__FONT_LINKS__", f'<link rel="stylesheet" href="{static_url("vendor/fonts/ledger-fonts.css")}">')
         .replace("__GSAP_URL__", static_url("vendor/gsap/3.15.0/gsap.min.js"))
         .replace("__STATE_JSON__", state_json)

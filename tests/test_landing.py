@@ -16,17 +16,22 @@ def test_landing_index_html_exists() -> None:
     assert INDEX_HTML.exists(), "ui/landing_component/index.html must exist"
     content = INDEX_HTML.read_text(encoding="utf-8")
     assert "<!DOCTYPE html>" in content
-    assert "DSA Agent" in content
+    # The product is named Sorrel on screen; DSA Agent survives only as its working name.
+    assert "<title>Sorrel" in content
+    assert 'class="brand-name">Sorrel<' in content
+    assert "working name of DSA Agent" in content
 
 
 def test_landing_typography_tokens() -> None:
     content = INDEX_HTML.read_text(encoding="utf-8")
-    # Must use warm Ledger typography (Baloo 2 and Mukta)
+    # Sorrel typography: Geist (interface and headlines), Newsreader (serif accents, wordmark), Geist Mono.
     # Served from ./fonts beside the page, not from Google (see test_landing_works_offline).
     assert "./fonts/landing-fonts.css" in content
-    assert "family=Baloo+2" not in content
-    assert "--heading: 'Baloo 2'" in content
-    assert "--sans: 'Mukta'" in content
+    assert "family=Geist" not in content
+    assert "--heading: 'Geist'" in content
+    assert "--sans: 'Geist'" in content
+    assert "--serif: 'Newsreader'" in content
+    assert "--mono: 'Geist Mono'" in content
 
 
 def test_landing_day_and_night_themes() -> None:
@@ -189,9 +194,15 @@ def test_data_path_statement_is_honest_and_complete() -> None:
 
 
 def test_example_findings_are_labelled_as_an_illustration() -> None:
+    """The findings shown are a real run on a public table, labelled as such, and the 3D scene is
+    labelled as an illustration; neither can be mistaken for the visitor's own results."""
     text = _visible_text()
-    assert "illustration, not results from your data" in text
-    assert "Example: 4 of 5 findings held up" in text
+    assert "These come from a real run on a public air-quality table" in text
+    assert "not from your data" in text
+    assert "illustration, not your data" in text
+    # The verdict counts exactly the entries shown.
+    assert "From this run: 1 of the 2 findings shown held up" in text
+    assert INDEX_HTML.read_text(encoding="utf-8").count('class="audited-entry"') == 2
 
 
 def test_no_pricing_or_faq_remnants() -> None:

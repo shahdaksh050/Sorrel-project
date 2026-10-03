@@ -22,7 +22,7 @@ def test_landing_section_stack() -> None:
     content = INDEX_HTML.read_text(encoding="utf-8")
 
     assert 'class="site-header"' in content
-    assert "DSA AGENT" in content
+    assert 'class="brand-name">Sorrel<' in content
 
     assert 'id="hero"' in content
     assert "hero-enter-btn" in content
@@ -65,9 +65,13 @@ def test_landing_ledger_tokens() -> None:
 
     assert "./fonts/landing-fonts.css" in content
     fonts = (INDEX_HTML.parent / "fonts" / "landing-fonts.css").read_text(encoding="utf-8")
-    assert "font-family: 'Baloo 2'" in fonts and "font-family: 'Mukta'" in fonts
-    assert "--heading: 'Baloo 2'" in content
-    assert "--sans: 'Mukta'" in content
+    # The families the page uses are declared locally (Sorrel type: Geist, Geist Mono, Newsreader).
+    for family in ("Geist", "Geist Mono", "Newsreader"):
+        assert f"font-family: '{family}'" in fonts
+    assert "--heading: 'Geist'" in content
+    assert "--sans: 'Geist'" in content
+    assert "--serif: 'Newsreader'" in content
+    assert "--mono: 'Geist Mono'" in content
 
     assert f"--stock: {LEDGER_TOKENS_NIGHT['stock']}" in content
     assert f"--pen: {LEDGER_TOKENS_NIGHT['pen']}" in content

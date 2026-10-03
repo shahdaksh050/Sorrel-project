@@ -11,7 +11,8 @@ import streamlit.components.v1 as components
 
 from src.core.design_tokens import palette
 
-# Canonical "Ledger" design-system tokens (see DESIGN.md, "Tokens — ink").
+# Canonical "Sorrel" design-system tokens (see DESIGN.md). The LEDGER_* names date from the
+# earlier look and are kept because tests and callers import them by name.
 # This is the single Python source of truth for the two hexes this module needs
 # (the iframe/background colour shown while the static landing component loads).
 # The static HTML asset (ui/landing_component/index.html) cannot import this
@@ -73,6 +74,8 @@ def show_landing_page() -> bool:
     """, unsafe_allow_html=True)
 
     # Render the component. The JS sends {"enter": bool, "theme": "day" | "night"}.
+    # `islands_url` is still passed, but the Sorrel landing page does not load the hero island
+    # (its scroll-effects script reveals the headline), so the page ignores it.
     from ui.components.islands import island_base_url
 
     value = _landing_component(

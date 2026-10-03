@@ -3,6 +3,36 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- Hero island guard: hides the headline only while the optional island may animate it
+       (first view this session, motion allowed). A failsafe always releases it. -->
+  <style>html.hero-pending .hero-title { opacity: 0; }</style>
+  <script>
+    // Records the islands asset URL Python sends, in case it arrives before the module below runs.
+    window.addEventListener('message', function (e) {
+      var d = e.data;
+      if (d && d.type === 'streamlit:render' && d.args && typeof d.args.islands_url === 'string') {
+        window.__dsaIslandsUrl = d.args.islands_url;
+      }
+    });
+  </script>
+  <script>
+    (function () {
+      try {
+        var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        var played = false;
+        try { played = sessionStorage.getItem('dsa.hero.played') === '1'; } catch (e) {}
+        if (reduce || played) return;
+        var root = document.documentElement;
+        root.classList.add('hero-pending');
+        setTimeout(function () {
+          if (root.classList.contains('hero-pending')) {
+            window.__dsaHeroLate = true;
+            root.classList.remove('hero-pending');
+          }
+        }, 2500);
+      } catch (e) {}
+    })();
+  </script>
   <!-- Anime.js Animation Engine (/animejs-animation standard) -->
   <script src="./vendor/anime.min.js"></script>
   <title>DSA Agent: data analysis that checks its own findings</title>
@@ -3027,6 +3057,28 @@
 
     // Every handler above is bound: the classic fallback bridge in <head> can step aside.
     window.__dsaModuleReady = true;
+  </script>
+  <!-- Optional UI islands (built into static/islands/, see ui/islands). Python passes the
+       asset URL as the `islands_url` arg ("" when the build is absent). Any failure leaves the
+       page exactly as rendered above. -->
+  <script type="module">
+    let loaded = false;
+    function loadHero(url) {
+      if (loaded || !url) return;
+      loaded = true;
+      import(url).catch(function () { document.documentElement.classList.remove('hero-pending'); });
+    }
+    function onUrl(url) {
+      loadHero(url ? url + 'hero.js' : '');
+      if (!url) document.documentElement.classList.remove('hero-pending');
+    }
+    if (typeof window.__dsaIslandsUrl === 'string') onUrl(window.__dsaIslandsUrl);
+    window.addEventListener('message', function (e) {
+      var d = e.data;
+      if (d && d.type === 'streamlit:render' && d.args && typeof d.args.islands_url === 'string') {
+        onUrl(d.args.islands_url);
+      }
+    });
   </script>
 </body>
 </html>

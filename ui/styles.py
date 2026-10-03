@@ -22,7 +22,7 @@ def static_url(path: str) -> str:
 
 def font_css_url() -> str:
     """URL of the local font stylesheet, honouring `server.baseUrlPath`."""
-    return static_url("fonts/ledger-fonts.css")
+    return static_url("vendor/fonts/ledger-fonts.css")
 
 
 def inject_theme_css() -> None:
@@ -37,12 +37,29 @@ def inject_theme_css() -> None:
         theme_vars = design_tokens.css_root_block(mode) + """
         --lift:        0 4px 18px rgba(0,0,0,.35);
         --lift-sm:     0 2px 8px rgba(0,0,0,.3);
+        --lift-lg:     0 12px 32px rgba(0,0,0,.45);
+        --rule-strong: color-mix(in srgb, var(--rule) 50%, #fff);
+        --glow:        color-mix(in srgb, var(--pen) 15%, transparent);
+        --spot:        color-mix(in srgb, var(--accent) 15%, transparent);
+        --risk-text:   #ff8a8a; /* manually lightened for >= 4.5:1 on night sheet */
         """
     else:
         theme_vars = design_tokens.css_root_block(mode) + """
         --lift:        0 4px 14px color-mix(in srgb, var(--ink) 14%, transparent);
         --lift-sm:     0 2px 8px color-mix(in srgb, var(--ink) 10%, transparent);
+        --lift-lg:     0 12px 32px color-mix(in srgb, var(--ink) 20%, transparent);
+        --rule-strong: color-mix(in srgb, var(--rule) 60%, #000);
+        --glow:        color-mix(in srgb, var(--pen) 12%, transparent);
+        --spot:        color-mix(in srgb, var(--accent) 12%, transparent);
+        --risk-text:   var(--risk); /* raw is safe in day mode */
         """
+
+    theme_vars += """
+        --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+        --dur-fast: 150ms;
+        --dur-base: 250ms;
+        --dur-slow: 400ms;
+    """
 
     st.markdown(f"""
 <style>
@@ -55,7 +72,18 @@ def inject_theme_css() -> None:
 
     --sans:    'Mukta', ui-sans-serif, 'Segoe UI', system-ui, sans-serif;
     --heading: 'Baloo 2', 'Mukta', ui-sans-serif, sans-serif;
-    --mono:    'Cascadia Code', Consolas, ui-monospace, monospace;
+}}
+
+@media (prefers-reduced-motion: reduce) {{
+    :root {{
+        --dur-fast: 0ms !important;
+        --dur-base: 0ms !important;
+        --dur-slow: 0ms !important;
+    }}
+    * {{
+        animation: none !important;
+        transition: none !important;
+    }}
 }}
 
 
@@ -265,11 +293,19 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .stTabs [role="tab"]:last-child {{ margin-right: 0 !important; }}
 .stTabs [role="tab"]:focus, .stTabs [role="tab"]:focus-visible {{ outline: none !important; }}
 .stTabs [role="tab"] p {{ font-size: 14.5px; font-weight: 700;
-                                 color: var(--graphite) !important; letter-spacing: 0; margin: 0 !important; }}
+                                 color: var(--graphite) !important; letter-spacing: 0; margin: 0 !important;
+                                 position: relative; z-index: 1; }}
 .stTabs [role="tab"]:hover p {{ color: var(--ink) !important; }}
-.stTabs [role="tab"][aria-selected="true"] {{ background-color: var(--pen) !important; }}
+.stTabs [role="tab"][aria-selected="true"] {{ background-color: transparent !important; }}
 .stTabs [role="tab"][aria-selected="true"] p {{ color: var(--sheet) !important; }}
-.stTabs [data-testid="stTabIndicator"] {{ display: none !important; }}
+.stTabs [data-testid="stTabIndicator"] {{
+    height: 100% !important;
+    bottom: 0 !important;
+    border-radius: var(--radius-pill) !important;
+    background-color: var(--pen) !important;
+    z-index: 0 !important;
+    transition: transform var(--dur-base) var(--ease-out), width var(--dur-base) var(--ease-out) !important;
+}}
 .stTabs [data-testid="stTabsContent"] {{ padding-top: 1.5rem; }}
 
 /* ── 3D & Viewport Enhancements ── */
@@ -284,10 +320,15 @@ iframe {{
 
 /* ── Inputs ── */
 [data-testid="stFileUploaderDropzone"] {{
-    background: var(--sheet-alt); border: 2px dashed var(--rule); border-radius: var(--radius);
+    background: var(--sheet-alt); border: 2px dashed var(--rule-strong); border-radius: var(--radius);
+    transition: all var(--dur-fast) var(--ease-out);
 }}
-[data-testid="stFileUploaderDropzone"]:hover {{ border-color: var(--pen);
-                                               background: var(--sheet); }}
+[data-testid="stFileUploaderDropzone"]:hover {{
+    border-color: var(--pen);
+    background: var(--sheet);
+    box-shadow: var(--lift), 0 0 15px var(--glow);
+    transform: translateY(-2px);
+}}
 [data-testid="stFileUploader"] button {{
     background: var(--sheet) !important; border: 1px solid var(--rule) !important; color: var(--ink) !important;
 }}
@@ -304,9 +345,28 @@ iframe {{
 .stTextInput input:focus, .stTextArea textarea:focus {{ border-color: var(--pen) !important; }}
 
 /* ── Stat tile ── */
+@property --angle {{ syntax: '<angle>'; initial-value: 0deg; inherits: false; }}
+@keyframes spin {{ to {{ --angle: 360deg; }} }}
+
 .gauge {{ background: var(--sheet); border: 1px solid transparent;
          border-radius: var(--radius);
-         padding: 1rem 1.1rem; height: 100%; min-height: 96px; position: relative; }}
+         padding: 1rem 1.1rem; height: 100%; min-height: 96px; position: relative;
+         transition: transform var(--dur-fast) var(--ease-out); z-index: 1; }}
+.gauge::before {{
+    content: ""; position: absolute; inset: -1px; z-index: -1;
+    border-radius: var(--radius);
+    background: conic-gradient(from var(--angle), transparent 60%, var(--pen), var(--accent), transparent);
+    opacity: 0; transition: opacity var(--dur-base) var(--ease-out);
+}}
+.gauge:hover::before, .gauge:focus-within::before {{
+    opacity: 1; animation: spin 3s linear infinite;
+}}
+.gauge::after {{
+    content: ""; position: absolute; inset: 0; z-index: -1;
+    border-radius: var(--radius); background: var(--sheet);
+}}
+.gauge:hover {{ transform: translateY(-1px); }}
+
 .gauge .v {{ font-family: var(--heading); font-size: 26px; font-weight: 700;
             line-height: 1.1; letter-spacing: -.01em; color: var(--ink);
             overflow-wrap: anywhere; }}
@@ -315,6 +375,7 @@ iframe {{
 .gauge .k {{ font-size: 12.5px; color: var(--graphite); margin-top: .4rem; font-weight: 600; }}
 .gauge .s {{ font-size: 11.5px; color: var(--graphite); margin-top: 2px; }}
 .gauge.flag {{ border-color: var(--risk); background: color-mix(in srgb, var(--risk) 8%, var(--sheet)); }}
+.gauge.flag::after {{ background: color-mix(in srgb, var(--risk) 8%, var(--sheet)); }}
 .gauge.flag .v {{ color: var(--risk); }}
 
 /* ── Callout cards ── */

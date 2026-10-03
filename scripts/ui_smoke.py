@@ -56,6 +56,15 @@ def run(port: int) -> list[str]:
             executable_path=os.environ.get("CHROMIUM_PATH") or None,
         )
         page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.emulate_media(reduced_motion="reduce")
+        page.goto(url)
+        page.wait_for_selector(".stApp", timeout=TIMEOUT_MS)
+        page.wait_for_function("window.getComputedStyle(document.documentElement).getPropertyValue('--dur-base').trim() !== ''", timeout=TIMEOUT_MS)
+        dur = page.evaluate("window.getComputedStyle(document.documentElement).getPropertyValue('--dur-base').trim()")
+        if dur != "0ms" and dur != "0ms !important":
+            failures.append(f"reduced motion not zeroed: {dur}")
+
+        page.emulate_media(reduced_motion="no-preference")
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)[:200]))
         page.goto(url)

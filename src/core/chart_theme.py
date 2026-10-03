@@ -1,13 +1,12 @@
 """
-Chart Theme — single source of truth for the Ledger palette as it applies to
+Chart Theme — single source of truth for the Sorrel palette as it applies to
 *charts* (Round 7 items 7.17 and the Vega half of Q1).
 
 The page-chrome tokens (stock/sheet/ink/etc.) now live in
 `src/core/design_tokens.py`, which this module imports rather than
 retranscribing (FrontendPlan.md item 2.1). What stays local to this module is
 chart-only: the categorical/sequential/diverging ink sets DESIGN.md calls out
-as separate from the two UI pens ("Chart categories extend the two pens with
-four warm plot inks"), plus the Vega-Lite config assembly.
+as separate from the UI pens, plus the Vega-Lite config assembly.
 
 Why this module exists: three places used to each hand-roll their own copy
 of the same handful of hex codes (`src/core/html_report.py`'s
@@ -18,20 +17,16 @@ time, so the exact same `dashboard.json` / `report.html` artifact can be
 re-rendered light or dark from whatever the viewer's own theme is, without
 regenerating anything.
 
-NOTE for a future pass: `app.py`'s `_get_vega_config()` should be changed to
-`return vega_config()` instead of hand-maintaining its own copy of this
-palette. Not done here because app.py is off-limits for this change set.
+NOTE: `ui/components/cards.py`'s `get_vega_config()` already returns
+`vega_config(dark=...)`, so the console and the HTML report draw the same charts.
 
-FrontendPlan.md item 1.4: the previous six-slot categorical range failed the
-dataviz skill's colorblind-separation and normal-vision checks in both modes,
-and used `--risk` as slot 2 — meaning a chart series colored red meant
-"second category" while the rest of the UI reserves red for "may not hold"
-(DESIGN.md, "The rule about red"). The replacement below is validated (all
-checks PASS, no warnings) against the new A2 buff-green chart surfaces via
-the dataviz skill's `validate_palette.js`:
-    node validate_palette.js "<hexes>" --mode light --surface "#f7f8ef"
-    node validate_palette.js "<hexes>" --mode dark  --surface "#242a20"
-`--risk` no longer appears in either range — it stays a status color only.
+FrontendPlan.md item 1.4: an earlier six-slot range used `--risk` as slot 2 —
+meaning a chart series colored red meant "second category" while the rest of
+the UI reserves red for "may not hold" (DESIGN.md, "The rule about red").
+`--risk` is in neither range — it stays a status color only. The current ranges
+were re-validated for the Sorrel surfaces (see the comment above them for the
+thresholds); the chart surface is `sheet` in both modes, since that is the Vega
+`background`.
 """
 from __future__ import annotations
 
@@ -65,6 +60,7 @@ __all__ = [
     "ACCENT_NIGHT",
     "CATEGORY_RANGE_DAY",
     "CATEGORY_RANGE_NIGHT",
+    "CHART_PEN_NIGHT",
     "FONT_BODY",
     "FONT_HEADING",
     "GRAPHITE_DAY",
@@ -97,31 +93,43 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 # Colorblind-safe categorical palette (FrontendPlan.md section 4.2), fixed
-# hue order, never cycled. Slot 1 is the Ledger pen in both modes except one
-# deliberate exception: Night slot 1 is NOT `PEN_NIGHT` (`#f0a24a`), which is
-# too light to read as a chart mark against the dark chart surface — chart
-# inks and UI pens are separate token sets by design. `--risk` (`RISK_DAY`/
-# `RISK_NIGHT`) is deliberately absent from both ranges; see the module
-# docstring. A 7th series folds into "Other" rather than cycling a 7th hue.
+# hue order, never cycled. Slot 1 is the forest-green pen in both modes except one
+# deliberate exception: Night slot 1 is NOT `PEN_NIGHT` (`#326d48`), which is a
+# fill and only ~2.6:1 against the Night chart surface (marks need 3:1) — chart
+# inks and UI pens are separate token sets by design, so Night uses a lighter
+# green of the same hue. `--risk` (`RISK_DAY`/`RISK_NIGHT`) is deliberately
+# absent from both ranges; see the module docstring. A 7th series folds into
+# "Other" rather than cycling a 7th hue.
+#
+# Sorrel redesign: the old range had the pen as slot 1 and a leaf green as slot 3;
+# with the pen now green those two were one hue, so slot 3 became amber-brown and
+# no other slot is green. Validated with a script (not by eye): CIEDE2000 for all
+# 15 pairs under normal vision (every pair >= 20 Day / >= 22 Night) and under
+# protanopia, deuteranopia and tritanopia (Machado 2009, severity 1.0; every pair
+# >= 8 Day / >= 11 Night), each mark >= 3:1 against the chart surface (`sheet`),
+# and every slot >= 15 CIEDE2000 away from `risk`.
+CHART_PEN_NIGHT = "#4a9a69"
 CATEGORY_RANGE_DAY: list[str] = [
-    PEN_DAY,     # 1. Ledger rust (the pen)
-    "#1f6aa0",   # 2. Ink blue
-    "#3f7f4a",   # 3. Leaf green
-    "#6d4a8c",   # 4. Plum
-    "#9a7418",   # 5. Ochre
-    "#c4648a",   # 6. Rose
+    PEN_DAY,     # 1. Forest green (the pen; the name dates from "Ledger")
+    "#2f86d6",   # 2. Ink blue
+    "#a8620f",   # 3. Amber-brown
+    "#6b2a73",   # 4. Plum
+    "#a08c10",   # 5. Ochre / gold
+    "#c26a8f",   # 6. Rose
 ]
 CATEGORY_RANGE_NIGHT: list[str] = [
-    "#cc7f34",   # 1. Ledger rust, chart-surface variant (not PEN_NIGHT)
-    "#4d97cf",   # 2. Ink blue
-    "#4fa46a",   # 3. Leaf green
-    "#9d7fd0",   # 4. Plum
-    "#a8892a",   # 5. Ochre
-    "#c86e92",   # 6. Rose
+    CHART_PEN_NIGHT,   # 1. Forest green, chart-surface variant (not PEN_NIGHT)
+    "#7ca9ec",   # 2. Ink blue
+    "#d7a85b",   # 3. Amber-brown
+    "#7863d4",   # 4. Plum / violet
+    "#85700b",   # 5. Ochre / gold
+    "#b75280",   # 6. Rose
 ]
 
-FONT_HEADING = "Bricolage Grotesque, 'Public Sans', sans-serif"
-FONT_BODY = "Public Sans, 'Segoe UI', sans-serif"
+#: Sorrel's type. Chart text is Geist throughout (labels, axis titles, legend); the serif
+#: Newsreader is the app's accent face and never carries data. Same families the report embeds.
+FONT_HEADING = "Geist, -apple-system, 'Segoe UI', system-ui, sans-serif"
+FONT_BODY = "Geist, -apple-system, 'Segoe UI', system-ui, sans-serif"
 
 
 #: Round 8 (8.4) — Vega-Lite format-string fragments keyed by `unit_hint`
@@ -197,7 +205,7 @@ def humanize_axis_title(column: str, unit_hint: str | None = None) -> str:
 
 def vega_config(dark: bool = False) -> dict[str, Any]:
     """
-    A complete Vega-Lite `config` object for the Ledger theme.
+    A complete Vega-Lite `config` object for the Sorrel theme.
 
     Callers inject this at render/embed time (`spec["config"] = vega_config(...)`
     right before handing the spec to vega-embed) — it must never be baked into
@@ -213,8 +221,10 @@ def vega_config(dark: bool = False) -> dict[str, Any]:
     graphite = GRAPHITE_NIGHT if dark else GRAPHITE_DAY
     sheet = SHEET_NIGHT if dark else SHEET_DAY
     rule = RULE_NIGHT if dark else RULE_DAY
-    pen = PEN_NIGHT if dark else PEN_DAY
     category = CATEGORY_RANGE_NIGHT if dark else CATEGORY_RANGE_DAY
+    # Default mark colour = slot 1, so a mark with no colour encoding matches the first series and
+    # clears 3:1 on the chart surface in both modes (raw PEN_NIGHT is only ~2.6:1 there).
+    pen = category[0]
 
     return {
         "background": sheet,

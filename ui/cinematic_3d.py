@@ -1,5 +1,5 @@
 """
-The 6-Section Cinematic Experience — Anime.js + fullPage.js + Three.js 3D Master Architecture.
+The 6-Section Cinematic Experience (Sorrel): section pager + Anime.js + Three.js.
 
 This module provides the Python interface between Streamlit / standalone tools and
 the hardware-accelerated 3D fullpage presentation. It serializes live session state
@@ -10,7 +10,9 @@ viewport or standalone exportable presentation file.
 
 from __future__ import annotations
 
+import base64
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -33,29 +35,75 @@ _ASSETS = Path(__file__).parent / "assets"
 
 
 def _rgba(hex_color: str, alpha: float) -> str:
-    """A token hex as `rgba(...)`, so glow/card overlays track the token instead of drifting from it."""
+    """A token hex as `rgba(...)`, so card surfaces track the token instead of drifting from it."""
     r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
     return f"rgba({r}, {g}, {b}, {alpha})"
 
 
-#: pen_glow/card_bg/card_border alpha per mode — the only genuinely local part of
-#: this palette; everything else comes straight from `design_tokens`.
-_PEN_GLOW_ALPHA: dict[str, float] = {"day": 0.35, "night": 0.45}
-_CARD_BG_ALPHA: dict[str, float] = {"day": 0.88, "night": 0.82}
-_CARD_BORDER_ALPHA: dict[str, float] = {"day": 0.22, "night": 0.25}
+#: Card surface alpha per mode: the only genuinely local part of this palette; everything else
+#: comes straight from `design_tokens`. There is no blur behind the cards, so they stay mostly
+#: opaque to keep text legible over the 3D scene (and fully opaque under reduced transparency).
+_CARD_BG_ALPHA: dict[str, float] = {"day": 0.94, "night": 0.92}
 
-#: Luxury Ledger Palettes for Day and Night modes. This file's "grid" key
-#: predates `design_tokens`' "rule" naming, so it is mapped explicitly.
+#: The Sorrel palettes for Day and Night. This file's "grid" key predates `design_tokens`'
+#: "rule" naming, so it is mapped explicitly. Card borders are the hairline token (no glow).
 CINEMATIC_PALETTES: dict[str, dict[str, str]] = {
     mode: {
         **palette,
         "grid": palette["rule"],
-        "pen_glow": _rgba(palette["pen"], _PEN_GLOW_ALPHA[mode]),
         "card_bg": _rgba(palette["sheet"], _CARD_BG_ALPHA[mode]),
-        "card_border": _rgba(palette["pen"], _CARD_BORDER_ALPHA[mode]),
+        "card_border": palette["rule"],
     }
     for mode, palette in design_tokens.PALETTES.items()
 }
+
+#: The font families the standalone export embeds. The shared stylesheet still declares older faces
+#: until the final cleanup; none of them is used by this document, so none is inlined.
+_EXPORT_FAMILIES = frozenset({"Geist", "Geist Mono", "Newsreader"})
+_FONT_FACE_RE = re.compile(r"@font-face\s*\{[^}]*\}", re.DOTALL)
+_FONT_FAMILY_RE = re.compile(r"font-family\s*:\s*['\"]?([^;'\"]+)['\"]?\s*;")
+_FONT_URL_RE = re.compile(r"""url\((["']?)\./([^"')]+)\1\)""")
+
+
+def _mode_css(mode: str) -> str:
+    """The `--token: value;` lines the document's stylesheet carries for one mode."""
+    palette = CINEMATIC_PALETTES[mode]
+    lines = [design_tokens.css_root_block(mode, indent="      ")]  # type: ignore[arg-type]
+    for key in ("grid", "card_bg", "card_border"):
+        lines.append(f"      --{key.replace('_', '-')}: {palette[key]};")
+    return "\n".join(lines)
+
+
+def _inline_export_fonts(root: Path) -> str:
+    """`<style>` for the standalone export: the Sorrel `@font-face` rules with each woff2 as a data URI.
+
+    The rules are variable fonts (`format('woff2-variations')`, a weight range), so a rule is kept
+    as written and only its `url('./file.woff2')` is replaced. A rule whose file is missing is
+    dropped rather than left pointing at a relative path, so the export never depends on a file
+    beside it (the page then falls back to the system fonts).
+    """
+    font_dir = root / "static" / "vendor" / "fonts"
+    css = (font_dir / "ledger-fonts.css").read_text("utf-8")
+    kept: list[str] = []
+    for face in _FONT_FACE_RE.findall(css):
+        family = _FONT_FAMILY_RE.search(face)
+        if family is None or family.group(1).strip() not in _EXPORT_FAMILIES:
+            continue
+        missing = False
+
+        def to_data_uri(match: re.Match[str]) -> str:
+            nonlocal missing
+            font_path = font_dir / match.group(2)
+            if not font_path.is_file():
+                missing = True
+                return match.group(0)
+            b64 = base64.b64encode(font_path.read_bytes()).decode("ascii")
+            return f"url('data:font/woff2;base64,{b64}')"
+
+        inlined = _FONT_URL_RE.sub(to_data_uri, face)
+        if not missing:
+            kept.append(inlined)
+    return "<style>" + "\n".join(kept) + "</style>"
 
 
 @lru_cache(maxsize=2)
@@ -391,6 +439,8 @@ def build_cinematic_document(
     else:
         state_dict.setdefault("theme", theme)
         state_dict.setdefault("palette", CINEMATIC_PALETTES.get(theme, CINEMATIC_PALETTES["night"]))
+    # Both modes travel with the state, so the in-page Day / Night toggle redraws from the tokens.
+    state_dict.setdefault("palettes", CINEMATIC_PALETTES)
 
     # Escape state JSON against early closing script tag
     state_json = json.dumps(state_dict, ensure_ascii=False).replace("<", "\\u003c")
@@ -398,9 +448,6 @@ def build_cinematic_document(
     html_template = _read_asset("cinematic_3d.html")
 
     if inline_assets:
-        import base64
-        import re
-        from pathlib import Path
         root = Path(__file__).resolve().parents[1]
 
         # Inline Anime.js
@@ -412,16 +459,8 @@ def build_cinematic_document(
         three_code = (root / "static/vendor/three/three.module.js").read_text("utf-8")
         three_url = "data:text/javascript;base64," + base64.b64encode(three_code.encode("utf-8")).decode("utf-8")
 
-        # Inline Fonts
-        font_css = (root / "static/vendor/fonts/ledger-fonts.css").read_text("utf-8")
-        def replace_font_url(m):
-            font_path = root / "static/vendor/fonts" / m.group(1)
-            if font_path.exists():
-                b64 = base64.b64encode(font_path.read_bytes()).decode("utf-8")
-                return f"url('data:font/woff2;charset=utf-8;base64,{b64}')"
-            return m.group(0)
-        font_css = re.sub(r"url\('\./([^']+)'\)", replace_font_url, font_css)
-        font_links = f"<style>{font_css}</style>"
+        # Inline Fonts (Sorrel families only; see `_inline_export_fonts`)
+        font_links = _inline_export_fonts(root)
     else:
         anime_url = static_url("vendor/anime/4.5.0/anime.esm.min.js")
         three_url = static_url("vendor/three/three.module.js")
@@ -435,10 +474,12 @@ def build_cinematic_document(
 
     return (
         html_template
+        .replace("__TOKENS_NIGHT__", _mode_css("night"))
+        .replace("__TOKENS_DAY__", _mode_css("day"))
         .replace("__FONT_LINKS__", font_links)
-        .replace("__CINEMATIC_STATE_JSON__", state_json)
         .replace("__SECTION_PAGER_SCRIPT__", _read_asset("section_pager.js"))
         .replace("__CINEMATIC_SCENE_SCRIPT__", scene_script)
+        .replace("__CINEMATIC_STATE_JSON__", state_json)  # last: dataset text that contains a placeholder name stays text
     )
 
 

@@ -86,6 +86,11 @@ export const MOTION = {
 };
 
 
+// Dataset column names, model names and LLM findings reach innerHTML below: escape them first.
+export function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
 export function smoothstep(x) {
   const c = Math.min(Math.max(x, 0), 1);
   return c * c * (3 - 2 * c);
@@ -97,7 +102,7 @@ if (engine && typeof engine === 'object') {
 }
 
 /* -------------------------------------------------------------------------- */
-/* STATE & PALETTE MANAGEMENT (Warm Ledger Aesthetic)                         */
+/* STATE & PALETTE MANAGEMENT (Sorrel)                                        */
 /* -------------------------------------------------------------------------- */
 const RAW_STATE = window.__CINEMATIC_STATE__ || {};
 // Compact mode (workspace hero box) prepends a step 0 section, so fullPage section N maps to
@@ -106,52 +111,53 @@ const HAS_INTRO = !!RAW_STATE.compact;
 const SECTION_OFFSET = HAS_INTRO ? 1 : 0;
 let THEME = RAW_STATE.theme || 'night';
 let isNight = THEME === 'night';
-const P = RAW_STATE.palette || {};
 
-const PALETTES = {
-  night: {
-    stock: (isNight && P.stock) || '#241c14',
-    sheet: (isNight && P.sheet) || '#1c1610',
-    pen: (isNight && P.pen) || '#f0a24a',
-    accent: (isNight && P.accent) || '#d99a4e',
-    risk: (isNight && P.risk) || '#e2685a',
-    positive: (isNight && P.positive) || '#7fb77e',
-    graphite: (isNight && P.graphite) || '#bdae97',
-    grid: (isNight && P.grid) || '#4a3c28',
-    coreEmissive: 0x6e3805,
-    ambient: 0x2e2419,
-    ambientInt: 1.4,
-    key: 0xffd9a6,
-    keyInt: 1.8,
-    fill: 0xd99a4e,
-    fillInt: 0.75,
-    rim: 0xf0a24a,
-    rimInt: 0.9,
-    fogDensity: 0.024,
-    gridOpacity: 0.14,
-  },
-  day: {
-    stock: (!isNight && P.stock) || '#f7eedd',
-    sheet: (!isNight && P.sheet) || '#fffbf2',
-    pen: (!isNight && P.pen) || '#a34f20',
-    accent: (!isNight && P.accent) || '#e08a3e',
-    risk: (!isNight && P.risk) || '#a33526',
-    positive: (!isNight && P.positive) || '#5b8c5a',
-    graphite: (!isNight && P.graphite) || '#8a7660',
-    grid: (!isNight && P.grid) || '#e4d4bc',
-    coreEmissive: 0x3d1c00,
-    ambient: 0xfbf4e6,
-    ambientInt: 1.1,
-    key: 0xfffaed,
-    keyInt: 1.2,
-    fill: 0xd8edf5,
-    fillInt: 0.55,
-    rim: 0xa34f20,
-    rimInt: 0.6,
-    fogDensity: 0.022,
-    gridOpacity: 0.09,
-  },
+// Both modes' tokens come from Python (src/core/design_tokens.py via ui/cinematic_3d.py), so toggling
+// Day / Night never falls back to a colour typed here. The literals are only the last resort if the
+// state arrived without them, and they are the Sorrel token values.
+const FALLBACK_TOKENS = {
+  night: { stock: '#141712', sheet: '#1c2219', sheet_alt: '#1a1e17', ink: '#edf0e4', graphite: '#8a927d', pen: '#326d48', accent_soft: '#1c2b20', accent_text: '#7fc79a', margin: '#b3a06a', risk: '#cf5544', positive: '#4ca167', grid: '#2a3324', paper_elevated: '#22291e', bg_deep: '#0d120e' },
+  day: { stock: '#f7f4ed', sheet: '#fffdf7', sheet_alt: '#efeae0', ink: '#1a1a17', graphite: '#66665e', pen: '#1f4634', accent_soft: '#e4ebe5', accent_text: '#1f4634', margin: '#9a8650', risk: '#8a3a2a', positive: '#24643c', grid: '#d9d3c4', paper_elevated: '#ffffff', bg_deep: '#12241a' },
 };
+function tokensFor(mode) {
+  const sent = (RAW_STATE.palettes && RAW_STATE.palettes[mode]) || (RAW_STATE.theme === mode ? RAW_STATE.palette : null) || {};
+  return { ...FALLBACK_TOKENS[mode], ...sent };
+}
+
+/* The scene's inks. `pen` is the stage ink: raw token `pen` is a fill, so on the dark page the scene uses the
+ * lighter `accent_text` of the same green. `accent` is the scene's second, purely decorative hue and takes the
+ * token built for that (`margin`, brass): amber means "look twice" and brick means "may not hold", and a 3D
+ * ornament must not borrow either. Light colours are neutral paper-white; intensities are unchanged. */
+function sceneInks(mode) {
+  const t = tokensFor(mode);
+  const night = mode === 'night';
+  return {
+    stock: t.stock,
+    sheet: t.sheet,
+    pen: night ? t.accent_text : t.pen,
+    accent: t.margin,
+    risk: t.risk,
+    positive: t.positive,
+    graphite: t.graphite,
+    grid: t.grid,
+    easel: t.paper_elevated,
+    edge: night ? 0xcfe9d8 : new THREE.Color(t.bg_deep).getHex(),
+    lens: night ? 0xcfe9d8 : new THREE.Color(t.pen).getHex(),
+    coreEmissive: night ? 0x1c3a28 : 0x0f2418,
+    ambient: night ? 0x1f2a22 : 0xfbf8ee,
+    ambientInt: night ? 1.4 : 1.1,
+    key: night ? 0xe9eddc : 0xfffdf5,
+    keyInt: night ? 1.8 : 1.2,
+    fill: night ? new THREE.Color(t.accent_text).getHex() : new THREE.Color(t.accent_soft || t.sheet_alt).getHex(),
+    fillInt: night ? 0.75 : 0.55,
+    rim: night ? new THREE.Color(t.accent_text).getHex() : new THREE.Color(t.pen).getHex(),
+    rimInt: night ? 0.9 : 0.6,
+    fogDensity: night ? 0.024 : 0.022,
+    gridOpacity: night ? 0.14 : 0.09,
+  };
+}
+
+const PALETTES = { night: sceneInks('night'), day: sceneInks('day') };
 
 function getActivePalette() {
   return isNight ? PALETTES.night : PALETTES.day;
@@ -236,9 +242,9 @@ const stageBuffers = [
   new Float32Array(MATTER_COUNT * 3), // Stage 0: Gimbal Core & Orbital Rings
   new Float32Array(MATTER_COUNT * 3), // Stage 1: Orderly 3D Grid Lattice (Defect 13 Fix)
   new Float32Array(MATTER_COUNT * 3), // Stage 2: Feature Scatter Constellation
-  new Float32Array(MATTER_COUNT * 3), // Stage 3: Stratified Decision Manifolds
+  new Float32Array(MATTER_COUNT * 3), // Stage 3: Stratified cross-validation sheets
   new Float32Array(MATTER_COUNT * 3), // Stage 4: Anti-Overfit Generalization Envelope
-  new Float32Array(MATTER_COUNT * 3), // Stage 5: Sealed Executive Ledger Dossier
+  new Float32Array(MATTER_COUNT * 3), // Stage 5: Summary dossier
 ];
 
 // Stage Colors per instance
@@ -341,7 +347,7 @@ for (let i = 0; i < MATTER_COUNT; i++) {
   stageColors[2][i3 + 2] = chosenColor.b;
 }
 
-// -- Stage 3: Stratified Decision Manifolds (5 Hyperplane Sheets)
+// -- Stage 3: Stratified cross-validation (5 fold sheets)
 const FOLD_COUNT = 5;
 const ptsPerFold = Math.floor(MATTER_COUNT / FOLD_COUNT);
 for (let i = 0; i < MATTER_COUNT; i++) {
@@ -558,7 +564,7 @@ const rlmCore = new THREE.Mesh(dodecaGeo, dodecaMat);
 rlmGroup.add(rlmCore);
 
 const dodecaEdgesMat = new THREE.LineBasicMaterial({
-  color: isNight ? 0xffe2b8 : 0x5a2d0d,
+  color: pal.edge,
   transparent: true,
   opacity: 0.9,
 });
@@ -799,7 +805,7 @@ export const WAYPOINTS = [
   {
     camera: new THREE.Vector3(2.2, 1.8, 8.2),
     lookAt: new THREE.Vector3(0.0, 0.15, 0.0),
-    hudTag: 'ML PIPELINE // 5-FOLD STRATIFIED MANIFOLDS',
+    hudTag: 'ML PIPELINE // 5-FOLD STRATIFIED FOLDS',
     hudTagClass: 'hud-tag positive',
     anchorObj: manifoldPlates[2],
   },
@@ -811,11 +817,11 @@ export const WAYPOINTS = [
     hudTagClass: 'hud-tag positive',
     anchorObj: radarOuter,
   },
-  // 5: Executive Ledger: Square-on desk elevation focusing on sealed dossier
+  // 5: Summary: Square-on desk elevation focusing on the dossier
   {
     camera: new THREE.Vector3(1.2, 0.9, 9.4),
     lookAt: new THREE.Vector3(0.0, 0.0, 0.0),
-    hudTag: 'VERIFIED SYNTHESIS // SEALED LEDGER',
+    hudTag: 'CHECKED SUMMARY // KEY FINDINGS',
     hudTagClass: 'hud-tag',
     anchorObj: seal,
   },
@@ -936,7 +942,7 @@ const lensOrigin = new THREE.Vector3();
 const lensDir = new THREE.Vector3();
 const camForward = new THREE.Vector3();
 const sceneOrigin = new THREE.Vector3(0, 0, 0);
-const cLensGlow = new THREE.Color(isNight ? 0xffe2b8 : pal.pen);
+const cLensGlow = new THREE.Color(pal.lens);
 let cursorInside = false;
 let lensStrength = 0;
 const ripples = [];
@@ -1081,8 +1087,9 @@ function updateProjectedHudAndLeaderLines() {
   if (leaderCtx) {
     leaderCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     leaderCtx.lineWidth = 1.2;
-    leaderCtx.strokeStyle = isNight ? 'rgba(240, 162, 74, 0.45)' : 'rgba(163, 79, 32, 0.35)';
-    leaderCtx.fillStyle = isNight ? '#f0a24a' : '#a34f20';
+    leaderCtx.strokeStyle = getActivePalette().pen;
+    leaderCtx.fillStyle = getActivePalette().pen;
+    leaderCtx.globalAlpha = 0.7;
 
     // Origin Dot at 3D anchor projection
     leaderCtx.beginPath();
@@ -1224,7 +1231,7 @@ try {
         '03 Statistical Testing',
         '04 ML Pipeline & Folds',
         '05 Overfit Guard',
-        '06 Executive Ledger',
+        '06 Summary',
       ]),
       // A permanently shown tooltip collides with the HUD tag in the small hero box
       showActiveTooltip: !HAS_INTRO,
@@ -1262,7 +1269,7 @@ document.addEventListener('visibilitychange', () => {
     isTourActive = false;
     if (btnCameraView) {
       btnCameraView.style.borderColor = 'var(--card-border)';
-      btnCameraView.style.boxShadow = 'none';
+      btnCameraView.setAttribute('aria-pressed', 'false');
     }
   }
 });
@@ -1674,18 +1681,16 @@ export function applyThemePalette(themeName) {
   document.documentElement.classList.toggle('theme-day', !isNight);
   document.body.classList.toggle('theme-day', !isNight);
 
-  document.documentElement.style.setProperty('--stock', p.stock);
-  document.documentElement.style.setProperty('--sheet', p.sheet);
-  document.documentElement.style.setProperty('--sheet-alt', isNight ? '#282017' : '#f1e4cb');
-  document.documentElement.style.setProperty('--ink', isNight ? '#f6eedf' : '#3a2b1e');
-  document.documentElement.style.setProperty('--graphite', p.graphite);
-  document.documentElement.style.setProperty('--pen', p.pen);
-  document.documentElement.style.setProperty('--accent', p.accent);
-  document.documentElement.style.setProperty('--risk', p.risk);
-  document.documentElement.style.setProperty('--positive', p.positive);
-  document.documentElement.style.setProperty('--grid', p.grid);
-  document.documentElement.style.setProperty('--card-bg', isNight ? 'rgba(28, 22, 16, 0.85)' : 'rgba(255, 251, 242, 0.94)');
-  document.documentElement.style.setProperty('--card-border', isNight ? 'rgba(240, 162, 74, 0.22)' : 'rgba(138, 118, 96, 0.28)');
+  // Every token of the mode that is now showing, as the CSS variables the stylesheet reads.
+  const root = document.documentElement;
+  for (const [key, value] of Object.entries(tokensFor(THEME))) {
+    if (typeof value === 'string') root.style.setProperty('--' + key.replace(/_/g, '-'), value);
+  }
+  const mode = RAW_STATE.palettes && RAW_STATE.palettes[THEME];
+  if (mode) {
+    if (mode.card_bg) root.style.setProperty('--card-bg', mode.card_bg);
+    if (mode.card_border) root.style.setProperty('--card-border', mode.card_border);
+  }
 
   const stockC = new THREE.Color(p.stock);
   renderer.setClearColor(stockC, 1);
@@ -1706,7 +1711,7 @@ export function applyThemePalette(themeName) {
   // Re-tint all hero mesh materials
   dodecaMat.color.set(p.pen);
   dodecaMat.emissive.setHex(p.coreEmissive);
-  dodecaEdgesMat.color.setHex(isNight ? 0xffe2b8 : 0x5a2d0d);
+  dodecaEdgesMat.color.setHex(p.edge);
   ring1Mat.color.set(p.pen);
   ring2Mat.color.set(p.accent);
   ring3Mat.color.set(p.graphite);
@@ -1719,7 +1724,7 @@ export function applyThemePalette(themeName) {
   outerMat.color.set(p.positive);
   innerMat.color.set(p.positive);
   guardRingMat.color.set(p.positive);
-  easelMat.color.set(isNight ? p.sheet : '#fff5e6');
+  easelMat.color.set(isNight ? p.sheet : p.easel);
   easelEdgesMat.color.set(p.pen);
   sealMat.color.set(p.pen);
   sealMat.emissive.set(p.pen);
@@ -1740,7 +1745,7 @@ export function applyThemePalette(themeName) {
   cAccent.set(p.accent);
   cPositive.set(p.positive);
   cGraphite.set(p.graphite);
-  cLensGlow.set(isNight ? 0xffe2b8 : p.pen);
+  cLensGlow.set(p.lens);
 }
 
 const btnTheme = document.getElementById('btn-theme-toggle');
@@ -1768,7 +1773,7 @@ if (btnCameraView) {
   btnCameraView.addEventListener('click', () => {
     isTourActive = !isTourActive;
     btnCameraView.style.borderColor = isTourActive ? 'var(--pen)' : 'var(--card-border)';
-    btnCameraView.style.boxShadow = isTourActive ? '0 0 12px var(--pen-glow)' : 'none';
+    btnCameraView.setAttribute('aria-pressed', String(isTourActive));
 
     if (isTourActive) {
       tourInterval = setInterval(() => {
@@ -1838,16 +1843,16 @@ function populateDataFromState() {
   const corrList = document.getElementById('correlations-list');
   if (corrList && Array.isArray(s.top_correlations) && s.top_correlations.length > 0) {
     corrList.innerHTML = s.top_correlations.slice(0, 4).map((c) => `
-      <div style="display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
-        <span style="font-family: var(--mono); color: var(--ink);">${c.pair || ''}</span>
-        <span style="font-weight: 700; color: ${c.val >= 0 ? 'var(--pen)' : 'var(--risk)'};">${c.val >= 0 ? '+' : ''}${c.val}</span>
+      <div style="display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--rule-faint);">
+        <span style="font-family: var(--mono); color: var(--ink);">${esc(c.pair || '')}</span>
+        <span style="font-weight: 600; font-family: var(--mono); color: var(--ink);">${c.val >= 0 ? '+' : ''}${esc(c.val)}</span>
       </div>
     `).join('');
   }
 
   if (hasModels) {
     // --- SUPERVISED ML PIPELINE & GENERALIZATION ENVELOPE ---
-    WAYPOINTS[3].hudTag = 'ML PIPELINE // 5-FOLD STRATIFIED MANIFOLDS';
+    WAYPOINTS[3].hudTag = 'ML PIPELINE // 5-FOLD STRATIFIED FOLDS';
     WAYPOINTS[4].hudTag = 'OVERFIT GUARD // GENERALIZATION ENVELOPE';
 
     const pillPipe = document.getElementById('nav-pill-pipeline');
@@ -1867,10 +1872,10 @@ function populateDataFromState() {
         const isWarn = mod.gap > 10;
         return `
           <tr class="${isBest ? 'best-row' : ''}">
-            <td>${mod.name} ${isBest ? '★' : ''}</td>
-            <td>${mod.cv_mean}%</td>
-            <td>±${mod.cv_std || 1.5}%</td>
-            <td style="${isWarn ? 'color: var(--risk); font-weight: 700;' : ''}">${mod.gap}% ${isWarn ? '⚠️' : ''}</td>
+            <td>${esc(mod.name)} ${isBest ? '★' : ''}</td>
+            <td>${esc(mod.cv_mean)}%</td>
+            <td>±${esc(mod.cv_std || 1.5)}%</td>
+            <td style="${isWarn ? 'color: var(--danger-text); font-weight: 600;' : ''}">${esc(mod.gap)}% ${isWarn ? '⚠ may not hold on new data' : ''}</td>
           </tr>
         `;
       }).join('');
@@ -1892,7 +1897,7 @@ function populateDataFromState() {
         elSafeTag.textContent = '⚠️ GAP > 10% WARNING';
       } else {
         elSafeTag.className = 'pill-tag safe';
-        elSafeTag.textContent = '✓ GAP < 10% CERTIFIED';
+        elSafeTag.textContent = '✓ GAP < 10% (CHECKED)';
       }
     }
 
@@ -1911,22 +1916,22 @@ function populateDataFromState() {
     if (datumGap) datumGap.textContent = `${m.best_gap || 3.2}%`;
   } else {
     // --- DESCRIPTIVE EDA & DIMENSIONALITY MODE (NO HALLUCINATED MODELS) ---
-    WAYPOINTS[3].hudTag = 'FEATURE MANIFOLDS // CONTINUOUS EMBEDDINGS';
+    WAYPOINTS[3].hudTag = 'FEATURES // PROJECTED SPACE';
     WAYPOINTS[4].hudTag = 'DATA INTEGRITY // DISTRIBUTION ENVELOPE';
 
     const pillPipe = document.getElementById('nav-pill-pipeline');
-    if (pillPipe) pillPipe.textContent = '04 Manifolds';
+    if (pillPipe) pillPipe.textContent = '04 Features';
     const pillDiag = document.getElementById('nav-pill-diagnostics');
     if (pillDiag) pillDiag.textContent = '05 Integrity';
 
     // Section 4 Header & Card 1
     const sec4Badge = document.getElementById('sec4-badge');
-    if (sec4Badge) sec4Badge.textContent = 'STAGE 04 // FEATURE DECOMPOSITION & MANIFOLDS';
+    if (sec4Badge) sec4Badge.textContent = 'STAGE 04 // FEATURE DECOMPOSITION';
     const sec4Title = document.getElementById('sec4-title');
-    if (sec4Title) sec4Title.textContent = 'Continuous Feature Manifolds';
+    if (sec4Title) sec4Title.textContent = 'Feature Decomposition';
     const sec4Desc = document.getElementById('sec4-desc');
     if (sec4Desc) {
-      sec4Desc.textContent = 'High-dimensional feature space projected across continuous geometric manifolds. Latent variance structures and cross-feature interactions are audited across all dimensions.';
+      sec4Desc.textContent = 'The features are projected into a smaller space. Shared variance and interactions between features are checked.';
     }
 
     const sec4Card1Label = document.getElementById('sec4-card1-label');
@@ -1954,7 +1959,7 @@ function populateDataFromState() {
 
     // Section 4 Card 2 (Feature Association Matrix instead of fake model tournament)
     const sec4Card2Label = document.getElementById('sec4-card2-label');
-    if (sec4Card2Label) sec4Card2Label.textContent = 'Multivariate Topology';
+    if (sec4Card2Label) sec4Card2Label.textContent = 'Feature Associations';
     const sec4Card2Title = document.getElementById('sec4-card2-title');
     if (sec4Card2Title) sec4Card2Title.textContent = 'Feature Association Spectrum';
     const sec4Card2Content = document.getElementById('sec4-card2-content');
@@ -1971,9 +1976,9 @@ function populateDataFromState() {
           <tbody>
             ${s.top_correlations.slice(0, 4).map((c) => `
               <tr>
-                <td><span style="font-family: var(--mono);">${c.pair || ''}</span></td>
+                <td><span style="font-family: var(--mono);">${esc(c.pair || '')}</span></td>
                 <td><span class="pill-tag ${Math.abs(c.val) > 0.6 ? 'safe' : 'accent'}" style="font-size: 9px; padding: 1px 5px;">${Math.abs(c.val) > 0.6 ? 'STRONG' : 'MODERATE'}</span></td>
-                <td style="font-weight: 700; color: ${c.val >= 0 ? 'var(--pen)' : 'var(--risk)'};">${c.val >= 0 ? '+' : ''}${c.val}</td>
+                <td style="font-weight: 600; font-family: var(--mono); color: var(--ink);">${c.val >= 0 ? '+' : ''}${esc(c.val)}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -1988,7 +1993,7 @@ function populateDataFromState() {
     if (sec5Title) sec5Title.textContent = 'Statistical Robustness Envelope';
     const sec5Desc = document.getElementById('sec5-desc');
     if (sec5Desc) {
-      sec5Desc.textContent = 'Automated outlier detection and variance integrity audit. A 3D radar diamond envelope illuminates dataset stability, verifying statistical assumptions and bounding anomalies.';
+      sec5Desc.textContent = 'Automated outlier detection and variance integrity audit. A 3D outline shows how stable the data looks, and the checks flag anomalies.';
     }
 
     const sec5Card1Label = document.getElementById('sec5-card1-label');
@@ -2010,7 +2015,7 @@ function populateDataFromState() {
     const elSafeTag = document.getElementById('guard-safe-tag');
     if (elSafeTag) {
       elSafeTag.className = 'pill-tag safe';
-      elSafeTag.textContent = '✓ DISTRIBUTION INTEGRITY CERTIFIED';
+      elSafeTag.textContent = '✓ DISTRIBUTION CHECKS RAN';
     }
 
     const sec5Card2Label = document.getElementById('sec5-card2-label');
@@ -2056,7 +2061,7 @@ function populateDataFromState() {
 
   const findingsList = document.getElementById('exec-findings-list');
   if (findingsList && Array.isArray(syn.findings) && syn.findings.length > 0) {
-    findingsList.innerHTML = syn.findings.map((f) => `<li>${f}</li>`).join('');
+    findingsList.innerHTML = syn.findings.map((f) => `<li>${esc(f)}</li>`).join('');
   }
 
   // Verifiable Claims & Integrity Badges
@@ -2070,7 +2075,7 @@ function populateDataFromState() {
   }
   const execZeroTag = document.getElementById('exec-zero-tag');
   if (execZeroTag) {
-    execZeroTag.textContent = '✓ REPRODUCIBLE REPL LEDGER';
+    execZeroTag.textContent = '✓ REPRODUCIBLE RUN (SEED 42)';
   }
 
   // Refresh active HUD tag text if currently viewing Section 4 or 5

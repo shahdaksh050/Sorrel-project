@@ -5,19 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 __FONT_LINKS__
 <style>
-  /* Tokens mirror DESIGN.md and are updated dynamically from window.__PIPELINE_STATE__.palette */
+  /* The Sorrel tokens for this theme, from src/core/design_tokens.py (one source; no hex is typed here).
+     --pen is a fill (green); text uses --accent-text, and --accent (amber) is the only "look twice" colour.
+     --risk means "this may not hold" and is not used by the plate: a stage that failed to run is amber. */
   :root {
-    --ink: #3a2b1e;
-    --graphite: #8a7660;
-    --pen: #a34f20;
-    --risk: #a33526;
-    --stock: #f7eedd;
-    --sheet: #fffbf2;
-    --accent: #e08a3e;
-    --rule: rgba(58, 43, 30, 0.16);
-    --sans: 'Public Sans', ui-sans-serif, 'Segoe UI', system-ui, sans-serif;
-    --heading: 'Bricolage Grotesque', 'Public Sans', ui-sans-serif, sans-serif;
-    --mono: 'IBM Plex Mono', 'Cascadia Code', ui-monospace, Consolas, monospace;
+__ROOT_TOKENS__
+    --sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --heading: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, Consolas, monospace;
+    --radius: 4px;
 
     /* MOTION CONTRACT (Synchronized with cinematic_3d) */
     --dur-micro: 180ms;
@@ -58,7 +54,7 @@ __FONT_LINKS__
   }
 
   #scene canvas:focus-visible {
-    outline: 2px solid var(--pen);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
 
@@ -85,15 +81,15 @@ __FONT_LINKS__
     transform: translate(-50%, -115%);
   }
 
+  /* A label, not a control: a hairline card, square corners, no shadow. */
   .hud-badge {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     background: var(--sheet);
     border: 1px solid var(--rule);
-    border-radius: 999px;
-    padding: 4px 11px;
-    box-shadow: 0 2px 8px rgba(58,43,30,0.14);
+    border-radius: var(--radius);
+    padding: 4px 10px;
     font-family: var(--sans);
     font-weight: 600;
     font-size: 11.5px;
@@ -102,13 +98,14 @@ __FONT_LINKS__
   }
 
   .hud-badge .step {
+    font-family: var(--mono);
     font-weight: 600;
-    color: var(--pen);
+    color: var(--accent-text);
   }
 
-  .hud-badge.err .step {
-    color: var(--risk);
-  }
+  /* A stage that failed to run: amber (look twice), never the "may not hold" brick. */
+  .hud-badge.err { border-color: var(--accent); }
+  .hud-badge.err .step { color: var(--accent); }
 
   .hud-pointer {
     width: 1px;
@@ -117,44 +114,47 @@ __FONT_LINKS__
     margin: 0 auto;
   }
 
-  /* View toolbar */
+  /* View toolbar: real buttons, so these may react to the pointer. */
   #cad-toolbar {
     position: absolute;
     top: 10px;
     right: 12px;
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 2px;
     background: var(--sheet);
     border: 1px solid var(--rule);
-    border-radius: 999px;
-    box-shadow: 0 2px 8px rgba(58,43,30,0.12);
+    border-radius: var(--radius);
     padding: 3px;
     z-index: 20;
   }
 
   .cad-btn {
     font-family: var(--sans);
-    font-size: 11px;
-    font-weight: 700;
+    font-size: 11.5px;
+    font-weight: 600;
     background: transparent;
     border: none;
-    color: var(--graphite);
-    padding: 4px 10px;
+    color: var(--ink-2);
+    padding: 5px 10px;
     cursor: pointer;
     line-height: 1;
-    border-radius: 999px;
-    transition: all 0.12s ease;
+    border-radius: 2px;
   }
 
   .cad-btn:hover {
     color: var(--ink);
-    background: var(--stock);
+    background: var(--sheet-alt);
+  }
+
+  .cad-btn:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: 1px;
   }
 
   .cad-btn.active {
     background: var(--pen);
-    color: var(--sheet);
+    color: var(--accent-ink);
   }
 
   /* Readout panel in bottom-left */
@@ -167,17 +167,17 @@ __FONT_LINKS__
     z-index: 15;
     background: var(--sheet);
     border: 1px solid var(--rule);
-    border-radius: 12px;
-    box-shadow: 0 2px 8px rgba(58,43,30,0.10);
+    border-radius: var(--radius);
     padding: 8px 12px;
   }
 
   #readout-title {
     margin: 0;
     font-family: var(--heading);
-    font-weight: 700;
+    font-weight: 600;
     font-size: 14.5px;
-    line-height: 1.2;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
     color: var(--ink);
   }
 
@@ -186,7 +186,7 @@ __FONT_LINKS__
     font-family: var(--sans);
     font-size: 12px;
     line-height: 1.4;
-    color: var(--graphite);
+    color: var(--ink-2);
   }
 
   #hint {
@@ -194,24 +194,23 @@ __FONT_LINKS__
     right: 12px;
     bottom: 8px;
     margin: 0;
-    font-family: var(--sans);
-    font-weight: 600;
-    font-size: 11px;
+    font-family: var(--mono);
+    font-weight: 500;
+    font-size: 10.5px;
     color: var(--graphite);
     pointer-events: none;
-    opacity: 0.8;
   }
 
   .fallback-steps { margin: 0 20px 20px; padding-left: 1.4rem; font-size: 14px; line-height: 1.7; color: var(--ink); }
-  .fallback-steps li.done::marker, .fallback-steps li.active::marker { color: var(--pen); }
-  .fallback-steps li.error { color: var(--risk); }
+  .fallback-steps li.done::marker, .fallback-steps li.active::marker { color: var(--accent-text); }
+  .fallback-steps li.error { color: var(--accent); }
   .fallback {
     padding: 24px;
     font-size: 14px;
     line-height: 1.6;
     max-width: 48ch;
-    color: var(--graphite);
-    border-left: 3px solid var(--graphite);
+    color: var(--ink-2);
+    border-left: 3px solid var(--rule);
     margin: 20px;
   }
 
@@ -219,6 +218,10 @@ __FONT_LINKS__
     #hint { display: none; }
     #readout { max-width: calc(100% - 24px); }
     #cad-toolbar { top: 6px; right: 6px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hud-pin { transition: none; }
   }
 </style>
 </head>
@@ -238,8 +241,8 @@ __FONT_LINKS__
       <button id="btn-iso" class="cad-btn active" title="Angled view">3D</button>
       <button id="btn-plan" class="cad-btn" title="Top-down view">Top</button>
       <button id="btn-front" class="cad-btn" title="Front-on view">Front</button>
-      <button id="btn-cinema" class="cad-btn" title="Cinematic Tour">🎬 Tour</button>
-      <button id="btn-reset" class="cad-btn" title="Recenter">⟲</button>
+      <button id="btn-cinema" class="cad-btn" title="Cinematic Tour">Tour</button>
+      <button id="btn-reset" class="cad-btn" title="Recenter" aria-label="Recenter the view">Reset</button>
     </div>
     <div id="readout">
       <p id="readout-title"></p>
@@ -250,17 +253,12 @@ __FONT_LINKS__
 
   <script>
     window.__PIPELINE_STATE__ = __STATE_JSON__;
-    // Apply dynamic palette tokens from state
+    // Apply the palette from state as CSS variables (the same tokens the stylesheet above already carries)
     if (window.__PIPELINE_STATE__ && window.__PIPELINE_STATE__.palette) {
-      const p = window.__PIPELINE_STATE__.palette;
       const root = document.documentElement;
-      if (p.ink) root.style.setProperty('--ink', p.ink);
-      if (p.graphite) root.style.setProperty('--graphite', p.graphite);
-      if (p.pen) root.style.setProperty('--pen', p.pen);
-      if (p.risk) root.style.setProperty('--risk', p.risk);
-      if (p.stock) root.style.setProperty('--stock', p.stock);
-      if (p.sheet) root.style.setProperty('--sheet', p.sheet);
-      if (p.accent) root.style.setProperty('--accent', p.accent);
+      for (const [key, value] of Object.entries(window.__PIPELINE_STATE__.palette)) {
+        if (typeof value === 'string') root.style.setProperty('--' + key.replace(/_/g, '-'), value);
+      }
     }
   </script>
   <script src="__GSAP_URL__"></script>

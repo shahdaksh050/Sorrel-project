@@ -3,37 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>DSA Agent // 3D Autonomous Ledger Experience</title>
-  
-  <!-- Fonts: Warm Ledger Typography -->
+  <title>Sorrel: your analysis in 3D</title>
+
+  <!-- Fonts: Geist, Geist Mono and Newsreader (self-hosted; inlined in the standalone export) -->
 __FONT_LINKS__
-  
-  
+
+
   <style>
     /* -------------------------------------------------------------------------- */
-    /* DESIGN TOKENS & SYSTEM VARIABLES (Warm Ledger Aesthetic from DESIGN.md)   */
+    /* SORREL TOKENS: written by ui/cinematic_3d.py from src/core/design_tokens.py */
+    /* (the one palette source), so no hex is typed in this file. --pen and        */
+    /* --risk are fills: text uses --accent-text / --danger-text. --risk means     */
+    /* "this may not hold" only; amber (--accent) is "look twice".                 */
     /* -------------------------------------------------------------------------- */
     :root {
       /* Night Palette (Default) */
-      --stock: #241c14;
-      --sheet: #1c1610;
-      --sheet-alt: #282017;
-      --ink: #f6eedf;
-      --graphite: #bdae97;
-      --pen: #f0a24a;
-      --pen-glow: rgba(240, 162, 74, 0.45);
-      --risk: #e2685a;
-      --positive: #7fb77e;
-      --accent: #d99a4e;
-      --grid: #4a3c28;
-      --card-bg: rgba(28, 22, 16, 0.85);
-      --card-border: rgba(240, 162, 74, 0.22);
-      --lift: 0 16px 40px rgba(0, 0, 0, 0.55);
-      --lift-sm: 0 6px 20px rgba(0, 0, 0, 0.4);
-      
-      --sans: 'Public Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      --heading: 'Bricolage Grotesque', 'Public Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-      --mono: 'JetBrains Mono', Consolas, ui-monospace, monospace;
+__TOKENS_NIGHT__
+
+      --sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --heading: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --serif: 'Newsreader', Georgia, serif;
+      --mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, Consolas, monospace;
+      --radius: 4px;
 
       /* MOTION CONTRACT (Single source of timing mirrored with JS MOTION) */
       --dur-micro: 180ms;
@@ -45,34 +36,9 @@ __FONT_LINKS__
     }
 
     html.theme-day, body.theme-day {
-      /* Day Palette (High Contrast Warm Ledger) */
-      --stock: #f7eedd;
-      --sheet: #fffbf2;
-      --sheet-alt: #f1e4cb;
-      --ink: #3a2b1e;
-      --graphite: #6a5948;
-      --pen: #a34f20;
-      --pen-glow: rgba(163, 79, 32, 0.25);
-      --risk: #a33526;
-      --positive: #3d753c;
-      --accent: #d47a28;
-      --grid: #e4d4bc;
-      --card-bg: rgba(255, 251, 242, 0.94);
-      --card-border: rgba(138, 118, 96, 0.28);
-      --lift: 0 14px 32px rgba(58, 43, 30, 0.12);
-      --lift-sm: 0 4px 14px rgba(58, 43, 30, 0.08);
+      /* Day Palette */
+__TOKENS_DAY__
     }
-
-    /* Day Mode Strict High-Contrast Text Overrides */
-    html.theme-day .section-title { color: #3a2b1e !important; text-shadow: none !important; }
-    html.theme-day .section-desc { color: #5a4a3a !important; text-shadow: none !important; }
-    html.theme-day .card-title { color: #2e2015 !important; }
-    html.theme-day .card-body { color: #4e3f32 !important; }
-    html.theme-day .datum-value { color: #3a2b1e !important; }
-    html.theme-day .datum-label { color: #756350 !important; }
-    html.theme-day .scroll-hint { color: #756350 !important; }
-    html.theme-day .mini-table td { border-bottom-color: rgba(58, 43, 30, 0.08) !important; color: #2e2015 !important; }
-    html.theme-day .hud-tag { background: rgba(255, 251, 242, 0.95) !important; color: #3a2b1e !important; box-shadow: 0 4px 18px rgba(58, 43, 30, 0.15), 0 0 12px var(--pen-glow) !important; }
 
     * {
       box-sizing: border-box;
@@ -97,7 +63,7 @@ __FONT_LINKS__
     }
 
     /* -------------------------------------------------------------------------- */
-    /* PILLAR 6: MANSORY-STANDARD ZERO-FREEZE PRELOADER                           */
+    /* PILLAR 6: ZERO-FREEZE PRELOADER                                              */
     /* -------------------------------------------------------------------------- */
     #preloader-curtain {
       position: fixed;
@@ -128,34 +94,26 @@ __FONT_LINKS__
     .preloader-mark {
       width: 44px;
       height: 44px;
-      border-radius: 12px;
+      border-radius: var(--radius);
       background: var(--pen);
       display: flex;
       align-items: center;
       justify-content: center;
-      box-shadow: 0 0 24px var(--pen-glow);
     }
 
     .preloader-mark-inner {
       width: 18px;
       height: 18px;
-      border: 3px solid #fff;
-      border-radius: 4px;
+      border: 3px solid var(--accent-ink);
+      border-radius: 2px;
       transform: rotate(45deg);
-      animation: preloader-spin 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-    }
-
-    @keyframes preloader-spin {
-      0% { transform: rotate(45deg) scale(0.85); }
-      50% { transform: rotate(225deg) scale(1.15); }
-      100% { transform: rotate(405deg) scale(0.85); }
     }
 
     .preloader-title {
       font-family: var(--heading);
       font-size: 26px;
-      font-weight: 800;
-      letter-spacing: 0.05em;
+      font-weight: 600;
+      letter-spacing: 0.02em;
       color: var(--ink);
     }
 
@@ -171,7 +129,7 @@ __FONT_LINKS__
       width: 240px;
       height: 4px;
       background: var(--sheet-alt);
-      border-radius: 4px;
+      border-radius: 2px;
       overflow: hidden;
       position: relative;
     }
@@ -180,7 +138,6 @@ __FONT_LINKS__
       height: 100%;
       width: 0%;
       background: var(--pen);
-      box-shadow: 0 0 10px var(--pen-glow);
       transition: width 0.3s ease-out;
     }
 
@@ -255,51 +212,38 @@ __FONT_LINKS__
       padding: 5px 12px;
       background: var(--card-bg);
       border: 1px solid var(--pen);
-      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35), 0 0 12px var(--pen-glow);
-      border-radius: 999px;
+      border-radius: var(--radius);
       color: var(--ink);
       font-family: var(--mono);
       font-size: 11px;
       font-weight: 600;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
       white-space: nowrap;
     }
 
     .hud-tag.cyan {
-      border-color: var(--accent);
-      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35), 0 0 12px rgba(79, 195, 247, 0.4);
+      border-color: var(--graphite);
     }
 
     .hud-tag.positive {
       border-color: var(--positive);
-      box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35), 0 0 12px rgba(127, 183, 126, 0.4);
     }
 
+    /* A static square marker: a shape that carries meaning, not a pulsing glow. */
     .hud-tag .dot {
       width: 7px;
       height: 7px;
-      border-radius: 50%;
-      background: var(--pen);
-      box-shadow: 0 0 8px var(--pen);
-      animation: pulse-dot 1.8s infinite ease-in-out;
+      border-radius: 1px;
+      background: var(--accent-text);
     }
 
     .hud-tag.cyan .dot {
-      background: var(--accent);
-      box-shadow: 0 0 8px var(--accent);
+      background: var(--graphite);
     }
 
     .hud-tag.positive .dot {
       background: var(--positive);
-      box-shadow: 0 0 8px var(--positive);
-    }
-
-    @keyframes pulse-dot {
-      0%, 100% { transform: scale(1); opacity: 1; }
-      50% { transform: scale(1.4); opacity: 0.6; }
     }
 
     /* LAYER 3: Global Header (z-index: 50) */
@@ -315,11 +259,8 @@ __FONT_LINKS__
       justify-content: space-between;
       z-index: 50;
       pointer-events: auto;
-      background: color-mix(in srgb, var(--stock) 85%, transparent);
-    }
-
-    html.theme-day #global-header {
-      background: color-mix(in srgb, var(--stock) 90%, transparent);
+      background: var(--stock);
+      border-bottom: 1px solid var(--rule);
     }
 
     .header-left {
@@ -339,29 +280,29 @@ __FONT_LINKS__
     .brand-mark {
       width: 32px;
       height: 32px;
-      border-radius: 9px;
+      border-radius: var(--radius);
       background: var(--pen);
       display: flex;
       align-items: center;
       justify-content: center;
-      box-shadow: 0 0 14px var(--pen-glow);
     }
 
     .brand-mark-inner {
       width: 12px;
       height: 12px;
-      border: 2px solid #fff;
-      border-radius: 3px;
+      border: 2px solid var(--accent-ink);
+      border-radius: 1px;
       transform: rotate(45deg);
     }
 
     .brand-title {
       font-family: var(--heading);
-      font-size: 17px;
-      font-weight: 800;
+      font-family: var(--serif);
+      font-size: 20px;
+      font-weight: 500;
       color: var(--ink);
       line-height: 1.1;
-      letter-spacing: 0.04em;
+      letter-spacing: -0.01em;
     }
 
     .brand-sub {
@@ -378,10 +319,9 @@ __FONT_LINKS__
       align-items: center;
       gap: 6px;
       background: var(--card-bg);
-      padding: 4px 6px;
-      border-radius: 999px;
+      padding: 3px;
+      border-radius: var(--radius);
       border: 1px solid var(--card-border);
-      backdrop-filter: blur(14px);
     }
 
     .pill-btn {
@@ -392,10 +332,14 @@ __FONT_LINKS__
       font-size: 12.5px;
       font-weight: 600;
       padding: 5px 12px;
-      border-radius: 999px;
+      border-radius: 2px;
       cursor: pointer;
-      transition: all 0.25s ease;
       white-space: nowrap;
+    }
+
+    .pill-btn:focus-visible, .ctrl-btn:focus-visible {
+      outline: 2px solid var(--accent-text);
+      outline-offset: 1px;
     }
 
     .pill-btn:hover {
@@ -405,12 +349,7 @@ __FONT_LINKS__
 
     .pill-btn.active {
       background: var(--pen);
-      color: #fff;
-      box-shadow: 0 2px 10px var(--pen-glow);
-    }
-
-    html.theme-day .pill-btn.active {
-      color: #fffbf2;
+      color: var(--accent-ink);
     }
 
     .header-right {
@@ -423,22 +362,20 @@ __FONT_LINKS__
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       color: var(--ink);
-      width: 38px;
+      min-width: 38px;
+      padding: 0 10px;
       height: 38px;
-      border-radius: 50%;
+      border-radius: var(--radius);
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
-      font-size: 15px;
-      backdrop-filter: blur(12px);
-      transition: all 0.25s ease;
+      font: 600 11px/1 var(--mono);
+      letter-spacing: 0.04em;
     }
 
     .ctrl-btn:hover {
       border-color: var(--pen);
-      transform: scale(1.06);
-      box-shadow: 0 0 12px var(--pen-glow);
     }
 
     /* LAYER 2: section pager container */
@@ -494,7 +431,7 @@ __FONT_LINKS__
       font-family: var(--mono);
       font-size: 11px;
       font-weight: 600;
-      color: var(--pen);
+      color: var(--accent-text);
       text-transform: uppercase;
       letter-spacing: 0.12em;
       margin-bottom: 10px;
@@ -503,7 +440,7 @@ __FONT_LINKS__
     .section-title {
       font-family: var(--heading);
       font-size: clamp(28px, 3.8vw, 42px);
-      font-weight: 800;
+      font-weight: 600;
       line-height: 1.15;
       color: var(--ink);
       margin-bottom: 12px;
@@ -514,11 +451,11 @@ __FONT_LINKS__
       font-family: var(--sans);
       font-size: 15px;
       line-height: 1.6;
-      color: var(--graphite);
+      color: var(--ink-2);
       margin-bottom: 22px;
     }
 
-    /* Frosted Glass Cards */
+    /* Cards: a hairline, an opaque-enough surface, no blur, no lift */
     .cards-grid {
       display: flex;
       flex-direction: column;
@@ -529,27 +466,16 @@ __FONT_LINKS__
     .glass-card {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 16px;
+      border-radius: var(--radius);
       padding: 18px 22px;
-      box-shadow: var(--lift);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
       pointer-events: auto;
-      transition: border-color 0.25s ease, box-shadow 0.25s ease;
-    }
-
-    .glass-card:hover {
-      transform: translateY(-2px);
-      border-color: var(--pen);
-      box-shadow: var(--lift), 0 0 16px var(--pen-glow);
-      transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
     }
 
     .card-label {
       font-family: var(--mono);
       font-size: 10px;
       font-weight: 600;
-      color: var(--pen);
+      color: var(--accent-text);
       text-transform: uppercase;
       letter-spacing: 0.1em;
       margin-bottom: 6px;
@@ -558,7 +484,7 @@ __FONT_LINKS__
     .card-title {
       font-family: var(--heading);
       font-size: 18px;
-      font-weight: 700;
+      font-weight: 600;
       color: var(--ink);
       margin-bottom: 6px;
       line-height: 1.25;
@@ -568,7 +494,7 @@ __FONT_LINKS__
       font-family: var(--sans);
       font-size: 13.5px;
       line-height: 1.55;
-      color: var(--graphite);
+      color: var(--ink-2);
     }
 
     /* Metric Chips & Readouts */
@@ -581,9 +507,10 @@ __FONT_LINKS__
 
     .metric-huge {
       font-family: var(--heading);
-      font-size: 36px;
-      font-weight: 800;
-      color: var(--pen);
+      font-family: var(--mono);
+      font-size: 34px;
+      font-weight: 500;
+      color: var(--accent-text);
       line-height: 1;
     }
 
@@ -591,7 +518,7 @@ __FONT_LINKS__
       font-family: var(--sans);
       font-size: 13px;
       font-weight: 600;
-      color: var(--graphite);
+      color: var(--ink-2);
     }
 
     .pill-tag {
@@ -599,28 +526,31 @@ __FONT_LINKS__
       align-items: center;
       gap: 5px;
       padding: 3px 9px;
-      border-radius: 999px;
+      border-radius: 2px;
       font-size: 11px;
       font-weight: 600;
       font-family: var(--mono);
     }
 
+    /* Each tag carries a mark and words (tick, warning sign), never colour alone. */
     .pill-tag.safe {
-      background: rgba(127, 183, 126, 0.15);
+      background: var(--accent-soft);
       color: var(--positive);
-      border: 1px solid rgba(127, 183, 126, 0.3);
+      border: 1px solid var(--positive);
     }
 
+    /* "This may not hold": the one use of the brick. */
     .pill-tag.warn {
-      background: rgba(226, 104, 90, 0.15);
-      color: var(--risk);
-      border: 1px solid rgba(226, 104, 90, 0.3);
+      background: var(--sheet-alt);
+      color: var(--danger-text);
+      border: 1px solid var(--risk);
     }
 
+    /* A neutral note (a setting, a count), not a verdict. */
     .pill-tag.accent {
-      background: rgba(79, 195, 247, 0.15);
-      color: var(--accent);
-      border: 1px solid rgba(79, 195, 247, 0.3);
+      background: var(--sheet-alt);
+      color: var(--ink-2);
+      border: 1px solid var(--rule);
     }
 
 
@@ -629,8 +559,8 @@ __FONT_LINKS__
     #fp-nav ul { list-style: none; margin: 0; padding: 0; }
     #fp-nav li { position: relative; width: 14px; height: 14px; margin: 10px 0; }
     #fp-nav a { display: block; width: 100%; height: 100%; position: relative; }
-    #fp-nav a span { position: absolute; left: 4px; top: 4px; width: 6px; height: 6px; border-radius: 50%; }
-    #fp-nav a:focus-visible { outline: 2px solid var(--pen); outline-offset: 2px; border-radius: 50%; }
+    #fp-nav a span { position: absolute; left: 4px; top: 4px; width: 6px; height: 6px; border-radius: 1px; }
+    #fp-nav a:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
     #fp-nav .fp-tooltip { position: absolute; right: 22px; top: -4px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .2s ease; }
     #fp-nav li:hover .fp-tooltip, #fp-nav li:focus-within .fp-tooltip { opacity: 1; }
 
@@ -640,9 +570,8 @@ __FONT_LINKS__
       transition: all 0.3s ease !important;
     }
     #fp-nav ul li a.active span, .fp-slidesNav ul li a.active span {
-      background: var(--pen) !important;
+      background: var(--accent-text) !important;
       transform: scale(1.4) !important;
-      box-shadow: 0 0 10px var(--pen-glow);
     }
     #fp-nav ul li .fp-tooltip {
       font-family: var(--sans) !important;
@@ -652,8 +581,7 @@ __FONT_LINKS__
       background: var(--card-bg) !important;
       border: 1px solid var(--card-border) !important;
       padding: 4px 10px !important;
-      border-radius: 8px !important;
-      backdrop-filter: blur(10px) !important;
+      border-radius: var(--radius) !important;
     }
 
     /* Model comparison mini-table */
@@ -677,14 +605,13 @@ __FONT_LINKS__
     .mini-table td {
       padding: 6px 8px;
       color: var(--ink);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      border-bottom: 1px solid var(--rule-faint);
     }
 
     .mini-table tr.best-row td {
-      color: var(--pen);
-      font-weight: 700;
-      background: rgba(240, 162, 74, 0.08);
-      border-radius: 6px;
+      color: var(--accent-text);
+      font-weight: 600;
+      background: var(--accent-soft);
     }
 
     /* LAYER 3: Bottom Datum Bar (z-index: 50) */
@@ -700,13 +627,8 @@ __FONT_LINKS__
       justify-content: space-between;
       z-index: 50;
       pointer-events: none;
-      background: color-mix(in srgb, var(--stock) 90%, transparent);
-      border-top: 1px solid rgba(255, 255, 255, 0.05);
-    }
-
-    html.theme-day #bottom-datum-bar {
-      background: color-mix(in srgb, var(--stock) 90%, transparent);
-      border-top: 1px solid rgba(0, 0, 0, 0.05);
+      background: var(--stock);
+      border-top: 1px solid var(--rule);
     }
 
     .datum-strip {
@@ -736,9 +658,9 @@ __FONT_LINKS__
       color: var(--ink);
     }
 
-    .datum-value.pen { color: var(--pen); }
+    .datum-value.pen { color: var(--accent-text); }
     .datum-value.positive { color: var(--positive); }
-    .datum-value.risk { color: var(--risk); }
+    .datum-value.risk { color: var(--danger-text); }
 
     .scroll-hint {
       display: flex;
@@ -748,13 +670,6 @@ __FONT_LINKS__
       font-size: 11px;
       color: var(--graphite);
       pointer-events: auto;
-      animation: bounce 2s infinite;
-    }
-
-    @keyframes bounce {
-      0%, 20%, 50%, 80%, 100% { transform: translateY(0); }
-      40% { transform: translateY(-4px); }
-      60% { transform: translateY(-2px); }
     }
 
     /* Mobile adjustments */
@@ -827,7 +742,7 @@ __FONT_LINKS__
     }
     html.compact .glass-card {
       padding: 8px 12px !important;
-      border-radius: 10px !important;
+      border-radius: var(--radius) !important;
     }
     html.compact .card-label {
       font-size: 8.5px !important;
@@ -900,13 +815,19 @@ __FONT_LINKS__
       font-size: 14px;
       font-weight: 600;
       color: var(--graphite);
-      animation: bounce 2s infinite;
     }
 
+    /* Nothing moves for a reader who asked for less motion: no curtain slide, no transitions. */
     @media (prefers-reduced-motion: reduce) {
-      .intro-hint {
-        animation: none;
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
       }
+    }
+
+    /* Cards become fully opaque when the reader asked for less transparency. */
+    @media (prefers-reduced-transparency: reduce) {
+      .glass-card, .quick-pills, .hud-tag, .ctrl-btn { background: var(--sheet) !important; }
     }
 
     /* Watermark Occlusion Fix: completely remove fullPage.js license badge */
@@ -940,7 +861,7 @@ __FONT_LINKS__
       }
       .glass-card {
         padding: 12px 18px;
-        border-radius: 12px;
+        border-radius: var(--radius);
       }
       .card-title {
         font-size: 16px;
@@ -964,13 +885,13 @@ __FONT_LINKS__
 </head>
 <body>
 
-  <!-- PILLAR 6: MANSORY CINEMATIC PRELOADER -->
+  <!-- PILLAR 6: PRELOADER -->
   <div id="preloader-curtain">
     <div class="preloader-brand">
       <div class="preloader-mark"><div class="preloader-mark-inner"></div></div>
       <div>
-        <div class="preloader-title">DSA AGENT</div>
-        <div class="preloader-sub">WARM LEDGER // 3D CINEMATIC V2</div>
+        <div class="preloader-title">Sorrel</div>
+        <div class="preloader-sub">Analysis walkthrough</div>
       </div>
     </div>
     <div class="preloader-bar-wrap">
@@ -1003,8 +924,8 @@ __FONT_LINKS__
       <div class="brand-badge" onclick="if(window.fullpage_api) fullpage_api.moveTo(1)">
         <div class="brand-mark"><div class="brand-mark-inner"></div></div>
         <div>
-          <div class="brand-title">DSA AGENT</div>
-          <div class="brand-sub">3D AUTONOMOUS LEDGER</div>
+          <div class="brand-title">Sorrel</div>
+          <div class="brand-sub">Analysis walkthrough</div>
         </div>
       </div>
       <div class="quick-pills">
@@ -1019,9 +940,9 @@ __FONT_LINKS__
     </div>
 
     <div class="header-right">
-      <button id="btn-camera-view" class="ctrl-btn" title="Toggle Camera Tour / Orbit">🎥</button>
-      <button id="btn-theme-toggle" class="ctrl-btn" title="Toggle Day / Night">🌓</button>
-      <button id="btn-fullscreen" class="ctrl-btn" title="Toggle Fullscreen">⛶</button>
+      <button id="btn-camera-view" class="ctrl-btn" title="Toggle Camera Tour / Orbit" aria-label="Toggle camera tour" aria-pressed="false">Tour</button>
+      <button id="btn-theme-toggle" class="ctrl-btn" title="Toggle Day / Night" aria-label="Switch between day and night">Day/Night</button>
+      <button id="btn-fullscreen" class="ctrl-btn" title="Toggle Fullscreen" aria-label="Toggle full screen">Full</button>
     </div>
   </header>
 
@@ -1054,7 +975,7 @@ __FONT_LINKS__
 
           <div class="glass-card">
             <div class="card-label">Verification Seam</div>
-            <div class="card-title">Zero-Hallucination Gate</div>
+            <div class="card-title">Verification Gate</div>
             <div class="card-body">
               7-stage execution order with automatic rollback and iterative refinement. 
               If the model detects overfit patterns or multicollinearity, it rejects the step and adapts.
@@ -1076,7 +997,7 @@ __FONT_LINKS__
         <h2 class="section-title">Deep Semantic Profiling</h2>
         <p class="section-desc">
           Before running any model, the system inspects column semantics, null distributions, and cardinality ratios. 
-          A holographic laser plane actively sweeps the instanced data grid to audit quality.
+          A scan plane sweeps the data grid while quality is checked.
         </p>
 
         <div class="cards-grid">
@@ -1096,21 +1017,21 @@ __FONT_LINKS__
             <div class="card-label">Column Semantics</div>
             <div class="card-title">Feature Type Decomposition</div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;">
-              <div style="background: var(--sheet-alt); padding: 10px; border-radius: 10px;">
+              <div style="background: var(--sheet-alt); padding: 10px; border-radius: var(--radius);">
                 <div class="card-label" style="font-size: 9px;">Numeric Cols</div>
-                <div style="font-size: 20px; font-weight: 800; color: var(--pen);" id="count-numeric">8</div>
+                <div style="font-size: 20px; font-weight: 600; font-family: var(--mono); color: var(--accent-text);" id="count-numeric">8</div>
               </div>
-              <div style="background: var(--sheet-alt); padding: 10px; border-radius: 10px;">
+              <div style="background: var(--sheet-alt); padding: 10px; border-radius: var(--radius);">
                 <div class="card-label" style="font-size: 9px;">Categorical Cols</div>
-                <div style="font-size: 20px; font-weight: 800; color: var(--accent);" id="count-categorical">4</div>
+                <div style="font-size: 20px; font-weight: 600; font-family: var(--mono); color: var(--ink);" id="count-categorical">4</div>
               </div>
-              <div style="background: var(--sheet-alt); padding: 10px; border-radius: 10px;">
+              <div style="background: var(--sheet-alt); padding: 10px; border-radius: var(--radius);">
                 <div class="card-label" style="font-size: 9px;">Missing Cells</div>
-                <div style="font-size: 20px; font-weight: 800; color: var(--positive);" id="count-missing">12</div>
+                <div style="font-size: 20px; font-weight: 600; font-family: var(--mono); color: var(--positive);" id="count-missing">12</div>
               </div>
-              <div style="background: var(--sheet-alt); padding: 10px; border-radius: 10px;">
+              <div style="background: var(--sheet-alt); padding: 10px; border-radius: var(--radius);">
                 <div class="card-label" style="font-size: 9px;">Task Type</div>
-                <div style="font-size: 15px; font-weight: 800; color: var(--ink);" id="val-task-type">Classification</div>
+                <div style="font-size: 15px; font-weight: 600; color: var(--ink);" id="val-task-type">Classification</div>
               </div>
             </div>
           </div>
@@ -1133,7 +1054,7 @@ __FONT_LINKS__
             <div class="card-label">Hypothesis Decision</div>
             <div class="card-title" id="stat-test-name">Two-Sample T-Test / Mann-Whitney</div>
             <div class="card-body">
-              Null hypothesis rejected with high statistical confidence. Feature distributions show non-trivial divergence.
+              The test result suggests the feature distributions differ. A small p-value is evidence, not proof.
             </div>
             <div class="metric-row">
               <span class="metric-huge" id="stat-p-value">&lt; 0.001</span>
@@ -1149,17 +1070,17 @@ __FONT_LINKS__
             <div class="card-label">Key Correlations (3D Vector Web)</div>
             <div class="card-title">Strongest Feature Associations</div>
             <div id="correlations-list" style="margin-top: 8px; display: flex; flex-direction: column; gap: 6px;">
-              <div style="display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <div style="display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--rule-faint);">
                 <span style="font-family: var(--mono); color: var(--ink);">tenure ↔ total_spend</span>
-                <span style="font-weight: 700; color: var(--pen);">+0.78</span>
+                <span style="font-weight: 600; font-family: var(--mono); color: var(--accent-text);">+0.78</span>
               </div>
-              <div style="display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+              <div style="display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--rule-faint);">
                 <span style="font-family: var(--mono); color: var(--ink);">usage_rate ↔ converted</span>
-                <span style="font-weight: 700; color: var(--pen);">+0.64</span>
+                <span style="font-weight: 600; font-family: var(--mono); color: var(--accent-text);">+0.64</span>
               </div>
               <div style="display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0;">
                 <span style="font-family: var(--mono); color: var(--ink);">support_tickets ↔ churn_risk</span>
-                <span style="font-weight: 700; color: var(--accent);">+0.59</span>
+                <span style="font-weight: 600; font-family: var(--mono); color: var(--ink);">+0.59</span>
               </div>
             </div>
           </div>
@@ -1171,10 +1092,10 @@ __FONT_LINKS__
     <section class="section" data-anchor="pipeline">
       <div class="section-content-wrapper">
         <div class="section-badge" id="sec4-badge">STAGE 04 // MACHINE LEARNING PIPELINE</div>
-        <h2 class="section-title" id="sec4-title">Stratified Decision Manifolds</h2>
+        <h2 class="section-title" id="sec4-title">Stratified Cross-Validation</h2>
         <p class="section-desc" id="sec4-desc">
           Models compete under 5-Fold Stratified Cross-Validation. Primary ranking relies strictly on out-of-fold generalization, 
-          never on training memorization. Translucent hyperplanes slice through feature space.
+          never on training memorization. Translucent sheets stand for the folds of the data.
         </p>
 
         <div class="cards-grid">
@@ -1226,7 +1147,7 @@ __FONT_LINKS__
                     <td>DecisionTree</td>
                     <td>81.2%</td>
                     <td>±3.4%</td>
-                    <td style="color: var(--risk);">12.8% ⚠️</td>
+                    <td style="color: var(--danger-text);">12.8% ⚠</td>
                   </tr>
                 </tbody>
               </table>
@@ -1242,8 +1163,7 @@ __FONT_LINKS__
         <div class="section-badge" id="sec5-badge">STAGE 05 // ANTI-OVERFIT GUARD &amp; VERIFICATION</div>
         <h2 class="section-title" id="sec5-title">Generalization Safety Envelope</h2>
         <p class="section-desc" id="sec5-desc">
-          Automated guard gates compute train-vs-test divergence. A 3D radar diamond envelope illuminates 
-          healthy generalization in emerald green, flagging any model exceeding the 10% gap threshold.
+          Automated guard gates compute train-vs-test divergence. A 3D outline shows healthy generalization in green and flags any model that exceeds the 10% gap threshold.
         </p>
 
         <div class="cards-grid">
@@ -1251,14 +1171,14 @@ __FONT_LINKS__
             <div class="card-label" id="sec5-card1-label">Overfit Audit</div>
             <div class="card-title" id="sec5-card1-title">Train-Test Generalization Gap</div>
             <div class="card-body" id="sec5-card1-body">
-              The champion model's gap is strictly capped below the 10% threshold. The safety envelope certifies production readiness.
+              The champion model's gap is strictly capped below the 10% threshold. A small gap is a good sign, not a guarantee about new data.
             </div>
             <div class="metric-row">
               <span class="metric-huge" id="guard-gap-val">3.2%</span>
               <span class="metric-unit" id="sec5-card1-unit">train-test gap (<span id="guard-gap-status" style="color: var(--positive);">SAFE</span>)</span>
             </div>
             <div id="overfit-warnings-box" style="margin-top: 8px;">
-              <span class="pill-tag safe" id="guard-safe-tag">✓ GAP &lt; 10% CERTIFIED</span>
+              <span class="pill-tag safe" id="guard-safe-tag">✓ GAP &lt; 10% (CHECKED)</span>
             </div>
           </div>
 
@@ -1287,10 +1207,10 @@ __FONT_LINKS__
     <!-- SECTION 6: Executive Synthesis & Findings -->
     <section class="section" data-anchor="report">
       <div class="section-content-wrapper">
-        <div class="section-badge">STAGE 07 // VERIFIED EXECUTIVE LEDGER</div>
+        <div class="section-badge">STAGE 07 // CHECKED SUMMARY</div>
         <h2 class="section-title">Verified Synthesis &amp; Findings</h2>
         <p class="section-desc">
-          All analytical artifacts coalesce into a final executive ledger. Key findings are derived directly from verified data and models.
+          The results are gathered into one summary. Each key finding is taken from the run's own tool results.
         </p>
 
         <div class="cards-grid">
@@ -1308,7 +1228,7 @@ __FONT_LINKS__
             <ul id="exec-findings-list" style="margin-top: 6px; padding-left: 18px; font-size: 13px; color: var(--ink); line-height: 1.6;">
               <li>Feature distributions audited with automated normality and variance tests.</li>
               <li>Multiple testing controlled via Benjamini-Hochberg false discovery rate.</li>
-              <li>Data integrity verified with zero data leakage.</li>
+              <li>Train and test partitions were kept separate.</li>
             </ul>
             <div style="margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap;">
               <span class="pill-tag safe" id="exec-held-tag">✓ 4 OF 4 CLAIMS VERIFIED</span>
@@ -1378,23 +1298,12 @@ __FONT_LINKS__
       if (fullpageRoot) fullpageRoot.insertBefore(introSection, fullpageRoot.firstElementChild);
     }
 
-    // Apply dynamic palette tokens if provided
+    // Apply the palette tokens from state as CSS variables (the stylesheet already carries both modes).
     if (window.__CINEMATIC_STATE__ && window.__CINEMATIC_STATE__.palette) {
-      const p = window.__CINEMATIC_STATE__.palette;
       const root = document.documentElement;
-      if (p.stock) root.style.setProperty('--stock', p.stock);
-      if (p.sheet) root.style.setProperty('--sheet', p.sheet);
-      if (p.sheet_alt) root.style.setProperty('--sheet-alt', p.sheet_alt);
-      if (p.ink) root.style.setProperty('--ink', p.ink);
-      if (p.graphite) root.style.setProperty('--graphite', p.graphite);
-      if (p.pen) root.style.setProperty('--pen', p.pen);
-      if (p.pen_glow) root.style.setProperty('--pen-glow', p.pen_glow);
-      if (p.risk) root.style.setProperty('--risk', p.risk);
-      if (p.positive) root.style.setProperty('--positive', p.positive);
-      if (p.accent) root.style.setProperty('--accent', p.accent);
-      if (p.grid) root.style.setProperty('--grid', p.grid);
-      if (p.card_bg) root.style.setProperty('--card-bg', p.card_bg);
-      if (p.card_border) root.style.setProperty('--card-border', p.card_border);
+      for (const [key, value] of Object.entries(window.__CINEMATIC_STATE__.palette)) {
+        if (typeof value === 'string') root.style.setProperty('--' + key.replace(/_/g, '-'), value);
+      }
     }
   </script>
 

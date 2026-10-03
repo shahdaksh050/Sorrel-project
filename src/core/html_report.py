@@ -9,8 +9,9 @@ data table behind every chart), and the tool execution log.
 Rules:
   - Pure string building, no I/O — the controller writes the file.
   - Every dataset- or LLM-derived string is HTML-escaped.
-  - Charts render client-side from embedded JSON; viewing needs internet
-    access for the CDN scripts (acceptable for a shareable artifact).
+  - Charts render client-side from embedded JSON. Fonts and the Vega bundles are
+    inlined from static/ (src.core.report_assets), so the file opens offline;
+    only if those files are missing does it fall back to CDN tags.
 """
 from __future__ import annotations
 
@@ -80,11 +81,14 @@ def _model_was_trained(llm_insights: dict[str, Any], tool_results: list[dict[str
         for r in tool_results
     )
 
-# "Ledger" (DESIGN.md): warm paper, friendly ink, one terracotta pen.
-# The shared report is the same warm sheet as the console, printed.
+# "Sorrel" (DESIGN.md): warm unbleached paper, near-black ink, one forest-green
+# pen, hairline rules and square-ish corners. The shared report is the same
+# sheet as the console, printed: no shadows, no gradients, nothing that moves.
 # Token values come from src.core.design_tokens (FrontendPlan.md 2.1) — this
-# file used to hand-type its own fourth copy of the same hex codes; --lift
-# and color-scheme aren't palette tokens, so they stay hardcoded here.
+# file used to hand-type its own fourth copy of the same hex codes. Only
+# color-scheme is not a palette token, so it stays here.
+# Text that must be read uses the AA-safe --accent-text / --danger-text: raw
+# --pen and --risk are fills and borders (Night --pen is ~2.5:1 as text).
 # Built as an f-string root block plus a plain string for the rest of the
 # rules, rather than one big f-string, so none of the CSS below needs its
 # braces doubled.
@@ -92,13 +96,11 @@ _CSS_ROOT = f"""
 :root {{
   color-scheme: light dark;
 {css_root_block("day")}
-  --lift:        0 4px 14px rgba(58,43,30,.14);
 }}
 
 @media (prefers-color-scheme: dark) {{
   :root {{
 {css_root_block("night")}
-    --lift:        0 4px 18px rgba(0,0,0,.35);
   }}
 }}
 """
@@ -108,41 +110,48 @@ _CSS = _CSS_ROOT + """
 body {
   background: var(--stock);
   color: var(--ink);
-  font-family: 'Mukta', 'Segoe UI', system-ui, sans-serif;
+  font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   margin: 0; padding: 3.5rem 1.5rem; line-height: 1.65;
 }
 .wrap { max-width: 900px; margin: 0 auto; }
-h1 { font-family: 'Baloo 2', 'Mukta', sans-serif; font-weight: 800;
-     font-size: clamp(32px, 5vw, 52px); line-height: 1.06;
-     margin: .3rem 0 .2rem; max-width: 18ch; color: var(--ink); }
-h2 { font-family: 'Baloo 2', 'Mukta', sans-serif; font-weight: 700; font-size: 25px;
-     line-height: 1.15; color: var(--ink);
-     border-bottom: 2px solid var(--rule); padding-bottom: .4rem; margin: 3rem 0 1rem; }
+.brand { display: flex; align-items: baseline; gap: .7rem; padding-bottom: .8rem;
+         border-bottom: 1px solid var(--rule); margin-bottom: 1.6rem; }
+.brand .mark { font-family: 'Newsreader', Georgia, serif; font-weight: 500; font-size: 1.5rem;
+               letter-spacing: -.01em; color: var(--accent-text); }
+.brand .kind { font: 500 .72rem/1.2 'Geist Mono', ui-monospace, monospace; letter-spacing: .08em;
+               text-transform: uppercase; color: var(--graphite); }
+h1 { font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+     font-weight: 600; letter-spacing: -.02em;
+     font-size: clamp(30px, 4.6vw, 46px); line-height: 1.12;
+     margin: .3rem 0 .2rem; max-width: 20ch; color: var(--ink); }
+h2 { font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+     font-weight: 600; letter-spacing: -.01em; font-size: 23px;
+     line-height: 1.2; color: var(--ink);
+     border-bottom: 1px solid var(--rule); padding-bottom: .4rem; margin: 3rem 0 1rem; }
 .sub { color: var(--graphite); font-size: .85rem; margin-bottom: 2rem; }
-.objective { border-left: 4px solid var(--pen); border-radius: 0 10px 10px 0;
+.objective { border-left: 3px solid var(--pen); border-radius: 0 4px 4px 0;
              background: var(--sheet); padding: .6rem 0 .6rem 1rem;
              margin: 1.4rem 0; max-width: 72ch; }
 .card { padding: .5rem 0 .5rem 1rem; margin: .1rem 0 .8rem;
-        border-left: 3px solid var(--rule); border-radius: 0 10px 10px 0;
+        border-left: 3px solid var(--rule); border-radius: 0 4px 4px 0;
         background: var(--sheet); max-width: 74ch; }
-.card.exec { background: var(--sheet); border: 1px solid var(--rule); border-left: 4px solid var(--pen);
-             border-radius: 14px; box-shadow: var(--lift);
+.card.exec { background: var(--sheet); border: 1px solid var(--rule); border-left: 3px solid var(--pen);
+             border-radius: 4px;
              padding: 1.5rem 1.7rem; max-width: 72ch; }
 .insight { border-left-color: var(--graphite); }
 .rec { border-left-color: var(--pen); }
 .driver { border-left-color: var(--graphite); font-size: .95rem; }
 .treat { border-left-color: var(--rule); font-size: .9rem; color: var(--graphite); }
-.warn { border-left-color: var(--risk); color: var(--risk); }
+.warn { border-left-color: var(--risk); color: var(--danger-text); }
 table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: .88rem;
-        background: var(--sheet); border: 1px solid var(--rule); border-radius: 12px; overflow: hidden;
-        box-shadow: var(--lift); }
+        background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
 th, td { border-bottom: 1px solid var(--rule-faint); padding: .55rem .8rem; text-align: left; }
-th { background: var(--sheet-alt); color: var(--ink); font-weight: 700; font-size: .8rem; }
-.chart { background: var(--sheet); border: 1px solid var(--rule); border-radius: 14px;
-         box-shadow: var(--lift);
+th { background: var(--sheet-alt); color: var(--ink); font-weight: 600; font-size: .75rem;
+     font-family: 'Geist Mono', ui-monospace, monospace; letter-spacing: .06em; text-transform: uppercase; }
+.chart { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px;
          padding: 1.2rem 1.3rem 1.1rem; margin: 1.4rem 0; }
-.chart h3 { margin: .1rem 0 .2rem; font-weight: 700; font-size: 1.05rem;
-            font-family: 'Baloo 2', 'Mukta', sans-serif; }
+.chart h3 { margin: .1rem 0 .2rem; font-weight: 600; font-size: 1.05rem;
+            font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; }
 .chart p { margin: .15rem 0 .9rem; color: var(--graphite); font-size: .85rem; max-width: 68ch; }
 .vega-holder { width: 100%; }
 /* vega-embed makes its target inline-block; with width:"container" that shrinks to 0 unless it is full width. */
@@ -150,7 +159,7 @@ th { background: var(--sheet-alt); color: var(--ink); font-weight: 700; font-siz
 .chart-data { font-size: .78rem; margin: .4rem 0; }
 .chart-data caption { text-align: left; color: var(--graphite); padding-bottom: .3rem; }
 .chart-data-details summary { cursor: pointer; font-size: .8rem; color: var(--graphite); margin-top: .5rem; }
-.badge { display: inline-block; border: 1px solid var(--pen); color: var(--pen);
+.badge { display: inline-block; border: 1px solid var(--pen); color: var(--accent-text);
          background: var(--sheet); border-radius: 999px; font-weight: 600;
          padding: .25rem .85rem; font-size: .78rem; margin: 0 .4rem .4rem 0; }
 .footer { margin-top: 4rem; border-top: 1px solid var(--rule); padding-top: .8rem;
@@ -158,11 +167,10 @@ th { background: var(--sheet-alt); color: var(--ink); font-weight: 700; font-siz
 .check-row { display: flex; flex-wrap: wrap; gap: .7rem; margin-top: .5rem; }
 .check { font-size: .78rem; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
 .check.ok { color: var(--positive); }
-.check.risk { color: var(--risk); }
+.check.risk { color: var(--danger-text); }
 .check.note { color: var(--graphite); font-weight: 500; }
 
 @media print {
-  .card, .card.exec, table, .chart { box-shadow: none; }
   .card, .chart, table { page-break-inside: avoid; }
   .chart-data-details { display: none; }
   .wrap { max-width: none; }
@@ -507,8 +515,9 @@ def build_html_report(
         badges += f'<span class="badge">best model: {_esc(best_model)}</span>'
 
     sections.append(
+        '<div class="brand"><span class="mark">Sorrel</span><span class="kind">Analysis report</span></div>'
         f"<h1>What we found in {_esc(dataset_name)}</h1>"
-        f'<div class="sub">Prepared {timestamp} by your data assistant</div>'
+        f'<div class="sub">Prepared {timestamp} by Sorrel, your data assistant</div>'
         f"<div>{badges}</div>"
     )
 
@@ -755,14 +764,14 @@ def build_html_report(
         )
 
     sections.append(
-        '<div class="footer">Made for you by your data assistant.</div>'
+        '<div class="footer">Made for you by Sorrel, the working name of DSA Agent.</div>'
     )
 
     body = "\n".join(sections)
     assets = report_assets(need_vega=bool(charts))
     return (
         "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
-        f"<title>Analysis Report — {_esc(dataset_name)}</title>"
+        f"<title>Sorrel analysis report — {_esc(dataset_name)}</title>"
         f"{assets.fonts_html}{assets.vega_html}<style>{_CSS}</style></head>"
         f"<body><div class='wrap'>{body}</div></body></html>"
     )

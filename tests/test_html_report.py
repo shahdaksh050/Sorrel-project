@@ -1,6 +1,7 @@
 """Unit tests for src/core/html_report.py — the shareable HTML report."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from src.core.html_report import build_html_report
@@ -100,3 +101,31 @@ class TestBuildHtmlReport:
         assert "amount" in doc
         assert "40%" in doc
         assert "Benjamini-Hochberg" in doc
+
+
+class TestSorrelReport:
+    def test_header_title_and_footer_say_sorrel(self) -> None:
+        doc = build_html_report("ds", {}, [], [])
+        assert "<title>Sorrel analysis report — ds</title>" in doc
+        assert '<span class="mark">Sorrel</span>' in doc
+        assert "by Sorrel, your data assistant" in doc
+        assert "Sorrel, the working name of DSA Agent" in doc
+        assert "Ledger" not in doc and "Agentic Data Analysis" not in doc
+
+    def test_report_css_uses_sorrel_tokens_and_families(self) -> None:
+        doc = build_html_report("ds", {}, [], [])
+        assert "--pen: #1f4634;" in doc and "--pen: #326d48;" in doc  # Day and Night from design_tokens
+        css = doc[doc.rindex("<style>") :]
+        assert "'Geist'" in css and "'Newsreader'" in css and "'Geist Mono'" in css
+        for old in ("Baloo", "Mukta", "Bricolage", "Public Sans"):
+            assert old not in css
+        assert "box-shadow" not in css and "gradient" not in css  # a printed sheet: no lift, no glow
+
+    def test_text_uses_the_aa_safe_tokens_not_raw_pen_or_risk(self) -> None:
+        css = build_html_report("ds", {}, [], [])
+        css = css[css.rindex("<style>") :]
+        assert ".warn { border-left-color: var(--risk); color: var(--danger-text); }" in css
+        assert ".check.risk { color: var(--danger-text); }" in css
+        assert "color: var(--accent-text)" in css
+        # a bare `color:` (not border-left-color etc.) never takes the raw fill tokens
+        assert not re.search(r"(?<![-\w])color:\s*var\(--(risk|pen)\)", css)

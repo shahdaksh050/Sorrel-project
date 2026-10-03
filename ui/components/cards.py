@@ -748,6 +748,7 @@ def render_dashboard_chart(
     *,
     height: int | None = None,
     framed: bool = True,
+    card_key: str | None = None,
 ) -> None:
     """Render one dashboard panel (title, chart, caption/description).
 
@@ -756,8 +757,9 @@ def render_dashboard_chart(
     it is given it replaces `finding_note`, and a caption that only repeats the finding is dropped.
     `height` gives the chart a common height with its neighbours. `framed=False` draws no border of
     its own, for a panel placed in a bordered column (which keeps a row's cards the same height).
+    `card_key` names the card so the stylesheet can give it the card surface (`chart_card_...`).
     """
-    with st.container(border=True) if framed else contextlib.nullcontext():
+    with st.container(border=True, key=card_key) if framed else contextlib.nullcontext():
         st.markdown(
             f'<h4 class="chart-title">{html.escape(str(ch.get("title", "")))}</h4>',
             unsafe_allow_html=True,

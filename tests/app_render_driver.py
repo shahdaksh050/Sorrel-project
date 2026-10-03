@@ -99,7 +99,8 @@ def main() -> dict[str, object]:
         "agent_line": "agent-line" in text,
         "agent_cards": text.count("agent-card"),
         "report_toggle": any(t.key == "show_report_preview" for t in at.toggle),
-        "report_frame_before_asking": 'key="report_preview"' in text or "st-key-report_preview" in text,
+        # the stylesheet names this container too, so look at the page without its <style> blocks
+        "report_frame_before_asking": "st-key-report_preview" in re.sub(r"<style.*?</style>", "", text, flags=re.S),
     }
 
     # 3. A failed run, seeded directly (no API key, no network): the stepper shows the stopped step.

@@ -303,3 +303,32 @@ def test_panels_in_a_row_get_one_height_unless_the_chart_needs_more() -> None:
     for odd in ({"hconcat": [], "mark": "bar"}, {"vconcat": [], "layer": []}, {"mark": "bar", "encoding": {"row": {}}},
                 {"mark": "bar", "encoding": {"column": {}}}):
         assert _fit_height(odd, 260) is odd
+
+
+def test_each_tab_is_a_warm_band_holding_lighter_cards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The page, a band for a tab's content, cards on the band, and page-toned insets inside a card."""
+    import streamlit as st
+    from ui import styles as ui_styles
+
+    from src.core.design_tokens import palette
+    from tests.test_contrast import contrast
+
+    for theme in ("day", "night"):
+        emitted: list[str] = []
+        monkeypatch.setattr(st, "markdown", lambda body, sink=emitted, **kwargs: sink.append(body))
+        monkeypatch.setattr(st, "get_option", lambda key: "")
+        monkeypatch.setattr(st, "session_state", {"theme": theme})
+        ui_styles.inject_theme_css()
+        css = emitted[0]
+
+        def body(selector: str, sheet: str = css) -> str:
+            at = sheet.index(selector + " {")
+            return sheet[at : sheet.index("}", at)]
+
+        assert "background: var(--sheet-alt)" in body('[data-testid="stTabs"] [data-testid="stTabPanel"]')
+        assert "background: var(--sheet)" in body('[class*="st-key-audit_"], [class*="st-key-chart_card_"], .st-key-report_preview')
+        assert "var(--stock)" in body(".how-head")
+        # The three surfaces are told apart: a card is never the band's colour.
+        colours = palette(theme)
+        assert len({colours["sheet_alt"].lower(), colours["sheet"].lower(), colours["stock"].lower()}) == 3
+        assert contrast(colours["ink"], colours["sheet_alt"]) >= 4.5  # text sitting straight on the band

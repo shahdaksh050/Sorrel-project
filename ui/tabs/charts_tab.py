@@ -3,6 +3,7 @@ Charts Tab (Dynamic Vega-Lite Dashboard).
 """
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
 import streamlit as st
@@ -42,13 +43,18 @@ def render_charts_tab(
             "A chart tied to a finding says which one and whether it held up."
         )
 
+        lone_cards = itertools.count()  # `flush` runs more than once: each card key must stay unique
+
         def flush(pending: list[dict[str, Any]]) -> None:
             """Two panels per row, in bordered columns so the two cards are always the same height; a
             lone last panel takes the full width."""
             for j in range(0, len(pending), 2):
                 row = pending[j : j + 2]
                 if len(row) == 1:
-                    render_dashboard_chart(row[0], vega_cfg, note(row[0]), finding_of(row[0]), height=HALF_HEIGHT)
+                    render_dashboard_chart(
+                        row[0], vega_cfg, note(row[0]), finding_of(row[0]), height=HALF_HEIGHT,
+                        card_key=f"chart_card_lone_{next(lone_cards)}",
+                    )
                     continue
                 for col, ch in zip(st.columns(2, border=True), row, strict=True):
                     with col:
@@ -65,7 +71,9 @@ def render_charts_tab(
             if spans_page:
                 flush(pending)
                 pending = []
-                render_dashboard_chart(ch, vega_cfg, note(ch), finding_of(ch), height=WIDE_HEIGHT)
+                render_dashboard_chart(
+                    ch, vega_cfg, note(ch), finding_of(ch), height=WIDE_HEIGHT, card_key=f"chart_card_wide_{index}"
+                )
             else:
                 pending.append(ch)
         flush(pending)

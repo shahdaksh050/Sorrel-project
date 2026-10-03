@@ -409,7 +409,25 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 [data-testid="stTabs"] .react-aria-SelectionIndicator,
 [data-testid="stTabs"] [data-baseweb="tab-highlight"],
 [data-testid="stTabs"] [data-baseweb="tab-border"] {{ display: none !important; }}
-[data-testid="stTabs"] [data-testid="stTabPanel"] {{ padding-top: 1.5rem; }}
+/* Three layers, the same on every tab as in the header band: the page, a warm band that holds a tab's
+   content, and lighter cards on that band. What sits inside a card (a nested card, a chip, a header
+   strip) goes back to the page tone, so each step down is visible and no card melts into its ground. */
+[data-testid="stTabs"] [data-testid="stTabPanel"] {{
+    margin-top: 1.25rem; padding: 1.4rem 1.4rem 1.6rem;
+    background: var(--sheet-alt); border: 1px solid var(--rule); border-radius: var(--radius);
+}}
+[class*="st-key-audit_"], [class*="st-key-chart_card_"], .st-key-report_preview {{ background: var(--sheet); }}
+/* A pair of charts sits in bordered columns (so both cards are one height): the column is the card. */
+[data-testid="stColumn"]:has(.chart-title) {{ background: var(--sheet); border-radius: var(--radius); }}
+[data-testid="stTabPanel"] [data-testid="stAlertContainer"] {{
+    background: var(--sheet) !important; border: 1px solid var(--rule);
+}}
+[data-testid="stExpander"] [data-testid="stExpander"], [data-testid="stExpander"] .agent-card,
+[class*="st-key-audit_"] .agent-card, .join-card {{ background: var(--stock) !important; }}
+.how-head {{ background: var(--stock); }}
+@media (max-width: 768px) {{
+    [data-testid="stTabs"] [data-testid="stTabPanel"] {{ padding: .9rem .75rem 1.1rem; }}
+}}
 
 /* ── 3D plate ── */
 /* The plate is not a link or a Streamlit callback target, so it has a hairline and nothing else. */

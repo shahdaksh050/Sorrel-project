@@ -803,7 +803,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 }}
 .stepper .step {{
     position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr);
-    grid-template-areas: "dot name" "dot state"; column-gap: 14px; row-gap: 2px; padding-bottom: 20px;
+    grid-template-areas: "dot name" "dot state" "dot detail"; column-gap: 14px; row-gap: 2px; padding-bottom: 20px;
 }}
 .stepper .step:last-child {{ padding-bottom: 0; }}
 .stepper .step:not(:last-child)::after {{
@@ -833,6 +833,11 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .step.done .step-state {{ color: var(--positive); }}
 .step.active .step-state {{ color: var(--accent-text); }}
 .step.err .step-state {{ color: var(--accent); }}
+/* What the step reported, in the step's own row: rows read, tools run, iterations. It wraps, never clips. */
+.step-detail {{
+    grid-area: detail; align-self: start; margin-top: 4px; font-size: var(--text-xs); line-height: 1.45;
+    color: var(--graphite); overflow-wrap: anywhere;
+}}
 
 /* A found-so-far item that has just appeared carries `is-new` on its markup (it marks one seen once);
    this rule keeps the class styled, and it does not animate. */

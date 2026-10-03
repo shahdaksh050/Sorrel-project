@@ -207,7 +207,25 @@ def test_the_stepper_names_every_step_and_escapes_what_it_is_given() -> None:
     out = render_stepper([("1", "done", "<script>x</script>")])
     for _, name in STAGE_DEFS:
         assert name in out
-    assert "<script" not in out
+    assert "<script" not in out and "&lt;script&gt;x&lt;/script&gt;" in out
+
+
+def test_each_step_row_carries_what_that_step_reported_and_only_when_it_has_something() -> None:
+    from ui.components.cards import render_stepper
+
+    out = render_stepper([
+        ("1", "done", "9,471 rows x 15 cols"),
+        ("2", "done", "plan generated & executed"),
+        ("3", "active", ""),
+        ("5", "done", "3 iteration(s)"),
+    ])
+    assert out.count('class="step-detail"') == 3  # steps 1, 2 and 5; none for the quiet ones
+    assert "9,471 rows x 15 cols" in out and "plan generated &amp; executed" in out and "3 iteration(s)" in out
+    # the detail sits inside its own step's row, after the status word
+    first = out.split('role="listitem"')[1]
+    assert first.index("Reading Your File") < first.index("✓ Done") < first.index("9,471 rows x 15 cols")
+    assert "9,471" not in out.split('role="listitem"')[2]  # not in step 2's row
+    assert 'class="step-detail"' not in render_stepper([("1", "done", "")])
 
 
 def test_team_cards_are_one_line_until_opened() -> None:

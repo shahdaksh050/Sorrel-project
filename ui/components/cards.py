@@ -139,7 +139,8 @@ _STAGE_WORDS: dict[str, str] = {
 
 
 def render_stepper(stage_log: list[tuple[str, str, str]]) -> str:
-    """The seven stages as one vertical list: a numbered dot, the step's name and a status word with a shape.
+    """The seven stages as one vertical list: a numbered dot, the step's name, a status word with a shape,
+    and what the step reported (rows read, tools run, iterations...) once it has something to say.
 
     Meant to sit beside the 3D plate. A rail joins the dots; the part behind a finished or skipped
     step is filled, so progress reads at a glance. Plain divs with list roles, not `ol`/`li`: Streamlit's
@@ -147,6 +148,7 @@ def render_stepper(stage_log: list[tuple[str, str, str]]) -> str:
     the stage in progress, so a screen reader hears it once per change.
     """
     status_of = {n: s for n, s, _ in stage_log}
+    detail_of = {n: d for n, _, d in stage_log}
     items: list[str] = []
     active: tuple[str, str] | None = None
     done = 0
@@ -158,11 +160,13 @@ def render_stepper(stage_log: list[tuple[str, str, str]]) -> str:
         if status == "active" and active is None:
             active = (num, name)
         word = _STAGE_WORDS.get(status, "○ Waiting")
+        detail = str(detail_of.get(num) or "")
+        detail_html = f'<span class="step-detail">{html.escape(detail)}</span>' if detail else ""
         items.append(
             f'<div class="{f"step {cls}".strip()}" role="listitem">'
             f'<span class="step-dot">{html.escape(num)}</span>'
             f'<span class="step-name">{html.escape(name)}</span>'
-            f'<span class="step-state">{html.escape(word)}</span></div>'
+            f'<span class="step-state">{html.escape(word)}</span>{detail_html}</div>'
         )
     status_line = (
         f'<p class="sr-only" role="status">Working on step {html.escape(active[0])} of {len(STAGE_DEFS)}: '

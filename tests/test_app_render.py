@@ -71,6 +71,7 @@ def test_a_finished_run_explains_itself_in_the_details_and_offers_its_files(rend
 def test_the_home_page_has_no_how_it_works_panel_and_the_team_lives_in_details(rendered: dict[str, Any]) -> None:
     done = rendered["finished"]
     assert not done["how_panel"]  # no expander and no "The Team at Work" under the steps
+    assert done["step_details"] >= 4  # what each step reported (rows read, tools run...) is in its own row
     # The compact team cards still exist, in the Details tab's step-by-step record.
     assert done["agent_line"] and done["agent_cards"] >= 8
 

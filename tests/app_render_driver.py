@@ -92,6 +92,7 @@ def main() -> dict[str, object]:
         "how_rows": 'class="how-we-got-here"' in text and 'class="how-block' in text,
         "artifacts": text.count('class="artifact'),
         "analyst_notes": "Details for analysts" in text,
+        "step_details": stepper.count('class="step-detail"'),
         "how_panel": "Show how it's working" in text or "The Team at Work" in text,
         "details_before_file": text.find("Analyses specific to your data") != -1
         and text.find("Analyses specific to your data") < text.find("How the file was read and repaired"),

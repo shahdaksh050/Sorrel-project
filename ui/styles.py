@@ -280,33 +280,37 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 }}
 
 /* ── Tabs ── */
-.stTabs [role="tablist"] {{
-    gap: 0 !important; background: var(--sheet-alt) !important; border-radius: var(--radius-pill) !important;
+[data-testid="stTabs"] [role="tablist"] {{
+    gap: 4px !important; background: var(--sheet-alt) !important; border-radius: var(--radius-pill) !important;
     padding: 6px !important; overflow-x: auto; border: none; border-bottom: none !important;
-    display: flex !important; width: 100% !important;
+    display: flex !important; width: 100% !important; position: relative;
 }}
-.stTabs [role="tab"] {{
+[data-testid="stTabs"] [role="tab"] {{
     flex: 1 1 0px !important; justify-content: center !important; text-align: center !important;
     border-radius: var(--radius-pill) !important; padding: 6px 16px !important; background-color: transparent !important;
-    border: none !important; transition: all 0.14s ease; margin: 0 !important; outline: none !important;
+    border: none !important; margin: 0 !important; outline: none !important;
+    z-index: 1; position: relative;
+    transition: background-color var(--dur-fast) var(--ease-out);
 }}
-.stTabs [role="tab"]:last-child {{ margin-right: 0 !important; }}
-.stTabs [role="tab"]:focus, .stTabs [role="tab"]:focus-visible {{ outline: none !important; }}
-.stTabs [role="tab"] p {{ font-size: 14.5px; font-weight: 700;
+[data-testid="stTabs"] [role="tab"]:last-child {{ margin-right: 0 !important; }}
+[data-testid="stTabs"] [role="tab"]:focus, [data-testid="stTabs"] [role="tab"]:focus-visible {{ outline: none !important; }}
+[data-testid="stTabs"] [role="tab"] p {{ font-size: 14.5px; font-weight: 700;
                                  color: var(--graphite) !important; letter-spacing: 0; margin: 0 !important;
-                                 position: relative; z-index: 1; }}
-.stTabs [role="tab"]:hover p {{ color: var(--ink) !important; }}
-.stTabs [role="tab"][aria-selected="true"] {{ background-color: transparent !important; }}
-.stTabs [role="tab"][aria-selected="true"] p {{ color: var(--sheet) !important; }}
-.stTabs [data-testid="stTabIndicator"] {{
-    height: 100% !important;
-    bottom: 0 !important;
+                                 position: relative; z-index: 2;
+                                 transition: color var(--dur-base) var(--ease-out); }}
+[data-testid="stTabs"] [role="tab"]:hover p {{ color: var(--ink) !important; }}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ background-color: transparent !important; }}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] p {{ color: var(--sheet) !important; }}
+[data-testid="stTabs"] .react-aria-SelectionIndicator {{
+    height: calc(100% - 12px) !important;
+    top: 6px !important; bottom: 6px !important;
     border-radius: var(--radius-pill) !important;
     background-color: var(--pen) !important;
     z-index: 0 !important;
-    transition: transform var(--dur-base) var(--ease-out), width var(--dur-base) var(--ease-out) !important;
+    box-shadow: var(--lift-sm);
+    transition: transform var(--dur-base) var(--ease-in-out), width var(--dur-base) var(--ease-in-out) !important;
 }}
-.stTabs [data-testid="stTabsContent"] {{ padding-top: 1.5rem; }}
+[data-testid="stTabs"] [data-testid="stTabPanel"] {{ padding-top: 1.5rem; }}
 
 /* ── 3D & Viewport Enhancements ── */
 /* The plate (FrontendPlan.md 2.8 keeps this one's elevation permanently) — no
@@ -336,23 +340,23 @@ iframe {{
     background: var(--sheet-alt) !important; border-color: var(--pen) !important;
 }}
 /* ── Inputs (Polling-safe, no !important) ── */
-[data-testid="stTextInput"] input, 
-[data-testid="stTextArea"] textarea, 
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
 [data-testid="stSelectbox"] div[data-baseweb="select"] > div {{
     border-radius: 10px; border: 1px solid var(--rule);
     background: var(--sheet); color: var(--ink);
     transition: all var(--dur-fast) var(--ease-out);
 }}
-[data-testid="stTextInput"] input::placeholder, 
+[data-testid="stTextInput"] input::placeholder,
 [data-testid="stTextArea"] textarea::placeholder {{
     color: var(--graphite); opacity: .9;
 }}
-[data-testid="stTextInput"] input:focus, 
+[data-testid="stTextInput"] input:focus,
 [data-testid="stTextArea"] textarea:focus,
-[data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within {{ 
-    border-color: var(--pen); box-shadow: 0 0 0 1px var(--pen); 
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within {{
+    border-color: var(--pen); box-shadow: 0 0 0 1px var(--pen);
 }}
-[data-testid="stTextInput"] input:hover, 
+[data-testid="stTextInput"] input:hover,
 [data-testid="stTextArea"] textarea:hover,
 [data-testid="stSelectbox"] div[data-baseweb="select"] > div:hover {{
     border-color: var(--graphite);
@@ -360,12 +364,14 @@ iframe {{
 
 /* ── Skeletons & Empty States ── */
 .skeleton {{
-    background: linear-gradient(90deg, var(--sheet) 25%, var(--sheet-alt) 50%, var(--sheet) 75%);
-    background-size: 200% 100%;
-    animation: shimmer 1.5s infinite linear;
+    background: var(--sheet-alt);
+    animation: pulse 1.5s infinite ease-in-out;
     border-radius: var(--radius);
 }}
-@keyframes shimmer {{ 0% {{ background-position: 200% 0; }} 100% {{ background-position: -200% 0; }} }}
+@keyframes pulse {{
+    0%, 100% {{ opacity: 0.6; }}
+    50% {{ opacity: 1; }}
+}}
 .skeleton-text {{ height: 1em; width: 100%; border-radius: 4px; margin-bottom: 0.5rem; }}
 .skeleton-card {{ height: 120px; width: 100%; }}
 
@@ -456,9 +462,7 @@ iframe {{
 
 /* ── Finding cards (Answers tab, IMPROVEMENTS.md 7.15) ── */
 .finding-card {{
-    background: var(--sheet);
-    border-left: 4px solid var(--pen); border-radius: var(--radius);
-    padding: 1rem 1.3rem; margin: 0 0 .9rem;
+    border-left: 4px solid var(--pen); margin: 0 0 .9rem;
 }}
 .finding-headline {{
     font-family: var(--heading); font-size: 17px; font-weight: 700;
@@ -617,10 +621,40 @@ iframe {{
     gap: 1.5rem;
     align-items: start;
 }}
-.bento-card {{
+.bento-card, .finding-card {{
     background: var(--sheet);
     border-radius: var(--radius);
     padding: 1.2rem;
+    position: relative;
+    overflow: hidden;
+}}
+.bento-card::before, .finding-card::before {{
+    content: "";
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: radial-gradient(
+        600px circle at var(--mx, -9999px) var(--my, -9999px),
+        color-mix(in srgb, var(--pen) 8%, transparent),
+        transparent 40%
+    );
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity var(--dur-base) var(--ease-out);
+}}
+.bento-card:hover::before, .finding-card:hover::before {{
+    opacity: 1;
+}}
+.bento-card.flagged::before, .finding-card.flagged::before {{
+    background: radial-gradient(
+        600px circle at var(--mx, -9999px) var(--my, -9999px),
+        color-mix(in srgb, var(--risk) 10%, transparent),
+        transparent 40%
+    );
+}}
+.bento-card > *, .finding-card > * {{
+    position: relative;
+    z-index: 1;
 }}
 .bento-card.full-width {{
     grid-column: 1 / -1;
@@ -746,6 +780,14 @@ iframe {{
 .sc.err   .sc-num {{ background: var(--risk); }}
 .sc.err .nm {{ color: var(--risk); }}
 
+@keyframes slideInDown {{
+    from {{ opacity: 0; transform: translateY(-10px); }}
+    to {{ opacity: 1; transform: translateY(0); }}
+}}
+.sc.is-new, .prov-item.is-new {{
+    animation: slideInDown 0.4s var(--ease-out) forwards;
+}}
+
 /* ── Annotations ── */
 .ic, .rc, .wc {{
     border-left: 3px solid var(--rule); border-radius: 0 10px 10px 0;
@@ -828,11 +870,11 @@ iframe {{
 .how-tag.supported {{ color: var(--positive); }}
 .how-tag.refuted {{ color: var(--risk); }}
 /* ── "Found so far, may change" (live run): hairline block, tokens only ── */
-.prov {{ border-top: 1px solid var(--rule); padding: .8rem 0 .4rem; margin: .8rem 0; max-width: 74ch; }}
+.prov {{ border-top: 1px solid var(--rule); padding: .8rem 0 .4rem; margin: .8rem 0; max-width: 100%; }}
 .prov-h {{ font-size: 15px; font-weight: 700; margin: 0 0 .15rem; color: var(--ink); }}
-.prov-note {{ font-size: 13px; color: var(--graphite); line-height: 1.5; margin: 0 0 .5rem; }}
+.prov-note {{ font-size: 13px; color: var(--graphite); line-height: 1.5; margin: 0 0 1rem; }}
 .prov-list {{ margin: 0; padding-left: 1.1rem; font-size: 14px; line-height: 1.55; color: var(--ink); overflow-wrap: anywhere; }}
-.prov-kind {{ font-size: 12px; font-weight: 700; color: var(--graphite); }}
+.prov-kind {{ font-size: 12px; font-weight: 700; color: var(--graphite); display: block; margin-bottom: 4px; }}
 .prov-count {{ font-size: 13px; color: var(--graphite); margin: .4rem 0 0; }}
 /* ── Native widget text follows the page tokens ──
    Streamlit's native theme is fixed (.streamlit/config.toml, Day palette), so in

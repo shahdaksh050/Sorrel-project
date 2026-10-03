@@ -13,7 +13,7 @@
  */
 
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
-import { engine, animate, stagger, cubicBezier } from 'https://cdn.jsdelivr.net/npm/animejs@4.5.0/dist/bundles/anime.esm.min.js';
+import { engine, animate, stagger, cubicBezier } from '__ANIME_ESM_URL__';
 
 // Accurate Cubic Bezier (0.22, 1, 0.36, 1) Solver (Defect 5 Fix)
 export function createCubicBezierSolver(x1, y1, x2, y2) {

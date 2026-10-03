@@ -181,6 +181,8 @@ _DEFAULTS: dict[str, Any] = {
     "run_objective":  "",     # the question the finished run was given
     "is_sample":      False,  # the finished run analysed the bundled sample file
     "run_view":       None,   # RunView of the finished run (src/core/run_view.py)
+    "seen_stages":    set(),  # tracks which stages have entered to animate once
+    "seen_provs":     set(),  # tracks which provisional findings have entered
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -228,6 +230,8 @@ def _reset_pipeline() -> None:
               "dashboard", "tmp_dir", "progress_lines", "llm_warning",
               "preview_notes", "run_view"):
         st.session_state[k] = _DEFAULTS[k]
+    st.session_state["seen_stages"] = set()
+    st.session_state["seen_provs"] = set()
 
 
 def _set_stage(num: str, status: str, detail: str = "") -> None:
@@ -288,8 +292,8 @@ def _run_progress() -> None:
         f'<div class="run-banner">Running the analysis<span class="sub">{html.escape(sub)}</span></div>',
         unsafe_allow_html=True,
     )
-    st.markdown(_render_steps_list(list(snap.stage_log)), unsafe_allow_html=True)
-    _prov_html = build_provisional_html(snap.provisional)
+    st.markdown(_render_steps_list(list(snap.stage_log), st.session_state["seen_stages"]), unsafe_allow_html=True)
+    _prov_html = build_provisional_html(snap.provisional, st.session_state["seen_provs"])
     if _prov_html:
         st.markdown(_prov_html, unsafe_allow_html=True)
     if st.button("Stop", key="stop_run", disabled=snap.stop_requested or snap.discard):
@@ -1081,7 +1085,7 @@ _running = any(s == "active" for _, s, _ in st.session_state["stage_log"])
 
 _run_active = _active_run() is not None
 if (st.session_state.get("analysis_done") or _errored or _running) and not _run_active:
-    steps_list_slot.markdown(_render_steps_list(st.session_state["stage_log"]), unsafe_allow_html=True)
+    steps_list_slot.markdown(_render_steps_list(st.session_state["stage_log"], set()), unsafe_allow_html=True)
     with pipeline_slot.container():
         with st.expander("Show how it's working", expanded=False):
             _draw_pipeline_rig(st.empty())

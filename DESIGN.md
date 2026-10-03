@@ -68,7 +68,7 @@ Gradients are generally **forbidden** on surfaces, buttons, and backgrounds. The
 
 ## 5. UI Islands Contract
 
-Rich, isolated React components ("islands") are used for display-only enhancements (e.g., Hero, Progress, Findings).
-- Islands receive state as plain text properties from Python. 
+The **Hero** section is the *only* approved React island. Progress, Findings, and other UI elements must remain native HTML/CSS.
+- The Hero island receives state as plain text properties from Python. 
 - Island rendering must gracefully fail or skip rendering if the built bundle is missing.
 - Island sources **must never inject raw HTML** (`dangerouslySetInnerHTML` is forbidden). All LLM output and dataset text is rendered as React text nodes to prevent XSS.

@@ -20,17 +20,33 @@ def _kind_label(kind: str) -> str:
     return text[:1].upper() + text[1:] if text else "Finding"
 
 
-def build_provisional_html(findings: tuple[ProvisionalFinding, ...], *, shown: int = MAX_SHOWN) -> str:
+def build_provisional_html(findings: tuple[ProvisionalFinding, ...], seen_provs: set[str], *, shown: int = MAX_SHOWN) -> str:
     """The provisional block, or `""` when nothing has been found yet."""
     if not findings:
         return ""
     latest = findings[-shown:]
     total = len(findings)
-    rows = "".join(
-        f'<li><span class="prov-kind">{html.escape(_kind_label(f.kind))}</span> '
-        f"{html.escape(f.headline)}</li>"
-        for f in latest
-    )
+    rows = []
+    for i, f in enumerate(latest):
+        is_new = False
+        if f.finding_id not in seen_provs:
+            is_new = True
+            seen_provs.add(f.finding_id)
+        
+        # In provisional findings, we don't know risk flags yet, so just standard cards.
+        classes = ["bento-card", "prov-item"]
+        if is_new:
+            classes.append("is-new")
+        if i == 0:
+            classes.append("full-width")
+            
+        rows.append(
+            f'<div class="{" ".join(classes)}">'
+            f'<span class="prov-kind">{html.escape(_kind_label(f.kind))}</span>'
+            f'<div class="finding-headline">{html.escape(f.headline)}</div>'
+            f'</div>'
+        )
+    rows_html = "".join(rows)
     count = (
         f'<p class="prov-count">Showing the latest {len(latest)} of {total}.</p>'
         if total > len(latest)
@@ -41,5 +57,5 @@ def build_provisional_html(findings: tuple[ProvisionalFinding, ...], *, shown: i
         '<h4 class="prov-h">Found so far, may change</h4>'
         '<p class="prov-note">These have not been checked yet. They can change or '
         "disappear when the checks run.</p>"
-        f'<ul class="prov-list">{rows}</ul>{count}</div>'
+        f'<div class="bento-grid">{rows_html}</div>{count}</div>'
     )

@@ -190,8 +190,8 @@ Not used: TailwindCSS, `@tabler/icons-react`, `lucide-react`, `react-dropzone`, 
 
 1. **Spike A (static island):** scaffold `ui/islands/`, build the hero island, load it in the landing document with the failure fallback. Verify with Node absent (committed build), Day and Night, reduced motion, and `scripts/ui_smoke.py`. **Completed and Accepted.**
 2. **Spike B (live island):** Cancelled. Replaced by Native HTML/CSS Acceptance Test.
-3. Step 1: token overlay in `ui/styles.py` (derived tokens only; do not edit `src/`) + `DESIGN.md` + numeric contrast tests.
-4. Step 1b: vendor GSAP, anime.js (both majors) and the fonts under `static/vendor/` with licence files. Do NOT touch fullPage.js; record it as a known issue.
+3. **Completed** Step 1: token overlay in `ui/styles.py` (derived tokens only; do not edit `src/`) + `DESIGN.md` + numeric contrast tests.
+4. **Completed** Step 1b: vendor GSAP, anime.js (both majors) and the fonts under `static/vendor/` with licence files. Do NOT touch fullPage.js; record it as a known issue.
 5. Step 2: shell (header/hero spacing, sidebar, section heads, responsive layout).
 6. Step 3: Tier-2 primitives (run button states, dropzone, tabs, inputs, stat tiles, callouts, empty states, skeletons).
 7. Step 4: run experience.

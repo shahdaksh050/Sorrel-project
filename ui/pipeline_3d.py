@@ -126,7 +126,9 @@ def build_document(stages: Sequence[Stage], theme: str = "day") -> str:
     three_urls = json.dumps([static_url("vendor/three/three.module.js"), _THREE_CDN]).replace("<", "\\u003c")
     return (
         _asset("pipeline_3d.html")
-        .replace("__FONT_LINKS__", f'<link rel="stylesheet" href="{static_url("fonts/ledger-fonts.css")}">')
+        .replace("__FONT_LINKS__", f'<link rel="stylesheet" href="{static_url("vendor/fonts/ledger-fonts.css")}">')
+        .replace("__GSAP_URL__", static_url("vendor/gsap/3.15.0/gsap.min.js"))
+        .replace("__ANIME_UMD_URL__", static_url("vendor/anime/4.5.0/anime.umd.min.js"))
         .replace("__STATE_JSON__", state_json)
         .replace("__SCENE_SCRIPT__", f"window.__THREE_URLS__ = {three_urls};\n" + _asset("pipeline_3d.js"))
     )

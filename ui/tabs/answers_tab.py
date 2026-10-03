@@ -115,8 +115,10 @@ def render_answers_tab(
         dash_finding_ids: set[str] = {
             str(c["finding_id"]) for c in (dash or []) if c.get("finding_id")
         }
-        for f in view.headline_findings:
-            st.markdown(render_finding_card(f, dash_finding_ids), unsafe_allow_html=True)
+        cards_html = []
+        for i, f in enumerate(view.headline_findings):
+            cards_html.append(render_finding_card(f, dash_finding_ids, is_primary=(i == 0)))
+        st.markdown(f'<div class="bento-grid">{"".join(cards_html)}</div>', unsafe_allow_html=True)
     else:
         # No cards to lead with: promote whatever analysis actually ran. With
         # cards present this line would only repeat the first one.

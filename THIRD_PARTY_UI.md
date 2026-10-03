@@ -48,8 +48,8 @@ The `ui/islands` build system uses the following dependencies. These are **build
 
 The repository currently relies on several vendored or CDN-loaded assets:
 
-- **GSAP (GreenSock)**: Used for 3D pipeline animations. It is currently loaded from a CDN. **Licence Note:** GSAP operates under a custom "Standard No Charge" licence, *not* MIT. Free for most commercial uses unless charging multiple users for a product that uses it.
-- **anime.js**: Used for animations. Loaded from CDN/vendored. MIT Licence.
+- **GSAP (GreenSock)**: Used for 3D pipeline animations. Vendored in `static/vendor/gsap`. **Licence Note:** GSAP operates under a custom "Standard No Charge" licence, *not* MIT. Free for most commercial uses unless charging multiple users for a product that uses it.
+- **anime.js**: Used for animations. Both major versions (3.x and 4.x) are vendored in `static/vendor/anime`. MIT Licence.
 - **Three.js**: Vendored in `static/vendor/three`. MIT Licence.
-- **Google Fonts**: `Baloo 2` and `Mukta` are used. They are covered by the **SIL Open Font License (OFL)**.
+- **Google Fonts**: `Baloo 2` and `Mukta` are vendored in `static/vendor/fonts`. They are covered by the **SIL Open Font License (OFL)**.
 - **fullPage.js**: Used in the cinematic export. Loaded from CDN. **Known Issue:** The CDN load conflicts with `LOCAL_ONLY` network isolation. Additionally, fullPage.js v4 operates under GPLv3 or a paid commercial licence, which may conflict with the project's "free only" constraints and distribution model. (Pending resolution).

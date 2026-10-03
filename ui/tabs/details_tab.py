@@ -50,6 +50,18 @@ def render_details_tab(
             f"tools (time-series, text, geo...) were unavailable. Reason: {profile_status[8:]}"
         )
 
+    # The analyses that ran for this data come first: they are what most readers came to see, ahead
+    # of how the file was read and repaired.
+    with st.container(border=True, key="audit_other"):
+        st.markdown(
+            audit_head_html(
+                "Analyses specific to your data",
+                "Segmentation, trends, text and geography, run when your data called for them.",
+            ),
+            unsafe_allow_html=True,
+        )
+        render_other_findings(tool_results)
+
     read_report = st.session_state.get("read_report")
     coercions = st.session_state.get("coercions")
     if read_report or coercions:
@@ -190,16 +202,6 @@ def render_details_tab(
                         if isinstance(v, dict)
                     ]
                     st.dataframe(safe_df(pd.DataFrame(cr_rows)), width="stretch")
-
-    with st.container(border=True, key="audit_other"):
-        st.markdown(
-            audit_head_html(
-                "Analyses specific to your data",
-                "Segmentation, trends, text and geography, run when your data called for them.",
-            ),
-            unsafe_allow_html=True,
-        )
-        render_other_findings(tool_results)
 
     gov = report.get("governance")
     if gov:

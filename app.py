@@ -129,13 +129,7 @@ from ui.components.cards import (
     get_vega_config as _get_vega_config,
 )
 from ui.components.cards import (
-    render_agent_grid as _render_agent_grid,
-)
-from ui.components.cards import (
     render_datum as _datum,
-)
-from ui.components.cards import (
-    render_step_notes as _render_step_notes,
 )
 from ui.components.cards import (
     render_stepper as _render_stepper,
@@ -1006,8 +1000,7 @@ with _inputs_box:
 # ══════════════════════════════════════════════════════════════════════════════
 with _hero_box:
     # Header: the title on the left, the two view buttons on the right. Under it, in order: the readout
-    # of the run, the seven steps as one even row across the page, then the work area: what each step
-    # found beside the 3D plate while a run is going, a closed "how it's working" panel afterwards.
+    # of the run, then the seven steps as a vertical list with the 3D plate beside it.
     if _workspace_state:
         hero_text, hero_actions = st.columns([0.68, 0.32], gap="large", vertical_alignment="center")
     else:
@@ -1045,20 +1038,16 @@ with _hero_box:
                 st.session_state["show_cinematic_hero"] = not _hero_cinema_on
                 st.rerun()
 
-    # The datum line carries the run's readings and the stepper its seven steps; both are filled in
-    # further down this same script pass, so they show the run as it is now.
+    # The datum line carries the run's readings, the stepper the seven steps and the plate the run itself;
+    # all are filled in further down this same script pass, so they show the run as it is now.
     datum_slot = st.empty()
-    stepper_slot = st.empty()
-
-    # The work area. The pipeline executes further down this same pass, so the plate is filled into
-    # this placeholder afterwards, which makes it show the state of the run that just happened.
-    if _workspace_state == "running":
-        _notes_col, _plate_col = st.columns([0.42, 0.58], gap="large")
-        notes_slot = _notes_col.empty()
+    if _workspace_state:
+        _steps_col, _plate_col = st.columns([0.34, 0.66], gap="large")
+        stepper_slot = _steps_col.empty()
         with _plate_col.container(key="plate"):
             pipeline_slot = st.empty()
     else:
-        notes_slot = st.empty()
+        stepper_slot = st.empty()
         with st.container(key="plate"):
             pipeline_slot = st.empty()
 
@@ -1252,24 +1241,12 @@ _running = any(s == "active" for _, s, _ in st.session_state["stage_log"])
 _run_active = _active_run() is not None
 if not _workspace_state:
     stepper_slot.empty()
-    notes_slot.empty()
     pipeline_slot.empty()
 else:
-    _log_now = _live_stage_log()
-    stepper_slot.markdown(_render_stepper(_log_now), unsafe_allow_html=True)
-    if _run_active:
-        # Live: what each step has found so far, beside the plate drawn at the stage the run is at.
-        notes_slot.markdown(_render_step_notes(_log_now), unsafe_allow_html=True)
-        _draw_pipeline_rig(pipeline_slot)
-    else:
-        notes_slot.empty()
-        with pipeline_slot.container():
-            with st.expander("Show how it's working", expanded=False):
-                _notes_col, _plate_col = st.columns([0.42, 0.58], gap="large")
-                _notes_col.markdown(_render_step_notes(_log_now), unsafe_allow_html=True)
-                _draw_pipeline_rig(_plate_col.empty())
-                st.markdown("#### The Team at Work")
-                st.markdown(_render_agent_grid(_log_now), unsafe_allow_html=True)
+    # The same layout during a run and after it: the steps on the left, the plate on the right, both drawn
+    # from the live log (the worker's while it runs, the finished run's afterwards).
+    stepper_slot.markdown(_render_stepper(_live_stage_log()), unsafe_allow_html=True)
+    _draw_pipeline_rig(pipeline_slot)
 
 # The datum line: the same run state as the drawing, in words and figures.
 _error_step = next((n for n, s, _ in st.session_state["stage_log"] if s == "error"), None)

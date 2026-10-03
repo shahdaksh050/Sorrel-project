@@ -139,10 +139,11 @@ _STAGE_WORDS: dict[str, str] = {
 
 
 def render_stepper(stage_log: list[tuple[str, str, str]]) -> str:
-    """The seven stages as one even row: a numbered dot, a short name and a status word with a shape.
+    """The seven stages as one vertical list: a numbered dot, the step's name and a status word with a shape.
 
-    Meant to sit full width above the work area. A rail joins the dots; the part behind a
-    finished step is filled, so progress reads at a glance. One polite status sentence names
+    Meant to sit beside the 3D plate. A rail joins the dots; the part behind a finished or skipped
+    step is filled, so progress reads at a glance. Plain divs with list roles, not `ol`/`li`: Streamlit's
+    markdown styles those, and a list element collapsed to a narrow column in the page. One polite status sentence names
     the stage in progress, so a screen reader hears it once per change.
     """
     status_of = {n: s for n, s, _ in stage_log}
@@ -158,10 +159,10 @@ def render_stepper(stage_log: list[tuple[str, str, str]]) -> str:
             active = (num, name)
         word = _STAGE_WORDS.get(status, "○ Waiting")
         items.append(
-            f'<li class="{f"step {cls}".strip()}">'
+            f'<div class="{f"step {cls}".strip()}" role="listitem">'
             f'<span class="step-dot">{html.escape(num)}</span>'
             f'<span class="step-name">{html.escape(name)}</span>'
-            f'<span class="step-state">{html.escape(word)}</span></li>'
+            f'<span class="step-state">{html.escape(word)}</span></div>'
         )
     status_line = (
         f'<p class="sr-only" role="status">Working on step {html.escape(active[0])} of {len(STAGE_DEFS)}: '
@@ -170,21 +171,7 @@ def render_stepper(stage_log: list[tuple[str, str, str]]) -> str:
         else ""
     )
     label = f"Analysis steps, {done} of {len(STAGE_DEFS)} done"
-    return f'{status_line}<ol class="stepper" aria-label="{html.escape(label)}">{"".join(items)}</ol>'
-
-
-def render_step_notes(stage_log: list[tuple[str, str, str]]) -> str:
-    """What each step reported, for the steps that reported something: a compact two-line list."""
-    by_stage = {n: d for n, _, d in stage_log}
-    rows = [
-        f'<li><span class="note-num">{html.escape(num.zfill(2))}</span>'
-        f'<div><b>{html.escape(name)}</b><span>{html.escape(str(by_stage[num]))}</span></div></li>'
-        for num, name in STAGE_DEFS
-        if by_stage.get(num)
-    ]
-    if not rows:
-        return '<p class="step-notes-empty">What each step found appears here as it finishes.</p>'
-    return f'<ul class="step-notes">{"".join(rows)}</ul>'
+    return f'{status_line}<div class="stepper" role="list" aria-label="{html.escape(label)}">{"".join(items)}</div>'
 
 
 def render_datum(cells: list[tuple[str, str]]) -> str:

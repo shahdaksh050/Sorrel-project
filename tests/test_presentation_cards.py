@@ -185,11 +185,13 @@ def test_visible_naming_is_sorrel() -> None:
     assert "Sorrel is the working name of DSA Agent" in app
 
 
-def test_the_stepper_is_one_even_row_of_seven_with_a_shape_and_a_word_each() -> None:
+def test_the_stepper_is_a_list_of_seven_with_a_shape_and_a_word_each() -> None:
     from ui.components.cards import STAGE_DEFS, render_stepper
 
     out = render_stepper([("1", "done", ""), ("2", "active", ""), ("3", "error", ""), ("4", "skipped", "")])
-    assert out.count('<li class="step') == len(STAGE_DEFS) == 7
+    assert out.count('role="listitem"') == len(STAGE_DEFS) == 7
+    # Plain divs with list roles, not ol/li: Streamlit styles those, and an ol collapsed to a narrow column.
+    assert 'role="list"' in out and "<ol" not in out and "<li" not in out
     for word in ("✓ Done", "● Working", "! Stopped", "– Skipped", "○ Waiting"):
         assert word in out
     assert 'aria-label="Analysis steps, 1 of 7 done"' in out
@@ -199,13 +201,13 @@ def test_the_stepper_is_one_even_row_of_seven_with_a_shape_and_a_word_each() -> 
     assert 'role="status"' not in render_stepper([("1", "done", "")])
 
 
-def test_step_notes_show_only_steps_that_reported_and_escape_them() -> None:
-    from ui.components.cards import render_step_notes
+def test_the_stepper_names_every_step_and_escapes_what_it_is_given() -> None:
+    from ui.components.cards import STAGE_DEFS, render_stepper
 
-    out = render_step_notes([("1", "done", "8,789 rows <b>"), ("2", "active", "")])
-    assert "8,789 rows &lt;b&gt;" in out and "<b>x" not in out
-    assert out.count("<li>") == 1 and "Reading Your File" in out
-    assert "appears here as it finishes" in render_step_notes([("1", "pending", "")])
+    out = render_stepper([("1", "done", "<script>x</script>")])
+    for _, name in STAGE_DEFS:
+        assert name in out
+    assert "<script" not in out
 
 
 def test_team_cards_are_one_line_until_opened() -> None:

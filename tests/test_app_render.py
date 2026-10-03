@@ -41,11 +41,11 @@ def test_the_empty_workspace_renders_without_error(rendered: dict[str, Any]) -> 
     assert not empty["stepper"]  # no run, no steps
 
 
-def test_a_running_page_shows_the_stepper_and_the_notes_beside_the_plate(rendered: dict[str, Any]) -> None:
+def test_a_running_page_shows_the_stepper_beside_the_plate(rendered: dict[str, Any]) -> None:
     running = rendered["running"]
     assert running, "the page was never seen in its running state"
     assert running["exceptions"] == []
-    assert running["stepper"] and running["notes_or_placeholder"]
+    assert running["stepper"]
 
 
 def test_a_finished_run_shows_the_header_band_the_stepper_and_all_four_tabs(rendered: dict[str, Any]) -> None:
@@ -68,10 +68,15 @@ def test_a_finished_run_explains_itself_in_the_details_and_offers_its_files(rend
     assert done["analyst_notes"]
 
 
-def test_the_closed_how_it_works_panel_lists_what_each_step_found_and_a_compact_team(rendered: dict[str, Any]) -> None:
+def test_the_home_page_has_no_how_it_works_panel_and_the_team_lives_in_details(rendered: dict[str, Any]) -> None:
     done = rendered["finished"]
-    assert done["step_notes"]
+    assert not done["how_panel"]  # no expander and no "The Team at Work" under the steps
+    # The compact team cards still exist, in the Details tab's step-by-step record.
     assert done["agent_line"] and done["agent_cards"] >= 8
+
+
+def test_details_leads_with_the_analyses_that_ran_for_this_data(rendered: dict[str, Any]) -> None:
+    assert rendered["finished"]["details_before_file"]
 
 
 def test_the_report_preview_is_not_sent_until_it_is_asked_for(rendered: dict[str, Any]) -> None:

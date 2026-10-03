@@ -65,7 +65,6 @@ def main() -> dict[str, object]:
         if "Analysing" in text and not running:
             running = {
                 "stepper": 'class="stepper"' in text,
-                "notes_or_placeholder": 'class="step-notes"' in text or 'class="step-notes-empty"' in text,
                 "exceptions": problems(at),
             }
         if "Results for" in text:
@@ -74,12 +73,17 @@ def main() -> dict[str, object]:
         at.run()
         time.sleep(1)
     text = markup(at)
-    stepper = text.split('class="stepper"', 1)[1].split("</ol>", 1)[0] if 'class="stepper"' in text else ""
+    stepper = ""
+    if 'class="stepper"' in text:
+        after = text.split('class="stepper"', 1)[1]
+        items = [m.end() for m in re.finditer(r'role="listitem">', after)]
+        # up to the end of the last step (the stepper is a div: there is no closing tag to split on)
+        stepper = after[: items[-1] + after[items[-1] :].index("</div>")] if items else after[:0]
     out["running"] = running
     out["finished"] = {
         "finished": finished,
         "exceptions": problems(at),
-        "steps": len(re.findall(r'<li class="step[ "]', text)),
+        "steps": len(re.findall(r'<div class="step[ "][^>]*role="listitem"', text)),
         "stepper_label": (re.search(r'aria-label="(Analysis steps[^"]*)"', text) or [None, ""])[1],
         "waiting_in_stepper": "○ Waiting" in stepper,
         "tabs": [t.label for t in at.tabs],
@@ -88,7 +92,9 @@ def main() -> dict[str, object]:
         "how_rows": 'class="how-we-got-here"' in text and 'class="how-block' in text,
         "artifacts": text.count('class="artifact'),
         "analyst_notes": "Details for analysts" in text,
-        "step_notes": 'class="step-notes"' in text,
+        "how_panel": "Show how it's working" in text or "The Team at Work" in text,
+        "details_before_file": text.find("Analyses specific to your data") != -1
+        and text.find("Analyses specific to your data") < text.find("How the file was read and repaired"),
         "agent_line": "agent-line" in text,
         "agent_cards": text.count("agent-card"),
         "report_toggle": any(t.key == "show_report_preview" for t in at.toggle),

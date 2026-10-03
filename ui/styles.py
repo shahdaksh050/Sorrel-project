@@ -793,61 +793,46 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     border-radius: var(--radius); overflow: hidden;
 }}
 
-/* ── The seven steps: one even row across the page ──
-   A numbered dot, a short name and a status word with a shape. A hairline rail joins the dots and
-   is filled behind each finished step, so progress reads at a glance. */
+/* ── The seven steps: a vertical list beside the 3D plate ──
+   A numbered dot, the step's name and a status word with a shape. A hairline rail runs down through the
+   dots and is filled behind each finished or skipped step, so progress reads at a glance. */
 .stepper {{
-    list-style: none; margin: 0 0 1.25rem; padding: 18px 16px 16px;
-    display: grid; grid-template-columns: repeat(7, minmax(0, 1fr));
+    display: flex; flex-direction: column; width: 100%; max-width: 30rem; box-sizing: border-box;
+    margin: 0 0 1.25rem; padding: 18px 20px;
     background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
 }}
 .stepper .step {{
-    position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px;
-    text-align: center; padding: 0 6px; min-width: 0;
+    position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-areas: "dot name" "dot state"; column-gap: 14px; row-gap: 2px; padding-bottom: 20px;
 }}
+.stepper .step:last-child {{ padding-bottom: 0; }}
 .stepper .step:not(:last-child)::after {{
-    content: ""; position: absolute; top: 13px; left: calc(50% + 20px); width: calc(100% - 40px);
-    height: 2px; background: var(--rule);
+    content: ""; position: absolute; left: 13px; top: 32px; bottom: 2px; width: 2px; background: var(--rule);
 }}
 /* The rail is filled past a finished step and past a skipped one (it was passed, just not needed). */
 .stepper .step.done:not(:last-child)::after, .stepper .step.skip:not(:last-child)::after {{ background: var(--pen); }}
 .step-dot {{
-    position: relative; z-index: 1; width: 28px; height: 28px; display: grid; place-items: center;
-    border-radius: 50%; background: var(--sheet); border: 1.5px solid var(--rule-strong);
-    color: var(--graphite); font-family: var(--mono); font-size: 12px; font-weight: 600; line-height: 1;
+    grid-area: dot; align-self: start; position: relative; z-index: 1; width: 28px; height: 28px;
+    display: grid; place-items: center; border-radius: 50%; background: var(--sheet);
+    border: 1.5px solid var(--rule-strong); color: var(--graphite);
+    font-family: var(--mono); font-size: 12px; font-weight: 600; line-height: 1;
 }}
 .step.done .step-dot {{ background: var(--pen); border-color: var(--pen); color: var(--accent-ink); }}
 .step.active .step-dot {{ border-color: var(--pen); color: var(--accent-text); outline: 3px solid var(--accent-soft); }}
 .step.err .step-dot {{ border-color: var(--accent); color: var(--accent); }}
 .step.skip .step-dot {{ border-style: dashed; }}
 .step-name {{
-    font-size: var(--text-xs); font-weight: 600; color: var(--ink); line-height: 1.3;
-    text-wrap: balance; min-height: 2.6em;
+    grid-area: name; align-self: end; font-size: var(--text-sm); font-weight: 600; color: var(--ink); line-height: 1.3;
 }}
 .step:not(.done):not(.active):not(.err) .step-name {{ color: var(--graphite); font-weight: 500; }}
 .step.active .step-name {{ color: var(--accent-text); }}
 .step-state {{
-    font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .06em;
-    text-transform: uppercase; color: var(--graphite);
+    grid-area: state; align-self: start; font-family: var(--mono); font-size: 11px; font-weight: 600;
+    letter-spacing: .06em; text-transform: uppercase; color: var(--graphite);
 }}
 .step.done .step-state {{ color: var(--positive); }}
 .step.active .step-state {{ color: var(--accent-text); }}
 .step.err .step-state {{ color: var(--accent); }}
-@media (max-width: 900px) {{
-    .stepper {{ grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); row-gap: 16px; }}
-    .stepper .step::after {{ display: none; }}
-}}
-/* What each step found, as small even cards: number, step name, one line. */
-.step-notes {{ list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }}
-.step-notes li {{
-    display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: baseline;
-    padding: 10px 12px; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
-}}
-.step-notes .note-num {{ font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--graphite); }}
-.step-notes b {{ display: block; font-size: var(--text-sm); color: var(--ink); }}
-.step-notes div > span {{ display: block; margin-top: 2px; font-size: var(--text-xs); color: var(--graphite);
-    line-height: 1.5; overflow-wrap: anywhere; }}
-.step-notes-empty {{ color: var(--graphite); font-size: var(--text-sm); margin: 0; }}
 
 /* A found-so-far item that has just appeared carries `is-new` on its markup (it marks one seen once);
    this rule keeps the class styled, and it does not animate. */

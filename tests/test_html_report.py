@@ -4,7 +4,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from src.core.html_report import build_html_report
+from src.core.design_tokens import palette
+from src.core.html_report import build_html_report, retheme_report_html
 
 INSIGHTS: dict[str, Any] = {
     "reasoning": "Support calls drive churn.",
@@ -129,3 +130,47 @@ class TestSorrelReport:
         assert "color: var(--accent-text)" in css
         # a bare `color:` (not border-left-color etc.) never takes the raw fill tokens
         assert not re.search(r"(?<![-\w])color:\s*var\(--(risk|pen)\)", css)
+
+
+class TestRethemeReportHtml:
+    """The embedded preview follows the app's Day/Night toggle; the saved file keeps following the browser."""
+
+    def _doc(self) -> str:
+        return build_html_report("churn", INSIGHTS, TOOL_RESULTS, CHARTS, objective="what drives churn?")
+
+    def test_the_saved_report_follows_the_browser_setting(self) -> None:
+        doc = self._doc()
+        assert "prefers-color-scheme: dark" in doc and "color-scheme: light dark" in doc
+        assert 'id="forced-theme"' not in doc
+
+    def test_night_and_day_force_their_own_tokens_and_chart_theme(self) -> None:
+        doc = self._doc()
+        for theme, mode, literal in (("night", "night", "true"), ("day", "day", "false")):
+            out = retheme_report_html(doc, theme)
+            assert out.count('id="forced-theme"') == 1
+            at = out.index('id="forced-theme"')
+            forced = out[at : out.index("</style>", at)]
+            body = out[out.rindex("</head><body>") :]  # not the first "</head>": Vega's source contains one
+            assert f"--stock: {palette(mode)['stock']};" in forced  # type: ignore[index]
+            assert f"color-scheme: {'dark' if mode == 'night' else 'light'};" in forced
+            assert f"const _dark = {literal};" in body and "matchMedia('(prefers-color-scheme: dark)')" not in body
+
+    def test_the_forced_tokens_come_after_the_report_rules_so_they_win(self) -> None:
+        out = retheme_report_html(self._doc(), "night")
+        media = re.search(r"@media\s*\(prefers-color-scheme:\s*dark\)", out)  # the CSS is minified
+        assert media is not None
+        forced_at = out.rindex('id="forced-theme"')
+        assert media.start() < forced_at
+        # It sits in the report's own head, right before the body, never inside an embedded script
+        # (the Vega bundles contain the text "</head>").
+        assert out[forced_at:].split("</style>", 1)[1].startswith("</head><body>")
+
+    def test_the_original_is_not_changed_and_the_dark_spelling_is_accepted(self) -> None:
+        doc = self._doc()
+        before = doc
+        assert retheme_report_html(doc, "dark") == retheme_report_html(doc, "night")
+        assert doc == before
+
+    def test_a_document_without_a_head_is_returned_with_only_the_chart_choice_fixed(self) -> None:
+        out = retheme_report_html("<p>x</p>", "night")
+        assert out == "<p>x</p>"

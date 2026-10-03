@@ -14,6 +14,7 @@ from typing import Any
 
 import streamlit as st
 
+from src.core.html_report import retheme_report_html
 from ui.components.cards import artifact_info_html, md_text
 
 
@@ -170,8 +171,18 @@ def render_downloads_tab(
             )
 
         st.divider()
-        st.markdown("### Report preview")
-        if mds:
+        _shelf_group("Report preview")
+        if html_file.exists():
+            # The real report page, as it looks when opened or printed, in a frame that scrolls. It is
+            # drawn in the app's current theme, not the browser's, so it matches the page around it.
+            theme = "night" if st.session_state.get("theme", "day") in ("night", "dark") else "day"
+            st.caption("The report as it looks when opened in a browser or printed. Scroll inside the frame to read it.")
+            with st.container(border=True, key="report_preview"):
+                st.iframe(retheme_report_html(html_file.read_text(encoding="utf-8"), theme), height=720)
+            if mds:
+                with st.expander("Read the plain-text version (Markdown)", expanded=False):
+                    st.markdown(mds[0].read_text(encoding="utf-8"))
+        elif mds:
             st.markdown(mds[0].read_text(encoding="utf-8"))
         else:
             # No Markdown file on disk. Two different reasons look identical

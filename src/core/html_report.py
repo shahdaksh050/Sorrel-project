@@ -451,6 +451,38 @@ _CHART_SCRIPT = (
 )
 
 
+#: Where this module's own head ends. The embedded Vega bundles contain the text "</head>" inside their
+#: scripts, so the closing tag alone is not a safe place to insert anything; this exact sequence is.
+_HEAD_END = "</style></head><body>"
+
+#: The line in a saved report that picks chart colours from the viewer's browser setting.
+_AUTO_DARK_JS = "const _dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);"
+
+
+def retheme_report_html(document: str, theme: str) -> str:
+    """A finished report page forced to the app's Day or Night theme.
+
+    A saved report follows the viewer's browser setting (`prefers-color-scheme`), which is right for
+    a file that is opened on its own. Embedded in the app it should follow the app's own Day/Night
+    toggle instead, which the browser setting does not know about. This leaves the saved file
+    untouched and returns a copy: the colour tokens are re-declared after the report's own rules, and
+    the charts' light/dark choice is fixed to match.
+    """
+    night = theme in ("night", "dark")
+    forced = (
+        '<style id="forced-theme">:root {\n'
+        f"  color-scheme: {'dark' if night else 'light'};\n"
+        f"{css_root_block('night' if night else 'day')}\n"
+        "}</style>"
+    )
+    out = document.replace(_AUTO_DARK_JS, f"const _dark = {'true' if night else 'false'};")
+    end = out.rfind(_HEAD_END)
+    if end < 0:
+        return out
+    at = end + len("</style>")  # after the report's own stylesheet, so the forced tokens win
+    return out[:at] + forced + out[at:]
+
+
 def build_html_report(
     dataset_name: str,
     llm_insights: dict[str, Any],

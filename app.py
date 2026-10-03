@@ -135,7 +135,10 @@ from ui.components.cards import (
     render_datum as _datum,
 )
 from ui.components.cards import (
-    render_steps_list as _render_steps_list,
+    render_step_notes as _render_step_notes,
+)
+from ui.components.cards import (
+    render_stepper as _render_stepper,
 )
 from ui.components.cards import (
     safe_df as _safe_df,
@@ -234,6 +237,7 @@ def _reset_pipeline() -> None:
         st.session_state[k] = _DEFAULTS[k]
     st.session_state["seen_stages"] = set()
     st.session_state["seen_provs"] = set()
+    st.session_state.pop("_stage_sig", None)
 
 
 def _set_stage(num: str, status: str, detail: str = "") -> None:
@@ -312,7 +316,13 @@ def _run_progress() -> None:
         f"{html.escape(_where)}Elapsed {_elapsed // 60}:{_elapsed % 60:02d}. {html.escape(sub)}</span></div>",
         unsafe_allow_html=True,
     )
-    st.markdown(_render_steps_list(list(snap.stage_log), st.session_state["seen_stages"]), unsafe_allow_html=True)
+    # The stepper and the 3D plate sit in the page header and are drawn by the full script, so a change
+    # of stage (a handful of times per run) asks for one full redraw; the polling here stays cheap.
+    _stage_sig = tuple((n, status) for n, status, _ in snap.stage_log)
+    if st.session_state.get("_stage_sig", _stage_sig) != _stage_sig:
+        st.session_state["_stage_sig"] = _stage_sig
+        st.rerun()
+    st.session_state["_stage_sig"] = _stage_sig
     _prov_html = build_provisional_html(snap.provisional, st.session_state["seen_provs"])
     if _prov_html:
         st.markdown(_prov_html, unsafe_allow_html=True)
@@ -320,6 +330,19 @@ def _run_progress() -> None:
         run.request_stop()
         st.rerun(scope="fragment")
     st.caption("Stop is cooperative: a step that is already running finishes before the run ends.")
+
+
+def _live_stage_log() -> list[tuple[str, str, str]]:
+    """The stage log as it is right now: the running worker's, or the finished run's.
+
+    While a run is in flight `st.session_state["stage_log"]` still holds the starting state (the
+    result is folded into it when the run ends), so anything that draws progress during a run
+    reads the worker's snapshot instead.
+    """
+    run = _active_run()
+    if run is not None:
+        return list(run.snapshot().stage_log)
+    return list(st.session_state["stage_log"])
 
 
 def _draw_pipeline_rig(slot: Any) -> list[Any]:
@@ -335,7 +358,7 @@ def _draw_pipeline_rig(slot: Any) -> list[Any]:
     from ui.pipeline_3d import Stage, StageStatus
     from ui.pipeline_3d import render as render_pipeline
 
-    log = {n: (s, d) for n, s, d in st.session_state["stage_log"]}
+    log = {n: (s, d) for n, s, d in _live_stage_log()}
     stages = [
         Stage(
             num=num,
@@ -981,9 +1004,13 @@ with _inputs_box:
 # MAIN AREA — header
 # ══════════════════════════════════════════════════════════════════════════════
 with _hero_box:
-    # Before there is a run the plate has nothing to show, so the headline gets the width.
-    hero_text, hero_plate = st.columns([0.46, 0.54] if _workspace_state else [0.85, 0.15], gap="large",
-                                       vertical_alignment="center")
+    # Header: the title on the left, the two view buttons on the right. Under it, in order: the readout
+    # of the run, the seven steps as one even row across the page, then the work area: what each step
+    # found beside the 3D plate while a run is going, a closed "how it's working" panel afterwards.
+    if _workspace_state:
+        hero_text, hero_actions = st.columns([0.68, 0.32], gap="large", vertical_alignment="center")
+    else:
+        hero_text, hero_actions = st.container(), None
 
     # Once there is a file or a run, the page is a workspace, not a landing page: the marketing
     # headline gives way to a compact header so the answer is not pushed below the fold.
@@ -997,9 +1024,6 @@ with _hero_box:
                 f'<h1>{_lead} <span class="hero-file">{_file_label}</span></h1></div>',
                 unsafe_allow_html=True,
             )
-            if st.button("New analysis", key="btn_new_analysis"):
-                _reset_pipeline()
-                st.rerun()
         else:
             st.markdown(
                 '<div class="hero workspace-welcome">'
@@ -1009,24 +1033,33 @@ with _hero_box:
                 'checks that back it up.</p></div>',
                 unsafe_allow_html=True,
             )
-        if _workspace_state:
+    if hero_actions is not None:
+        with hero_actions.container(key="hero_actions"):
+            if st.button("New analysis", key="btn_new_analysis"):
+                _reset_pipeline()
+                st.rerun()
             _hero_cinema_on = st.session_state.get("show_cinematic_hero", False)
             _hero_btn_txt = "Standard progress view" if _hero_cinema_on else "Open 3D progress view"
             if st.button(_hero_btn_txt, key="btn_toggle_hero_cinema"):
                 st.session_state["show_cinematic_hero"] = not _hero_cinema_on
                 st.rerun()
 
-    # The plate: a live technical drawing of the run, ruled off the headline and
-    # running past the container edge. The pipeline executes further down this same
-    # script pass, so the drawing is filled into this placeholder afterwards — that
-    # way it shows the state of the run that just happened.
-    with hero_plate.container(key="plate"):
-        steps_list_slot = st.empty()
-        pipeline_slot = st.empty()
-
-    # The datum line under the hero carries the run's readings, filled at the same
-    # time as the plate.
+    # The datum line carries the run's readings and the stepper its seven steps; both are filled in
+    # further down this same script pass, so they show the run as it is now.
     datum_slot = st.empty()
+    stepper_slot = st.empty()
+
+    # The work area. The pipeline executes further down this same pass, so the plate is filled into
+    # this placeholder afterwards, which makes it show the state of the run that just happened.
+    if _workspace_state == "running":
+        _notes_col, _plate_col = st.columns([0.42, 0.58], gap="large")
+        notes_slot = _notes_col.empty()
+        with _plate_col.container(key="plate"):
+            pipeline_slot = st.empty()
+    else:
+        notes_slot = st.empty()
+        with st.container(key="plate"):
+            pipeline_slot = st.empty()
 
 
 if _workspace_state == "failed":
@@ -1167,6 +1200,7 @@ if (run_clicked or _sample_run) and st.session_state.get("_run") is None:
         with st.expander("Technical details"):
             st.code(_ping_err, language=None)
         st.caption("You can also run without an AI summary: no key is needed.")
+        stepper_slot.markdown(_render_stepper(_live_stage_log()), unsafe_allow_html=True)
         _draw_pipeline_rig(pipeline_slot)  # the hero slot must not stay empty
         st.stop()
 
@@ -1216,18 +1250,25 @@ _running = any(s == "active" for _, s, _ in st.session_state["stage_log"])
 
 _run_active = _active_run() is not None
 if not _workspace_state:
-    steps_list_slot.empty()
+    stepper_slot.empty()
+    notes_slot.empty()
     pipeline_slot.empty()
-elif (st.session_state.get("analysis_done") or _errored or _running) and not _run_active:
-    steps_list_slot.markdown(_render_steps_list(st.session_state["stage_log"], set()), unsafe_allow_html=True)
-    with pipeline_slot.container():
-        with st.expander("Show how it's working", expanded=False):
-            _draw_pipeline_rig(st.empty())
-            st.markdown("#### The Team at Work")
-            st.markdown(_render_agent_grid(st.session_state["stage_log"]), unsafe_allow_html=True)
 else:
-    steps_list_slot.empty()
-    stages_3d = _draw_pipeline_rig(pipeline_slot)
+    _log_now = _live_stage_log()
+    stepper_slot.markdown(_render_stepper(_log_now), unsafe_allow_html=True)
+    if _run_active:
+        # Live: what each step has found so far, beside the plate drawn at the stage the run is at.
+        notes_slot.markdown(_render_step_notes(_log_now), unsafe_allow_html=True)
+        _draw_pipeline_rig(pipeline_slot)
+    else:
+        notes_slot.empty()
+        with pipeline_slot.container():
+            with st.expander("Show how it's working", expanded=False):
+                _notes_col, _plate_col = st.columns([0.42, 0.58], gap="large")
+                _notes_col.markdown(_render_step_notes(_log_now), unsafe_allow_html=True)
+                _draw_pipeline_rig(_plate_col.empty())
+                st.markdown("#### The Team at Work")
+                st.markdown(_render_agent_grid(_log_now), unsafe_allow_html=True)
 
 # The datum line: the same run state as the drawing, in words and figures.
 _error_step = next((n for n, s, _ in st.session_state["stage_log"] if s == "error"), None)

@@ -271,22 +271,21 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     overflow-wrap: anywhere;
 }}
 .workspace-welcome {{ border-bottom: 1px solid var(--rule); margin-bottom: 1.25rem; }}
+.st-key-hero_actions {{ display: flex; flex-direction: column; align-items: flex-end; gap: .5rem; }}
+.st-key-hero_actions .stButton {{ width: auto; }}
 .sample-choice {{
     padding: 14px 16px; background: var(--stock); border: 1px solid var(--rule); border-radius: var(--radius);
 }}
 .sample-choice .sample-title {{ color: var(--ink); font-size: var(--text-sm); font-weight: 600; }}
 .sample-choice p {{ color: var(--graphite); font-size: var(--text-xs); line-height: 1.45; margin: .25rem 0 .6rem; }}
 
-.st-key-plate {{ padding-left: 16px; margin-right: -2.8rem; }}
 /* The 3D plate is an optional extra; on a phone it would push the inputs off the first screen.
    The stage list beside it, and the live progress panel, carry the same information. */
 @media (max-width: 768px) {{
-    .st-key-plate {{ padding-left: 0; margin-right: 0; }}
     .st-key-plate iframe,
     .st-key-plate .stElementContainer:has(iframe) {{ display: none; }}
 }}
 @media (max-width: 900px) {{
-    .st-key-plate {{ margin-right: 0; padding-left: 0; }}
     [data-testid="stHorizontalBlock"]:has(.st-key-plate) {{ flex-wrap: wrap !important; }}
     [data-testid="stHorizontalBlock"]:has(.st-key-plate) > [data-testid="stColumn"] {{
         min-width: 100% !important; flex: 1 1 100% !important;
@@ -572,19 +571,6 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     position: relative;
     padding: 20px 0;
 }}
-.agent-grid.org-chart-layout::before {{
-    content: '';
-    position: absolute;
-    top: 50%;
-    left: 20px;
-    right: 20px;
-    height: 1px;
-    background: var(--rule);
-    z-index: 0;
-}}
-.agent-grid.org-chart-layout .agent-card {{
-    z-index: 1;
-}}
 
 .agent-header {{
     display: flex;
@@ -660,6 +646,19 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     border-radius: var(--radius);
     display: inline-block;
 }}
+/* Compact: the team is a roster of small cards, three or four to a row. Each shows its name, its
+   status and one line; the full description and what it found open with the card. */
+.agent-grid.org-chart-layout {{
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 10px;
+    padding: 6px 0 2px;
+    margin: .4rem 0 0;
+}}
+.agent-details {{ padding: .7rem .85rem; }}
+.agent-header {{ margin-bottom: 4px; padding-bottom: 0; border-bottom: none; }}
+.agent-line {{ font-size: var(--text-xs); color: var(--graphite); line-height: 1.4; }}
+.agent-more {{ margin-top: .6rem; padding-top: .6rem; }}
+.agent-more .agent-desc {{ margin: 0 0 .5rem; }}
 
 /* ── Handoff Stream Feed ── */
 .handoff-stream {{
@@ -753,6 +752,60 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 [data-testid="stDataFrame"], [data-testid="stTable"] {{
     border-radius: var(--radius); overflow: hidden;
 }}
+
+/* ── The seven steps: one even row across the page ──
+   A numbered dot, a short name and a status word with a shape. A hairline rail joins the dots and
+   is filled behind each finished step, so progress reads at a glance. */
+.stepper {{
+    list-style: none; margin: 0 0 1.25rem; padding: 18px 16px 16px;
+    display: grid; grid-template-columns: repeat(7, minmax(0, 1fr));
+    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
+}}
+.stepper .step {{
+    position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px;
+    text-align: center; padding: 0 6px; min-width: 0;
+}}
+.stepper .step:not(:last-child)::after {{
+    content: ""; position: absolute; top: 13px; left: calc(50% + 20px); width: calc(100% - 40px);
+    height: 2px; background: var(--rule);
+}}
+.stepper .step.done:not(:last-child)::after {{ background: var(--pen); }}
+.step-dot {{
+    position: relative; z-index: 1; width: 28px; height: 28px; display: grid; place-items: center;
+    border-radius: 50%; background: var(--sheet); border: 1.5px solid var(--rule-strong);
+    color: var(--graphite); font-family: var(--mono); font-size: 12px; font-weight: 600; line-height: 1;
+}}
+.step.done .step-dot {{ background: var(--pen); border-color: var(--pen); color: var(--accent-ink); }}
+.step.active .step-dot {{ border-color: var(--pen); color: var(--accent-text); outline: 3px solid var(--accent-soft); }}
+.step.err .step-dot {{ border-color: var(--accent); color: var(--accent); }}
+.step-name {{
+    font-size: var(--text-xs); font-weight: 600; color: var(--ink); line-height: 1.3;
+    text-wrap: balance; min-height: 2.6em;
+}}
+.step:not(.done):not(.active):not(.err) .step-name {{ color: var(--graphite); font-weight: 500; }}
+.step.active .step-name {{ color: var(--accent-text); }}
+.step-state {{
+    font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--graphite);
+}}
+.step.done .step-state {{ color: var(--positive); }}
+.step.active .step-state {{ color: var(--accent-text); }}
+.step.err .step-state {{ color: var(--accent); }}
+@media (max-width: 900px) {{
+    .stepper {{ grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); row-gap: 16px; }}
+    .stepper .step::after {{ display: none; }}
+}}
+/* What each step found, as small even cards: number, step name, one line. */
+.step-notes {{ list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }}
+.step-notes li {{
+    display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: baseline;
+    padding: 10px 12px; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
+}}
+.step-notes .note-num {{ font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--graphite); }}
+.step-notes b {{ display: block; font-size: var(--text-sm); color: var(--ink); }}
+.step-notes div > span {{ display: block; margin-top: 2px; font-size: var(--text-xs); color: var(--graphite);
+    line-height: 1.5; overflow-wrap: anywhere; }}
+.step-notes-empty {{ color: var(--graphite); font-size: var(--text-sm); margin: 0; }}
 
 /* ── Stage timeline: number, name, and a status with a shape and a word ── */
 .stage-list {{

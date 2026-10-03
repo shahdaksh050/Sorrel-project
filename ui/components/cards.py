@@ -184,6 +184,55 @@ def render_steps_list(stage_log: list[tuple[str, str, str]], seen_stages: set[st
     return f'{status_line}<ol class="stage-list">{"".join(rows)}</ol>'
 
 
+def render_stepper(stage_log: list[tuple[str, str, str]]) -> str:
+    """The seven stages as one even row: a numbered dot, a short name and a status word with a shape.
+
+    Meant to sit full width above the work area. A rail joins the dots; the part behind a
+    finished step is filled, so progress reads at a glance. One polite status sentence names
+    the stage in progress, so a screen reader hears it once per change.
+    """
+    status_of = {n: s for n, s, _ in stage_log}
+    items: list[str] = []
+    active: tuple[str, str] | None = None
+    done = 0
+    for num, name in STAGE_DEFS:
+        status = status_of.get(num, "pending")
+        cls = {"done": "done", "active": "active", "skipped": "skip", "error": "err"}.get(status, "")
+        if status == "done":
+            done += 1
+        if status == "active" and active is None:
+            active = (num, name)
+        word = _STAGE_WORDS.get(status, "○ Waiting")
+        items.append(
+            f'<li class="{f"step {cls}".strip()}">'
+            f'<span class="step-dot">{html.escape(num)}</span>'
+            f'<span class="step-name">{html.escape(name)}</span>'
+            f'<span class="step-state">{html.escape(word)}</span></li>'
+        )
+    status_line = (
+        f'<p class="sr-only" role="status">Working on step {html.escape(active[0])} of {len(STAGE_DEFS)}: '
+        f"{html.escape(active[1])}</p>"
+        if active
+        else ""
+    )
+    label = f"Analysis steps, {done} of {len(STAGE_DEFS)} done"
+    return f'{status_line}<ol class="stepper" aria-label="{html.escape(label)}">{"".join(items)}</ol>'
+
+
+def render_step_notes(stage_log: list[tuple[str, str, str]]) -> str:
+    """What each step reported, for the steps that reported something: a compact two-line list."""
+    by_stage = {n: d for n, _, d in stage_log}
+    rows = [
+        f'<li><span class="note-num">{html.escape(num.zfill(2))}</span>'
+        f'<div><b>{html.escape(name)}</b><span>{html.escape(str(by_stage[num]))}</span></div></li>'
+        for num, name in STAGE_DEFS
+        if by_stage.get(num)
+    ]
+    if not rows:
+        return '<p class="step-notes-empty">What each step found appears here as it finishes.</p>'
+    return f'<ul class="step-notes">{"".join(rows)}</ul>'
+
+
 def render_datum(cells: list[tuple[str, str]]) -> str:
     """A ruled measurement bar. Each reading gets its own cell and hairline."""
     body = "".join(
@@ -510,11 +559,11 @@ def render_agent_grid(
                         <span class="agent-role">{ag['icon']} {ag['name']}</span>
                         <span class="agent-badge {badge_cls}">{badge_txt}</span>
                     </div>
-                    <div class="agent-desc">{ag['desc']}</div>
-                    <div class="agent-metric">Role: {ag['role']}. Tool: {ag['tool']}</div>
+                    <div class="agent-line">{ag['role']}</div>
                 </summary>
                 <div class="agent-more">
-                    <div class="agent-more-rule"><strong>Rule:</strong> {ag['desc']}</div>
+                    <div class="agent-desc">{ag['desc']}</div>
+                    <div class="agent-metric">Tool: {ag['tool']}</div>
                     <div class="agent-more-found"><strong>Found:</strong> {html.escape(str(agent_output))}</div>
                 </div>
             </details>

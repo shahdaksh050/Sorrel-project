@@ -179,3 +179,35 @@ def test_visible_naming_is_sorrel() -> None:
     assert 'class="brand-name">Sorrel<' in app and 'class="side-word">Sorrel<' in app
     assert "Agentic Data Analysis" not in app
     assert "Sorrel is the working name of DSA Agent" in app
+
+
+def test_the_stepper_is_one_even_row_of_seven_with_a_shape_and_a_word_each() -> None:
+    from ui.components.cards import STAGE_DEFS, render_stepper
+
+    out = render_stepper([("1", "done", ""), ("2", "active", ""), ("3", "error", ""), ("4", "skipped", "")])
+    assert out.count('<li class="step') == len(STAGE_DEFS) == 7
+    for word in ("✓ Done", "● Working", "! Stopped", "– Skipped", "○ Waiting"):
+        assert word in out
+    assert 'aria-label="Analysis steps, 1 of 7 done"' in out
+    # one polite sentence names the stage in progress; the row itself is not a live region
+    assert out.count('role="status"') == 1 and "Working on step 2 of 7" in out
+    assert "aria-live" not in out
+    assert 'role="status"' not in render_stepper([("1", "done", "")])
+
+
+def test_step_notes_show_only_steps_that_reported_and_escape_them() -> None:
+    from ui.components.cards import render_step_notes
+
+    out = render_step_notes([("1", "done", "8,789 rows <b>"), ("2", "active", "")])
+    assert "8,789 rows &lt;b&gt;" in out and "<b>x" not in out
+    assert out.count("<li>") == 1 and "Reading Your File" in out
+    assert "appears here as it finishes" in render_step_notes([("1", "pending", "")])
+
+
+def test_team_cards_are_one_line_until_opened() -> None:
+    from ui.components.cards import render_agent_grid
+
+    grid = render_agent_grid([("1", "done", "")])
+    summary = grid.split("<summary")[1].split("</summary>")[0]
+    assert "agent-line" in summary and "agent-desc" not in summary and "agent-metric" not in summary
+    assert grid.count("agent-more") >= 8  # the description and what it found open with each card

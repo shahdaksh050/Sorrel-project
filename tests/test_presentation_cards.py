@@ -106,7 +106,8 @@ def test_exact_figures_are_folded_behind_the_plain_sentence_and_escaped() -> Non
         "source_tool": "correlation_analysis<x>",
     }
     figures = analyst_figures(finding)
-    assert "r = 0.9311" in figures and "p = <0.001" in figures and "confidence = 0.82" in figures
+    assert "r = 0.9311" in figures and "p = <0.001" in figures
+    assert "confidence" not in figures  # a ranking weight, not statistical confidence
     out = render_evidence_html(finding)
     assert '<details class="tech-note"><summary>Details for analysts</summary>' in out
     assert "correlation analysis&lt;x&gt;" in out and "<x>" not in out

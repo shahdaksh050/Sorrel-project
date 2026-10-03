@@ -62,7 +62,7 @@ def render_downloads_tab(
             else:
                 info.markdown(
                     artifact_info_html(
-                        "HTML", "report.html",
+                        "HTML", "Web page report",
                         "A clean reading view you can open in any browser or print.",
                         None, "Not available for this run",
                     ),
@@ -87,7 +87,7 @@ def render_downloads_tab(
             else:
                 info.markdown(
                     artifact_info_html(
-                        "MD", "report.md", "The same report as plain text.", None, "Not available for this run",
+                        "MD", "Markdown report", "The same report as plain text.", None, "Not available for this run",
                     ),
                     unsafe_allow_html=True,
                 )
@@ -148,10 +148,11 @@ def render_downloads_tab(
                     )
                 pres_html = st.session_state.get("_cinema_pres_html")
                 if pres_html:
-                    pres_bytes = pres_html.encode("utf-8")
+                    payload = pres_html.encode("utf-8")
+                    pres_bytes = payload
                     st.download_button(
                         "Download the 3D presentation (HTML)",
-                        pres_bytes,
+                        payload,
                         "dsa_agent_3d_presentation.html",
                         mime="text/html",
                         key="dl_3d_cinema_standalone",

@@ -260,8 +260,10 @@ def _check_marks_html(checks: list[Any]) -> str:
 def analyst_figures(finding: dict[str, Any]) -> str:
     """The finding's own exact figures as one line of plain text, or "" when it records none.
 
-    Only values the finding already carries are used: its effect size, p-values,
-    confidence and the tool that found it. Nothing is computed or invented here.
+    Only values the finding already carries are used: its effect size, p-values
+    and the tool that found it. Nothing is computed or invented here. Its
+    `confidence` is left out on purpose: on the finding bus that is a ranking
+    weight, and an analyst would misread it as statistical confidence.
     """
     bits: list[str] = []
     effect = finding.get("effect")
@@ -274,9 +276,6 @@ def analyst_figures(finding: dict[str, Any]) -> str:
     p_adj = finding.get("p_adjusted")
     if isinstance(p_adj, (int, float)) and not isinstance(p_adj, bool):
         bits.append(f"p after correcting for the other tests = {format_p(p_adj)}")
-    conf = finding.get("confidence")
-    if isinstance(conf, (int, float)) and not isinstance(conf, bool):
-        bits.append(f"confidence = {conf:.2f}")
     source = str(finding.get("source_tool") or "").replace("_", " ")
     if source:
         bits.append(f"found by {source}")

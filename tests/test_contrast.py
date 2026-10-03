@@ -41,8 +41,9 @@ def test_contrast_ratios():
     print(f"{'Pair':<30} | {'Day':<8} | {'Night':<8}")
     print("-" * 52)
 
-    day = palette("day")
-    night = palette("night")
+    # Copies: the derived tokens below must not leak into the shared PALETTES for later tests.
+    day = dict(palette("day"))
+    night = dict(palette("night"))
 
     # Add derived tokens
     # ui/styles.py definitions:
@@ -50,9 +51,9 @@ def test_contrast_ratios():
     day["rule_strong"] = mix(day["rule"], 0.60, "#000000")
     night["rule_strong"] = mix(night["rule"], 0.50, "#ffffff")
 
-    # --risk-text: var(--risk) for day, #ff8a8a for night
-    day["risk_text"] = day["risk"]
-    night["risk_text"] = "#ff8a8a"
+    # --risk-text is the `danger_text` token in both modes (the raw night `risk` fill is only 3.9:1 as text)
+    day["risk_text"] = day["danger_text"]
+    night["risk_text"] = night["danger_text"]
 
     # --glow (pen @ 12% on sheet for day, 15% on sheet for night)
     day["glow_on_sheet"] = mix(day["pen"], 0.12, day["sheet"])
@@ -67,19 +68,30 @@ def test_contrast_ratios():
         ("ink on stock", "ink", "stock", 4.5),
         ("ink on sheet", "ink", "sheet", 4.5),
         ("ink on sheet_alt", "ink", "sheet_alt", 4.5),
+        ("ink_2 on sheet", "ink_2", "sheet", 4.5),
         ("graphite on sheet", "graphite", "sheet", 4.5),
-        ("pen on sheet", "pen", "sheet", 4.5),
+        ("graphite on stock", "graphite", "stock", 4.5),
+        ("graphite on sheet_alt", "graphite", "sheet_alt", 4.5),
+        # The accent as TEXT. Raw `pen` is a fill (Night `pen` on a card is under 3:1), so text uses accent_text.
+        ("accent_text on sheet", "accent_text", "sheet", 4.5),
+        ("accent_text on stock", "accent_text", "stock", 4.5),
+        ("accent_text on accent_soft", "accent_text", "accent_soft", 4.5),
+        # Button label on the pen fill, resting and on hover
+        ("accent_ink on pen", "accent_ink", "pen", 4.5),
+        ("accent_ink on pen_hover", "accent_ink", "pen_hover", 4.5),
         ("risk_text on sheet", "risk_text", "sheet", 4.5),
+        ("risk_text on stock", "risk_text", "stock", 4.5),
+        ("risk_text on accent_soft", "risk_text", "accent_soft", 4.5),
+        # Amber (look twice) and green (positive) are used as text on cards
+        ("accent (amber) on sheet", "accent", "sheet", 4.5),
+        ("positive on sheet", "positive", "sheet", 4.5),
 
         # UI components (AA requires 3:1)
         ("rule_strong on stock", "rule_strong", "stock", 3.0),
         ("rule_strong on sheet", "rule_strong", "sheet", 3.0),
 
         # Texts on tints
-        ("risk_text on risk tint", "risk_text", "glow_on_sheet", 4.5),
-
-        # Verify accent is decorative only (fails AA for text)
-        ("accent on sheet", "accent", "sheet", -1), # -1 means just report, don't assert pass
+        ("risk_text on pen tint", "risk_text", "glow_on_sheet", 4.5),
     ]
 
     failures = []

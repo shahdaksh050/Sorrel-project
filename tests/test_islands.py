@@ -95,4 +95,5 @@ def test_spotlight_peak_tint_keeps_text_aa(theme: str) -> None:
     tinted = _mix(p["accent"], p["stock"], peak)
     assert _ratio(p["ink"], tinted) >= 4.5
     assert _ratio(p["graphite"], tinted) >= 4.5
-    assert _ratio(p["pen"], tinted) >= 4.5
+    # Accent-coloured hero text uses the accent-as-text role: raw Night `pen` is a fill (about 2.5:1 as text).
+    assert _ratio(p["accent_text"], tinted) >= 4.5

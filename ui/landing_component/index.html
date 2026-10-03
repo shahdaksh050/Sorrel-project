@@ -89,23 +89,23 @@
     :root {
       /* Night Palette — "Ledger paper" (decision A2, src/core/design_tokens.py): pale
          buff-green stock and a faint blue rule replace the old warm-cream/brown copy. */
-      --stock: #1c211a;
-      --sheet: #242a20;
-      --sheet-alt: #2a3024;
-      --ink: #eef0e4;
-      --graphite: #a8ad98;
-      --pen: #f0a24a;
-      --pen-hover: #ffb86b;
-      --pen-glow: rgba(240, 162, 74, 0.40);
-      --risk: #e2685a;
-      --positive: #7fb77e;
-      --accent: #d99a4e;
-      --grid: #3d4a52;
-      --card-bg: rgba(36, 42, 32, 0.94);
-      --card-border: rgba(240, 162, 74, 0.22);
-      --rule: rgba(240, 162, 74, 0.12);
-      --header-bg: rgba(28, 33, 26, 0.72);
-      --bar-bg: rgba(28, 33, 26, 0.82);
+      --stock: #141712;
+      --sheet: #1c2219;
+      --sheet-alt: #1a1e17;
+      --ink: #edf0e4;
+      --graphite: #8a927d;
+      --pen: #326d48;
+      --pen-hover: #2b6040;
+      --pen-glow: rgba(50, 109, 72, 0.40);
+      --risk: #cf5544;
+      --positive: #4ca167;
+      --accent: #d48239;
+      --grid: #2a3324;
+      --card-bg: rgba(28, 34, 25, 0.94);
+      --card-border: rgba(127, 199, 154, 0.22);
+      --rule: rgba(127, 199, 154, 0.12);
+      --header-bg: rgba(20, 23, 18, 0.72);
+      --bar-bg: rgba(20, 23, 18, 0.82);
       --lift: 0 16px 40px rgba(0, 0, 0, 0.45);
       --lift-sm: 0 6px 20px rgba(0, 0, 0, 0.30);
 
@@ -125,25 +125,25 @@
     html.theme-day, body.theme-day {
       /* Day Palette (default) — "Ledger paper" (decision A2): buff-green stock, a
          faint blue rule, ink/graphite darkened to hold contrast on the greener stock. */
-      --stock: #eef1e0;
-      --sheet: #f7f8ef;
-      --sheet-alt: #e6e9d6;
-      --ink: #33362a;
-      --graphite: #5f6850;
-      --pen: #a34f20;
-      --pen-hover: #7e3d18;
-      --pen-glow: rgba(163, 79, 32, 0.25);
-      --risk: #a33526;
-      --positive: #3f7a44;
-      --accent: #e08a3e;
-      --grid: #a9bfd1;
-      --card-bg: rgba(247, 248, 239, 0.94);
-      --card-border: rgba(95, 104, 80, 0.26);
-      --rule: rgba(95, 104, 80, 0.16);
-      --header-bg: rgba(238, 241, 224, 0.75);
-      --bar-bg: rgba(238, 241, 224, 0.82);
-      --lift: 0 14px 32px rgba(51, 54, 42, 0.10);
-      --lift-sm: 0 4px 14px rgba(51, 54, 42, 0.08);
+      --stock: #f7f4ed;
+      --sheet: #fffdf7;
+      --sheet-alt: #efeae0;
+      --ink: #1a1a17;
+      --graphite: #66665e;
+      --pen: #1f4634;
+      --pen-hover: #15311f;
+      --pen-glow: rgba(31, 70, 52, 0.25);
+      --risk: #8a3a2a;
+      --positive: #24643c;
+      --accent: #a35a18;
+      --grid: #d9d3c4;
+      --card-bg: rgba(255, 253, 247, 0.94);
+      --card-border: rgba(26, 26, 23, 0.16);
+      --rule: rgba(26, 26, 23, 0.10);
+      --header-bg: rgba(247, 244, 237, 0.75);
+      --bar-bg: rgba(247, 244, 237, 0.82);
+      --lift: 0 14px 32px rgba(26, 26, 23, 0.10);
+      --lift-sm: 0 4px 14px rgba(26, 26, 23, 0.08);
     }
 
     /* CSS Reset */
@@ -1929,27 +1929,27 @@
     // ledger behind the sections after it.
     const PALETTES = {
       night: {
-        stock: '#1c211a',
-        pen: '#f0a24a',
-        accent: '#d99a4e',
-        positive: '#7fb77e',
-        risk: '#e2685a',
-        graphite: '#a8ad98',
-        sheet: '#2a3024',
-        grid: '#3d4a52',
+        stock: '#141712',
+        pen: '#7fc79a',
+        accent: '#d48239',
+        positive: '#4ca167',
+        risk: '#cf5544',
+        graphite: '#8a927d',
+        sheet: '#1a1e17',
+        grid: '#2a3324',
         fogDensity: 0.016,
         exposure: 1.15,
         gridOpacity: 0.12,
       },
       day: {
-        stock: '#eef1e0',
-        pen: '#a34f20',
-        accent: '#e08a3e',
-        positive: '#3f7a44',
-        risk: '#a33526',
-        graphite: '#5f6850',
-        sheet: '#e6e9d6',
-        grid: '#a9bfd1',
+        stock: '#f7f4ed',
+        pen: '#1f4634',
+        accent: '#a35a18',
+        positive: '#24643c',
+        risk: '#8a3a2a',
+        graphite: '#66665e',
+        sheet: '#efeae0',
+        grid: '#d9d3c4',
         fogDensity: 0.014,
         exposure: 1.0,
         gridOpacity: 0.10,

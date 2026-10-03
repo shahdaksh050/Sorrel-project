@@ -206,17 +206,26 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     letter-spacing: .08em; text-transform: uppercase; color: var(--graphite); margin: 0 0 .5rem;
 }}
 
-/* ── Brand: the italic serif wordmark with its small seal ── */
-.topbar-name {{ display: flex; align-items: center; gap: 10px; }}
+/* ── Brand: the italic serif wordmark with its seal ──
+   Large on purpose: the logo is the one fixed point of the page. It sits on its own bar (the top bar
+   container), vertically centred against the page state and the Day/Night control, with a hairline under
+   the bar. The seal's letter is nudged up a little so it reads as centred in the square. */
+.st-key-topbar {{ padding: .35rem 0 .9rem; margin-bottom: 1.1rem; border-bottom: 1px solid var(--rule); }}
+.topbar-name {{ display: flex; align-items: center; gap: 14px; }}
 .brand-seal {{
-    width: 24px; height: 24px; display: inline-grid; place-items: center; flex: none;
-    background: var(--pen); color: var(--accent-ink); border-radius: 3px;
-    font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 17px; line-height: 1;
-    padding-bottom: 2px;
+    width: 44px; height: 44px; display: inline-grid; place-items: center; flex: none;
+    background: var(--pen); color: var(--accent-ink); border-radius: 6px;
+    font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 32px; line-height: 1;
+    padding-bottom: 4px;
 }}
 .brand-name {{
-    font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 23px;
-    letter-spacing: -.01em; line-height: 1; color: var(--ink);
+    font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 44px;
+    letter-spacing: -.02em; line-height: 1; color: var(--ink);
+}}
+@media (max-width: 600px) {{
+    .topbar-name {{ gap: 10px; }}
+    .brand-seal {{ width: 34px; height: 34px; font-size: 25px; padding-bottom: 3px; }}
+    .brand-name {{ font-size: 34px; }}
 }}
 
 /* ── Readout: State, File, Analysis ── */
@@ -338,10 +347,10 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 
 /* ── Sidebar masthead & settings groups ── */
 .side-brand {{ margin: .1rem 0 .8rem; }}
-.side-word {{
-    font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 20px;
-    letter-spacing: -.01em; line-height: 1; color: var(--ink); margin-bottom: .6rem;
-}}
+/* The sidebar carries the same logo, a little smaller than the top bar's. */
+.side-word {{ display: flex; align-items: center; gap: 12px; margin-bottom: .9rem; }}
+.side-word .brand-seal {{ width: 36px; height: 36px; font-size: 26px; padding-bottom: 3px; border-radius: 5px; }}
+.side-word .brand-name {{ font-size: 36px; }}
 .side-title {{ font-family: var(--heading); font-weight: 600; font-size: var(--text-base); line-height: 1.15; color: var(--ink); }}
 .side-sub {{ font-size: var(--text-xs); color: var(--graphite); margin-top: 4px;
             max-width: 26ch; line-height: 1.45; }}

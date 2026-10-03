@@ -216,7 +216,8 @@ def test_segmented_controls_take_their_colours_from_the_tokens_in_both_themes(mo
 def test_visible_naming_is_sorrel() -> None:
     app = (ROOT / "app.py").read_text(encoding="utf-8")
     assert 'page_title="Sorrel"' in app
-    assert 'class="brand-name">Sorrel<' in app and 'class="side-word">Sorrel<' in app
+    # The logo (seal and wordmark) is in the top bar and again in the sidebar masthead.
+    assert app.count('class="brand-name">Sorrel<') == 2 and 'class="side-word"' in app and 'key="topbar"' in app
     assert "Agentic Data Analysis" not in app
     assert "Sorrel is the working name of DSA Agent" in app
 

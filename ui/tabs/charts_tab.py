@@ -20,6 +20,10 @@ def render_charts_tab(
     """Render Tier 3: Dynamic Visual Dashboard."""
     by_id = {str(f["finding_id"]): f for f in (findings or []) if f.get("finding_id")}
 
+    def finding_of(ch: dict[str, Any]) -> dict[str, Any] | None:
+        """The finding a chart supports, so its checks and its source can sit beside it."""
+        return by_id.get(str(ch.get("finding_id") or ""))
+
     def note(ch: dict[str, Any]) -> str:
         """Which finding a chart supports, with its verdict, so a chart is never an unexplained picture."""
         f = by_id.get(str(ch.get("finding_id") or ""))
@@ -38,11 +42,11 @@ def render_charts_tab(
             for j in range(0, len(pending), 2):
                 row = pending[j : j + 2]
                 if len(row) == 1:
-                    render_dashboard_chart(row[0], vega_cfg, note(row[0]))
+                    render_dashboard_chart(row[0], vega_cfg, note(row[0]), finding_of(row[0]))
                     continue
                 for col, ch in zip(st.columns(2), row, strict=True):
                     with col:
-                        render_dashboard_chart(ch, vega_cfg, note(ch))
+                        render_dashboard_chart(ch, vega_cfg, note(ch), finding_of(ch))
 
         # Ranking order is kept. Only the lead chart and charts that need width (time series,
         # survival curves, anything marked "wide") span the page; the rest sit two to a row, so
@@ -53,7 +57,7 @@ def render_charts_tab(
             if spans_page:
                 flush(pending)
                 pending = []
-                render_dashboard_chart(ch, vega_cfg, note(ch))
+                render_dashboard_chart(ch, vega_cfg, note(ch), finding_of(ch))
             else:
                 pending.append(ch)
         flush(pending)

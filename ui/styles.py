@@ -876,7 +876,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
     padding: 12px 16px; margin-bottom: .5rem;
 }}
-.artifact {{ display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 16px; align-items: center; }}
+.artifact {{ display: grid; grid-template-columns: 56px minmax(0, 1fr) auto auto; gap: 16px; align-items: center; }}
 .artifact .ty {{
     font-family: var(--mono); font-size: 11px; font-weight: 600; line-height: 1; letter-spacing: .06em;
     text-align: center; padding: 6px 0; border: 1px solid var(--rule); border-radius: 3px;

@@ -11,6 +11,7 @@ import streamlit as st
 from src.core.plain_language import format_p
 from src.core.run_view import RunView
 from ui.components.cards import (
+    audit_head_html,
     find_tool,
     render_agent_grid,
     render_governance,
@@ -52,8 +53,8 @@ def render_details_tab(
     read_report = st.session_state.get("read_report")
     coercions = st.session_state.get("coercions")
     if read_report or coercions:
-        with st.container(border=True):
-            st.markdown("### How the file was read and repaired")
+        with st.container(border=True, key="audit_read"):
+            st.markdown(audit_head_html("How the file was read and repaired"), unsafe_allow_html=True)
             if read_report:
                 rr_bits = [
                     f"format `{read_report.get('format')}`",
@@ -88,8 +89,8 @@ def render_details_tab(
 
     prof = prof or st.session_state.get("profile")
     if prof:
-        with st.container(border=True):
-            st.markdown("### Column profile")
+        with st.container(border=True, key="audit_profile"):
+            st.markdown(audit_head_html("Column profile"), unsafe_allow_html=True)
             prows = [
                 {
                     "Column": c.get("name"),
@@ -104,16 +105,16 @@ def render_details_tab(
             st.dataframe(safe_df(pd.DataFrame(prows)), width="stretch")
 
     if clean_out:
-        with st.container(border=True):
-            st.markdown("### Cleaning")
+        with st.container(border=True, key="audit_cleaning"):
+            st.markdown(audit_head_html("Cleaning"), unsafe_allow_html=True)
             c1, c2, c3 = st.columns(3)
             c1.metric("Strategy used", clean_out.get("strategy_used", "—"))
             c2.metric("Missing values before", clean_out.get("missing_before", "—"))
             c3.metric("Missing values after", clean_out.get("missing_after", "—"))
 
     if outlier_out:
-        with st.container(border=True):
-            st.markdown("### Unusual rows")
+        with st.container(border=True, key="audit_outliers"):
+            st.markdown(audit_head_html("Unusual rows"), unsafe_allow_html=True)
             c1, c2 = st.columns(2)
             c1.metric("Unusual rows found", outlier_out.get("total_outliers", "—"))
             c2.metric("Share of all rows", f"{outlier_out.get('outlier_percentage','—')}%")
@@ -127,8 +128,8 @@ def render_details_tab(
                     st.dataframe(safe_df(pc_df), width="stretch")
 
     if stat_out:
-        with st.container(border=True):
-            st.markdown("### Statistical test")
+        with st.container(border=True, key="audit_stat"):
+            st.markdown(audit_head_html("Statistical test"), unsafe_allow_html=True)
             c1, c2, c3 = st.columns(3)
             c1.metric("Test used", stat_out.get("test_name", "—"))
             c2.metric("p-value", format_p(stat_out.get("p_value")))
@@ -136,8 +137,8 @@ def render_details_tab(
             st.info(stat_out.get("interpretation", "No interpretation recorded."))
 
     if train_out:
-        with st.container(border=True):
-            st.markdown("### Models")
+        with st.container(border=True, key="audit_models"):
+            st.markdown(audit_head_html("Models"), unsafe_allow_html=True)
             mt2 = train_out.get("models_trained", {})
             best2 = train_out.get("best_model", "")
             task2 = train_out.get("task_type", "classification")
@@ -190,16 +191,23 @@ def render_details_tab(
                     ]
                     st.dataframe(safe_df(pd.DataFrame(cr_rows)), width="stretch")
 
-    with st.container(border=True):
-        st.markdown("### Analyses specific to your data")
-        st.caption("Segmentation, trends, text and geography, run when your data called for them.")
+    with st.container(border=True, key="audit_other"):
+        st.markdown(
+            audit_head_html(
+                "Analyses specific to your data",
+                "Segmentation, trends, text and geography, run when your data called for them.",
+            ),
+            unsafe_allow_html=True,
+        )
         render_other_findings(tool_results)
 
     gov = report.get("governance")
     if gov:
-        with st.container(border=True):
-            st.markdown("### Safety and audit")
-            st.caption("What AI-written code ran, where it ran, and what was refused.")
+        with st.container(border=True, key="audit_safety"):
+            st.markdown(
+                audit_head_html("Safety and audit", "What AI-written code ran, where it ran, and what was refused."),
+                unsafe_allow_html=True,
+            )
             render_governance(gov)
 
     with st.expander("Step-by-step record (technical)", expanded=False):

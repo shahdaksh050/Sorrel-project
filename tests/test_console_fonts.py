@@ -59,6 +59,29 @@ def test_the_families_the_console_uses_are_declared() -> None:
         assert f"font-family: '{family}'" in css
 
 
+def test_workspace_stylesheet_uses_the_sorrel_families_and_not_the_ledger_ones() -> None:
+    source = (ROOT / "ui" / "styles.py").read_text(encoding="utf-8")
+    assert "--sans:    'Geist'" in source
+    assert "--serif:   'Newsreader', Georgia, serif" in source
+    assert "--mono:    'Geist Mono'" in source
+    for old in ("Public Sans", "Bricolage Grotesque", "IBM Plex Mono"):
+        assert old not in source
+
+
+def test_injected_css_is_balanced_and_declares_the_sorrel_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    for theme in ("day", "night"):
+        emitted: list[str] = []
+        monkeypatch.setattr(st, "markdown", lambda body, _out=emitted, **kwargs: _out.append(body))
+        monkeypatch.setattr(st, "get_option", lambda key: "")
+        monkeypatch.setattr(st, "session_state", {"theme": theme})
+        styles.inject_theme_css()
+        css = emitted[0].split("<style>", 1)[1].split("</style>", 1)[0]
+        assert css.count("{") == css.count("}")
+        assert "{{" not in css and "}}" not in css
+        for token in ("--accent-text", "--danger-text", "--accent-ink", "--pen-hover", "--rule-strong", "--risk-text"):
+            assert f"{token}:" in css
+
+
 def test_static_folder_holds_only_public_assets() -> None:
     """Static serving exposes the whole folder to every visitor."""
     allowed = {".woff2", ".css", ".js", ".json"}

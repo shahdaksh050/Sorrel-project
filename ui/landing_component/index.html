@@ -1105,7 +1105,7 @@
       cursor: pointer;
       transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
     }
-    .stage-nav-pill .n { font: 500 11px/1 var(--mono); opacity: 0.7; }
+    .stage-nav-pill .n { font: 500 11px/1 var(--mono); opacity: 0.85; }
     .stage-nav-pill:hover { color: var(--stage-ink); }
     .stage-nav-pill:active { background: rgba(var(--stage-ink-rgb), 0.12); }
     .stage-nav-pill.active {
@@ -1307,7 +1307,7 @@
     }
 
     /* ==========================================================================
-       SCROLL EFFECTS (the script is at the end of <body>)
+       SCROLL EFFECTS (the script sits just before the 3D module)
        ========================================================================== */
     /* Line reveal: each word slides up from behind its own line mask. Only
        applies once JS has split the text, so no-JS and reduced-motion show it plain. */
@@ -2279,10 +2279,11 @@
       }
       buildGrid();
 
-      // Front faces sum to 1.0, so a token shows the colour it was given. The legacy (r128)
-      // intensities 0.44 + 0.56 + 0.20 are scaled by PI for r160's physically based lights.
-      scene.add(new THREE.AmbientLight(0xffffff, 0.44 * Math.PI));
-      const keyLight = new THREE.DirectionalLight(0xffffff, 0.56 * Math.PI);
+      // Front faces sum to about 1.1, so a token shows (nearly) the colour it was given. These are
+      // the prototype's r128 intensities (0.5, 0.62, 0.2), each multiplied by PI because r160's
+      // physically based lights no longer apply that factor internally.
+      scene.add(new THREE.AmbientLight(0xffffff, 0.5 * Math.PI));
+      const keyLight = new THREE.DirectionalLight(0xffffff, 0.62 * Math.PI);
       keyLight.position.set(-8, 12, 18);
       scene.add(keyLight);
       const fillLight = new THREE.DirectionalLight(0xffffff, 0.2 * Math.PI);

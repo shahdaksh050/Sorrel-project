@@ -16,6 +16,7 @@ import streamlit as st
 from src.core.plain_language import plainify
 from src.core.run_view import RunView, build_run_view
 from ui.components.cards import (
+    analyst_figures,
     find_chart_by_id,
     find_tool,
     finding_state,
@@ -28,6 +29,7 @@ from ui.components.cards import (
     render_run_compare,
     search_findings,
     state_label,
+    tech_note_html,
 )
 
 
@@ -56,12 +58,16 @@ def _evidence_inspector(
     finding = findings[ids.index(chosen)]
     with right:
         with st.container(border=True, key="evidence_panel"):
-            st.markdown(render_evidence_html(finding), unsafe_allow_html=True)
+            st.markdown(render_evidence_html(finding, with_figures=False), unsafe_allow_html=True)
             chart = chart_by_finding.get(str(finding.get("finding_id") or ""))
             if chart:
-                render_dashboard_chart(chart, vega_cfg)
+                # Unframed (the pane is the frame) and at the common chart height.
+                render_dashboard_chart(chart, vega_cfg, framed=False, height=260)
             else:
                 st.caption("This finding has no chart. The checks above are its evidence.")
+            figures = tech_note_html(analyst_figures(finding))
+            if figures:
+                st.markdown(figures, unsafe_allow_html=True)
 
 
 def render_answers_tab(

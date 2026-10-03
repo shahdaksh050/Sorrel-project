@@ -534,7 +534,8 @@ with _bar_theme:
         on_change=_on_theme_change,
     )
 
-_hero_box = st.container()
+# Once there is a file or a run, the header, the readout and the seven steps sit on one warm band.
+_hero_box = st.container(key="hero_band") if _workspace_state else st.container()
 # Before a run the inputs are the page's one task; once there is a run they tuck away.
 _inputs_box = (
     st.expander("Your file and question", expanded=False)

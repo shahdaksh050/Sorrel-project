@@ -166,6 +166,12 @@ h3 {{ font-weight: 600 !important; font-size: var(--text-base) !important; line-
 [data-baseweb="tab-panel"] h2 {{ font-size: var(--text-lg) !important; }}
 [data-baseweb="tab-panel"] h3 {{ font-size: var(--text-base) !important; }}
 [data-baseweb="tab-panel"] .exec-directive h2 {{ font-size: var(--text-lg) !important; }}
+/* A small square in the accent colour leads each section, so the page has a rhythm without decoration. */
+[data-baseweb="tab-panel"] h2::before {{
+    content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 10px;
+    border-radius: 2px; background: var(--pen); vertical-align: 2px;
+}}
+[data-baseweb="tab-panel"] .exec-directive h2::before {{ content: none; }}
 h4 {{ font-weight: 600 !important; font-size: var(--text-sm) !important; letter-spacing: 0; }}
 .stMarkdown p, .stMarkdown li {{ font-size: var(--text-base); line-height: 1.6; max-width: 68ch; }}
 code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
@@ -280,6 +286,11 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     overflow-wrap: anywhere;
 }}
 .workspace-welcome {{ border-bottom: 1px solid var(--rule); margin-bottom: 1.25rem; }}
+.st-key-hero_band {{
+    background: var(--sheet-alt); border: 1px solid var(--rule); border-radius: var(--radius);
+    padding: 1rem 1.4rem 1.2rem; margin-bottom: 1.5rem;
+}}
+.st-key-hero_band .hero.compact {{ padding: .2rem 0 .4rem; }}
 .st-key-hero_actions {{ display: flex; flex-direction: column; align-items: flex-end; gap: .5rem; }}
 .st-key-hero_actions .stButton {{ width: auto; }}
 .sample-choice {{
@@ -432,6 +443,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
             text-transform: uppercase; color: var(--graphite); margin-top: .5rem; line-height: 1.2; }}
 .gauge .s {{ font-size: var(--text-xs); color: var(--graphite); margin-top: 4px; }}
 /* A gauge "worth a look" is amber with a shape and words in its note, never red. */
+.gauge:not(.flag) .v {{ color: var(--accent-text); }}
 .gauge.flag {{ border-color: var(--accent); }}
 .gauge.flag .s {{ color: var(--accent); font-weight: 600; }}
 
@@ -492,7 +504,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .trust-cell:first-child {{ border-left: none; }}
 .trust-cell .k {{ font-family: var(--mono); font-size: 10.5px; color: var(--graphite); font-weight: 500;
                   text-transform: uppercase; letter-spacing: .08em; line-height: 1.2; }}
-.trust-cell .v {{ font-size: var(--text-sm); font-weight: 600; color: var(--ink); margin-top: 4px; overflow-wrap: anywhere; }}
+.trust-cell .v {{ font-size: var(--text-sm); font-weight: 600; color: var(--accent-text); margin-top: 4px; overflow-wrap: anywhere; }}
 @media (max-width: 900px) {{
     .trust-strip {{ grid-auto-flow: row; }}
     .trust-cell {{ border-left: none; border-top: 1px solid var(--rule); }}
@@ -706,7 +718,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 
 /* ── Summary: the question and its answer ── */
 .exec-directive {{
-    background: var(--sheet);
+    background: var(--accent-soft);
     border: 1px solid var(--rule);
     border-left: 3px solid var(--pen);
     border-radius: var(--radius);
@@ -719,7 +731,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     font-size: 11px;
     letter-spacing: .08em;
     text-transform: uppercase;
-    color: var(--graphite);
+    color: var(--accent-text);
     font-weight: 600;
     margin-bottom: 5px;
 }}

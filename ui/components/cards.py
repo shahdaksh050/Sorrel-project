@@ -332,8 +332,12 @@ def analyst_figures(finding: dict[str, Any]) -> str:
     return ("; ".join(bits) + ".") if bits else ""
 
 
-def render_evidence_html(finding: dict[str, Any]) -> str:
-    """The selected finding's evidence: headline, verdict, plain detail, checks that ran, caveats, then folded figures."""
+def render_evidence_html(finding: dict[str, Any], *, with_figures: bool = True) -> str:
+    """The selected finding's evidence: headline, verdict, plain detail, checks that ran, caveats, then folded figures.
+
+    `with_figures=False` leaves the folded analyst figures out, so a caller can place them after the
+    chart (the fold is the last thing in the pane, not a label that makes the chart look folded).
+    """
     state = finding_state(finding)
     headline = html.escape(plainify(str(finding.get("headline", ""))))
     detail = round_for_reading(plainify(str(finding.get("detail") or "")))
@@ -348,7 +352,7 @@ def render_evidence_html(finding: dict[str, Any]) -> str:
         + (f'<p class="evidence-detail">{html.escape(detail)}</p>' if detail else "")
         + (f'<div class="check-row">{marks}</div>' if marks else '<p class="evidence-none">No check ran on this finding.</p>')
         + (f'<div class="evidence-caveats"><b>Be careful</b><ul>{caveats}</ul></div>' if caveats else "")
-        + tech_note_html(analyst_figures(finding))
+        + (tech_note_html(analyst_figures(finding)) if with_figures else "")
     )
 
 

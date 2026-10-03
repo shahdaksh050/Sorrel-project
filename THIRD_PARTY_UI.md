@@ -25,7 +25,7 @@ Copyright (c) Magic UI.
 
 The following UI elements were written from scratch as **original CSS/JS** using the app's design tokens. No third-party source was used for these:
 - **Hero Spotlight** (`radial-gradient` from `--accent`).
-- **Progress RunStepper** (Original CSS + React).
+- **Progress RunStepper** (Original Tier-2 CSS + Native HTML).
 - **Pointer-following Glow** (Tier-2 pure CSS/JS on hovered cards).
 - **Hover Border Gradient** (`@property` angle).
 - **Dropzone Styling** (Dashed `--rule-strong` border on `stFileUploader`).

@@ -17,6 +17,7 @@ Starts from branch `frontend-overhaul` at `96c4598`. Read `FRONTEND_AUDIT.md` fi
 | D8 | Largest bento tile = top-ranked finding; the written answer and the "You asked" heading stay native above it (section 4.6) | approve |
 | D9 | `src/core/design_tokens.py` is under `src/`, so Night `--risk` text (4.04:1 on its tint) and Day `--accent` (2.3:1) cannot be fixed at source without your OK. Plan: derived overlay tokens in `styles.py` only. Say if you want the source edited instead (AGENTS.md "Ask First") | overlay only |
 | D10 | Aceternity licence stance (section 3) | **resolved**: Aceternity is inspiration only; no code used. Using Magic UI (MIT) + original CSS. |
+| D11 | Islands strategy | **resolved**: Hero island only. Progress and Findings use native HTML/CSS. |
 
 ## 1. The two design directions
 
@@ -51,7 +52,8 @@ Replacements are built from **Magic UI** (MIT) or written as **original CSS** fr
 |---|---|
 | **Hero Spotlight** | Original CSS (`radial-gradient` from `--accent`). Static under reduced motion, paused when hidden. |
 | **Hero Headline Fade** | Derived from Magic UI `text-animate` (MIT). Trimmed to by-word blurIn only, no Tailwind, `LazyMotion` only. Plays once per session. |
-| **Progress RunStepper** | Original CSS + React. Look of a fading step list, controlled by python props, no timers, no loops. |
+| **Progress RunStepper** | Original Tier-2 CSS + Native HTML. Look of a fading step list, polling-safe. |
+| **Findings Bento** | Original Tier-2 CSS (CSS Grid) + Native HTML. Selectable text, clickable links, pointer glow. |
 | **Pointer-following glow** | Tier-2 pure CSS/JS: one shared pointer listener setting `--mx/--my` for a radial gradient on hovered cards. |
 | **Hover Border Gradient** | Original Tier-2 CSS (`@property` angle), hover/focus only. |
 | **Dropzone styling** | Original Tier-2 CSS: native `stFileUploader` with dashed `--rule-strong` border, hover lift and glow. |
@@ -104,12 +106,10 @@ I recommend v1: same mechanism as the landing, no version-floor bump, no app-DOM
 ### 4.2 Layout of the project
 
 ```
-ui/islands/                  source (Vite + React 19 + TypeScript strict + Tailwind v4)
+ui/islands/                  source (Vite + React 19 + TypeScript strict)
   package.json, package-lock.json, vite.config.ts, tsconfig.json, README note
-  src/shared/   tokens bridge, useReducedMotion, streamlit bridge (postMessage), cn()
+  src/shared/   tokens bridge, useReducedMotion, streamlit bridge (postMessage)
   src/hero/     Hero island (Magic UI TextAnimate derived, original CSS spotlight)
-  src/progress/ Progress steps (original CSS + React)
-  src/findings/ Findings bento (original CSS)
 static/islands/              BUILD OUTPUT, committed
   index.html                 one declare_component entry; `island` arg picks the island
   hero.js                    stable name, loaded by the landing document
@@ -120,11 +120,9 @@ static/islands/              BUILD OUTPUT, committed
 
 **Hero (D3).** The landing is a self-contained 119 KB HTML document in a full-screen iframe whose injected CSS forces every iframe to full-screen. A second Streamlit component there would be hijacked. Instead the landing document gets one small module script that dynamically imports `/<baseUrlPath>/app/static/islands/hero.js` (the base path is derived from `location.pathname`, since a static file cannot be templated). If that import fails the script does nothing and the existing hero stays exactly as it is. `#hero-enter-btn` and the enter/theme handshake are not touched, so `scripts/ui_smoke.py` keeps working. Theme: the island reads the landing document's own CSS variables and watches its theme class, so it follows the landing's Day/Night switch without a prop.
 
-**Progress and findings** are mounted from Python through one `declare_component("dsa_islands", path="static/islands")` with `island="progress"` or `"findings"`, stable `key`s, and a shared chunk.
-
 ### 4.3 Typed Python helpers
 
-`ui/components/islands.py`: frozen dataclasses for each prop set (`StepperProps`, `StepProps`, `FindingTile`, `FindingsProps`), pure builders `stepper_props(snap_stage_log) -> StepperProps` and `findings_props(...)`, and `islands_available() -> bool` (checks `static/islands/index.html` and `manifest.json`, and that every file the manifest lists exists). Props are built **only** from `STAGE_DEFS`, the snapshot and the `RunView`; never from the API key, dataset rows or raw LLM output. All new Python is fully type-hinted and gets tests.
+`ui/components/islands.py`: isolated helper for island URLs and availability (`islands_available() -> bool`). Checks `static/islands/manifest.json`.
 
 ### 4.4 Props contract and escaping (D7)
 
@@ -134,17 +132,13 @@ Props are plain display strings, sanitised and truncated in Python (`plainify`, 
 
 `tokens` (both palettes plus the overlay tokens) and `theme` are props. The island root maps them onto CSS custom properties; a theme change updates those variables, no re-mount. Tailwind is v4 with `preflight` omitted and all utilities scoped under the island root class; colours come from `var(--pen)` etc., never literals (a build-time check fails on hex literals in `src/`). The Day/Night control stays the native selectbox (changing it reruns the script; a v1 iframe given a new `theme` arg should update in place: **Spike B confirms**).
 
-### 4.6 Islands and their fallbacks
+### 4.6 Island fallbacks
 
 | Island | Where | Fallback |
 |---|---|---|
 | **Hero** (lazy) | landing document | existing hero untouched if the import fails or `static/islands/` is absent |
-| **Run progress** | inside the polled fragment, **beside** the existing steps list | additive: the native `render_steps_list` stays the primary readable account. If assets are missing, `islands_available()` is false and nothing extra renders; if the iframe fails at runtime its height stays 0 until it reports ready |
-| **Findings** (one bundle, `variant="answers"` or `"provisional"`) | Answers tab "What we found"; "Found so far" | the existing `render_finding_card` / `build_provisional_html` HTML. Used whenever `islands_available()` is false. For a runtime load failure the island reports `ready` once via `setComponentValue`; until then the legacy cards render, then are replaced (one extra rerun on first mount, outside the polled fragment) |
 
-Largest bento tile = the top-ranked headline finding (D8). The "You asked …" heading and written answer remain native, so the page keeps one real `<h1>/<h2>` structure and the answer stays selectable text. A finding is risk-flagged exactly when the existing `audited_checks` has a `"fail"` state (to be confirmed against `render_finding_card` in Step 5). Glow is `--risk` for those only; others use `--pen`/`--accent`. No per-word effects on answers.
-
-A test `tests/test_islands_fallback.py` monkeypatches the assets directory to empty and asserts every helper returns the legacy HTML path; a second test asserts a corrupt manifest does the same.
+A test `tests/test_islands.py` verifies the availability logic and URL resolution.
 
 ## 5. Tier-2 CSS and the named recreations
 
@@ -155,19 +149,24 @@ A test `tests/test_islands_fallback.py` monkeypatches the assets directory to em
 - **Dropzone**: native `stFileUploader`; dashed `--rule-strong` border, hover lift and glow, an explicit drag-over style. The uploader, its checks and `validate_upload` are not touched.
 - **Charts**: Vega config themed from tokens (`get_vega_config` already exists); no chart-selection logic changes; no glow on charts or tables.
 
-## 6. Making every animation fragment-poll-safe
+## 6. Polling-Safe Native CSS Rules
 
-| Effect | Trigger | Why it will not restart on a 1 s tick |
-|---|---|---|
-| Stepper check/slide | `status` transition for a stage id | React compares previous and next `status` per stage id; identical props do nothing |
-| Glowing Effect on active step | `current` changes | CSS-driven; only the active step mounts it |
-| Findings entrance | a `finding_id` not seen before | `seen` set lives in the island and in `sessionStorage` per run, so a remount does not replay |
-| Pointer glow | real pointer movement | not tied to renders |
-| Hero text | first visit in the session | `sessionStorage` flag |
-| `<style>`/`<script>` | injected once | existing `inject_theme_css()` is emitted once per script pass, outside the fragment; the fragment emits no `<style>` |
-| Layout shift | n/a | island iframe height is reserved (`min-height` from the stage count) before mount |
+The fragment re-renders every ~1s. The following rules ensure stability:
+- Inject global CSS/JS once outside the fragment; the fragment must emit no `<style>` or `<script>`.
+- Entrance animations (keyframes) go only on an element the FIRST time its stage/insight id appears: track seen ids in `st.session_state` per run and render the `is-new` class once. Settled items carry no animation class.
+- Prefer transitions on state-class changes (pending -> active -> done) over keyframes on persistent nodes.
+- Reserve layout space (min-height) so appearing items never shift content.
+- Respect `prefers-reduced-motion` for every animation.
+- Do not change how the snapshot is produced; `ui/run.py` gets no `st.*` calls.
 
-Memoisation: stepper props are rebuilt each tick, but Python skips re-sending when the serialised props are unchanged (cached last-props in the fragment), so the component receives no new args. **Spike B measures** re-mounts, flicker, restarts and shift; if it cannot be made stable I fall back to Tier-2 CSS for live views and tell you.
+**ACCEPTANCE TEST** for the native stepper and provisional cards (replaces Spike B): using the dev-only Playwright setup, observe a real run in Day and Night with a MutationObserver and an `animationstart` listener. 
+Report: 
+- number of `animationstart` events during idle ticks (target 0)
+- `animationstart` events per real transition (target 1 per new item)
+- number of stepper nodes replaced during idle ticks (target 0)
+- layout shift, and any flicker. 
+
+If idle ticks restart animations, fix it (e.g. avoid re-emitting changed markup for settled items) and re-test. Save the test as a script under `scripts/` so it can be re-run.
 
 ## 7. Dependencies, licences, sizes
 
@@ -181,7 +180,7 @@ Only dev-time npm deps; only built output ships. Licences below are **from memor
 
 Not used: TailwindCSS, `@tabler/icons-react`, `lucide-react`, `react-dropzone`, `@radix-ui/react-tabs`, `canvas-reveal-effect`/three for islands.
 
-**Bundle budgets** (gzipped; these are targets I will measure in the spikes, not measurements): shared chunk ≤ 70 KB; hero ≤ 12 KB; progress ≤ 10 KB; findings ≤ 18 KB; per-island CSS ≤ 6 KB; **total islands ≤ 110 KB gzipped**. For scale, the repo already ships a 1.33 MB `three.module.js`. If React alone breaks the budget the fallback is a Preact alias; I will not do that without telling you. Landing island lazy-loaded after first paint; progress and findings load only when first needed.
+**Bundle budgets** (gzipped; these are targets): hero ≤ 12 KB; per-island CSS ≤ 6 KB. Landing island lazy-loaded after first paint.
 
 **Pre-existing third-party items to resolve (D4)**
 - `ui/animations.py`, `pipeline_3d.html`, `cinematic_3d.html` load from CDNs (audit section 7). Plan: vendor anime.js 3.x, anime.js 4.x (pipeline uses a different major), GSAP and the fonts under `static/vendor/` with licence files.
@@ -189,20 +188,20 @@ Not used: TailwindCSS, `@tabler/icons-react`, `lucide-react`, `react-dropzone`, 
 
 ## 8. Rollout order
 
-0. **Prerequisites:** D6 (local browser), record baseline (done in the audit), `license-checker`.
-1. **Spike A (static island):** scaffold `ui/islands/`, build the hero island, load it in the landing document with the failure fallback. Verify with Node absent (committed build), Day and Night, reduced motion, and `scripts/ui_smoke.py`. **STOP for review.**
-2. **Spike B (live island):** progress island inside the polled fragment, real run, report remounts / flicker / restarts / shift / page weight. **STOP for review.**
-3. Step 1: tokens + overlay + `DESIGN.md` (+ Step 1b vendoring if D4).
-4. Step 2: shell (landing, header/hero, sidebar, section heads, spacing).
-5. Step 3: Tier-2 primitives.
-6. Step 4: run experience.
-7. Step 5: tabs, with the findings island.
-8. Step 6: micro-interactions (replace the `animations.py` observer).
-9. Step 7: responsive pass.
-10. Step 8: `report.html` restyle only if it stays self-contained and content-identical; else skipped and reported.
+1. **Spike A (static island):** scaffold `ui/islands/`, build the hero island, load it in the landing document with the failure fallback. Verify with Node absent (committed build), Day and Night, reduced motion, and `scripts/ui_smoke.py`. **Completed and Accepted.**
+2. **Spike B (live island):** Cancelled. Replaced by Native HTML/CSS Acceptance Test.
+3. Step 1: token overlay in `ui/styles.py` (derived tokens only; do not edit `src/`) + `DESIGN.md` + numeric contrast tests.
+4. Step 1b: vendor GSAP, anime.js (both majors) and the fonts under `static/vendor/` with licence files. Do NOT touch fullPage.js; record it as a known issue.
+5. Step 2: shell (header/hero spacing, sidebar, section heads, responsive layout).
+6. Step 3: Tier-2 primitives (run button states, dropzone, tabs, inputs, stat tiles, callouts, empty states, skeletons).
+7. Step 4: run experience.
+8. Step 5: tabs, with the findings native bento.
+9. Step 6: micro-interactions (replace the `animations.py` observer).
+10. Step 7: responsive pass.
+11. Step 8: `report.html` restyle only if it stays self-contained and content-identical; else skipped and reported.
 After each step: `ruff check .`, the `mypy`/`pytest` baseline comparison, `scripts/validate.py`; one commit per step on `frontend-overhaul`; no force-push; `master` untouched. `git diff 96c4598..HEAD -- src/` must be empty and `ui/run.py` must gain no `st.*` calls (checked by a test).
 
-**CI.** Existing jobs install only Python and keep working because `static/islands/` is committed. I propose one extra, **non-blocking** job that runs `npm ci && npm run build` and fails if the committed build differs from source; it starts as `continue-on-error` until proven reproducible. The `Dockerfile` handles the backend worker only and correctly ignores `static/islands/`, and `.dockerignore` excludes `ui/islands/node_modules/`.
+**CI.** Existing jobs install only Python and keep working because `static/islands/` is committed. The `Dockerfile` handles the backend worker only and correctly ignores `static/islands/`, and `.dockerignore` excludes `ui/islands/node_modules/`. Node modules remain entirely out of git and Docker context.
 
 ## 9. Rollback
 
@@ -211,6 +210,5 @@ Each step is one commit, so `git revert <commit>` undoes it. The islands are add
 ## 10. Limits of this plan
 
 - No browser has been driven yet (D6), so nothing about live behaviour is verified.
-- Whether a v1 iframe survives the 1 s fragment tick without remount, and whether a changed `theme` arg updates it in place, is the central assumption; Spike B tests it.
 - Bundle sizes and several licences are targets or recollection until measured.
 - I did not read the 3D JS, the landing HTML internals, the Charts/Details/Downloads tabs or the second half of `ui/run.py`; Steps 2 to 5 will read them before editing.

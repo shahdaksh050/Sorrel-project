@@ -32,14 +32,14 @@ def build_provisional_html(findings: tuple[ProvisionalFinding, ...], seen_provs:
         if f.finding_id not in seen_provs:
             is_new = True
             seen_provs.add(f.finding_id)
-        
+
         # In provisional findings, we don't know risk flags yet, so just standard cards.
         classes = ["bento-card", "prov-item"]
         if is_new:
             classes.append("is-new")
         if i == 0:
             classes.append("full-width")
-            
+
         rows.append(
             f'<div class="{" ".join(classes)}">'
             f'<span class="prov-kind">{html.escape(_kind_label(f.kind))}</span>'

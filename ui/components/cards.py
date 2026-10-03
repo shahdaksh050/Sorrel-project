@@ -157,13 +157,13 @@ def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str], is
             for c in checks
         )
         check_html = f'<div class="check-row animate">{marks}</div>'
-    
+
     classes = ["finding-card"]
     if is_primary:
         classes.append("full-width")
     if is_flagged:
         classes.append("flagged")
-        
+
     return (
         f'<div class="{" ".join(classes)}">'
         f'<div class="finding-headline">{headline}</div>'

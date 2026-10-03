@@ -28,7 +28,7 @@ def inject_micro_interactions() -> None:
 
                 mouseX = e.clientX;
                 mouseY = e.clientY;
-                
+
                 const card = e.target.closest('.bento-card, .finding-card');
                 if (card !== currentCard) {
                     currentCard = card;

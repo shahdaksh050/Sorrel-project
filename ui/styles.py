@@ -809,7 +809,8 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     content: ""; position: absolute; top: 13px; left: calc(50% + 20px); width: calc(100% - 40px);
     height: 2px; background: var(--rule);
 }}
-.stepper .step.done:not(:last-child)::after {{ background: var(--pen); }}
+/* The rail is filled past a finished step and past a skipped one (it was passed, just not needed). */
+.stepper .step.done:not(:last-child)::after, .stepper .step.skip:not(:last-child)::after {{ background: var(--pen); }}
 .step-dot {{
     position: relative; z-index: 1; width: 28px; height: 28px; display: grid; place-items: center;
     border-radius: 50%; background: var(--sheet); border: 1.5px solid var(--rule-strong);
@@ -818,6 +819,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .step.done .step-dot {{ background: var(--pen); border-color: var(--pen); color: var(--accent-ink); }}
 .step.active .step-dot {{ border-color: var(--pen); color: var(--accent-text); outline: 3px solid var(--accent-soft); }}
 .step.err .step-dot {{ border-color: var(--accent); color: var(--accent); }}
+.step.skip .step-dot {{ border-style: dashed; }}
 .step-name {{
     font-size: var(--text-xs); font-weight: 600; color: var(--ink); line-height: 1.3;
     text-wrap: balance; min-height: 2.6em;

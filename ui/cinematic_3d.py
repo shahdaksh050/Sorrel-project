@@ -19,6 +19,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from src.core import design_tokens
+from ui.styles import static_url
 
 __all__ = [
     "CINEMATIC_PALETTES",
@@ -278,6 +279,7 @@ def extract_cinematic_state(session_state: Any) -> dict[str, Any]:
 def build_cinematic_document(
     state_dict: dict[str, Any] | None = None,
     theme: str = "night",
+    inline_assets: bool = False,
 ) -> str:
     """Assemble the self-contained HTML document for the 6-Section 3D Cinematic Experience.
 
@@ -294,10 +296,39 @@ def build_cinematic_document(
     state_json = json.dumps(state_dict, ensure_ascii=False).replace("<", "\\u003c")
 
     html_template = _read_asset("cinematic_3d.html")
-    scene_script = _read_asset("cinematic_3d.js")
+
+    if inline_assets:
+        import base64
+        import re
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+
+        # Inline Anime.js
+        anime_esm_code = (root / "static/vendor/anime/4.5.0/anime.esm.min.js").read_text("utf-8")
+        anime_b64 = base64.b64encode(anime_esm_code.encode("utf-8")).decode("utf-8")
+        anime_url = f"data:text/javascript;base64,{anime_b64}"
+
+        # Inline Fonts
+        font_css = (root / "static/vendor/fonts/ledger-fonts.css").read_text("utf-8")
+        def replace_font_url(m):
+            font_path = root / "static/vendor/fonts" / m.group(1)
+            if font_path.exists():
+                b64 = base64.b64encode(font_path.read_bytes()).decode("utf-8")
+                return f"url('data:font/woff2;charset=utf-8;base64,{b64}')"
+            return m.group(0)
+        font_css = re.sub(r"url\('\./([^']+)'\)", replace_font_url, font_css)
+        font_links = f"<style>{font_css}</style>"
+    else:
+        anime_url = static_url("vendor/anime/4.5.0/anime.esm.min.js")
+        font_links = f'<link rel="stylesheet" href="{static_url("vendor/fonts/ledger-fonts.css")}">'
+
+    scene_script = _read_asset("cinematic_3d.js").replace(
+        "__ANIME_ESM_URL__", anime_url
+    )
 
     return (
         html_template
+        .replace("__FONT_LINKS__", font_links)
         .replace("__CINEMATIC_STATE_JSON__", state_json)
         .replace("__CINEMATIC_SCENE_SCRIPT__", scene_script)
     )
@@ -344,6 +375,6 @@ def export_cinematic_html(
     """Export the self-contained 3D presentation as a standalone HTML file."""
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    doc = build_cinematic_document(state_dict=state_dict, theme=theme)
+    doc = build_cinematic_document(state_dict=state_dict, theme=theme, inline_assets=True)
     path.write_text(doc, encoding="utf-8")
     return path

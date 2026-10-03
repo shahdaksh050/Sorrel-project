@@ -53,3 +53,6 @@ skills-lock.json
 streamlit_dev.log
 *_report.md
 final_report.json
+
+# UI islands: Node deps are dev-only; built output in static/islands/ is committed
+ui/islands/node_modules/

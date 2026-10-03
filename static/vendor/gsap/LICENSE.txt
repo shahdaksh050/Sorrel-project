@@ -1,0 +1,11 @@
+GSAP Standard License
+Copyright (c) 2008-2024, GreenSock. All rights reserved.
+
+This is the Standard GreenSock License which is "No Charge" for most usage.
+It is NOT open source or MIT.
+
+A paid "Business Green" license is required if your usage does not qualify
+under the Standard License (e.g. charging multiple users for a product that
+uses GSAP).
+
+See https://gsap.com/standard-license/ for details.

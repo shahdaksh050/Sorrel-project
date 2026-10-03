@@ -19,11 +19,11 @@ def _items(n: int) -> tuple[ProvisionalFinding, ...]:
 
 
 def test_nothing_found_renders_nothing() -> None:
-    assert build_provisional_html(()) == ""
+    assert build_provisional_html((), set()) == ""
 
 
 def test_block_is_labelled_provisional_and_lists_findings() -> None:
-    out = build_provisional_html(_items(2))
+    out = build_provisional_html(_items(2), set())
     assert "Found so far, may change" in out
     assert "have not been checked yet" in out
     assert "Group 0 differs" in out and "Group 1 differs" in out
@@ -32,7 +32,7 @@ def test_block_is_labelled_provisional_and_lists_findings() -> None:
 
 
 def test_no_provisional_entry_carries_a_check_mark() -> None:
-    out = build_provisional_html(_items(3))
+    out = build_provisional_html(_items(3), set())
     for glyph in GLYPH.values():
         assert glyph not in out
     for word in ("check-row", "held up", "Not luck", "class=\"check"):
@@ -43,32 +43,32 @@ def test_no_provisional_entry_carries_a_check_mark() -> None:
 
 def test_hostile_text_is_escaped() -> None:
     items = (ProvisionalFinding("x", HOSTILE, HOSTILE),)
-    out = build_provisional_html(items)
+    out = build_provisional_html(items, set())
     assert "<script" not in out and "<img" not in out
     assert "&lt;script&gt;" in out
 
 
 def test_only_the_latest_are_listed_and_the_rest_are_counted() -> None:
-    out = build_provisional_html(_items(MAX_SHOWN + 5))
-    assert out.count("<li>") == MAX_SHOWN
+    out = build_provisional_html(_items(MAX_SHOWN + 5), set())
+    assert out.count("class=\"bento-card") == MAX_SHOWN
     assert f"Showing the latest {MAX_SHOWN} of {MAX_SHOWN + 5}." in out
     assert "Group 0 differs" not in out  # oldest dropped
     assert f"Group {MAX_SHOWN + 4} differs" in out
 
 
 def test_no_count_line_when_everything_is_shown() -> None:
-    assert "Showing the latest" not in build_provisional_html(_items(2))
+    assert "Showing the latest" not in build_provisional_html(_items(2), set())
 
 
 def test_no_inline_style_and_single_line_markup() -> None:
-    out = build_provisional_html(_items(3))
+    out = build_provisional_html(_items(3), set())
     assert "style=" not in out
     assert "\n" not in out
 
 
 def test_every_class_used_is_styled_with_tokens_only() -> None:
     styles = (ROOT / "ui" / "styles.py").read_text(encoding="utf-8")
-    names = {c for cls in re.findall(r'class="([^"]+)"', build_provisional_html(_items(MAX_SHOWN + 1))) for c in cls.split()}
+    names = {c for cls in re.findall(r'class="([^"]+)"', build_provisional_html(_items(MAX_SHOWN + 1), set())) for c in cls.split()}
     for name in sorted(names):
         assert f".{name}" in styles, f"missing CSS for .{name}"
     start = styles.index('/* ── "Found so far, may change"')

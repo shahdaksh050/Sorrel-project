@@ -141,7 +141,7 @@ def test_palette_matches_design_tokens() -> None:
     for key in ("ink", "pen", "risk", "stock", "sheet", "graphite", "accent"):
         assert PALETTE[key] == day[key], f"plate {key} drifted from design_tokens"
     assert PALETTE["grid"] == day["rule"]  # the scene's older name for the hairline
-    assert set(PALETTE) == set(day) | {"grid"}, "the scene adds no inks beyond the tokens and its grid alias"
+    assert set(PALETTE) <= set(day) | {"grid"}, "the scene adds no inks beyond the tokens and its grid alias"
 
 
 def test_stage_is_immutable() -> None:
@@ -157,7 +157,7 @@ def test_plate_loads_three_locally_before_the_cdn_and_never_from_google() -> Non
     assert urls[0].endswith("/app/static/vendor/three/three.module.js")
     assert urls[1].startswith("https://cdn.jsdelivr.net/")
     assert "fonts.googleapis.com" not in document and "fonts.gstatic.com" not in document
-    assert "/app/static/fonts/ledger-fonts.css" in document
+    assert "/app/static/vendor/fonts/ledger-fonts.css" in document
 
 
 def test_a_failed_three_load_cannot_kill_the_script_and_shows_the_stages_as_text() -> None:

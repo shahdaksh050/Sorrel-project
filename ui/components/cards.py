@@ -78,7 +78,7 @@ def safe_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def stage_card(num: str, name: str, status: str, detail: str = "") -> str:
+def stage_card(num: str, name: str, status: str, detail: str = "", is_new: bool = False) -> str:
     """One row of the stage ledger. Numbered: the pipeline is a real sequence."""
     cls = {
         "done": "done",
@@ -86,22 +86,28 @@ def stage_card(num: str, name: str, status: str, detail: str = "") -> str:
         "skipped": "skip",
         "error": "err",
     }.get(status, "")
+    if is_new and status != "pending":
+        cls += " is-new"
     det = f'<span class="detail">{html.escape(str(detail))}</span>' if detail else ""
     aria = ' aria-live="polite"' if status == "active" else ""
     return (
-        f'<div class="sc {cls}"{aria}>'
+        f'<div class="sc {cls.strip()}"{aria}>'
         f'<span class="sc-num">{num.zfill(2)}</span>'
         f'<span class="nm">{html.escape(str(name))}</span>{det}</div>'
     )
 
 
-def render_steps_list(stage_log: list[tuple[str, str, str]]) -> str:
+def render_steps_list(stage_log: list[tuple[str, str, str]], seen_stages: set[str]) -> str:
     """Render the primary, always-visible numbered steps list."""
     log_map = {n: (s, d) for n, s, d in stage_log}
     html_out = ['<div aria-live="polite" aria-atomic="false">']
     for num, name in STAGE_DEFS:
         status, detail = log_map.get(num, ("pending", ""))
-        html_out.append(stage_card(num, name, status, detail))
+        is_new = False
+        if status != "pending" and num not in seen_stages:
+            is_new = True
+            seen_stages.add(num)
+        html_out.append(stage_card(num, name, status, detail, is_new))
     html_out.append('</div>')
     return "".join(html_out)
 
@@ -120,8 +126,8 @@ def render_datum(cells: list[tuple[str, str]]) -> str:
 _CHECK_CSS: dict[str, str] = {"pass": "ok", "fail": "risk", "neutral": "note"}
 
 
-def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str]) -> str:
-    """One full-width sentence card for a top-ranked Finding, with its audited-entry check row."""
+def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str], is_primary: bool = False) -> str:
+    """One sentence card for a top-ranked Finding, with its audited-entry check row."""
     headline = html.escape(plainify(str(finding.get("headline", ""))))
     detail = finding.get("detail")
     caveats = finding.get("caveats") or []
@@ -142,14 +148,24 @@ def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str]) ->
         xref = '<div style="font-size:12px;color:var(--pen);margin-top:6px;font-weight:600;">→ see chart in the Charts tab</div>'
     checks = audited_checks(finding.get("evidence"))
     check_html = ""
+    is_flagged = False
     if checks:
+        if any(c.state == "fail" for c in checks):
+            is_flagged = True
         marks = "".join(
             f'<span class="check {_CHECK_CSS[c.state]}">{GLYPH[c.state]} {html.escape(c.label)}</span>'
             for c in checks
         )
         check_html = f'<div class="check-row animate">{marks}</div>'
+    
+    classes = ["finding-card"]
+    if is_primary:
+        classes.append("full-width")
+    if is_flagged:
+        classes.append("flagged")
+        
     return (
-        '<div class="finding-card">'
+        f'<div class="{" ".join(classes)}">'
         f'<div class="finding-headline">{headline}</div>'
         f'{sub_html}{xref}{check_html}'
         '</div>'

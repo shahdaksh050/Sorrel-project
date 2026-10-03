@@ -344,7 +344,7 @@ class LLMClient:
             base_url: str | None = "https://openrouter.ai/api/v1"
             extra_headers: dict[str, str] = {
                 "HTTP-Referer": os.getenv("OPENROUTER_REFERER", "https://github.com/agentic-data-analysis"),
-                "X-Title": "Agentic Data Analysis",
+                "X-Title": "Sorrel",
             }
         elif self.provider == "nvidia":
             api_key = self._api_key("NVIDIA_API_KEY")

@@ -271,3 +271,7 @@ def test_panels_in_a_row_get_one_height_unless_the_chart_needs_more() -> None:
     assert _fit_height(stepped, 260) is stepped  # sized by step: left alone
     assert _fit_height({"facet": {}, "spec": {}}, 260) == {"facet": {}, "spec": {}}
     assert _fit_height({"hconcat": [], "mark": "bar"}, None) == {"hconcat": [], "mark": "bar"}
+    # compound charts and row/column facets are sized per cell, so a panel height would make them huge
+    for odd in ({"hconcat": [], "mark": "bar"}, {"vconcat": [], "layer": []}, {"mark": "bar", "encoding": {"row": {}}},
+                {"mark": "bar", "encoding": {"column": {}}}):
+        assert _fit_height(odd, 260) is odd

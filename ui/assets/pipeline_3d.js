@@ -46,19 +46,36 @@ export const MOTION = {
 };
 
 /* Streamlit reruns this iframe's document on *any* widget interaction
- * anywhere in the app, not just after an analysis run advances a stage —
- * moving an unrelated sidebar slider triggers the same full page rerun.
- * build_document() is deterministic for unchanged (stages, theme), so
- * replaying the entrance animation only makes sense when that pair has
- * actually changed since we last played it. sessionStorage survives an
- * iframe document reload within the same tab, so it's the signal: skip
- * the animation and snap straight to final state on a rerun that changed
- * nothing (IMPROVEMENTS.md #10); play it in full when the run progressed.
+ * anywhere in the app, and the page redraws it each time a run moves on to the
+ * next stage. The entrance (grid ruling in, modules stamping down) is the scene
+ * arriving, so it plays ONCE per scene, not on every redraw: a redraw of a scene
+ * that has already played is drawn straight at the current stage, and only the
+ * stages whose status changed since the last draw ease to their new look. That
+ * makes a refresh read as the run carrying on, not as the scene starting over.
+ * sessionStorage survives an iframe reload within the same tab, so it holds both
+ * the scene (theme and stage numbers) and the statuses it was last drawn with
+ * (IMPROVEMENTS.md #10 started this; the user asked for a continuation).
  */
-const RUN_SIGNATURE = JSON.stringify({
+const SCENE_SIGNATURE = JSON.stringify({
   theme: THEME,
-  stages: STAGES.map((s) => [s.num, s.status, s.detail]),
+  stages: STAGES.map((s) => s.num),
 });
+const STATUS_KEY = "pipeline3d:lastStatuses";
+function readPreviousStatuses() {
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(STATUS_KEY) || "null");
+    return Array.isArray(stored) && stored.length === STAGES.length ? stored : null;
+  } catch {
+    return null; // storage blocked, or nothing stored yet
+  }
+}
+function saveStatuses() {
+  try {
+    sessionStorage.setItem(STATUS_KEY, JSON.stringify(STAGES.map((s) => s.status)));
+  } catch {
+    /* storage blocked: the next load simply has no earlier look to ease from */
+  }
+}
 function hasPlayedEntranceFor(signature) {
   try {
     return sessionStorage.getItem("pipeline3d:lastEntrance") === signature;
@@ -769,13 +786,29 @@ function snapToFinalState() {
 function playEntrance() {
   if (REDUCED_MOTION) {
     snapToFinalState();
+    saveStatuses();
     return;
   }
-  if (hasPlayedEntranceFor(RUN_SIGNATURE)) {
+  if (hasPlayedEntranceFor(SCENE_SIGNATURE)) {
+    // A redraw of a scene that has already played: carry on from where it was.
+    const before = readPreviousStatuses();
     snapToFinalState();
+    if (before) {
+      STAGES.forEach((stage, i) => {
+        if (before[i] && before[i] !== stage.status) {
+          const now = stage.status;
+          stage.status = before[i];
+          ink(i, false); // draw the stage as it looked ...
+          stage.status = now;
+          ink(i, true); // ... and ease to what it is now
+        }
+      });
+    }
+    saveStatuses();
     return;
   }
-  markEntrancePlayed(RUN_SIGNATURE);
+  markEntrancePlayed(SCENE_SIGNATURE);
+  saveStatuses();
 
   inkStructure(true);
   const tl = gsap.timeline({ onUpdate: invalidate });

@@ -254,3 +254,21 @@ def test_stage_text_naming_a_placeholder_stays_text_and_never_splices_the_script
     document = build_document([Stage("1", "Reading", "done", trick)], theme="day")
     assert _state_of(document)["stages"][0]["detail"] == trick
     assert document.count("setAnimationLoop") == _asset("pipeline_3d.js").count("setAnimationLoop")
+
+
+def test_a_redraw_of_the_plate_carries_on_instead_of_replaying_the_entrance() -> None:
+    """The page redraws the plate when a run moves to the next stage. The entrance must not start over."""
+    from ui.pipeline_3d import _asset
+
+    js = _asset("pipeline_3d.js")
+    # The scene's identity is its theme and stage numbers: NOT the statuses or details, which change each stage.
+    scene = js.split("const SCENE_SIGNATURE = JSON.stringify({", 1)[1].split("});", 1)[0]
+    assert "theme: THEME" in scene and "s.num" in scene
+    assert "s.status" not in scene and "s.detail" not in scene
+    assert "RUN_SIGNATURE" not in js
+    # A scene that already played is drawn at its current stage, and only changed stages ease to their new look.
+    assert "hasPlayedEntranceFor(SCENE_SIGNATURE)" in js and "readPreviousStatuses()" in js
+    assert "before[i] !== stage.status" in js and "ink(i, true)" in js
+    assert "markEntrancePlayed(SCENE_SIGNATURE)" in js
+    # Reduced motion still draws the final state straight away.
+    assert js.index("if (REDUCED_MOTION) {", js.index("function playEntrance")) < js.index("hasPlayedEntranceFor(SCENE_SIGNATURE)", js.index("function playEntrance"))

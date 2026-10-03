@@ -176,9 +176,13 @@ def render_downloads_tab(
             # The real report page, as it looks when opened or printed, in a frame that scrolls. It is
             # drawn in the app's current theme, not the browser's, so it matches the page around it.
             theme = "night" if st.session_state.get("theme", "day") in ("night", "dark") else "day"
+            # A report with its charts and fonts is about a megabyte, and every tab draws on every rerun, so
+            # the page is only embedded once it is asked for (as the 3D presentation is only built on request).
             st.caption("The report as it looks when opened in a browser or printed. Scroll inside the frame to read it.")
-            with st.container(border=True, key="report_preview"):
-                st.iframe(retheme_report_html(html_file.read_text(encoding="utf-8"), theme), height=720)
+            show_report = st.toggle("Show the report here", key="show_report_preview")
+            if show_report:
+                with st.container(border=True, key="report_preview"):
+                    st.iframe(retheme_report_html(html_file.read_text(encoding="utf-8"), theme), height=720)
             if mds:
                 with st.expander("Read the plain-text version (Markdown)", expanded=False):
                     st.markdown(mds[0].read_text(encoding="utf-8"))

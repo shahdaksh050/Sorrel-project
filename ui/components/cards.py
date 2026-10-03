@@ -784,7 +784,11 @@ def _fit_height(spec: dict[str, Any], height: int | None) -> dict[str, Any]:
     its own taller height (many categories) keeps it, and one sized by `step` or `container` is left
     alone: squashing those would make them unreadable.
     """
-    if not height or not ({"mark", "layer"} & set(spec)) or {"facet", "repeat", "concat"} & set(spec):
+    if not height or not ({"mark", "layer"} & set(spec)):
+        return spec
+    compound = {"facet", "repeat", "concat", "hconcat", "vconcat"} & set(spec)
+    per_cell = {"row", "column"} & set(spec.get("encoding") or {})  # height is per facet cell there
+    if compound or per_cell:
         return spec
     own = spec.get("height")
     if own is None or (isinstance(own, int | float) and own < height):

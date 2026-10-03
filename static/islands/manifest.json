@@ -1,0 +1,8 @@
+{
+  "src/hero/main.tsx": {
+    "file": "hero.js",
+    "name": "hero",
+    "src": "src/hero/main.tsx",
+    "isEntry": true
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "dsa-islands",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Display-only UI islands for the Streamlit app. Built output is committed in ../../static/islands.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && vite build && node scripts/report-size.mjs",
+    "typecheck": "tsc --noEmit",
+    "check:no-html-injection": "node scripts/check-no-html-injection.mjs"
+  },
+  "dependencies": {
+    "motion": "14.0.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.2"
+  }
+}

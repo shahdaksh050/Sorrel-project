@@ -496,8 +496,7 @@ _cur_theme = st.session_state.get("theme", "day")
 with st.container(key="topbar"):
     _bar_name, _bar_state, _bar_theme = st.columns([0.34, 0.46, 0.2], vertical_alignment="center")
 _bar_name.markdown(
-    '<div class="topbar-name"><span class="brand-seal" aria-hidden="true">s</span>'
-    '<span class="brand-name">Sorrel</span></div>',
+    '<div class="topbar-name"><span class="brand-name">Sorrel</span></div>',
     unsafe_allow_html=True,
 )
 _bar_file = st.session_state.get("preview_name")
@@ -541,8 +540,7 @@ _inputs_box = (
 with st.sidebar:
     st.markdown(
         '<div class="side-brand">'
-        '<div class="side-word"><span class="brand-seal" aria-hidden="true">s</span>'
-        '<span class="brand-name">Sorrel</span></div>'
+        '<div class="side-word"><span class="brand-name">Sorrel</span></div>'
         '<div class="side-title">Settings</div>'
         '<div class="side-sub">Everything here has a safe default. You can run without opening it.</div></div>',
         unsafe_allow_html=True,

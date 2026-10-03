@@ -72,6 +72,9 @@ ignore = ["E501", "B008", "RUF001", "RUF002", "RUF003"]
 "tests/test_ml_enhancements.py" = ["N806"]
 "tests/fixtures/planted_effects.py" = ["N806"]
 "app.py" = ["E402"]
+# One-off, hand-run static checkers for the UI prototype: they put the repo on sys.path before
+# importing from it, and read like quick scripts.
+"docs/prototypes/checks/*.py" = ["E402", "E741", "UP031", "B905", "I001", "RUF100"]
 
 
 [tool.ruff.lint.isort]

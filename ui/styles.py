@@ -1,5 +1,22 @@
 """
-Ledger Design System Styles and CSS Injection for Streamlit UI.
+Sorrel workspace styles and CSS injection for the Streamlit UI.
+
+The look is the prototype's workspace (docs/prototypes): warm paper, near-black
+ink, one forest-green pen, hairline 4px cards, Geist for the interface and
+Newsreader for the italic accent word. The workspace has no gradients, glow,
+blur, shadows or transitions, and nothing that cannot be clicked reacts to the
+pointer. Colour values are never typed here: they come from
+`src.core.design_tokens.css_root_block`, and every rule below reads them as
+`var(--token)`.
+
+Colour roles worth knowing before editing a rule:
+
+* `--pen` is the forest-green fill. Night `--pen` is only about 2.5:1 as text or
+  as a thin indicator, so text, focus rings and the active-tab underline use
+  `--accent-text`; text on a `--pen` fill uses `--accent-ink`.
+* `--accent` is the amber: a warning, a failed step, a gauge worth a look.
+* `--risk` / `--danger-text` mean one thing only, "this finding or number may not
+  hold". They are never a generic error colour.
 """
 from __future__ import annotations
 
@@ -25,41 +42,36 @@ def font_css_url() -> str:
     return static_url("vendor/fonts/ledger-fonts.css")
 
 
-def inject_theme_css() -> None:
-    """Inject dynamic Ledger CSS supporting Day and Night modes via Python state."""
-    theme = st.session_state.get("theme", "day")
+def theme_vars_for(mode: design_tokens.Mode) -> str:
+    """The `:root` custom properties for one mode: the shared tokens, then the few derived ones.
 
-    mode: design_tokens.Mode = "night" if theme in ("dark", "night") else "day"
-
-    # --lift/--lift-sm are styles.py-local (shadow blur tuned per mode, not part of
-    # the shared palette) so they stay hand-typed alongside the imported token lines.
-    if mode == "night":
-        theme_vars = design_tokens.css_root_block(mode) + """
-        --lift:        0 4px 18px rgba(0,0,0,.35);
-        --lift-sm:     0 2px 8px rgba(0,0,0,.3);
-        --lift-lg:     0 12px 32px rgba(0,0,0,.45);
-        --rule-strong: color-mix(in srgb, var(--rule) 50%, #fff);
-        --glow:        color-mix(in srgb, var(--pen) 15%, transparent);
-        --spot:        color-mix(in srgb, var(--accent) 15%, transparent);
-        --risk-text:   #ff8a8a; /* manually lightened for >= 4.5:1 on night sheet */
-        """
-    else:
-        theme_vars = design_tokens.css_root_block(mode) + """
-        --lift:        0 4px 14px color-mix(in srgb, var(--ink) 14%, transparent);
-        --lift-sm:     0 2px 8px color-mix(in srgb, var(--ink) 10%, transparent);
-        --lift-lg:     0 12px 32px color-mix(in srgb, var(--ink) 20%, transparent);
-        --rule-strong: color-mix(in srgb, var(--rule) 60%, #000);
-        --glow:        color-mix(in srgb, var(--pen) 12%, transparent);
-        --spot:        color-mix(in srgb, var(--accent) 12%, transparent);
-        --risk-text:   var(--risk); /* raw is safe in day mode */
-        """
-
-    theme_vars += """
+    Derived here, not in `design_tokens`, because they are CSS-only: a control
+    border that clears 3:1 on both surfaces, and the "may not hold" text colour.
+    """
+    rule_strong = (
+        "color-mix(in srgb, var(--rule) 50%, white)"
+        if mode == "night"
+        else "color-mix(in srgb, var(--rule) 60%, black)"
+    )
+    return (
+        design_tokens.css_root_block(mode)
+        + f"""
+        --rule-strong: {rule_strong};
+        --risk-text:   var(--danger-text); /* AA text for "may not hold", in both modes */
         --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
         --dur-fast: 150ms;
         --dur-base: 250ms;
         --dur-slow: 400ms;
-    """
+        """
+    )
+
+
+def inject_theme_css() -> None:
+    """Inject the Sorrel CSS for Day or Night, from session state."""
+    theme = st.session_state.get("theme", "day")
+
+    mode: design_tokens.Mode = "night" if theme in ("dark", "night") else "day"
+    theme_vars = theme_vars_for(mode)
 
     st.markdown(f"""
 <style>
@@ -67,13 +79,14 @@ def inject_theme_css() -> None:
 
 :root {{
     {theme_vars}
-    --radius:      12px;
-    --radius-control: 8px;
+    --radius:      4px;
+    --radius-control: 4px;
     --radius-pill: 999px;
 
-    --sans:    'Public Sans', ui-sans-serif, 'Segoe UI', system-ui, sans-serif;
-    --heading: 'Bricolage Grotesque', 'Public Sans', ui-sans-serif, 'Segoe UI', system-ui, sans-serif;
-    --mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
+    --sans:    'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --heading: var(--sans);
+    --serif:   'Newsreader', Georgia, serif;
+    --mono:    'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
     --text-xs: .8125rem;
     --text-sm: .9375rem;
     --text-base: 1rem;
@@ -104,31 +117,29 @@ def inject_theme_css() -> None:
 #MainMenu, footer, .stAppDeployButton {{ visibility: hidden; }}
 header[data-testid="stHeader"] {{ background: transparent; }}
 /* The native run-status widget (spinner + "Stop") is the one piece of
-   stock Streamlit chrome the above rules don't touch — it's the only way
-   to interrupt a running analysis, so it stays, just re-themed to match
-   the Ledger palette instead of Streamlit's defaults. */
+   stock Streamlit chrome the above rules don't touch: it's the only way
+   to interrupt a running analysis, so it stays, re-themed to the tokens. */
 [data-testid="stStatusWidget"] {{
     background: var(--sheet);
     border: 1px solid var(--rule);
     border-radius: var(--radius-pill);
-    box-shadow: var(--lift-sm);
     color: var(--ink);
 }}
-[data-testid="stStatusWidget"] svg {{ color: var(--pen); }}
-.stApp {{
-    background-color: var(--stock);
-    background-image: none;
-    transition: background-color 0.2s ease;
-}}
+[data-testid="stStatusWidget"] svg {{ color: var(--accent-text); }}
+.stApp {{ background-color: var(--stock); background-image: none; }}
 .block-container {{ max-width: 1180px; padding-top: 2.2rem; }}
 html, body, .stApp, [class*="css"] {{ font-family: var(--sans); color: var(--ink); }}
 /* Figures line up in columns: tabular numerals on every metric and table. */
 .gauge .v, .datum .v, .kpi-ring-num, .kpi-tile .v, .trust-cell .v,
-[data-testid="stMetricValue"], [data-testid="stDataFrame"], .run-banner {{
+[data-testid="stMetricValue"], [data-testid="stDataFrame"], .run-banner, .artifact .sz {{
     font-variant-numeric: tabular-nums;
 }}
 hr {{ border: none; border-top: 1px solid var(--rule) !important; }}
-a {{ color: var(--pen) !important; text-underline-offset: 3px; font-weight: 600; }}
+a {{ color: var(--accent-text) !important; text-underline-offset: 3px; font-weight: 500; }}
+.sr-only {{
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}}
 
 section[data-testid="stSidebar"] {{
     background: var(--sheet);
@@ -136,109 +147,135 @@ section[data-testid="stSidebar"] {{
     background-image: none;
 }}
 section[data-testid="stSidebar"] .stSlider label,
-section[data-testid="stSidebar"] label p {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 600; }}
+section[data-testid="stSidebar"] label p {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 500; }}
 
 ::-webkit-scrollbar {{ width: 10px; height: 10px; }}
 ::-webkit-scrollbar-thumb {{ background: var(--rule); border-radius: 6px; border: 2px solid var(--stock); }}
 ::-webkit-scrollbar-track {{ background: transparent; }}
 
-/* ── Type: warm & rounded ── */
+/* ── Type: Geist for the interface, Newsreader italic for the one accent word ── */
 h1, h2, h3, h4, h5, h6 {{
     font-family: var(--heading) !important;
     letter-spacing: -.01em;
     color: var(--ink);
 }}
-h1 {{ font-weight: 700 !important; font-size: var(--text-2xl) !important; line-height: 1.08; }}
-h2 {{ font-weight: 700 !important; font-size: var(--text-xl) !important; line-height: 1.2; }}
-h3 {{ font-weight: 700 !important; font-size: var(--text-lg) !important; line-height: 1.25; }}
-/* Section headings inside a tab keep the earlier visual size at their corrected level. */
+h1 {{ font-weight: 600 !important; font-size: var(--text-2xl) !important; line-height: 1.15; letter-spacing: -.02em; }}
+h2 {{ font-weight: 600 !important; font-size: var(--text-lg) !important; line-height: 1.2; }}
+h3 {{ font-weight: 600 !important; font-size: var(--text-base) !important; line-height: 1.25; }}
+/* Section headings inside a tab keep one scale: 20px sections, 16px sub-sections. */
 [data-baseweb="tab-panel"] h2 {{ font-size: var(--text-lg) !important; }}
 [data-baseweb="tab-panel"] h3 {{ font-size: var(--text-base) !important; }}
-[data-baseweb="tab-panel"] .exec-directive h2 {{ font-size: var(--text-xl) !important; }}
-h4 {{ font-weight: 700 !important; font-size: var(--text-base) !important; letter-spacing: 0; }}
+[data-baseweb="tab-panel"] .exec-directive h2 {{ font-size: var(--text-lg) !important; }}
+h4 {{ font-weight: 600 !important; font-size: var(--text-sm) !important; letter-spacing: 0; }}
 .stMarkdown p, .stMarkdown li {{ font-size: var(--text-base); line-height: 1.6; max-width: 68ch; }}
 code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
-[data-testid="stMetricValue"] {{ font-family: var(--heading) !important; font-weight: 700; color: var(--ink) !important; }}
+[data-testid="stMetricValue"] {{ font-family: var(--mono) !important; font-weight: 600; color: var(--ink) !important; }}
 [data-testid="stMetricLabel"] * {{ color: var(--graphite) !important; }}
-[data-testid="stFileUploader"] section {{ background: var(--sheet) !important; border: 1px dashed var(--rule) !important; }}
+[data-testid="stFileUploader"] section {{ background: var(--stock) !important; border: 1px dashed var(--rule-strong) !important; }}
 [data-testid="stFileUploader"] section * {{ color: var(--ink) !important; }}
 [data-testid="stFileUploader"] small {{ color: var(--graphite) !important; }}
 .stExpander {{ border-color: var(--rule-faint) !important; background: var(--sheet) !important; }}
 .stExpander summary {{ color: var(--ink) !important; }}
+.eyebrow, .hero-eyebrow {{
+    display: block; font-family: var(--mono); font-size: 11px; font-weight: 600; line-height: 1.2;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--graphite); margin: 0 0 .5rem;
+}}
 
-/* ── Quick Facts bar ── */
-.datum {{ display: flex; align-items: stretch; flex-wrap: wrap;
-         background: var(--sheet); border-radius: var(--radius);
-         border-bottom: 1px solid var(--rule-faint);
-         margin: 0 0 1.5rem; overflow: hidden; }}
-.datum .cell {{ padding: .7rem 1.2rem; margin-right: 0;
-               border-right: 1px solid var(--rule-faint); }}
-.datum .cell:last-child {{ border-right: none; }}
-.datum .k {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 600; }}
-.datum .v {{ font-family: var(--sans); font-size: var(--text-sm); font-weight: 700; color: var(--ink); margin-top: 2px; }}
+/* ── Brand: the italic serif wordmark with its small seal ── */
+.topbar-name {{ display: flex; align-items: center; gap: 10px; }}
+.brand-seal {{
+    width: 24px; height: 24px; display: inline-grid; place-items: center; flex: none;
+    background: var(--pen); color: var(--accent-ink); border-radius: 3px;
+    font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 17px; line-height: 1;
+    padding-bottom: 2px;
+}}
+.brand-name {{
+    font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 23px;
+    letter-spacing: -.01em; line-height: 1; color: var(--ink);
+}}
 
-/* ── Section head ── */
-.sect {{ margin: 2.2rem 0 1.1rem; border-bottom: 2px solid var(--rule);
-        padding-bottom: .5rem; }}
+/* ── Readout: State, File, Analysis ── */
+.datum {{
+    display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
+    margin: 0 0 1.5rem;
+}}
+.datum .cell {{ padding: 10px 16px; border-left: 1px solid var(--rule); min-width: 0; }}
+.datum .cell:first-child {{ border-left: none; }}
+.datum .k {{
+    font-family: var(--mono); font-size: 10.5px; font-weight: 500; line-height: 1.2;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--graphite);
+}}
+.datum .v {{ font-size: var(--text-sm); font-weight: 600; color: var(--ink); margin-top: 4px; overflow-wrap: anywhere; }}
+
+/* ── Section head: the title, with an optional mono note on the right ── */
+.sect {{
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    margin: 1.6rem 0 .9rem; padding: 0;
+}}
 .sect:first-child {{ margin-top: .4rem; }}
-.sect h2, .sect h3 {{ margin: 0; padding: 0; }}
-.sect .note {{ font-size: var(--text-xs); color: var(--graphite); margin-top: .3rem; }}
+.sect h2, .sect h3 {{ margin: 0; padding: 0; font-size: var(--text-lg) !important; letter-spacing: -.01em; }}
+.sect .note {{
+    font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--graphite); overflow-wrap: anywhere;
+}}
 
 /* ── Chart panels ── */
 .chart-title {{
-    font-family: var(--heading); font-size: var(--text-lg) !important; font-weight: 700 !important;
-    color: var(--ink); margin: 0 0 .5rem; padding: 0;
+    font-family: var(--heading); font-size: var(--text-base) !important; font-weight: 600 !important;
+    color: var(--ink); margin: 0 0 .5rem; padding: 0; line-height: 1.4;
 }}
 .chart-desc {{ font-size: var(--text-sm); color: var(--graphite); margin-top: .5rem; line-height: 1.4; }}
+.chart-src {{ font-size: var(--text-xs); color: var(--graphite); margin: .5rem 0 0; }}
 
-/* ── Primary task steps (file, question, run) ── */
+/* ── Primary task steps (file, question, mode, run) ── */
 .step-head {{
-    display: flex; align-items: center; gap: .55rem; margin: 1rem 0 .4rem;
-    font-family: var(--heading); font-weight: 700; font-size: var(--text-lg); color: var(--ink);
+    display: flex; align-items: center; gap: 10px; margin: 1.1rem 0 .5rem;
+    font-family: var(--heading); font-weight: 600; font-size: var(--text-base); color: var(--ink);
 }}
 .step-head:first-child {{ margin-top: .2rem; }}
 .step-n {{
-    display: inline-grid; place-items: center; width: 1.6rem; height: 1.6rem; border-radius: 50%;
-    background: var(--pen); color: var(--sheet); font-size: var(--text-xs); font-weight: 800;
+    display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; flex: none;
+    background: var(--pen); color: var(--accent-ink);
+    font-family: var(--mono); font-size: 12px; font-weight: 600; line-height: 1;
 }}
-.file-identity {{ margin: .4rem 0 .2rem; font-size: var(--text-sm); color: var(--graphite); overflow-wrap: anywhere; }}
-.file-identity b {{ color: var(--ink); }}
+.file-identity {{
+    margin: .6rem 0 .3rem; padding: 10px 14px; font-size: var(--text-sm); overflow-wrap: anywhere;
+    background: var(--accent-soft); border: 1px solid var(--pen); border-radius: var(--radius);
+    color: var(--accent-text);
+}}
+.file-identity b {{ color: inherit; font-weight: 600; }}
 .file-notices {{ margin: .3rem 0 .7rem; font-size: var(--text-xs); color: var(--graphite); }}
-.file-notices summary {{ cursor: pointer; font-weight: 600; min-height: 24px; }}
+.file-notices summary {{ cursor: pointer; font-weight: 500; min-height: 24px; color: var(--ink-2); }}
 .file-notices ul {{ margin: .3rem 0 0; padding-left: 1.2rem; line-height: 1.5; }}
 
-/* ── Hero ── */
+/* The task card holds the one primary task. Only the border colour and corner come from the
+   key class, so the card still draws its own native frame. */
+.st-key-task_card {{ border-color: var(--rule); border-radius: var(--radius); }}
+
+/* ── Page header ── */
 .hero {{ padding: .2rem 0 1rem; }}
 .hero h1 {{
-    font-size: clamp(2rem, 3.8vw, 3.5rem);
-    font-weight: 700;
-    line-height: 1.08;
-    letter-spacing: -.02em;
-    margin: 0;
-    max-width: 18ch;
-}}
-@keyframes riseIn {{
-    from {{ opacity: 0; transform: translateY(10px); }}
-    to   {{ opacity: 1; transform: translateY(0); }}
+    font-size: clamp(1.7rem, 3vw, 2.3rem); font-weight: 600; line-height: 1.15;
+    letter-spacing: -.02em; margin: 0; max-width: 18ch;
 }}
 .hero .hero-sub {{
-    color: var(--graphite); font-size: var(--text-base); line-height: 1.6;
-    margin: 1rem 0 0; max-width: 54ch;
+    color: var(--ink-2); font-size: var(--text-base); line-height: 1.55;
+    margin: .6rem 0 0; max-width: 58ch;
 }}
-@media (prefers-reduced-motion: reduce) {{ .hero h1 {{ animation: none; }} }}
 .hero.compact {{ padding: .4rem 0 .6rem; }}
-.hero.compact .hero-eyebrow {{
-    font-size: var(--text-xs); font-weight: 700; letter-spacing: .04em; color: var(--pen); margin-bottom: .35rem;
+.hero.compact h1 {{ max-width: none; overflow-wrap: anywhere; }}
+/* The file name is the one italic serif word in the header. */
+.hero .hero-file {{
+    font-family: var(--serif); font-style: italic; font-weight: 400; color: var(--accent-text);
+    overflow-wrap: anywhere;
 }}
-.hero.compact h1 {{
-    font-size: clamp(1.625rem, 3.4vw, 2.5rem); line-height: 1.12; max-width: none; letter-spacing: -.01em;
-    animation: none; overflow-wrap: anywhere;
-}}
-.hero.compact .hero-file {{ color: var(--graphite); font-weight: 700; font-size: .62em; display: inline-block; overflow-wrap: anywhere; }}
 .workspace-welcome {{ border-bottom: 1px solid var(--rule); margin-bottom: 1.25rem; }}
-.sample-choice {{ padding: .65rem .1rem .3rem; }}
-.sample-choice .sample-title {{ color: var(--ink); font-size: var(--text-sm); font-weight: 700; }}
-.sample-choice p {{ color: var(--graphite); font-size: var(--text-xs); line-height: 1.45; margin: .2rem 0 .5rem; }}
+.sample-choice {{
+    padding: 14px 16px; background: var(--stock); border: 1px solid var(--rule); border-radius: var(--radius);
+}}
+.sample-choice .sample-title {{ color: var(--ink); font-size: var(--text-sm); font-weight: 600; }}
+.sample-choice p {{ color: var(--graphite); font-size: var(--text-xs); line-height: 1.45; margin: .25rem 0 .6rem; }}
 
 .st-key-plate {{ padding-left: 16px; margin-right: -2.8rem; }}
 /* The 3D plate is an optional extra; on a phone it would push the inputs off the first screen.
@@ -254,116 +291,111 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     [data-testid="stHorizontalBlock"]:has(.st-key-plate) > [data-testid="stColumn"] {{
         min-width: 100% !important; flex: 1 1 100% !important;
     }}
-    .datum .cell {{ flex: 1 1 45%; }}
+    .datum {{ grid-auto-flow: row; }}
+    .datum .cell {{ border-left: none; border-top: 1px solid var(--rule); }}
+    .datum .cell:first-child {{ border-top: none; }}
     .stTabs [role="tab"] {{ min-height: 44px; }}
     .stButton button, .stDownloadButton button {{ min-height: 44px; }}
 }}
 
-/* ── Sidebar masthead & Theme controls ── */
+/* ── Sidebar masthead & settings groups ── */
 .side-brand {{ margin: .1rem 0 .8rem; }}
-.side-title {{ font-family: var(--heading); font-weight: 800; font-size: var(--text-lg);
-              line-height: 1.15; color: var(--ink); }}
+.side-word {{
+    font-family: var(--serif); font-style: italic; font-weight: 500; font-size: 20px;
+    letter-spacing: -.01em; line-height: 1; color: var(--ink); margin-bottom: .6rem;
+}}
+.side-title {{ font-family: var(--heading); font-weight: 600; font-size: var(--text-base); line-height: 1.15; color: var(--ink); }}
 .side-sub {{ font-size: var(--text-xs); color: var(--graphite); margin-top: 4px;
             max-width: 26ch; line-height: 1.45; }}
-.side-head {{ font-family: var(--sans); font-weight: 700; font-size: var(--text-xs);
-             color: var(--graphite); margin: 1.5rem 0 .6rem; }}
+.side-head {{
+    font-family: var(--mono); font-weight: 600; font-size: 11.5px; line-height: 1.3;
+    letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2);
+    margin: 1.5rem 0 .6rem; padding-top: .8rem; border-top: 1px solid var(--rule-faint);
+}}
 .side-head:first-of-type {{ margin-top: .5rem; }}
 
 /* ── Buttons ── */
 .stButton button, .stDownloadButton button {{
-    font-family: var(--sans); font-weight: 700; font-size: var(--text-sm);
+    font-family: var(--sans); font-weight: 500; font-size: var(--text-sm);
     border-radius: var(--radius-control) !important; letter-spacing: 0;
-    transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
 }}
 .stButton button[kind="primary"], .stDownloadButton button[kind="primary"] {{
-    background: var(--pen); color: var(--sheet); border: none;
-    box-shadow: var(--lift-sm);
+    background: var(--pen); color: var(--accent-ink); border: 1px solid transparent;
+}}
+.stButton button[kind="primary"]:enabled *, .stDownloadButton button[kind="primary"]:enabled * {{
+    color: var(--accent-ink) !important;
 }}
 .stButton button[kind="primary"]:hover:enabled,
 .stDownloadButton button[kind="primary"]:hover:enabled {{
-    background: var(--pen); color: var(--sheet);
-    box-shadow: var(--lift-sm);
+    background: var(--pen-hover); color: var(--accent-ink);
 }}
-.stButton button:active:enabled, .stDownloadButton button:active:enabled {{ transform: scale(.98); }}
 .stButton button[kind="primary"]:disabled {{
     background: var(--sheet-alt); color: var(--graphite);
-    border: 1px dashed var(--rule); box-shadow: none;
+    border: 1px dashed var(--rule-strong);
 }}
 .stButton button[kind="secondary"], .stDownloadButton button[kind="secondary"] {{
-    background: var(--sheet); border: 1px solid var(--rule); color: var(--ink);
-    box-shadow: var(--lift-sm);
+    background: transparent; border: 1px solid var(--rule-strong); color: var(--ink);
 }}
 .stButton button[kind="secondary"]:hover:enabled,
 .stDownloadButton button[kind="secondary"]:hover:enabled {{
-    background: var(--sheet-alt); color: var(--ink); border-color: var(--pen);
+    background: transparent; color: var(--ink); border-color: var(--ink);
 }}
-:focus-visible {{ outline: 2px solid var(--pen) !important; outline-offset: 2px; }}
+:focus-visible {{ outline: 2px solid var(--accent-text) !important; outline-offset: 2px; }}
 .stButton button:focus-visible, .stDownloadButton button:focus-visible {{
-    outline: 2px solid var(--pen) !important; outline-offset: 3px;
+    outline: 2px solid var(--accent-text) !important; outline-offset: 3px;
 }}
 
-/* ── Tabs ── */
+/* ── Tabs: an underline marks the active one, not a filled pill bar ── */
 [data-testid="stTabs"] [role="tablist"] {{
-    gap: 4px !important; background: var(--sheet-alt) !important; border-radius: var(--radius-pill) !important;
-    padding: 6px !important; overflow-x: auto; border: none; border-bottom: none !important;
+    gap: 4px !important; background: transparent !important; border-radius: 0 !important;
+    padding: 0 !important; overflow-x: auto; border: none; border-bottom: 1px solid var(--rule) !important;
     display: flex !important; width: 100% !important; position: relative;
 }}
 [data-testid="stTabs"] [role="tab"] {{
-    flex: 1 1 0px !important; justify-content: center !important; text-align: center !important;
-    border-radius: var(--radius-pill) !important; padding: 6px 16px !important; background-color: transparent !important;
-    border: none !important; margin: 0 !important; outline: none !important;
-    z-index: 1; position: relative;
-    transition: background-color var(--dur-fast) var(--ease-out);
+    flex: 0 0 auto !important; justify-content: center !important; text-align: center !important;
+    border-radius: 0 !important; padding: 12px 18px !important; background-color: transparent !important;
+    border: none !important; border-bottom: 2px solid transparent !important; margin: 0 0 -1px !important;
+    outline: none !important; z-index: 1; position: relative; white-space: nowrap;
 }}
 [data-testid="stTabs"] [role="tab"]:last-child {{ margin-right: 0 !important; }}
-[data-testid="stTabs"] [role="tab"]:focus, [data-testid="stTabs"] [role="tab"]:focus-visible {{ outline: none !important; }}
-[data-testid="stTabs"] [role="tab"] p {{ font-size: var(--text-sm); font-weight: 700;
-                                 color: var(--graphite) !important; letter-spacing: 0; margin: 0 !important;
-                                 position: relative; z-index: 2;
-                                 transition: color var(--dur-base) var(--ease-out); }}
+[data-testid="stTabs"] [role="tab"]:focus {{ outline: none !important; }}
+[data-testid="stTabs"] [role="tab"]:focus-visible {{ outline: 2px solid var(--accent-text) !important; outline-offset: -2px; }}
+[data-testid="stTabs"] [role="tab"] p {{ font-size: var(--text-sm); font-weight: 500;
+                                 color: var(--graphite) !important; letter-spacing: 0; margin: 0 !important; }}
 [data-testid="stTabs"] [role="tab"]:hover p {{ color: var(--ink) !important; }}
-/* The selected tab paints itself: the label can never sit on a background that failed to render
-   (Streamlit's own highlight bar and bottom rule are hidden, their markup changes between releases). */
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ background-color: var(--pen) !important; box-shadow: var(--lift-sm); }}
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] p {{ color: var(--sheet) !important; }}
-[data-testid="stTabs"] [role="tab"][aria-selected="true"]:hover p {{ color: var(--sheet) !important; }}
+/* The selected tab paints its own underline: the label never depends on Streamlit's highlight bar,
+   whose markup changes between releases. Night `--pen` is too dim for a thin line, so the line uses
+   the accent text colour (the same green in Day). */
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ border-bottom-color: var(--accent-text) !important; }}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] p {{ color: var(--ink) !important; font-weight: 600; }}
 [data-testid="stTabs"] .react-aria-SelectionIndicator,
 [data-testid="stTabs"] [data-baseweb="tab-highlight"],
 [data-testid="stTabs"] [data-baseweb="tab-border"] {{ display: none !important; }}
 [data-testid="stTabs"] [data-testid="stTabPanel"] {{ padding-top: 1.5rem; }}
 
-/* ── 3D & Viewport Enhancements ── */
-/* The plate (FrontendPlan.md 2.8 keeps this one's elevation permanently) — no
-   hover-lift, since the iframe is not a link or a Streamlit callback target. */
+/* ── 3D plate ── */
+/* The plate is not a link or a Streamlit callback target, so it has a hairline and nothing else. */
 .st-key-plate iframe {{
     border-radius: var(--radius);
     border: 1px solid var(--rule) !important;
     background: transparent !important;
-    box-shadow: var(--lift-sm);
 }}
 
 /* ── Inputs ── */
 [data-testid="stFileUploaderDropzone"] {{
-    background: var(--sheet-alt); border: 2px dashed var(--rule-strong); border-radius: var(--radius);
-    transition: border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+    background: var(--stock); border: 1.5px dashed var(--rule-strong); border-radius: var(--radius);
 }}
-[data-testid="stFileUploaderDropzone"]:hover {{
-    border-color: var(--pen);
-    background: var(--sheet);
-}}
+[data-testid="stFileUploaderDropzone"]:hover {{ border-color: var(--ink); }}
 [data-testid="stFileUploader"] button {{
-    background: var(--sheet) !important; border: 1px solid var(--rule) !important; color: var(--ink) !important;
+    background: transparent !important; border: 1px solid var(--rule-strong) !important; color: var(--ink) !important;
 }}
-[data-testid="stFileUploader"] button:hover {{
-    background: var(--sheet-alt) !important; border-color: var(--pen) !important;
-}}
+[data-testid="stFileUploader"] button:hover {{ border-color: var(--ink) !important; }}
 /* ── Inputs (Polling-safe, no !important) ── */
 [data-testid="stTextInput"] input,
 [data-testid="stTextArea"] textarea,
 [data-testid="stSelectbox"] div[data-baseweb="select"] > div {{
-    border-radius: 10px; border: 1px solid var(--rule);
-    background: var(--sheet); color: var(--ink);
-    transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+    border-radius: var(--radius-control); border: 1px solid var(--rule-strong);
+    background: var(--stock); color: var(--ink);
 }}
 [data-testid="stTextInput"] input::placeholder,
 [data-testid="stTextArea"] textarea::placeholder {{
@@ -372,7 +404,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 [data-testid="stTextInput"] input:focus,
 [data-testid="stTextArea"] textarea:focus,
 [data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within {{
-    border-color: var(--pen); box-shadow: 0 0 0 1px var(--pen);
+    border-color: var(--accent-text); box-shadow: 0 0 0 1px var(--accent-text);
 }}
 [data-testid="stTextInput"] input:hover,
 [data-testid="stTextArea"] textarea:hover,
@@ -381,37 +413,34 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 }}
 
 
-/* ── Stat tile ── */
-.gauge {{ background: var(--sheet); border: 1px solid var(--rule-faint);
-         border-radius: var(--radius);
-         padding: 1rem 1.1rem; height: 100%; min-height: 96px; }}
-
-.gauge .v {{ font-family: var(--heading); font-size: var(--text-xl); font-weight: 700;
-            line-height: 1.1; letter-spacing: -.01em; color: var(--ink);
-            overflow-wrap: anywhere; }}
+/* ── Stat tile (dataset preview, governance) ── */
+.gauge {{ background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
+         padding: 14px 16px; height: 100%; min-height: 96px; }}
+.gauge .v {{ font-family: var(--mono); font-size: var(--text-xl); font-weight: 600;
+            line-height: 1.1; color: var(--ink); overflow-wrap: anywhere; }}
 .gauge.long .v   {{ font-size: var(--text-lg); }}
 .gauge.longer .v {{ font-size: var(--text-sm); line-height: 1.25; }}
-.gauge .k {{ font-size: var(--text-xs); color: var(--graphite); margin-top: .4rem; font-weight: 600; }}
-.gauge .s {{ font-size: var(--text-xs); color: var(--graphite); margin-top: 2px; }}
-.gauge.flag {{ border-color: var(--risk); background: color-mix(in srgb, var(--risk) 8%, var(--sheet)); }}
-.gauge.flag::after {{ background: color-mix(in srgb, var(--risk) 8%, var(--sheet)); }}
-.gauge.flag .v {{ color: var(--risk); }}
+.gauge .k {{ font-family: var(--mono); font-size: 10.5px; font-weight: 500; letter-spacing: .08em;
+            text-transform: uppercase; color: var(--graphite); margin-top: .5rem; line-height: 1.2; }}
+.gauge .s {{ font-size: var(--text-xs); color: var(--graphite); margin-top: 4px; }}
+/* A gauge "worth a look" is amber with a shape and words in its note, never red. */
+.gauge.flag {{ border-color: var(--accent); }}
+.gauge.flag .s {{ color: var(--accent); font-weight: 600; }}
 
-/* ── Callout cards ── */
+/* ── Callout cards: the model may not hold up / should hold up ── */
 .defect-stamp {{
     border: 1px solid var(--risk);
-    background: color-mix(in srgb, var(--risk) 8%, var(--sheet));
+    background: color-mix(in srgb, var(--risk) 6%, var(--sheet));
     border-radius: var(--radius);
     padding: 1.1rem 1.4rem;
     margin: 1.2rem 0;
-    box-shadow: var(--lift-sm);
 }}
 .defect-stamp .stamp-tag {{
-    font-family: var(--sans); font-size: var(--text-xs); font-weight: 700;
-    color: var(--risk); display: block; margin-bottom: 4px;
+    font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .04em;
+    color: var(--danger-text); display: block; margin-bottom: 4px;
 }}
 .defect-stamp .stamp-title {{
-    font-family: var(--heading); font-size: var(--text-lg); font-weight: 800; color: var(--risk);
+    font-family: var(--heading); font-size: var(--text-base); font-weight: 600; color: var(--danger-text);
     margin-bottom: 6px;
 }}
 .defect-stamp .stamp-desc {{
@@ -420,18 +449,17 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 
 .cert-stamp {{
     border: 1px solid var(--pen);
-    background: color-mix(in srgb, var(--pen) 8%, var(--sheet));
+    background: var(--accent-soft);
     border-radius: var(--radius);
     padding: 1.1rem 1.4rem;
     margin: 1.2rem 0;
-    box-shadow: var(--lift-sm);
 }}
 .cert-stamp .stamp-tag {{
-    font-family: var(--sans); font-size: var(--text-xs); font-weight: 700;
-    color: var(--pen); display: block; margin-bottom: 4px;
+    font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .04em;
+    color: var(--accent-text); display: block; margin-bottom: 4px;
 }}
 .cert-stamp .stamp-title {{
-    font-family: var(--heading); font-size: var(--text-lg); font-weight: 800; color: var(--pen);
+    font-family: var(--heading); font-size: var(--text-base); font-weight: 600; color: var(--accent-text);
     margin-bottom: 6px;
 }}
 .cert-stamp .stamp-desc {{
@@ -443,71 +471,78 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     margin: 0 0 .9rem;
 }}
 .finding-headline {{
-    font-family: var(--heading); font-size: var(--text-lg); font-weight: 700;
+    font-family: var(--heading); font-size: var(--text-base); font-weight: 600;
     color: var(--ink); line-height: 1.4;
 }}
 
-/* ── Trust strip (Answers tab) ── */
-.trust-strip {{ display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }}
-.trust-cell {{
-    background: var(--sheet); border-radius: var(--radius);
-    padding: .9rem 1.2rem; flex: 1; min-width: 160px;
+/* ── Facts at a glance (Answers tab): the readout again, ruled cells ── */
+.trust-strip {{
+    display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius); margin: 0 0 1rem;
 }}
-.trust-cell .k {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 600;
-                  text-transform: uppercase; letter-spacing: .5px; }}
-.trust-cell .v {{ font-family: var(--heading); font-size: var(--text-xl); font-weight: 800;
-                  color: var(--ink); margin-top: .3rem; }}
+.trust-cell {{ padding: 10px 16px; border-left: 1px solid var(--rule); min-width: 0; }}
+.trust-cell:first-child {{ border-left: none; }}
+.trust-cell .k {{ font-family: var(--mono); font-size: 10.5px; color: var(--graphite); font-weight: 500;
+                  text-transform: uppercase; letter-spacing: .08em; line-height: 1.2; }}
+.trust-cell .v {{ font-size: var(--text-sm); font-weight: 600; color: var(--ink); margin-top: 4px; overflow-wrap: anywhere; }}
+@media (max-width: 900px) {{
+    .trust-strip {{ grid-auto-flow: row; }}
+    .trust-cell {{ border-left: none; border-top: 1px solid var(--rule); }}
+    .trust-cell:first-child {{ border-top: none; }}
+}}
 
 /* ── How the agent read the data (Answers tab) ── */
 .du {{
-    background: var(--sheet); border-radius: var(--radius);
+    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
     padding: .9rem 1.2rem; margin: 0 0 1.5rem;
-    font-size: var(--text-sm); line-height: 1.6; color: var(--ink); max-width: 74ch;
+    font-size: var(--text-sm); line-height: 1.6; color: var(--ink-2); max-width: 74ch;
 }}
-.du .k {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 600;
-          text-transform: uppercase; letter-spacing: .5px; margin-right: .4rem; }}
+.du .k {{ font-family: var(--mono); font-size: 11px; color: var(--graphite); font-weight: 600;
+          text-transform: uppercase; letter-spacing: .06em; margin-right: .4rem; }}
 .du .note {{ color: var(--graphite); }}
 
-/* ── Sandbox isolation badge (Details tab) ── */
+/* ── Sandbox isolation badge (Details tab): shape, then words ── */
 .iso-badge {{
-    display: inline-block; font-family: var(--sans); font-size: var(--text-xs); font-weight: 700;
-    padding: 3px 8px; border-radius: 4px; margin: 0 0 .75rem;
+    display: inline-block; font-family: var(--sans); font-size: var(--text-xs); font-weight: 600;
+    padding: 3px 8px; border-radius: var(--radius); margin: 0 0 .75rem;
+    color: var(--ink); border: 1px solid var(--rule-strong);
 }}
-.iso-badge.ok {{ color: var(--positive); background: color-mix(in srgb, var(--positive) 15%, transparent); }}
-.iso-badge.warn {{ color: var(--risk); background: color-mix(in srgb, var(--risk) 15%, transparent); }}
+.iso-badge.ok {{ border-color: var(--positive); }}
+.iso-badge.ok::before {{ content: "\\2713  "; color: var(--positive); }}
+.iso-badge.warn {{ border-color: var(--accent); }}
+.iso-badge.warn::before {{ content: "!  "; color: var(--accent); font-weight: 700; }}
 
-/* ── KPI strip (technical-detail expander) — classes replace what used to be
-   ~35 lines of inline style= per tile (IMPROVEMENTS.md 7.22) ── */
-.kpi-row {{ display: flex; gap: 1.5rem; margin-bottom: 1.2rem; flex-wrap: wrap; }}
+/* ── KPI strip (technical-detail expander) ── */
+.kpi-row {{ display: flex; gap: 1rem; margin-bottom: 1.2rem; flex-wrap: wrap; }}
 .kpi-gauge-card {{
-    background: var(--sheet); padding: 1.5rem; border-radius: var(--radius);
+    background: var(--sheet); border: 1px solid var(--rule); padding: 1.5rem; border-radius: var(--radius);
     flex: 1; min-width: 250px; display: flex; flex-direction: column; align-items: center;
     justify-content: center; position: relative; overflow: hidden;
 }}
-.kpi-gauge-label {{ font-size: var(--text-sm); color: var(--graphite); font-weight: 700;
-                    margin-bottom: 1.5rem; text-transform: uppercase; letter-spacing: 1px; }}
+.kpi-gauge-label {{ font-family: var(--mono); font-size: 11px; color: var(--graphite); font-weight: 600;
+                    margin-bottom: 1.5rem; text-transform: uppercase; letter-spacing: .08em; }}
 .kpi-ring-wrap {{ position: relative; width: 140px; height: 140px;
                   display: flex; align-items: center; justify-content: center; }}
 .kpi-ring-value {{ display: flex; flex-direction: column; align-items: center;
                    margin-top: 6px; z-index: 10; }}
-.kpi-ring-num {{ font-family: var(--heading); font-size: var(--text-3xl); font-weight: 800;
+.kpi-ring-num {{ font-family: var(--mono); font-size: var(--text-3xl); font-weight: 600;
                  color: var(--ink); line-height: 1; }}
-.kpi-ring-sub {{ font-size: var(--text-xs); font-weight: 700; color: var(--graphite);
-                 text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }}
+.kpi-ring-sub {{ font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--graphite);
+                 text-transform: uppercase; letter-spacing: .08em; margin-top: 2px; }}
 .kpi-tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
               gap: 1rem; flex: 2; min-width: 300px; }}
-.kpi-tile {{ background: var(--sheet); padding: 1.5rem; border-radius: var(--radius);
+.kpi-tile {{ background: var(--sheet); border: 1px solid var(--rule); padding: 1.5rem; border-radius: var(--radius);
              display: flex; flex-direction: column; justify-content: center; }}
-.kpi-tile.flagged {{ border: 1px solid var(--risk); }}
-.kpi-tile .k {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 600;
-               text-transform: uppercase; letter-spacing: .5px; }}
-.kpi-tile .v {{ font-family: var(--heading); font-size: var(--text-xl); font-weight: 700;
-               color: var(--ink); margin-top: 0.5rem; }}
-.kpi-tile .v.big {{ font-size: var(--text-2xl); font-weight: 800; margin-top: 0.2rem; }}
-.kpi-tile .v.risk {{ color: var(--risk); }}
+.kpi-tile.flagged {{ border-color: var(--risk); }}
+.kpi-tile .k {{ font-family: var(--mono); font-size: 10.5px; color: var(--graphite); font-weight: 500;
+               text-transform: uppercase; letter-spacing: .08em; }}
+.kpi-tile .v {{ font-family: var(--mono); font-size: var(--text-lg); font-weight: 600;
+               color: var(--ink); margin-top: 0.5rem; overflow-wrap: anywhere; }}
+.kpi-tile .v.big {{ font-size: var(--text-2xl); margin-top: 0.2rem; }}
+.kpi-tile .v.risk {{ color: var(--danger-text); }}
 .kpi-tile .s {{ font-size: var(--text-xs); color: var(--graphite); margin-top: 4px; }}
 
-/* ── Team grid & cards ── */
+/* ── Step-by-step record: one disclosure card per step ── */
 .agent-grid {{
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -516,36 +551,22 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 }}
 .agent-card {{
     background: var(--sheet);
-    border: 1px solid transparent;
+    border: 1px solid var(--rule);
     border-radius: var(--radius);
-    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
 }}
-/* Each card is a <details>/<summary> disclosure (render_agent_grid, cards.py) —
-   genuinely clickable, so the hover lift stays (FrontendPlan.md 2.8). */
-.agent-card:hover {{
-    transform: translateY(-2px);
-    box-shadow: var(--lift);
-    border-color: var(--pen);
-}}
+/* Each card is a <details>/<summary> disclosure (render_agent_grid, cards.py), so it is
+   genuinely clickable and may answer the pointer. */
+.agent-card:hover {{ border-color: var(--ink); }}
 .agent-card.agent-active {{
     border-color: var(--pen);
-    background: color-mix(in srgb, var(--pen) 6%, var(--sheet));
-    animation: pulseActive 2s infinite cubic-bezier(0.4, 0, 0.2, 1);
+    background: var(--accent-soft);
 }}
-@keyframes pulseActive {{
-    0%   {{ box-shadow: 0 0 0 0 color-mix(in srgb, var(--pen) 40%, transparent); }}
-    70%  {{ box-shadow: 0 0 0 10px color-mix(in srgb, var(--pen) 0%, transparent); }}
-    100% {{ box-shadow: 0 0 0 0 color-mix(in srgb, var(--pen) 0%, transparent); }}
-}}
-.agent-card.agent-flagged {{
-    border-color: var(--risk);
-}}
+.agent-card.agent-flagged {{ border-color: var(--accent); }}
 .agent-grid.org-chart-layout {{
     display: grid;
-    /* auto-fit/minmax, not a fixed column count + viewport media query —
+    /* auto-fit/minmax, not a fixed column count + viewport media query:
        this grid can render inside a narrower container (e.g. the run
-       progress rail), and a viewport-width breakpoint doesn't know that.
-       Matches the same pattern .agent-grid/.kpi-tiles already use above. */
+       progress rail), and a viewport-width breakpoint doesn't know that. */
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: 20px;
     position: relative;
@@ -557,10 +578,9 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     top: 50%;
     left: 20px;
     right: 20px;
-    height: 2px;
+    height: 1px;
     background: var(--rule);
     z-index: 0;
-    opacity: 0.5;
 }}
 .agent-grid.org-chart-layout .agent-card {{
     z-index: 1;
@@ -576,32 +596,36 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 }}
 .agent-role {{
     font-family: var(--heading);
-    font-weight: 700;
+    font-weight: 600;
     font-size: var(--text-sm);
     color: var(--ink);
 }}
+/* The badge carries a shape and a word; colour only repeats them. */
 .agent-badge {{
-    font-family: var(--sans);
-    font-size: var(--text-xs);
-    font-weight: 700;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
     padding: 2px 8px;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
+    border: 1px solid currentColor;
     color: var(--graphite);
 }}
-.agent-badge.done {{ color: var(--positive); background: color-mix(in srgb, var(--positive) 15%, transparent); }}
-.agent-badge.running {{ color: var(--pen); background: color-mix(in srgb, var(--pen) 15%, transparent); }}
-.agent-badge.error {{ color: var(--risk); background: color-mix(in srgb, var(--risk) 15%, transparent); }}
+.agent-badge.done {{ color: var(--positive); }}
+.agent-badge.running {{ color: var(--accent-text); }}
+.agent-badge.error {{ color: var(--accent); }}
 
-/* ── Bento Dashboard Layout ── */
+/* ── Finding and provisional cards ── */
 .bento-grid {{
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 1.5rem;
+    gap: 1rem;
     align-items: start;
 }}
 .bento-card, .finding-card {{
     background: var(--sheet);
-    border: 1px solid var(--rule-faint);
+    border: 1px solid var(--rule);
     border-radius: var(--radius);
     padding: 1.2rem;
 }}
@@ -610,17 +634,16 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 }}
 .finding-card.flagged {{ border-color: var(--risk); }}
 .finding-detail {{ color: var(--graphite); font-size: var(--text-xs); line-height: 1.5; margin-top: .4rem; }}
-.finding-chart-note {{ color: var(--pen); font-size: var(--text-xs); font-weight: 700; margin-top: .55rem; }}
+.finding-chart-note {{ color: var(--accent-text); font-size: var(--text-xs); font-weight: 600; margin-top: .55rem; }}
 .agent-card {{ position: relative; overflow: hidden; display: flex; flex-direction: column; }}
 .agent-details {{ padding: 1rem; cursor: pointer; width: 100%; }}
 .agent-summary {{ list-style: none; display: flex; flex-direction: column; }}
 .agent-header {{ display: flex; justify-content: space-between; align-items: center; width: 100%; }}
-.agent-role {{ font-weight: 700; color: var(--ink); display: flex; align-items: center; gap: 8px; }}
-.agent-more {{ margin-top: 1rem; padding-top: 1rem; border-top: 1px dashed var(--rule); font-size: var(--text-sm); }}
+.agent-role {{ font-weight: 600; color: var(--ink); display: flex; align-items: center; gap: 8px; }}
+.agent-more {{ margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--rule-faint); font-size: var(--text-sm); }}
 .agent-more-rule {{ margin-bottom: .5rem; }}
-.agent-more-found {{ color: var(--pen); font-weight: 600; }}
-.kpi-ring-svg {{ position: absolute; top: 0; left: 0; transform: rotate(-90deg); overflow: visible;
-                filter: drop-shadow(0 4px 6px color-mix(in srgb, var(--ink) 12%, transparent)); }}
+.agent-more-found {{ color: var(--accent-text); font-weight: 500; }}
+.kpi-ring-svg {{ position: absolute; top: 0; left: 0; transform: rotate(-90deg); overflow: visible; }}
 .agent-desc {{
     font-size: var(--text-xs);
     line-height: 1.5;
@@ -628,20 +651,20 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     margin: 5px 0 9px;
 }}
 .agent-metric {{
-    font-family: var(--sans);
-    font-size: var(--text-xs);
-    font-weight: 600;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 500;
     color: var(--graphite);
     background: var(--sheet-alt);
     padding: 4px 8px;
-    border-radius: 8px;
+    border-radius: var(--radius);
     display: inline-block;
 }}
 
 /* ── Handoff Stream Feed ── */
 .handoff-stream {{
     margin: 1.5rem 0;
-    border-left: 2px solid var(--rule);
+    border-left: 1px solid var(--rule);
     padding-left: 1.2rem;
 }}
 .handoff-item {{
@@ -651,18 +674,20 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .handoff-item::before {{
     content: "";
     position: absolute;
-    left: calc(-1.2rem - 5px);
-    top: 5px;
-    width: 9px;
-    height: 9px;
+    left: calc(-1.2rem - 4px);
+    top: 6px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
     background: var(--pen);
 }}
 .handoff-meta {{
-    font-family: var(--sans);
-    font-size: var(--text-xs);
-    color: var(--pen);
-    font-weight: 700;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--accent-text);
+    font-weight: 600;
     margin-bottom: 2px;
 }}
 .handoff-text {{
@@ -671,178 +696,227 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     color: var(--ink);
 }}
 
-/* ── Executive Directive ── */
+/* ── Summary: the question and its answer ── */
 .exec-directive {{
     background: var(--sheet);
-    border: 1px solid var(--rule-faint);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--pen);
     border-radius: var(--radius);
-    padding: 1.3rem 1.5rem;
+    padding: 1.2rem 1.5rem;
     margin-bottom: 1.5rem;
 }}
+.exec-directive h2 {{ margin: 0 0 .4rem; }}
 .exec-directive .dir-label {{
-    font-family: var(--sans);
-    font-size: var(--text-xs);
-    color: var(--pen);
-    font-weight: 700;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--graphite);
+    font-weight: 600;
     margin-bottom: 5px;
 }}
 .exec-directive .dir-content {{
-    font-size: var(--text-base);
-    line-height: 1.65;
+    font-size: 17px;
+    line-height: 1.55;
     color: var(--ink);
+    margin: 0;
 }}
 
 /* ── Cards ── */
 [data-testid="stExpander"] {{
-    background: var(--sheet) !important; border: 1px solid var(--rule-faint) !important;
+    background: var(--sheet) !important; border: 1px solid var(--rule) !important;
     border-radius: var(--radius); box-shadow: none;
 }}
-[data-testid="stExpander"] summary {{ font-weight: 700; font-size: var(--text-sm); color: var(--ink) !important; }}
-[data-testid="stExpander"] summary:hover {{ color: var(--pen) !important; }}
+[data-testid="stExpander"] summary {{ font-weight: 500; font-size: var(--text-sm); color: var(--ink) !important; }}
+[data-testid="stExpander"] summary:hover {{ color: var(--accent-text) !important; }}
 [data-testid="stCode"] pre, pre {{
     background: var(--code-bg) !important; border: 1px solid var(--rule);
-    border-radius: 10px; font-size: var(--text-xs); color: var(--ink) !important;
+    border-radius: var(--radius); font-size: var(--text-xs); color: var(--ink) !important;
 }}
 [data-testid="stAlert"] {{ border-radius: var(--radius); }}
+/* Notes are neutral. A warning or an error is amber (a step stopped, something to look at);
+   red is kept for "this may not hold". Each alert keeps its own icon, so shape and words stay. */
 [data-testid="stAlertContainer"] {{
     background: var(--sheet-alt) !important; border-radius: var(--radius);
-    border-left: 4px solid var(--graphite);
-    padding: .6rem .8rem .6rem 1.1rem; color: var(--ink) !important;
+    border: 1px solid var(--rule);
+    padding: .7rem 1rem; color: var(--ink) !important;
 }}
 [data-testid="stAlertContainer"] p {{ color: inherit !important; font-size: var(--text-sm); }}
 [data-testid="stAlertContainer"] svg {{ fill: currentColor; }}
 [data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) {{
-    border-left-color: var(--positive); color: var(--positive) !important;
+    border-color: var(--positive); background: color-mix(in srgb, var(--positive) 8%, var(--sheet)) !important;
 }}
 [data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]),
 [data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) {{
-    border-left-color: var(--risk); color: var(--risk) !important;
+    border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--sheet)) !important;
 }}
 [data-testid="stDataFrame"], [data-testid="stTable"] {{
     border-radius: var(--radius); overflow: hidden;
 }}
 
-/* ── Steps list ── */
-.sc {{ display: flex; align-items: center; gap: 12px;
-      padding: .6rem .2rem; border-bottom: 1px solid var(--rule-faint);
+/* ── Stage timeline: number, name, and a status with a shape and a word ── */
+.stage-list {{
+    list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
+    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
+}}
+.sc {{ display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; gap: 12px; align-items: center;
+      padding: 13px 18px; border-bottom: 1px solid var(--rule-faint);
       font-size: var(--text-sm); color: var(--graphite); }}
-.sc .sc-num {{ font-family: var(--sans); font-size: var(--text-xs); font-weight: 700; color: var(--ink);
-              flex: none; width: 1.8em; height: 1.8em; display: flex; align-items: center;
-              justify-content: center; border-radius: 50%; background: var(--rule); border: 1px solid transparent; }}
-.sc .nm {{ color: var(--ink); font-weight: 600; }}
-.sc .detail {{ margin-left: auto; font-size: var(--text-xs);
-              color: var(--graphite); text-align: right; padding-left: 1rem; }}
-.sc.done  .sc-num {{ background: var(--pen); color: var(--sheet); }}
-.sc.active .sc-num {{ background: var(--pen); color: var(--sheet); }}
-.sc.active {{ background: color-mix(in srgb, var(--pen) 6%, transparent); border-radius: 10px; }}
-.sc.active .nm::after {{ content: " — working"; font-weight: 400;
-                        color: var(--pen); font-size: var(--text-xs); }}
-.sc.skip  .sc-num {{ background: var(--sheet-alt); color: var(--graphite); border: 1px solid var(--rule); }}
-.sc.skip .nm {{ color: var(--graphite); font-weight: 400; }}
-.sc.err   .sc-num {{ background: var(--risk); }}
-.sc.err .nm {{ color: var(--risk); }}
+.sc:last-child {{ border-bottom: none; }}
+.sc .sc-num {{ font-family: var(--mono); font-size: 12px; font-weight: 500; color: var(--graphite); }}
+.sc .nm {{ color: var(--graphite); font-size: var(--text-sm); }}
+.sc .detail {{ display: block; margin-top: 2px; font-size: var(--text-xs); color: var(--graphite); }}
+.sc .st {{ font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .06em;
+          text-transform: uppercase; color: var(--graphite); white-space: nowrap; }}
+.sc.done .nm {{ color: var(--ink); }}
+.sc.done .st {{ color: var(--positive); }}
+.sc.active {{ background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--pen); }}
+.sc.active .nm {{ color: var(--ink); font-weight: 600; }}
+.sc.active .st {{ color: var(--accent-text); }}
+.sc.skip .nm {{ color: var(--graphite); }}
+.sc.err {{ box-shadow: inset 3px 0 0 var(--accent); }}
+.sc.err .nm {{ color: var(--ink); }}
+.sc.err .st {{ color: var(--accent); }}
 
-@keyframes slideInDown {{
-    from {{ opacity: 0; transform: translateY(-10px); }}
-    to {{ opacity: 1; transform: translateY(0); }}
-}}
-.sc.is-new, .prov-item.is-new {{
-    animation: slideInDown 0.4s var(--ease-out) forwards;
-}}
+/* A row that has just entered the list is not animated: the workspace has no motion. The class
+   stays on the markup (it marks a row seen once), and these rules keep it inert. */
+.sc.is-new, .prov-item.is-new {{ animation: none; }}
+.check-row.animate .check {{ animation: none; }}
 
-/* ── Annotations ── */
+/* ── Annotations: Insight / Do / Risk, hairline cards with a mono tag ── */
 .ic, .rc, .wc {{
-    border-left: 3px solid var(--rule); border-radius: 0 10px 10px 0;
-    padding: .5rem .8rem .5rem 1rem;
-    margin: 0 0 .75rem; font-size: var(--text-sm); line-height: 1.6; max-width: 74ch;
-    color: var(--ink); background: var(--sheet-alt);
+    display: flex; gap: 12px; align-items: baseline;
+    border: 1px solid var(--rule); border-radius: var(--radius);
+    padding: 14px 16px; margin: 0 0 .6rem;
+    font-size: var(--text-sm); line-height: 1.55; max-width: 74ch;
+    color: var(--ink-2); background: var(--sheet);
 }}
-.ic {{ border-left-color: var(--graphite); }}
-.rc {{ border-left-color: var(--pen); }}
-.wc {{ border-left-color: var(--risk); color: var(--risk); background: color-mix(in srgb, var(--risk) 6%, var(--sheet-alt)); }}
 .ic .mk, .rc .mk, .wc .mk {{
-    font-family: var(--sans); font-size: var(--text-xs); font-weight: 700; color: var(--graphite);
-    display: block; margin-bottom: 2px;
+    flex: none; font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--graphite);
 }}
-.rc .mk {{ color: var(--pen); }}
-.wc .mk {{ color: var(--risk); }}
+.rc .mk {{ color: var(--accent-text); }}
+.wc .mk {{ color: var(--danger-text); }}
+.wc {{ border-color: var(--risk); }}
 
-.reason {{ background: var(--sheet);
+.reason {{ background: var(--sheet); border: 1px solid var(--rule);
           border-radius: var(--radius); padding: 1.3rem 1.5rem;
-          font-size: var(--text-base); color: var(--ink); line-height: 1.72; max-width: 72ch; }}
+          font-size: var(--text-base); color: var(--ink); line-height: 1.7; max-width: 72ch; }}
 
-.run-banner {{ border-radius: var(--radius);
-              background: color-mix(in srgb, var(--pen) 10%, var(--sheet)); padding: .8rem 1.1rem;
-              color: var(--pen); font-size: var(--text-sm); font-weight: 700;
+.run-banner {{ border-radius: var(--radius); border: 1px solid var(--pen);
+              background: var(--accent-soft); padding: .9rem 1.1rem;
+              color: var(--accent-text); font-size: var(--text-base); font-weight: 600;
               margin: .4rem 0 1.2rem; }}
-.run-banner.ok {{ background: color-mix(in srgb, var(--positive) 10%, var(--sheet)); color: var(--positive); }}
-.run-banner.caution {{ background: color-mix(in srgb, var(--accent) 12%, var(--sheet)); color: var(--ink); }}
-.run-banner .sub {{ display: block; font-weight: 500; color: var(--graphite);
-                   font-size: var(--text-xs); margin-top: 2px; }}
+.run-banner.ok {{ border-color: var(--positive); background: color-mix(in srgb, var(--positive) 8%, var(--sheet)); color: var(--ink); }}
+.run-banner.caution {{ border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--sheet)); color: var(--ink); }}
+.run-banner .sub {{ display: block; font-weight: 500; color: var(--ink-2);
+                   font-size: var(--text-sm); margin-top: 4px; }}
 
 .empty {{ padding: 1.5rem 0 2.5rem; max-width: 62ch; }}
-.empty h2 {{ font-size: var(--text-xl); font-family: var(--heading);
-            font-weight: 700; line-height: 1.15; margin: 0 0 .75rem; }}
+.empty h2 {{ font-size: var(--text-lg); font-family: var(--heading);
+            font-weight: 600; line-height: 1.15; margin: 0 0 .75rem; }}
 .empty p {{ color: var(--graphite); font-size: var(--text-base); line-height: 1.6; margin: 0; }}
-.empty .next-steps {{ margin: 0 0 1rem; padding-left: 1.25rem; color: var(--ink);
+.empty .next-steps {{ margin: 0 0 1rem; padding-left: 1.25rem; color: var(--ink-2);
                       font-size: var(--text-base); line-height: 1.6; }}
 .empty .next-steps li {{ margin-bottom: .3rem; }}
 
 /* ── Top bar ── */
-.topbar-name {{ font-family: var(--heading); font-weight: 700; font-size: var(--text-base); color: var(--ink); }}
 .topbar-state {{ color: var(--graphite); font-size: var(--text-sm); overflow-wrap: anywhere; }}
-.topbar-state b {{ color: var(--ink); font-weight: 700; }}
+.topbar-state b {{ color: var(--ink); font-weight: 600; }}
 .topbar-hint {{ display: block; font-size: var(--text-xs); }}
 
-@media (max-width: 600px) {{
-    .datum {{ flex-direction: column; }}
-    .datum .cell {{ border-right: none; border-bottom: 1px solid var(--rule-faint); padding: .8rem 1.1rem; }}
-    .datum .cell:last-child {{ border-bottom: none; }}
-    .agent-grid {{ grid-template-columns: 1fr; }}
-    .side-head {{ margin: 1.2rem 0 .5rem; }}
+/* ── Join review (one card per related table) ── */
+.join-card {{
+    border: 1px solid var(--rule-faint); border-left: 3px solid var(--rule-strong);
+    background: var(--sheet); border-radius: var(--radius); padding: .4rem .6rem;
+    font-size: var(--text-xs); margin-top: .5rem;
 }}
 
-/* ── Audited-entry check row (FrontendPlan.md section 5) ── */
-.check-row {{ display: flex; flex-wrap: wrap; gap: .9rem; margin-top: .6rem; }}
-.check {{ font-size: var(--text-xs); font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }}
-.check.ok {{ color: var(--positive); }}
-.check.risk {{ color: var(--risk); }}
-.check.note {{ color: var(--graphite); font-weight: 500; }}
-@media (prefers-reduced-motion: no-preference) {{
-  .check-row.animate .check {{
-    opacity: 0; transform: translateY(2px);
-    animation: checkIn 240ms cubic-bezier(.16,1,.3,1) forwards;
-  }}
-  .check-row.animate .check:nth-child(1) {{ animation-delay: 0ms; }}
-  .check-row.animate .check:nth-child(2) {{ animation-delay: 60ms; }}
-  .check-row.animate .check:nth-child(3) {{ animation-delay: 120ms; }}
-  .check-row.animate .check:nth-child(4) {{ animation-delay: 180ms; }}
-  .check-row.animate .check:nth-child(5) {{ animation-delay: 240ms; }}
-  .check-row.animate .check:nth-child(6) {{ animation-delay: 300ms; }}
+/* ── Footer line ── */
+.site-foot {{
+    margin: 3rem 0 .5rem; padding-top: 1rem; border-top: 1px solid var(--rule);
+    font-size: var(--text-xs); color: var(--graphite); max-width: 68ch; line-height: 1.55;
 }}
-@keyframes checkIn {{ to {{ opacity: 1; transform: translateY(0); }} }}
+
+@media (max-width: 600px) {{
+    .agent-grid {{ grid-template-columns: 1fr; }}
+    .side-head {{ margin: 1.2rem 0 .5rem; }}
+    .sc {{ grid-template-columns: 36px minmax(0, 1fr); }}
+    .sc .st {{ grid-column: 2; }}
+}}
+
+/* ── Audited-entry check row (FrontendPlan.md section 5): a shape and words on every check ── */
+.check-row {{ display: flex; flex-wrap: wrap; gap: .5rem 1rem; margin-top: .6rem; }}
+.check {{ font-size: var(--text-xs); font-weight: 600; display: inline-flex; align-items: baseline; gap: 6px; }}
+.check.ok {{ color: var(--positive); }}
+.check.risk {{ color: var(--danger-text); }}
+.check.note {{ color: var(--graphite); font-weight: 500; }}
+
+/* ── Details for analysts: exact figures, folded away behind the plain sentence ── */
+.tech-note {{ margin: .6rem 0 0; font-size: var(--text-xs); color: var(--graphite); }}
+.tech-note summary {{
+    display: inline-block; cursor: pointer; font-family: var(--mono); font-size: 11.5px; font-weight: 500;
+    letter-spacing: .04em; color: var(--ink-2);
+}}
+.tech-note summary:hover {{ color: var(--ink); }}
+.tech-note p {{ margin: .5rem 0 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; color: var(--graphite); overflow-wrap: anywhere; }}
+
+/* ── Audit trail (Details): a titled section, then hairline rows ── */
+.audit-head {{ margin: 0 0 .6rem; padding-bottom: .5rem; border-bottom: 1px solid var(--rule-faint); }}
+.audit-head .audit-title {{ margin: 0; padding: 0; font-family: var(--heading); font-size: var(--text-base) !important; font-weight: 600 !important; color: var(--ink); }}
+.audit-head p {{ margin: 2px 0 0; font-size: var(--text-xs); color: var(--graphite); line-height: 1.45; }}
+[class*="st-key-audit_"] {{ border-color: var(--rule); border-radius: var(--radius); }}
+
+/* ── Downloads: an artifact shelf. Each file has a type tag, a purpose, a size and a state ── */
+.shelf-group {{
+    font-family: var(--mono); font-size: 11px; font-weight: 600; line-height: 1.2; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--graphite); margin: 1.4rem 0 .5rem;
+}}
+[class*="st-key-artifact_"] {{
+    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
+    padding: 12px 16px; margin-bottom: .5rem;
+}}
+.artifact {{ display: grid; grid-template-columns: 56px minmax(0, 1fr) auto auto; gap: 16px; align-items: center; }}
+.artifact .ty {{
+    font-family: var(--mono); font-size: 11px; font-weight: 600; line-height: 1; letter-spacing: .06em;
+    text-align: center; padding: 6px 0; border: 1px solid var(--rule); border-radius: 3px;
+    color: var(--ink-2); background: var(--stock);
+}}
+.artifact .nm {{ font-family: var(--mono); font-size: var(--text-xs); font-weight: 600; line-height: 1.3; color: var(--ink); overflow-wrap: anywhere; }}
+.artifact .why {{ margin-top: 3px; font-size: var(--text-xs); color: var(--graphite); line-height: 1.45; }}
+.artifact .sz {{ font-family: var(--mono); font-size: 12px; color: var(--graphite); white-space: nowrap; }}
+.avail {{
+    font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--positive); white-space: nowrap;
+}}
+.avail.off {{ color: var(--graphite); }}
+@media (max-width: 900px) {{
+    .artifact {{ grid-template-columns: 56px minmax(0, 1fr); }}
+    .artifact .sz, .artifact .avail {{ grid-column: 2; }}
+}}
+
 /* ── "How we got here" (Details): hairline-ruled blocks, tokens only ── */
-.how-we-got-here {{ margin: 0 0 2rem; max-width: 1100px; }}
-.how-title {{ font-family: var(--heading); margin: 0 0 .25rem; }}
-.how-lede {{ color: var(--graphite); font-size: var(--text-sm); line-height: 1.55; margin: 0 0 1rem; }}
-.how-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 2.5rem; }}
-.how-block {{ border-top: 1px solid var(--rule); padding: .9rem 0 1.1rem; min-width: 0; }}
-.how-h {{ font-size: var(--text-sm); font-weight: 700; margin: 0 0 .15rem; color: var(--ink); }}
+.how-we-got-here {{ margin: 0 0 2rem; max-width: 1100px; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius); }}
+.how-title {{ font-family: var(--heading); margin: 0; padding: 16px 22px .2rem; }}
+.how-lede {{ color: var(--graphite); font-size: var(--text-xs); line-height: 1.55; margin: 0; padding: 0 22px 14px; border-bottom: 1px solid var(--rule); background: var(--sheet-alt); }}
+.how-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 2.5rem; padding: 0 22px; }}
+.how-block {{ border-top: 1px solid var(--rule-faint); padding: .9rem 0 1.1rem; min-width: 0; }}
+.how-h {{ font-size: var(--text-sm); font-weight: 600; margin: 0 0 .15rem; color: var(--ink); }}
 .how-note {{ font-size: var(--text-xs); color: var(--graphite); line-height: 1.5; margin: 0 0 .6rem; }}
 .how-lead {{ font-size: var(--text-sm); font-weight: 600; color: var(--ink); line-height: 1.5; margin: 0 0 .4rem; }}
-.how-text {{ font-size: var(--text-sm); color: var(--ink); line-height: 1.6; margin: 0 0 .5rem; overflow-wrap: anywhere; }}
-.how-sub {{ font-size: var(--text-xs); font-weight: 700; color: var(--graphite); margin: .6rem 0 .2rem; }}
-.how-list {{ margin: 0 0 .4rem; padding-left: 1.1rem; font-size: var(--text-sm); line-height: 1.55; color: var(--ink); overflow-wrap: anywhere; }}
+.how-text {{ font-size: var(--text-sm); color: var(--ink-2); line-height: 1.6; margin: 0 0 .5rem; overflow-wrap: anywhere; }}
+.how-sub {{ font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--graphite); margin: .6rem 0 .2rem; }}
+.how-list {{ margin: 0 0 .4rem; padding-left: 1.1rem; font-size: var(--text-sm); line-height: 1.55; color: var(--ink-2); overflow-wrap: anywhere; }}
 .how-more {{ font-size: var(--text-xs); color: var(--graphite); margin: 0; }}
-.how-tag {{ font-size: var(--text-xs); font-weight: 700; color: var(--graphite); }}
+.how-tag {{ font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--graphite); }}
 .how-tag.supported {{ color: var(--positive); }}
-.how-tag.refuted {{ color: var(--risk); }}
+.how-tag.refuted {{ color: var(--danger-text); }}
 /* ── "Found so far, may change" (live run): hairline block, tokens only ── */
 .prov {{ border-top: 1px solid var(--rule); padding: .8rem 0 .4rem; margin: .8rem 0; max-width: 100%; }}
-.prov-h {{ font-size: var(--text-sm); font-weight: 700; margin: 0 0 .15rem; color: var(--ink); }}
+.prov-h {{ font-size: var(--text-sm); font-weight: 600; margin: 0 0 .15rem; color: var(--ink); }}
 .prov-note {{ font-size: var(--text-xs); color: var(--graphite); line-height: 1.5; margin: 0 0 1rem; }}
 .prov-list {{ margin: 0; padding-left: 1.1rem; font-size: var(--text-sm); line-height: 1.55; color: var(--ink); overflow-wrap: anywhere; }}
-.prov-kind {{ font-size: var(--text-xs); font-weight: 700; color: var(--graphite); display: block; margin-bottom: 4px; }}
+.prov-kind {{ font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--graphite); display: block; margin-bottom: 4px; }}
 .prov-count {{ font-size: var(--text-xs); color: var(--graphite); margin: .4rem 0 0; }}
 /* ── Native widget text follows the page tokens ──
    Streamlit's native theme is fixed (.streamlit/config.toml, Day palette), so in
@@ -858,27 +932,33 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 [data-testid="stFileUploaderDropzoneInstructions"] * {{ color: var(--graphite) !important; }}
 [data-testid="stTooltipIcon"] svg {{ color: var(--graphite) !important; }}
 [data-baseweb="input"], [data-baseweb="base-input"], [data-baseweb="textarea"] {{
-    background: var(--sheet) !important; border-color: var(--rule) !important;
+    background: var(--stock) !important; border-color: var(--rule-strong) !important;
 }}
 [data-testid="stTextInput"] button, [data-testid="stNumberInput"] button {{ color: var(--ink) !important; }}
-[data-testid="stNumberInput"] input {{ background: var(--sheet) !important; color: var(--ink) !important; }}
-[data-testid="stNumberInput"] button {{ background: var(--sheet) !important; color: var(--ink) !important; }}
-/* ── Evidence inspector (Answers) ── */
-.st-key-selected_finding [role="radiogroup"] {{ gap: 0; }}
+[data-testid="stNumberInput"] input {{ background: var(--stock) !important; color: var(--ink) !important; }}
+[data-testid="stNumberInput"] button {{ background: var(--stock) !important; color: var(--ink) !important; }}
+/* ── Evidence inspector (Answers): ranked findings beside the selected one ── */
+.st-key-selected_finding [role="radiogroup"] {{ gap: 8px; }}
 .st-key-selected_finding [role="radiogroup"] > label {{
-    padding: .7rem .25rem; border-bottom: 1px solid var(--rule-faint); margin: 0; align-items: flex-start;
+    padding: 14px 16px; margin: 0; align-items: flex-start;
+    background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
 }}
-.st-key-selected_finding [role="radiogroup"] > label:last-child {{ border-bottom: none; }}
+/* The finding list is clickable, so it may answer the pointer; the selected one is marked by a bar. */
+.st-key-selected_finding [role="radiogroup"] > label:hover {{ border-color: var(--graphite); }}
+.st-key-selected_finding [role="radiogroup"] > label:has(input:checked) {{
+    border-color: var(--accent-text); box-shadow: inset 3px 0 0 var(--accent-text);
+}}
 .st-key-selected_finding [role="radiogroup"] p {{ font-size: var(--text-sm); line-height: 1.45; }}
 .st-key-evidence_panel {{ background: var(--sheet); border-radius: var(--radius); }}
 .evidence-head {{ display: flex; flex-direction: column; align-items: flex-start; gap: .5rem; margin-bottom: .4rem; }}
-.evidence-title {{ font-family: var(--heading); font-size: var(--text-lg); font-weight: 700; line-height: 1.25; margin: 0; padding: 0; }}
-.evidence-detail {{ color: var(--graphite); font-size: var(--text-sm); line-height: 1.55; max-width: 68ch; margin: .4rem 0 .6rem; }}
+.evidence-title {{ font-family: var(--heading); font-size: var(--text-lg) !important; font-weight: 600 !important; line-height: 1.3; margin: 0; padding: 0; }}
+.evidence-detail {{ color: var(--ink-2); font-size: var(--text-sm); line-height: 1.6; max-width: 68ch; margin: .4rem 0 .6rem; }}
 .evidence-none, .evidence-source {{ color: var(--graphite); font-size: var(--text-xs); margin: .4rem 0; }}
 .evidence-caveats {{ font-size: var(--text-sm); color: var(--ink); margin: .6rem 0; }}
-.evidence-caveats ul {{ margin: .25rem 0 0; padding-left: 1.2rem; color: var(--graphite); line-height: 1.5; }}
+.evidence-caveats ul {{ margin: .25rem 0 0; padding-left: 1.2rem; color: var(--ink-2); line-height: 1.5; }}
 .verdict-mark {{
-    display: inline-flex; align-items: center; font-size: var(--text-xs); font-weight: 700;
+    display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; font-weight: 600;
+    letter-spacing: .06em; text-transform: uppercase;
     padding: .15rem .65rem; border-radius: var(--radius-pill); border: 1px solid currentColor; background: var(--sheet);
 }}
 .verdict-mark.held {{ color: var(--positive); }}
@@ -894,12 +974,13 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 /* Higher contrast: heavier outlines, no tinted surfaces standing in for borders. */
 @media (prefers-contrast: more) {{
     :focus-visible {{ outline-width: 3px !important; }}
-    .finding-card, .bento-card, .gauge, .exec-directive, [data-testid="stExpander"] {{ border-color: var(--rule-strong) !important; }}
+    .finding-card, .bento-card, .gauge, .exec-directive, .datum, .trust-strip, .stage-list, .agent-card,
+    [data-testid="stExpander"], [class*="st-key-artifact_"] {{ border-color: var(--rule-strong) !important; }}
     .check, .run-banner {{ border: 1px solid currentColor; }}
 }}
 /* Reduced transparency: nothing translucent sits behind text. */
 @media (prefers-reduced-transparency: reduce) {{
-    .finding-card, .bento-card, .run-banner, .check, .agent-badge {{ background: var(--sheet) !important; }}
+    .finding-card, .bento-card, .run-banner, .check, .defect-stamp, .wc {{ background: var(--sheet) !important; }}
     * {{ backdrop-filter: none !important; }}
 }}
 </style>

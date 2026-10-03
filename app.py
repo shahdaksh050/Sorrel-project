@@ -1,5 +1,5 @@
 """
-Streamlit UI — Agentic Data Analysis System.
+Streamlit UI for Sorrel (the working name of DSA Agent).
 
 Run:
     streamlit run app.py
@@ -42,8 +42,8 @@ _HOSTED = os.getenv("DSA_HOSTED", "false").strip().lower() in ("1", "true", "yes
 
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
-    page_title="Agentic Data Analysis",
-    page_icon="🧾",
+    page_title="Sorrel",
+    page_icon=":material/eco:",
     layout="wide",
     # Settings are one level deeper than the task (file, question, run), so the sidebar starts closed.
     initial_sidebar_state="collapsed",
@@ -416,7 +416,7 @@ def _join_review(uploads: list[Any]) -> dict[int, dict[str, Any]]:
     for i, p in zip(idx, previews, strict=False):
         plan = p["plan"]
         if plan is None:
-            color, body = "var(--risk)", f"No join proposed. {html.escape(p['reason_if_none'])}"
+            color, body = "var(--accent)", f"No join proposed. {html.escape(p['reason_if_none'])}"
         else:
             cov = float(plan["coverage"])
             color = "var(--positive)" if cov >= 0.9 else "var(--accent)" if cov >= 0.6 else "var(--risk)"
@@ -427,9 +427,8 @@ def _join_review(uploads: list[Any]) -> dict[int, dict[str, Any]]:
                 f"{plan['cardinality'].replace('_', '-')} · {cov:.0%} matched"
             )
         st.markdown(
-            f'<div style="border:1px solid var(--rule-faint); border-left:3px solid {color}; '
-            f'background:var(--sheet); border-radius:var(--radius); padding:.4rem .6rem; '
-            f'font-size:13px; margin-top:.5rem;"><b>{html.escape(p["name"])}</b><br>{body}</div>',
+            f'<div class="join-card" style="border-left-color:{color};">'
+            f'<b>{html.escape(p["name"])}</b><br>{body}</div>',
             unsafe_allow_html=True,
         )
         opts = ["Use this join", "Skip", "Change key"] if plan else ["Skip", "Change key"]
@@ -478,7 +477,11 @@ _MODE_NO_AI = "Without an AI summary"
 # ── Top bar: where am I, what state is the data in, theme ─────────────────────
 _cur_theme = st.session_state.get("theme", "day")
 _bar_name, _bar_state, _bar_theme = st.columns([0.3, 0.5, 0.2], vertical_alignment="center")
-_bar_name.markdown('<div class="topbar-name">Agentic Data Analysis</div>', unsafe_allow_html=True)
+_bar_name.markdown(
+    '<div class="topbar-name"><span class="brand-seal" aria-hidden="true">s</span>'
+    '<span class="brand-name">Sorrel</span></div>',
+    unsafe_allow_html=True,
+)
 _bar_file = st.session_state.get("preview_name")
 _bar_state.markdown(
     '<div class="topbar-state">'
@@ -513,12 +516,13 @@ _hero_box = st.container()
 _inputs_box = (
     st.expander("Your file and question", expanded=False)
     if _workspace_state
-    else st.container(border=True)
+    else st.container(border=True, key="task_card")
 )
 
 with st.sidebar:
     st.markdown(
         '<div class="side-brand">'
+        '<div class="side-word">Sorrel</div>'
         '<div class="side-title">Settings</div>'
         '<div class="side-sub">Everything here has a safe default. You can run without opening it.</div></div>',
         unsafe_allow_html=True,
@@ -989,7 +993,7 @@ with _hero_box:
             _lead = {"running": "Analysing", "done": "Results for", "failed": "Could not finish"}[_workspace_state]
             st.markdown(
                 '<div class="hero compact">'
-                '<div class="hero-eyebrow">Agentic Data Analysis</div>'
+                '<div class="hero-eyebrow">Sorrel · Workspace</div>'
                 f'<h1>{_lead} <span class="hero-file">{_file_label}</span></h1></div>',
                 unsafe_allow_html=True,
             )
@@ -999,6 +1003,7 @@ with _hero_box:
         else:
             st.markdown(
                 '<div class="hero workspace-welcome">'
+                '<div class="hero-eyebrow">Sorrel · Workspace</div>'
                 '<h1>Start with the data.</h1>'
                 '<p class="hero-sub">Add a spreadsheet, ask a question, and get an answer with the '
                 'checks that back it up.</p></div>',
@@ -1044,6 +1049,7 @@ if preview_df is not None and not st.session_state["analysis_done"] and not _run
     c2.markdown(_gauge("Columns", str(len(preview_df.columns))),
                 unsafe_allow_html=True)
     c3.markdown(_gauge("Missing cells", f"{_miss_cells:,}",
+                       "Some cells are empty" if _miss_cells > 0 else "",
                        flag=_miss_cells > 0), unsafe_allow_html=True)
     c4.markdown(
         _gauge("Numeric columns",
@@ -1361,5 +1367,10 @@ if (preview_df is None
     )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MICRO-INTERACTIONS (Phase 3)
+# FOOTER
 # ══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    '<div class="site-foot">Sorrel is the working name of DSA Agent, a final-year project: '
+    "a seven-stage data analysis assistant that checks its own findings.</div>",
+    unsafe_allow_html=True,
+)

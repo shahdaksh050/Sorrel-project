@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from src.core.audited_entry import GLYPH, audited_checks
-from src.core.plain_language import describe_uncertainty, plainify
+from src.core.plain_language import describe_uncertainty, format_p, plainify
 from ui.components.icons import (
     ICON_CHART,
     ICON_COMPASS,
@@ -37,9 +37,15 @@ STAGE_DEFS: list[tuple[str, str]] = [
 
 
 def gauge(label: str, value: str, sub: str = "", *, flag: bool = False) -> str:
-    """One cell of the instrument readout: the number leads, the label follows."""
+    """One cell of the readout: the number leads, the label follows.
+
+    A flagged cell is "worth a look", never an error: its note always starts with
+    a "!" and says so in words, so the flag never rests on colour alone.
+    """
     value = str(value)
     fit = "" if len(value) <= 11 else " long" if len(value) <= 18 else " longer"
+    if flag:
+        sub = f"! {sub or 'Worth a look'}"
     value, label, sub = html.escape(value), html.escape(str(label)), html.escape(str(sub))
     sub_html = f'<div class="s">{sub}</div>' if sub else ""
     return (
@@ -57,11 +63,54 @@ def gap_is_risky(gap: float) -> bool:
 
 
 def section(title: str, note: str = "", level: str = "h3") -> None:
-    """Section head: the title sits on its own rule, with an optional mono note."""
+    """Section head: the title on the left, an optional mono note (such as a file name) on the right."""
     note_html = f'<div class="note">{html.escape(str(note))}</div>' if note else ""
     st.markdown(
         f'<div class="sect"><{level}>{html.escape(str(title))}</{level}>{note_html}</div>',
         unsafe_allow_html=True,
+    )
+
+
+def audit_head_html(title: str, note: str = "") -> str:
+    """Title and one plain line for a section of the Details audit trail."""
+    note_html = f"<p>{html.escape(str(note))}</p>" if note else ""
+    return f'<div class="audit-head"><h3 class="audit-title">{html.escape(str(title))}</h3>{note_html}</div>'
+
+
+def tech_note_html(text: str, summary: str = "Details for analysts") -> str:
+    """Exact figures folded behind the plain sentence; empty when there is nothing to fold."""
+    if not text.strip():
+        return ""
+    return (
+        f'<details class="tech-note"><summary>{html.escape(summary)}</summary>'
+        f"<p>{html.escape(text)}</p></details>"
+    )
+
+
+def format_size(n_bytes: int) -> str:
+    """File size as a person reads it: bytes below 1 KB, then KB or MB with one decimal at most."""
+    if n_bytes < 1024:
+        return f"{n_bytes} B"
+    if n_bytes < 1024 * 1024:
+        kb = n_bytes / 1024
+        return f"{kb:.0f} KB" if kb >= 10 else f"{kb:.1f} KB"
+    return f"{n_bytes / (1024 * 1024):.1f} MB"
+
+
+def artifact_info_html(type_tag: str, name: str, purpose: str, size_bytes: int | None, state: str) -> str:
+    """The text half of a Downloads shelf row: type tag, file name, purpose, size and availability.
+
+    The download button itself is a native widget placed beside this markup, so the
+    row never offers a file the button cannot deliver.
+    """
+    off = state != "Ready"
+    size = f'<span class="sz">{html.escape(format_size(size_bytes))}</span>' if size_bytes is not None else ""
+    avail = f'<span class="avail{" off" if off else ""}">{html.escape(state)}</span>'
+    return (
+        '<div class="artifact">'
+        f'<span class="ty">{html.escape(type_tag)}</span>'
+        f'<div><div class="nm">{html.escape(name)}</div><div class="why">{html.escape(purpose)}</div></div>'
+        f"{size}{avail}</div>"
     )
 
 
@@ -79,8 +128,17 @@ def safe_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+#: Every stage status is a shape and a word: a tick, a filled dot, a dash, an exclamation, an empty circle.
+_STAGE_WORDS: dict[str, str] = {
+    "done": "✓ Done",
+    "active": "● Working",
+    "skipped": "– Skipped",
+    "error": "! Stopped",
+}
+
+
 def stage_card(num: str, name: str, status: str, detail: str = "", is_new: bool = False) -> str:
-    """One row of the stage ledger. Numbered: the pipeline is a real sequence."""
+    """One row of the stage timeline: number, name, and a status word with a shape."""
     cls = {
         "done": "done",
         "active": "active",
@@ -90,27 +148,40 @@ def stage_card(num: str, name: str, status: str, detail: str = "", is_new: bool 
     if is_new and status != "pending":
         cls += " is-new"
     det = f'<span class="detail">{html.escape(str(detail))}</span>' if detail else ""
-    aria = ' aria-live="polite"' if status == "active" else ""
+    word = _STAGE_WORDS.get(status, "○ Waiting")
     return (
-        f'<div class="sc {cls.strip()}"{aria}>'
+        f'<li class="sc {cls.strip()}">'
         f'<span class="sc-num">{num.zfill(2)}</span>'
-        f'<span class="nm">{html.escape(str(name))}</span>{det}</div>'
+        f'<span class="nm">{html.escape(str(name))}{det}</span>'
+        f'<span class="st">{html.escape(word)}</span></li>'
     )
 
 
 def render_steps_list(stage_log: list[tuple[str, str, str]], seen_stages: set[str]) -> str:
-    """Render the primary, always-visible numbered steps list."""
+    """Render the primary, always-visible numbered timeline of the seven stages.
+
+    One polite status sentence announces the stage in progress, instead of making the
+    whole list a live region that a screen reader would read out again on every update.
+    """
     log_map = {n: (s, d) for n, s, d in stage_log}
-    html_out = ['<div aria-live="polite" aria-atomic="false">']
+    rows: list[str] = []
+    active: tuple[str, str] | None = None
     for num, name in STAGE_DEFS:
         status, detail = log_map.get(num, ("pending", ""))
         is_new = False
         if status != "pending" and num not in seen_stages:
             is_new = True
             seen_stages.add(num)
-        html_out.append(stage_card(num, name, status, detail, is_new))
-    html_out.append('</div>')
-    return "".join(html_out)
+        if status == "active" and active is None:
+            active = (num, name)
+        rows.append(stage_card(num, name, status, detail, is_new))
+    status_line = (
+        f'<p class="sr-only" role="status">Working on step {html.escape(active[0])} of {len(STAGE_DEFS)}: '
+        f"{html.escape(active[1])}</p>"
+        if active
+        else ""
+    )
+    return f'{status_line}<ol class="stage-list">{"".join(rows)}</ol>'
 
 
 def render_datum(cells: list[tuple[str, str]]) -> str:
@@ -156,7 +227,8 @@ FindingState = Literal["held", "needs_more", "unchecked"]
 _STATE_WORD: dict[FindingState, str] = {
     "held": "Held up", "needs_more": "Needs more data", "unchecked": "Not checked",
 }
-_STATE_MARK: dict[FindingState, str] = {"held": "●", "needs_more": "⊗", "unchecked": "○"}
+#: The same tick / exclamation / circle the check rows use (`audited_entry.GLYPH`), so one mark means one thing.
+_STATE_MARK: dict[FindingState, str] = {"held": GLYPH["pass"], "needs_more": GLYPH["fail"], "unchecked": GLYPH["neutral"]}
 
 
 def finding_state(finding: dict[str, Any]) -> FindingState:
@@ -176,26 +248,57 @@ def state_label(state: FindingState) -> str:
     return f"{_STATE_MARK[state]} {_STATE_WORD[state]}"
 
 
+def _check_marks_html(checks: list[Any]) -> str:
+    """The check spans of one row: a shape (hidden from screen readers) and the words that carry the meaning."""
+    return "".join(
+        f'<span class="check {_CHECK_CSS[c.state]}"><span aria-hidden="true">{GLYPH[c.state]}</span> '
+        f"{html.escape(c.label)}</span>"
+        for c in checks
+    )
+
+
+def analyst_figures(finding: dict[str, Any]) -> str:
+    """The finding's own exact figures as one line of plain text, or "" when it records none.
+
+    Only values the finding already carries are used: its effect size, p-values
+    and the tool that found it. Nothing is computed or invented here. Its
+    `confidence` is left out on purpose: on the finding bus that is a ranking
+    weight, and an analyst would misread it as statistical confidence.
+    """
+    bits: list[str] = []
+    effect = finding.get("effect")
+    if isinstance(effect, (int, float)) and not isinstance(effect, bool):
+        kind = str(finding.get("effect_kind") or "effect").replace("_", " ")
+        bits.append(f"{kind} = {effect:.4g}")
+    p_raw = finding.get("p_value")
+    if isinstance(p_raw, (int, float)) and not isinstance(p_raw, bool):
+        bits.append(f"p = {format_p(p_raw)}")
+    p_adj = finding.get("p_adjusted")
+    if isinstance(p_adj, (int, float)) and not isinstance(p_adj, bool):
+        bits.append(f"p after correcting for the other tests = {format_p(p_adj)}")
+    source = str(finding.get("source_tool") or "").replace("_", " ")
+    if source:
+        bits.append(f"found by {source}")
+    return ("; ".join(bits) + ".") if bits else ""
+
+
 def render_evidence_html(finding: dict[str, Any]) -> str:
-    """The selected finding's evidence: headline, verdict, plain detail, checks that ran, caveats, source."""
+    """The selected finding's evidence: headline, verdict, plain detail, checks that ran, caveats, then folded figures."""
     state = finding_state(finding)
     headline = html.escape(plainify(str(finding.get("headline", ""))))
     detail = round_for_reading(plainify(str(finding.get("detail") or "")))
     checks = audited_checks(finding.get("evidence"))
-    marks = "".join(
-        f'<span class="check {_CHECK_CSS[c.state]}">{GLYPH[c.state]} {html.escape(c.label)}</span>' for c in checks
-    )
+    marks = _check_marks_html(checks)
     caveats = "".join(
         f"<li>{html.escape(plainify(str(c)))}</li>" for c in (finding.get("caveats") or [])[:4]
     )
-    source = str(finding.get("source_tool") or "").replace("_", " ")
     return (
         f'<div class="evidence-head"><span class="verdict-mark {state}">{html.escape(state_label(state))}</span>'
         f'<h3 class="evidence-title">{headline}</h3></div>'
         + (f'<p class="evidence-detail">{html.escape(detail)}</p>' if detail else "")
         + (f'<div class="check-row">{marks}</div>' if marks else '<p class="evidence-none">No check ran on this finding.</p>')
         + (f'<div class="evidence-caveats"><b>Be careful</b><ul>{caveats}</ul></div>' if caveats else "")
-        + (f'<p class="evidence-source">Found by: {html.escape(source)}.</p>' if source else "")
+        + tech_note_html(analyst_figures(finding))
     )
 
 
@@ -221,11 +324,7 @@ def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str], is
     if checks:
         if any(c.state == "fail" for c in checks):
             is_flagged = True
-        marks = "".join(
-            f'<span class="check {_CHECK_CSS[c.state]}">{GLYPH[c.state]} {html.escape(c.label)}</span>'
-            for c in checks
-        )
-        check_html = f'<div class="check-row animate">{marks}</div>'
+        check_html = f'<div class="check-row animate">{_check_marks_html(checks)}</div>'
 
     classes = ["finding-card"]
     if is_primary:
@@ -368,19 +467,19 @@ def render_agent_grid(
         st_val = log_map.get(ag["stage"], "pending")
         if st_val == "done":
             badge_cls = "done"
-            badge_txt = "Done"
+            badge_txt = "✓ Done"
             card_cls = "agent-card"
         elif st_val == "active":
             badge_cls = "running"
-            badge_txt = "Working"
+            badge_txt = "● Working"
             card_cls = "agent-card agent-active"
         elif st_val == "error":
             badge_cls = "error"
-            badge_txt = "Needs attention"
+            badge_txt = "! Needs attention"
             card_cls = "agent-card agent-flagged"
         else:
             badge_cls = ""
-            badge_txt = "Waiting"
+            badge_txt = "○ Waiting"
             card_cls = "agent-card"
 
         agent_output = ""
@@ -555,7 +654,7 @@ def find_tool(tool_results: list[dict[str, Any]], name: str) -> dict[str, Any] |
 
 
 def get_vega_config() -> dict[str, Any]:
-    """Ledger palette for Vega-Lite charts."""
+    """Sorrel palette for Vega-Lite charts."""
     from src.core.chart_theme import vega_config as _vega_config_impl
 
     dark = st.session_state.get("theme", "day") in ("night", "dark")
@@ -583,10 +682,33 @@ def _render_chart_data(spec: dict[str, Any]) -> None:
         st.dataframe(safe_df(pd.DataFrame(shown)), width="stretch")
 
 
-def render_dashboard_chart(ch: dict[str, Any], vega_cfg: dict[str, Any], finding_note: str = "") -> None:
+def chart_provenance_html(finding: dict[str, Any] | None) -> str:
+    """The check row and the provenance line for a chart tied to a finding; "" when it has neither.
+
+    A chart is never an unexplained picture: the checks that ran on its finding sit
+    beside it, and a line says which step of the run produced it. An absent check
+    renders nothing, never a tick.
+    """
+    if not finding:
+        return ""
+    checks = audited_checks(finding.get("evidence"))
+    out = f'<div class="check-row">{_check_marks_html(checks)}</div>' if checks else ""
+    source = str(finding.get("source_tool") or "").replace("_", " ")
+    if source:
+        out += f'<p class="chart-src">Worked out by the {html.escape(source)} step of this run.</p>'
+    return out
+
+
+def render_dashboard_chart(
+    ch: dict[str, Any],
+    vega_cfg: dict[str, Any],
+    finding_note: str = "",
+    finding: dict[str, Any] | None = None,
+) -> None:
     """Render one dashboard panel (title, chart, caption/description).
 
     `finding_note` says which finding the chart supports and its verdict, when there is one.
+    `finding` (optional) adds that finding's check row and where it came from.
     """
     with st.container(border=True):
         st.markdown(
@@ -607,6 +729,9 @@ def render_dashboard_chart(ch: dict[str, Any], vega_cfg: dict[str, Any], finding
                 f'<div class="chart-desc">{html.escape(str(ch["description"]))}</div>',
                 unsafe_allow_html=True,
             )
+        provenance = chart_provenance_html(finding)
+        if provenance:
+            st.markdown(provenance, unsafe_allow_html=True)
         _render_chart_data(spec)
 
 

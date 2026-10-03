@@ -251,6 +251,10 @@ def render_answers_tab(
 
     # Search these findings: a keyword search over headlines, not free-form Q&A.
     st.markdown("## Search these findings")
+    st.caption(
+        "A keyword search over all the findings from this run. It is not a chat, "
+        "and it does not run a new analysis."
+    )
     ask_q = st.text_input(
         "Search these findings",
         placeholder="e.g. tenure churn",
@@ -268,13 +272,11 @@ def render_answers_tab(
                 "or check the Details tab for full coverage."
             )
 
-    # Technical detail expander
-    with st.expander("Show technical detail"):
-        radial_color = (
-            "var(--positive)"
-            if q >= 80
-            else ("var(--accent)" if q >= 60 else "var(--risk)")
-        )
+    # Technical detail expander: the plain answer above leads, the exact figures fold away here.
+    with st.expander("Details for analysts"):
+        # A low data-quality score is a warning (amber), not a "this may not hold" verdict: the
+        # score is printed in the ring, so the colour only adds to the number.
+        radial_color = "var(--positive)" if q >= 80 else "var(--accent)"
         gap_flag = gap_val is not None and gap_is_risky(gap_val)
         st.markdown(
             f"""<div class="kpi-row">

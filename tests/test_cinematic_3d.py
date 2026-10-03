@@ -275,3 +275,12 @@ def test_cinematic_text_pairs_meet_contrast_in_both_modes() -> None:
                        ("positive", "accent_soft"), ("accent_text", "accent_soft"), ("ink", "stock"),
                        ("graphite", "stock"), ("accent_ink", "pen")):
             assert ratio(pal[fg], pal[bg]) >= 4.5, f"{mode}: {fg} on {bg} = {ratio(pal[fg], pal[bg]):.2f}"
+
+
+def test_text_naming_a_placeholder_stays_text_and_never_splices_the_script_in() -> None:
+    """The state is substituted last, so a dataset name that looks like a template slot is just a string."""
+    trick = "__CINEMATIC_SCENE_SCRIPT__ and __FONT_LINKS__"
+    state = extract_cinematic_state({"preview_name": trick, "theme": "night"})
+    doc = build_cinematic_document(state)
+    assert _state_of(doc)["dataset"]["name"] == trick
+    assert doc.count("setAnimationLoop") == _read_asset("cinematic_3d.js").count("setAnimationLoop")

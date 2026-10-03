@@ -477,9 +477,9 @@ def build_cinematic_document(
         .replace("__TOKENS_NIGHT__", _mode_css("night"))
         .replace("__TOKENS_DAY__", _mode_css("day"))
         .replace("__FONT_LINKS__", font_links)
-        .replace("__CINEMATIC_STATE_JSON__", state_json)
         .replace("__SECTION_PAGER_SCRIPT__", _read_asset("section_pager.js"))
         .replace("__CINEMATIC_SCENE_SCRIPT__", scene_script)
+        .replace("__CINEMATIC_STATE_JSON__", state_json)  # last: dataset text that contains a placeholder name stays text
     )
 
 

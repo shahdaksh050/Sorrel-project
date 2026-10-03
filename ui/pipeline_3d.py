@@ -133,8 +133,8 @@ def build_document(stages: Sequence[Stage], theme: str = "day") -> str:
         .replace("__ROOT_TOKENS__", design_tokens.css_root_block(mode))
         .replace("__FONT_LINKS__", f'<link rel="stylesheet" href="{static_url("vendor/fonts/ledger-fonts.css")}">')
         .replace("__GSAP_URL__", static_url("vendor/gsap/3.15.0/gsap.min.js"))
-        .replace("__STATE_JSON__", state_json)
         .replace("__SCENE_SCRIPT__", f"window.__THREE_URLS__ = {three_urls};\n" + _asset("pipeline_3d.js"))
+        .replace("__STATE_JSON__", state_json)  # last: stage text that contains a placeholder name stays text
     )
 
 

@@ -247,3 +247,10 @@ def test_plate_text_and_marks_meet_contrast_in_both_themes() -> None:
                        ("graphite", "stock"), ("accent_ink", "pen"), ("ink", "sheet_alt")):
             assert ratio(p[fg], p[bg]) >= 4.5, f"{theme}: {fg} on {bg}"
         assert ratio(p["accent_text"], p["stock"]) >= 3.0  # the Night stage ink against the page
+
+
+def test_stage_text_naming_a_placeholder_stays_text_and_never_splices_the_script_in() -> None:
+    trick = "__SCENE_SCRIPT__ __GSAP_URL__"
+    document = build_document([Stage("1", "Reading", "done", trick)], theme="day")
+    assert _state_of(document)["stages"][0]["detail"] == trick
+    assert document.count("setAnimationLoop") == _asset("pipeline_3d.js").count("setAnimationLoop")

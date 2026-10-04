@@ -1,6 +1,7 @@
 """Regression checks for the native Streamlit presentation primitives."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -350,3 +351,33 @@ def test_stylesheet_only_targets_test_ids_this_streamlit_renders() -> None:
     # stToggle: Streamlit 1.57 draws a toggle as a checkbox; the rule that uses it is already dead.
     dead = sorted(i for i in ids if i not in bundle and not i.startswith(built_at_runtime) and i != "stToggle")
     assert not dead, f"selectors Streamlit does not render: {dead}"
+
+
+def test_a_tab_title_is_split_into_masked_words_and_keeps_its_text() -> None:
+    from ui.components.cards import reveal_words
+
+    marked = reveal_words("Your data and the", 0) + " " + reveal_words("checks", 4, "serif-it")
+    assert marked.count('class="w') == 5 and 'class="w serif-it" style="--k:4"' in marked
+    assert re.sub(r"<[^>]+>", "", marked) == "Your data and the checks"
+    assert "&lt;b&gt;" in reveal_words("<b>")  # escaped, like every other piece of text in a card
+
+
+def test_the_landing_page_motions_are_all_gated_and_leave_nothing_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    import streamlit as st
+    from ui import styles as ui_styles
+
+    emitted: list[str] = []
+    monkeypatch.setattr(st, "markdown", lambda body, **kwargs: emitted.append(body))
+    monkeypatch.setattr(st, "get_option", lambda key: "")
+    monkeypatch.setattr(st, "session_state", {"theme": "day"})
+    ui_styles.inject_theme_css()
+    css = emitted[0]
+    motion = " ".join(_media_blocks(css, "@media (prefers-reduced-motion: no-preference)"))
+    for name in ("bandOpen", "cardIn", "wordUp", "settleDown", "settleUp"):
+        assert f"@keyframes {name}" in motion, name
+    # Every animation starts from its first frame and is not held after it: `backwards`, never `both`/`forwards`.
+    animations = re.findall(r"animation:\s*([^;]+);", motion)
+    assert animations and all("backwards" in a and "both" not in a and "forwards" not in a for a in animations)
+    # The stepper rail's fill exists without motion (instant) and only grows with it.
+    assert "transform: scaleY(1)" in css.replace(motion, "")
+    assert ".stepper .step::before { transition: transform" in motion

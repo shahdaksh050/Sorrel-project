@@ -35,6 +35,11 @@ def markup(at: AppTest) -> str:
     return " ".join(str(m.value) for m in at.markdown)
 
 
+def spoken(text: str) -> str:
+    """The markup as it reads: tags dropped, so a title split into one span per word still matches."""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", text))
+
+
 def problems(at: AppTest) -> list[str]:
     return [str(e.value)[:300] for e in at.exception]
 
@@ -62,12 +67,12 @@ def main() -> dict[str, object]:
         if at.exception:
             break
         text = markup(at)
-        if "Analysing" in text and not running:
+        if "Analysing" in spoken(text) and not running:
             running = {
                 "stepper": 'class="stepper"' in text,
                 "exceptions": problems(at),
             }
-        if "Results for" in text:
+        if "Results for" in spoken(text):
             finished = True
             break
         at.run()
@@ -111,7 +116,7 @@ def main() -> dict[str, object]:
     text = markup(at)
     out["failed"] = {
         "exceptions": problems(at),
-        "headline": "Could not finish" in text,
+        "headline": "Could not finish" in spoken(text),
         "stopped_step": 'class="step err"' in text and "! Stopped" in text,
     }
     return out

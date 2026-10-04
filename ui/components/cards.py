@@ -72,13 +72,25 @@ def section(title: str, note: str = "", level: str = "h3") -> None:
     )
 
 
+def reveal_words(text: str, first: int = 0, css_class: str = "") -> str:
+    """Escaped text with each word in its own mask, so a title can rise word by word (the line reveal
+    of the landing page). `first` continues the count from an earlier run of words. Without motion the
+    words are just inline text; the animation never holds anything hidden."""
+    cls = f"w {css_class}".strip()
+    return " ".join(
+        f'<span class="{cls}" style="--k:{first + i}"><i>{html.escape(word)}</i></span>'
+        for i, word in enumerate(text.split())
+    )
+
+
 def tab_head(tab: str, title: str, accent: str = "") -> None:
     """The head of a tab: a mono eyebrow naming the tab, then the title with one italic serif word,
     as the workspace header reads ("SORREL · WORKSPACE", "Results for *file.csv*")."""
-    accent_html = f' <span class="serif-it">{html.escape(accent)}</span>' if accent else ""
+    plain = reveal_words(title)
+    accent_html = " " + reveal_words(accent, len(title.split()), "serif-it") if accent else ""
     st.markdown(
         f'<div class="tab-head"><span class="eyebrow">Sorrel · {html.escape(tab)}</span>'
-        f"<h2>{html.escape(title)}{accent_html}</h2></div>",
+        f"<h2>{plain}{accent_html}</h2></div>",
         unsafe_allow_html=True,
     )
 

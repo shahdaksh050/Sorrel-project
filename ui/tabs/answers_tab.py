@@ -55,10 +55,18 @@ def _evidence_inspector(
             format_func=lambda fid: labels[fid],
             key="selected_finding",
         )
-    finding = findings[ids.index(chosen)]
+    position = ids.index(chosen)
+    finding = findings[position]
+    # Each choice is its own card (the key carries the position), so choosing mounts a fresh one and it
+    # can settle in from the side the choice came from. The first draw, and a redraw of the same finding,
+    # carry no marker and do not animate.
+    previous = st.session_state.get("_evidence_position")
+    st.session_state["_evidence_position"] = position
+    came_from = "" if previous is None or previous == position else "ev-down" if position > previous else "ev-up"
+    marker = f'<span class="{came_from}"></span>' if came_from else ""
     with right:
-        with st.container(border=True, key="evidence_panel"):
-            st.markdown(render_evidence_html(finding, with_figures=False), unsafe_allow_html=True)
+        with st.container(border=True, key=f"evidence_panel_{position}"):
+            st.markdown(marker + render_evidence_html(finding, with_figures=False), unsafe_allow_html=True)
             chart = chart_by_finding.get(str(finding.get("finding_id") or ""))
             if chart:
                 # Unframed (the pane is the frame) and at the common chart height.

@@ -381,3 +381,20 @@ def test_the_landing_page_motions_are_all_gated_and_leave_nothing_hidden(monkeyp
     # The stepper rail's fill exists without motion (instant) and only grows with it.
     assert "transform: scaleY(1)" in css.replace(motion, "")
     assert ".stepper .step::before { transition: transform" in motion
+
+
+def test_streamlits_own_expanders_are_not_eased_a_second_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Streamlit animates an expander's height itself (and keeps `open` until that ends). Easing the
+    content as well made every collapse run twice, so only our own `<details>` get the CSS easing."""
+    import streamlit as st
+    from ui import styles as ui_styles
+
+    emitted: list[str] = []
+    monkeypatch.setattr(st, "markdown", lambda body, **kwargs: emitted.append(body))
+    monkeypatch.setattr(st, "get_option", lambda key: "")
+    monkeypatch.setattr(st, "session_state", {"theme": "day"})
+    ui_styles.inject_theme_css()
+    css = emitted[0]
+    own = 'details:not([data-testid="stExpander"] > details)::details-content'
+    assert own in css and "details[open]:not([data-testid=\"stExpander\"] > details)::details-content" in css
+    assert not re.search(r"(?<![\w\]\)\"])details::details-content", css)  # no bare rule left that also hits expanders

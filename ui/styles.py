@@ -120,11 +120,14 @@ def inject_theme_css() -> None:
    where the browser supports it (Chromium today; elsewhere they simply open at once). */
 @media (prefers-reduced-motion: no-preference) {{
     :root {{ interpolate-size: allow-keywords; }}
-    details::details-content {{
+    /* Not Streamlit's own expanders (`stExpander > details`): Streamlit already animates their height
+       from script (500 ms, and it keeps `open` until the animation ends), so easing the content here
+       as well made every collapse run twice, the content first and the box after it. */
+    details:not([data-testid="stExpander"] > details)::details-content {{
         block-size: 0; overflow: clip;
         transition: block-size var(--dur-base) var(--ease-out), content-visibility var(--dur-base) allow-discrete;
     }}
-    details[open]::details-content {{ block-size: auto; }}
+    details[open]:not([data-testid="stExpander"] > details)::details-content {{ block-size: auto; }}
     /* What the landing page does, at workspace scale: a tab's band opens from slightly narrower (the
        way the dark band opens there), its cards settle in after it, and a tab's title rises word by word
        from behind a mask. All of it plays when a tab is shown (a user action) or arrives with the

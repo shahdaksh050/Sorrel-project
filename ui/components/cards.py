@@ -72,6 +72,29 @@ def section(title: str, note: str = "", level: str = "h3") -> None:
     )
 
 
+def reveal_words(text: str, first: int = 0, css_class: str = "") -> str:
+    """Escaped text with each word in its own mask, so a title can rise word by word (the line reveal
+    of the landing page). `first` continues the count from an earlier run of words. Without motion the
+    words are just inline text; the animation never holds anything hidden."""
+    cls = f"w {css_class}".strip()
+    return " ".join(
+        f'<span class="{cls}" style="--k:{first + i}"><i>{html.escape(word)}</i></span>'
+        for i, word in enumerate(text.split())
+    )
+
+
+def tab_head(tab: str, title: str, accent: str = "") -> None:
+    """The head of a tab: a mono eyebrow naming the tab, then the title with one italic serif word,
+    as the workspace header reads ("SORREL · WORKSPACE", "Results for *file.csv*")."""
+    plain = reveal_words(title)
+    accent_html = " " + reveal_words(accent, len(title.split()), "serif-it") if accent else ""
+    st.markdown(
+        f'<div class="tab-head"><span class="eyebrow">Sorrel · {html.escape(tab)}</span>'
+        f"<h2>{plain}{accent_html}</h2></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def audit_head_html(title: str, note: str = "") -> str:
     """Title and one plain line for a section of the Details audit trail."""
     note_html = f"<p>{html.escape(str(note))}</p>" if note else ""
@@ -748,6 +771,7 @@ def render_dashboard_chart(
     *,
     height: int | None = None,
     framed: bool = True,
+    card_key: str | None = None,
 ) -> None:
     """Render one dashboard panel (title, chart, caption/description).
 
@@ -756,8 +780,9 @@ def render_dashboard_chart(
     it is given it replaces `finding_note`, and a caption that only repeats the finding is dropped.
     `height` gives the chart a common height with its neighbours. `framed=False` draws no border of
     its own, for a panel placed in a bordered column (which keeps a row's cards the same height).
+    `card_key` names the card so the stylesheet can give it the card surface (`chart_card_...`).
     """
-    with st.container(border=True) if framed else contextlib.nullcontext():
+    with st.container(border=True, key=card_key) if framed else contextlib.nullcontext():
         st.markdown(
             f'<h4 class="chart-title">{html.escape(str(ch.get("title", "")))}</h4>',
             unsafe_allow_html=True,

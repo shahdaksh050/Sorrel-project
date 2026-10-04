@@ -15,7 +15,7 @@ from typing import Any
 import streamlit as st
 
 from src.core.html_report import retheme_report_html
-from ui.components.cards import artifact_info_html, md_text
+from ui.components.cards import artifact_info_html, md_text, tab_head
 
 
 def _shelf_group(title: str) -> None:
@@ -32,7 +32,7 @@ def render_downloads_tab(
     tmp_dir: str,
 ) -> None:
     """Downloads: a hand-off surface grouped by what the file is."""
-    st.markdown("## Downloads")
+    tab_head("Downloads", "Your", "files")
     st.caption("Everything from this run, ready to keep or share.")
 
     if tmp_dir:

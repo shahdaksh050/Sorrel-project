@@ -1460,7 +1460,7 @@ def _build(spec: dict[str, Any]) -> dict[str, Any]:
             {"type": "area", "line": True} if kind == "area" else {"type": "line", "point": len(rows) <= 60}
         )
         if bounded:
-            band = bound_layer({"type": "area", "opacity": 0.2}, encoding)
+            band = bound_layer({"type": "area", "opacity": 0.2, "style": "accent"}, encoding)
             return {"data": {"values": rows}, "height": 260,
                     "layer": [band, {"mark": mark, "encoding": encoding}]}
         return {"data": {"values": rows}, "mark": mark, "height": 260, "encoding": encoding}

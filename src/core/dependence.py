@@ -46,9 +46,11 @@ def effective_sample_size_ar1(
 
     raw_r, raw_p = stats.pearsonr(vx, vy)
 
-    # Lag-1 autocorrelation
-    r1_x = float(np.corrcoef(vx[:-1], vx[1:])[0, 1]) if n > 3 else 0.0
-    r1_y = float(np.corrcoef(vy[:-1], vy[1:])[0, 1]) if n > 3 else 0.0
+    # Lag-1 autocorrelation. A constant series has zero spread, so the correlation is 0/0 (NaN, set to
+    # 0 below: no autocorrelation to correct for); that is expected, not a warning.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r1_x = float(np.corrcoef(vx[:-1], vx[1:])[0, 1]) if n > 3 else 0.0
+        r1_y = float(np.corrcoef(vy[:-1], vy[1:])[0, 1]) if n > 3 else 0.0
 
     r1_x = float(np.nan_to_num(r1_x, nan=0.0))
     r1_y = float(np.nan_to_num(r1_y, nan=0.0))

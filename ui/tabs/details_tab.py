@@ -18,6 +18,7 @@ from ui.components.cards import (
     render_handoff_stream,
     render_other_findings,
     safe_df,
+    tab_head,
 )
 from ui.components.how_we_got_here import build_how_html
 
@@ -35,12 +36,12 @@ def render_details_tab(
     train_out = find_tool(tool_results, "train_model")
     eval_out = find_tool(tool_results, "evaluate_model")
 
+    tab_head("Details", "Your data and the", "checks")
     if run_view is not None:
         how_html = build_how_html(run_view.how)
         if how_html:
             st.markdown(how_html, unsafe_allow_html=True)
 
-    st.markdown("## Your data and the checks")
     st.caption("What was done to the file and which analyses ran, from plain summary to technical detail.")
 
     profile_status = st.session_state.get("profile_status")

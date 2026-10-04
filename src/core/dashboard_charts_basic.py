@@ -396,9 +396,9 @@ def _scatter_chart(
     spec: dict[str, Any] = {"data": {"values": values}, "height": 280, "usermeta": {"columns": list(pair)}}
     has_trend = pd.notna(r) and abs(float(r)) >= _TREND_MIN_ABS_R
     if has_trend:
-        # Fitted on the plotted points; drawn in the theme's line colour.
+        # Fitted on the plotted points; drawn in the theme's accent, over the green points.
         spec["layer"] = [points, {
-            "mark": {"type": "line", "strokeDash": [4, 3]},
+            "mark": {"type": "line", "strokeDash": [4, 3], "style": "accent"},
             "transform": [{"regression": pair[1], "on": pair[0]}],
             "encoding": {"x": {"field": pair[0], "type": "quantitative"},
                          "y": {"field": pair[1], "type": "quantitative"}},
@@ -651,7 +651,7 @@ def _time_series_chart(
         for row, pos in zip(values, x_pos, strict=True):
             row["sen_fit"] = round(intercept + sen_slope * float(pos), 4)
         layers.append({
-            "mark": {"type": "line", "strokeDash": [4, 3]},
+            "mark": {"type": "line", "strokeDash": [4, 3], "style": "accent"},
             "encoding": {"x": x_encoding, "y": {"field": "sen_fit", "type": "quantitative"}},
         })
         unit = ts_output.get("sen_slope_unit") or "period"
@@ -778,9 +778,9 @@ def _scree_chart(dim_output: dict[str, Any] | None) -> ChartSpec | None:
             "height": 280,
             "layer": [
                 {
-                    # No literal color — bar/line get distinct theme-default
-                    # colors from the injected vega_config()'s per-mark-type
-                    # config (bar: pen, line: ink).
+                    # No literal color — the bars take the theme's pen and the
+                    # cumulative line its accent (the `accent` style), both from
+                    # the injected vega_config().
                     "mark": {"type": "bar"},
                     "encoding": {
                         "x": x_enc,
@@ -791,7 +791,7 @@ def _scree_chart(dim_output: dict[str, Any] | None) -> ChartSpec | None:
                     },
                 },
                 {
-                    "mark": {"type": "line", "point": True},
+                    "mark": {"type": "line", "point": {"style": "accent"}, "style": "accent"},
                     "encoding": {
                         "x": x_enc,
                         "y": {"field": "cumulative", "type": "quantitative", "scale": y_scale},

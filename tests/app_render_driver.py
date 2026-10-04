@@ -35,6 +35,11 @@ def markup(at: AppTest) -> str:
     return " ".join(str(m.value) for m in at.markdown)
 
 
+def spoken(text: str) -> str:
+    """The markup as it reads: tags dropped, so a title split into one span per word still matches."""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", text))
+
+
 def problems(at: AppTest) -> list[str]:
     return [str(e.value)[:300] for e in at.exception]
 
@@ -62,12 +67,12 @@ def main() -> dict[str, object]:
         if at.exception:
             break
         text = markup(at)
-        if "Analysing" in text and not running:
+        if "Analysing" in spoken(text) and not running:
             running = {
                 "stepper": 'class="stepper"' in text,
                 "exceptions": problems(at),
             }
-        if "Results for" in text:
+        if "Results for" in spoken(text):
             finished = True
             break
         at.run()
@@ -99,7 +104,8 @@ def main() -> dict[str, object]:
         "agent_line": "agent-line" in text,
         "agent_cards": text.count("agent-card"),
         "report_toggle": any(t.key == "show_report_preview" for t in at.toggle),
-        "report_frame_before_asking": 'key="report_preview"' in text or "st-key-report_preview" in text,
+        # the stylesheet names this container too, so look at the page without its <style> blocks
+        "report_frame_before_asking": "st-key-report_preview" in re.sub(r"<style.*?</style>", "", text, flags=re.S),
     }
 
     # 3. A failed run, seeded directly (no API key, no network): the stepper shows the stopped step.
@@ -110,7 +116,7 @@ def main() -> dict[str, object]:
     text = markup(at)
     out["failed"] = {
         "exceptions": problems(at),
-        "headline": "Could not finish" in text,
+        "headline": "Could not finish" in spoken(text),
         "stopped_step": 'class="step err"' in text and "! Stopped" in text,
     }
     return out

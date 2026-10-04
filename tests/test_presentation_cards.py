@@ -1,6 +1,7 @@
 """Regression checks for the native Streamlit presentation primitives."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -303,3 +304,80 @@ def test_panels_in_a_row_get_one_height_unless_the_chart_needs_more() -> None:
     for odd in ({"hconcat": [], "mark": "bar"}, {"vconcat": [], "layer": []}, {"mark": "bar", "encoding": {"row": {}}},
                 {"mark": "bar", "encoding": {"column": {}}}):
         assert _fit_height(odd, 260) is odd
+
+
+def test_each_tab_is_a_warm_band_holding_lighter_cards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The page, a band for a tab's content, cards on the band, and page-toned insets inside a card."""
+    import streamlit as st
+    from ui import styles as ui_styles
+
+    from src.core.design_tokens import palette
+    from tests.test_contrast import contrast
+
+    for theme in ("day", "night"):
+        emitted: list[str] = []
+        monkeypatch.setattr(st, "markdown", lambda body, sink=emitted, **kwargs: sink.append(body))
+        monkeypatch.setattr(st, "get_option", lambda key: "")
+        monkeypatch.setattr(st, "session_state", {"theme": theme})
+        ui_styles.inject_theme_css()
+        css = emitted[0]
+
+        def body(selector: str, sheet: str = css) -> str:
+            at = sheet.index(selector + " {")
+            return sheet[at : sheet.index("}", at)]
+
+        assert "background: var(--sheet-alt)" in body('[data-testid="stTabs"] [role="tabpanel"]')
+        assert "background: var(--sheet)" in body('[class*="st-key-audit_"], [class*="st-key-chart_card_"], .st-key-report_preview')
+        assert "var(--stock)" in body(".how-head")
+        # The three surfaces are told apart: a card is never the band's colour.
+        colours = palette(theme)
+        assert len({colours["sheet_alt"].lower(), colours["sheet"].lower(), colours["stock"].lower()}) == 3
+        assert contrast(colours["ink"], colours["sheet_alt"]) >= 4.5  # text sitting straight on the band
+
+
+def test_stylesheet_only_targets_test_ids_this_streamlit_renders() -> None:
+    """A rule keyed on a `data-testid` the installed Streamlit never emits silently styles nothing
+    (`stTabPanel` did: the tab bands never rendered). Ids Streamlit builds at runtime are listed."""
+    import re
+    from pathlib import Path
+
+    import streamlit
+
+    js_dir = Path(streamlit.__file__).parent / "static" / "static" / "js"
+    bundle = "".join(p.read_text(encoding="utf-8", errors="ignore") for p in js_dir.glob("*.js"))
+    built_at_runtime = ("stAlertContent", "stBaseButton-")
+    source = Path("ui/styles.py").read_text(encoding="utf-8")
+    ids = set(re.findall(r'data-testid="(st[A-Za-z_-]+)"', source))
+    # stToggle: Streamlit 1.57 draws a toggle as a checkbox; the rule that uses it is already dead.
+    dead = sorted(i for i in ids if i not in bundle and not i.startswith(built_at_runtime) and i != "stToggle")
+    assert not dead, f"selectors Streamlit does not render: {dead}"
+
+
+def test_a_tab_title_is_split_into_masked_words_and_keeps_its_text() -> None:
+    from ui.components.cards import reveal_words
+
+    marked = reveal_words("Your data and the", 0) + " " + reveal_words("checks", 4, "serif-it")
+    assert marked.count('class="w') == 5 and 'class="w serif-it" style="--k:4"' in marked
+    assert re.sub(r"<[^>]+>", "", marked) == "Your data and the checks"
+    assert "&lt;b&gt;" in reveal_words("<b>")  # escaped, like every other piece of text in a card
+
+
+def test_the_landing_page_motions_are_all_gated_and_leave_nothing_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    import streamlit as st
+    from ui import styles as ui_styles
+
+    emitted: list[str] = []
+    monkeypatch.setattr(st, "markdown", lambda body, **kwargs: emitted.append(body))
+    monkeypatch.setattr(st, "get_option", lambda key: "")
+    monkeypatch.setattr(st, "session_state", {"theme": "day"})
+    ui_styles.inject_theme_css()
+    css = emitted[0]
+    motion = " ".join(_media_blocks(css, "@media (prefers-reduced-motion: no-preference)"))
+    for name in ("bandOpen", "cardIn", "wordUp", "settleDown", "settleUp"):
+        assert f"@keyframes {name}" in motion, name
+    # Every animation starts from its first frame and is not held after it: `backwards`, never `both`/`forwards`.
+    animations = re.findall(r"animation:\s*([^;]+);", motion)
+    assert animations and all("backwards" in a and "both" not in a and "forwards" not in a for a in animations)
+    # The stepper rail's fill exists without motion (instant) and only grows with it.
+    assert "transform: scaleY(1)" in css.replace(motion, "")
+    assert ".stepper .step::before { transition: transform" in motion

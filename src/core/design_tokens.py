@@ -121,7 +121,7 @@ PAPER_ELEVATED_DAY = "#ffffff"
 # Night — carbon ledger stock
 # ---------------------------------------------------------------------------
 STOCK_NIGHT = "#141712"
-SHEET_NIGHT = "#1c2219"
+SHEET_NIGHT = "#232a1f"
 SHEET_ALT_NIGHT = "#1a1e17"
 INK_NIGHT = "#edf0e4"
 GRAPHITE_NIGHT = "#8a927d"

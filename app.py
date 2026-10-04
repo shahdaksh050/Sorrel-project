@@ -135,6 +135,9 @@ from ui.components.cards import (
     render_stepper as _render_stepper,
 )
 from ui.components.cards import (
+    reveal_words as _reveal_words,
+)
+from ui.components.cards import (
     safe_df as _safe_df,
 )
 from ui.components.cards import (
@@ -311,8 +314,9 @@ def _run_progress() -> None:
         unsafe_allow_html=True,
     )
     # The stepper and the 3D plate sit in the page header and are drawn by the full script, so a change
-    # of stage (a handful of times per run) asks for one full redraw; the polling here stays cheap.
-    _stage_sig = tuple((n, status) for n, status, _ in snap.stage_log)
+    # of stage or of what a stage reports (which tool is running, which cycle) asks for one full redraw;
+    # the polling here stays cheap.
+    _stage_sig = tuple(snap.stage_log)
     if st.session_state.get("_stage_sig", _stage_sig) != _stage_sig:
         st.session_state["_stage_sig"] = _stage_sig
         st.rerun()
@@ -353,13 +357,16 @@ def _draw_pipeline_rig(slot: Any) -> list[Any]:
     from ui.pipeline_3d import render as render_pipeline
 
     log = {n: (s, d) for n, s, d in _live_stage_log()}
+    # The plate replays its scene whenever its HTML changes, and the page now redraws on every step
+    # note during a run. Its hover note is left out until the run ends, so a note never restarts it.
+    live = _active_run() is not None
     stages = [
         Stage(
             num=num,
             name=name,
             # session_state is untyped; _set_stage only writes StageStatus values.
             status=cast(StageStatus, log.get(num, ("pending", ""))[0]),
-            detail=log.get(num, ("pending", ""))[1],
+            detail="" if live else log.get(num, ("pending", ""))[1],
         )
         for num, name in STAGE_DEFS
     ]
@@ -1015,7 +1022,8 @@ with _hero_box:
             st.markdown(
                 '<div class="hero compact">'
                 '<div class="hero-eyebrow">Sorrel · Workspace</div>'
-                f'<h1>{_lead} <span class="hero-file">{_file_label}</span></h1></div>',
+                f'<h1>{_reveal_words(_lead)} <span class="w" style="--k:{len(_lead.split())}">'
+                f'<i class="hero-file">{_file_label}</i></span></h1></div>',
                 unsafe_allow_html=True,
             )
         else:

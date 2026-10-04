@@ -125,11 +125,52 @@ def inject_theme_css() -> None:
         transition: block-size var(--dur-base) var(--ease-out), content-visibility var(--dur-base) allow-discrete;
     }}
     details[open]::details-content {{ block-size: auto; }}
-    @keyframes revealIn {{ from {{ opacity: 0; transform: translateY(6px); }} to {{ opacity: 1; transform: none; }} }}
-    [data-baseweb="tab-panel"]:not([hidden]) {{ animation: revealIn var(--dur-base) var(--ease-out) both; }}
+    /* What the landing page does, at workspace scale: a tab's band opens from slightly narrower (the
+       way the dark band opens there), its cards settle in after it, and a tab's title rises word by word
+       from behind a mask. All of it plays when a tab is shown (a user action) or arrives with the
+       results. The fill is `backwards`, so nothing is held afterwards (a stale element still dims, as
+       Streamlit asks) and nothing can stay hidden. Opacity, transform and clip-path only. */
+    @keyframes bandOpen {{
+        from {{ opacity: 0; clip-path: inset(0 2.5% 0 round 14px); }}
+        to   {{ opacity: 1; clip-path: inset(0 0 0 round var(--radius)); }}
+    }}
+    @keyframes cardIn {{ from {{ opacity: 0; transform: translate3d(0, 8px, 0); }} to {{ opacity: 1; transform: none; }} }}
+    @keyframes wordUp {{ from {{ transform: translate3d(0, 112%, 0); }} to {{ transform: none; }} }}
+    @keyframes settleDown {{ from {{ opacity: 0; transform: translate3d(0, 8px, 0); }} }}
+    @keyframes settleUp   {{ from {{ opacity: 0; transform: translate3d(0, -8px, 0); }} }}
+    [data-baseweb="tab-panel"]:not([hidden]) {{ animation: bandOpen var(--dur-base) var(--ease-out) backwards; }}
+    /* The first eight blocks of a tab follow one after another. Streamlit may or may not wrap a tab's
+       blocks in one more div, so both shapes are covered (they cannot match the same element). */
+    [data-baseweb="tab-panel"] > [data-testid="stVerticalBlock"] > :nth-child(-n+8),
+    [data-baseweb="tab-panel"] > :not([data-testid="stVerticalBlock"]) > [data-testid="stVerticalBlock"] > :nth-child(-n+8) {{
+        animation: cardIn var(--dur-base) var(--ease-out) backwards;
+    }}
+    [data-baseweb="tab-panel"] > [data-testid="stVerticalBlock"] > :nth-child(2),
+    [data-baseweb="tab-panel"] > :not([data-testid="stVerticalBlock"]) > [data-testid="stVerticalBlock"] > :nth-child(2) {{ animation-delay: 30ms; }}
+    [data-baseweb="tab-panel"] > [data-testid="stVerticalBlock"] > :nth-child(3),
+    [data-baseweb="tab-panel"] > :not([data-testid="stVerticalBlock"]) > [data-testid="stVerticalBlock"] > :nth-child(3) {{ animation-delay: 60ms; }}
+    [data-baseweb="tab-panel"] > [data-testid="stVerticalBlock"] > :nth-child(4),
+    [data-baseweb="tab-panel"] > :not([data-testid="stVerticalBlock"]) > [data-testid="stVerticalBlock"] > :nth-child(4) {{ animation-delay: 90ms; }}
+    [data-baseweb="tab-panel"] > [data-testid="stVerticalBlock"] > :nth-child(5),
+    [data-baseweb="tab-panel"] > :not([data-testid="stVerticalBlock"]) > [data-testid="stVerticalBlock"] > :nth-child(5) {{ animation-delay: 120ms; }}
+    [data-baseweb="tab-panel"] > [data-testid="stVerticalBlock"] > :nth-child(6),
+    [data-baseweb="tab-panel"] > :not([data-testid="stVerticalBlock"]) > [data-testid="stVerticalBlock"] > :nth-child(6) {{ animation-delay: 150ms; }}
+    [data-baseweb="tab-panel"] > [data-testid="stVerticalBlock"] > :nth-child(7),
+    [data-baseweb="tab-panel"] > :not([data-testid="stVerticalBlock"]) > [data-testid="stVerticalBlock"] > :nth-child(7) {{ animation-delay: 180ms; }}
+    [data-baseweb="tab-panel"] > [data-testid="stVerticalBlock"] > :nth-child(8),
+    [data-baseweb="tab-panel"] > :not([data-testid="stVerticalBlock"]) > [data-testid="stVerticalBlock"] > :nth-child(8) {{ animation-delay: 210ms; }}
+    .w > i {{
+        display: inline-block; animation: wordUp var(--dur-base) var(--ease-out) backwards;
+        animation-delay: calc(60ms + var(--k, 0) * 30ms);
+    }}
+    /* Choosing another finding mounts a new evidence card (its key carries the finding), and it settles in
+       from the side the choice came from: down the list, up from below. */
+    [class*="st-key-evidence_panel"]:has(.ev-down) {{ animation: settleDown var(--dur-base) var(--ease-out) backwards; }}
+    [class*="st-key-evidence_panel"]:has(.ev-up) {{ animation: settleUp var(--dur-base) var(--ease-out) backwards; }}
     .stepper .step-dot, .stepper .step::after, .step-state, .step-name {{
         transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, color var(--dur-fast) ease;
     }}
+    .stepper .step::before {{ transition: transform var(--dur-base) var(--ease-out); }}
 }}
 
 /* ── The page ── */
@@ -205,6 +246,14 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     display: block; font-family: var(--mono); font-size: 11px; font-weight: 600; line-height: 1.2;
     letter-spacing: .08em; text-transform: uppercase; color: var(--graphite); margin: 0 0 .5rem;
 }}
+
+/* The italic serif word, as the file name is in the page header. */
+.serif-it {{ font-family: var(--serif); font-style: italic; font-weight: 400; color: var(--accent-text); }}
+.tab-head {{ margin: 0 0 .9rem; }}
+.tab-head h2 {{ margin: 0; padding: 0; }}
+/* A word of a revealed title sits in its own mask, so it rises from behind the baseline. */
+.w {{ display: inline-block; overflow: hidden; vertical-align: top; padding-bottom: .14em; margin-bottom: -.14em; }}
+.w > i {{ font-style: inherit; }}
 
 /* ── Brand: the italic serif wordmark is the logo, on its own ──
    Large on purpose: the logo is the one fixed point of the page. It sits on its own bar (the top bar
@@ -409,7 +458,30 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 [data-testid="stTabs"] .react-aria-SelectionIndicator,
 [data-testid="stTabs"] [data-baseweb="tab-highlight"],
 [data-testid="stTabs"] [data-baseweb="tab-border"] {{ display: none !important; }}
-[data-testid="stTabs"] [data-testid="stTabPanel"] {{ padding-top: 1.5rem; }}
+/* Three layers, the same on every tab as in the header band: the page, a warm band that holds a tab's
+   content, and lighter cards on that band. What sits inside a card (a nested card, a chip, a header
+   strip) goes back to the page tone, so each step down is visible and no card melts into its ground. */
+[data-testid="stTabs"] [role="tabpanel"] {{
+    margin-top: 1.25rem; padding: 1.4rem 1.4rem 1.6rem;
+    background: var(--sheet-alt); border: 1px solid var(--rule); border-radius: var(--radius);
+}}
+[class*="st-key-audit_"], [class*="st-key-chart_card_"], .st-key-report_preview {{ background: var(--sheet); }}
+/* A pair of charts sits in bordered columns (so both cards are one height): the column is the card. */
+[data-testid="stColumn"]:has(.chart-title) {{ background: var(--sheet); border-radius: var(--radius); }}
+[data-testid="stTabs"] [role="tabpanel"] [data-testid="stAlertContainer"] {{
+    background: var(--sheet) !important; border: 1px solid var(--rule);
+}}
+[data-testid="stExpander"] [data-testid="stExpander"], [data-testid="stExpander"] .agent-card,
+[class*="st-key-audit_"] .agent-card, .join-card,
+[class*="st-key-audit_"] .gauge,
+[class*="st-key-audit_"] [data-testid="stExpander"], [class*="st-key-audit_"] [data-testid="stAlertContainer"],
+[class*="st-key-chart_card_"] [data-testid="stExpander"], [data-testid="stColumn"]:has(.chart-title) [data-testid="stExpander"],
+[class*="st-key-evidence_panel"] [data-testid="stExpander"], [class*="st-key-evidence_panel"] [data-testid="stAlertContainer"],
+.st-key-report_preview [data-testid="stExpander"] {{ background: var(--stock) !important; }}
+.how-head {{ background: var(--stock); }}
+@media (max-width: 768px) {{
+    [data-testid="stTabs"] [role="tabpanel"] {{ padding: .9rem .75rem 1.1rem; }}
+}}
 
 /* ── 3D plate ── */
 /* The plate is not a link or a Streamlit callback target, so it has a hairline and nothing else. */
@@ -806,11 +878,16 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     grid-template-areas: "dot name" "dot state" "dot detail"; column-gap: 14px; row-gap: 2px; padding-bottom: 20px;
 }}
 .stepper .step:last-child {{ padding-bottom: 0; }}
-.stepper .step:not(:last-child)::after {{
+.stepper .step:not(:last-child)::after, .stepper .step:not(:last-child)::before {{
     content: ""; position: absolute; left: 13px; top: 32px; bottom: 2px; width: 2px; background: var(--rule);
 }}
-/* The rail is filled past a finished step and past a skipped one (it was passed, just not needed). */
-.stepper .step.done:not(:last-child)::after, .stepper .step.skip:not(:last-child)::after {{ background: var(--pen); }}
+/* The rail is filled past a finished step and past a skipped one (it was passed, just not needed). The
+   fill is its own layer that grows down the track (a transform, see the motion block), so a step
+   finishing reads as the line running on to the next dot. */
+.stepper .step:not(:last-child)::before {{
+    z-index: 1; background: var(--pen); transform: scaleY(0); transform-origin: top;
+}}
+.stepper .step.done:not(:last-child)::before, .stepper .step.skip:not(:last-child)::before {{ transform: scaleY(1); }}
 .step-dot {{
     grid-area: dot; align-self: start; position: relative; z-index: 1; width: 28px; height: 28px;
     display: grid; place-items: center; border-radius: 50%; background: var(--sheet);
@@ -1041,9 +1118,9 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     border-color: var(--accent-text); box-shadow: inset 3px 0 0 var(--accent-text);
 }}
 .st-key-selected_finding [role="radiogroup"] p {{ font-size: var(--text-sm); line-height: 1.45; }}
-.st-key-evidence_panel {{ background: var(--sheet); border-radius: var(--radius); }}
+[class*="st-key-evidence_panel"] {{ background: var(--sheet); border-radius: var(--radius); }}
 .evidence-head {{ display: flex; flex-direction: column; align-items: flex-start; gap: .5rem; margin-bottom: .4rem; }}
-.evidence-title {{ font-family: var(--heading); font-size: var(--text-lg) !important; font-weight: 600 !important; line-height: 1.3; margin: 0; padding: 0; }}
+.evidence-title {{ font-family: var(--serif); font-style: italic; font-size: var(--text-xl) !important; font-weight: 500 !important; line-height: 1.3; margin: 0; padding: 0; }}
 .evidence-detail {{ color: var(--ink-2); font-size: var(--text-sm); line-height: 1.6; max-width: 68ch; margin: .4rem 0 .6rem; }}
 .evidence-none, .evidence-source {{ color: var(--graphite); font-size: var(--text-xs); margin: .4rem 0; }}
 .evidence-caveats {{ font-size: var(--text-sm); color: var(--ink); margin: .6rem 0; }}

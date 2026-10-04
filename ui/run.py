@@ -243,6 +243,36 @@ class ActiveRun:
             self._stage_log = [e for e in self._stage_log if e[0] != num] + [(num, status, detail)]
             self._stage_log.sort(key=lambda e: e[0])
 
+    def advance(
+        self,
+        num: str,
+        detail: str,
+        *,
+        closing: dict[str, str] | None = None,
+        reopen: tuple[str, ...] = (),
+    ) -> None:
+        """Make `num` the one active stage, in a single locked update.
+
+        Any other active stage is closed as done (so two stages never read "Working" at once);
+        `closing` names stages to close with a final detail, and `reopen` puts stages that an
+        earlier cycle finished back to waiting, because a new cycle is about to repeat them.
+        """
+        closing = closing or {}
+        with self._lock:
+            log = {n: (s, d) for n, s, d in self._stage_log}
+            for n, (status, old_detail) in list(log.items()):
+                if n == num:
+                    continue
+                if n in closing:
+                    log[n] = ("done", closing[n])
+                elif status == "active":
+                    log[n] = ("done", old_detail)
+            for n in reopen:
+                if log.get(n, ("", ""))[0] == "done":
+                    log[n] = ("pending", "")
+            log[num] = ("active", detail)
+            self._stage_log = sorted(((n, s, d) for n, (s, d) in log.items()), key=lambda e: e[0])
+
     def add_progress(self, line: str) -> None:
         with self._lock:
             self._progress_lines.append(line)
@@ -364,33 +394,65 @@ def _execute(run: ActiveRun) -> None:
         "done",
         f"{meta.row_count:,} rows × {meta.column_count} cols · task={meta.task_type} · target={meta.target_column}",
     )
-    upd(
-        "2",
-        "active",
+    plan_detail = (
         "calling LLM for analysis plan…"
         if spec.use_llm
-        else "building deterministic plan from the data profile…",
+        else "building deterministic plan from the data profile…"
     )
+    upd("2", "active", plan_detail)
     for num in ("3", "4", "5"):
         upd(num, "pending")
     upd("6", "pending" if spec.enable_rlm else "skipped", "" if spec.enable_rlm else "disabled")
     upd("7", "pending")
 
+    # What the controller reports maps onto one moving "you are here": plan (2), run the planned
+    # steps (3), and on later cycles interpret and refine (4, 5) before running again; the
+    # decomposition (6) and the report (7) follow. `advance` keeps exactly one stage active.
+    cycle = {"iteration": 1, "planned": False, "ran": 0}
+
     def on_step(tool_name: str, status: str, detail: str) -> None:
-        run.set_stage("3", "active", detail)
+        iteration = cycle["iteration"]
+        label = detail if iteration == 1 else f"iter {iteration} · {detail}"
+        if not cycle["planned"]:
+            # The first tool of a cycle means its plan arrived: the reasoning stages are over.
+            cycle["planned"] = True
+            closing = (
+                {"2": "plan ready"}
+                if iteration == 1
+                else {"4": f"iter {iteration}: results interpreted", "5": f"iter {iteration}: plan refined"}
+            )
+            run.advance("3", label, closing=closing)
+        else:
+            run.set_stage("3", "active", label)
+        if status != "running":
+            cycle["ran"] += 1
         run.add_progress(f"       {'ok  ' if status == 'success' else '... '}{detail}")
         if tool_name == "train_model":
             run.set_note("Still working. Training models can take a few minutes depending on the data size.")
 
     def on_iter(iteration: int, stage: str) -> None:
-        if "stage2" in stage:
-            run.set_stage("2", "active", f"iter {iteration}: LLM reasoning…")
+        if "stage6" not in stage and "stage7" not in stage:
+            cycle["iteration"] = iteration
+            cycle["planned"] = False
+        ran = f"{cycle['ran']} step(s) run"
+        if "stage7" in stage:
+            run.advance("7", "writing the report…", closing={"3": ran})
+            run.add_progress("[run ] Writing the report")
+        elif "stage6" in stage:
+            run.advance("6", "splitting the question into sub-tasks…", closing={"3": ran})
+            run.add_progress("[run ] Splitting the question into sub-tasks")
+        elif "stage2" in stage:
+            run.advance("2", plan_detail if iteration == 1 else f"iter {iteration}: LLM reasoning…")
             run.add_progress(f"[run ] Iteration {iteration}: model reasoning")
         elif "stage4" in stage or "stage5" in stage:
-            run.set_stage("4", "active", f"iter {iteration}: interpreting results…")
-            run.set_stage("5", "active", f"iter {iteration}: refining plan…")
+            run.advance(
+                "4",
+                f"iter {iteration}: interpreting results and refining the plan…",
+                closing={"3": ran},
+                reopen=("5",),
+            )
             run.add_progress(f"[run ] Iteration {iteration}: interpreting and refining")
-        if iteration > 1:
+        if iteration > 1 and "stage7" not in stage:
             run.set_note("Still working. Refining answers can take a few minutes.")
 
     agent.on_step_callback = on_step

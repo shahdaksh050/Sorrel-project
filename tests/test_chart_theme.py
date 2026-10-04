@@ -116,9 +116,15 @@ class TestCategoryRanges:
 
     def test_slot_one_is_the_pen_family_in_both_modes(self) -> None:
         from src.core import design_tokens
-        from src.core.chart_theme import CATEGORY_RANGE_DAY, CATEGORY_RANGE_NIGHT, CHART_PEN_NIGHT
+        from src.core.chart_theme import (
+            CATEGORY_RANGE_DAY,
+            CATEGORY_RANGE_NIGHT,
+            CHART_PEN_DAY,
+            CHART_PEN_NIGHT,
+        )
 
-        assert CATEGORY_RANGE_DAY[0] == design_tokens.PEN_DAY
+        assert CATEGORY_RANGE_DAY[0] == CHART_PEN_DAY
+        assert abs(_hue(CHART_PEN_DAY) - _hue(design_tokens.PEN_DAY)) < 12  # same hue, brighter: marks, not a fill
         assert CATEGORY_RANGE_NIGHT[0] == CHART_PEN_NIGHT
         assert abs(_hue(CHART_PEN_NIGHT) - _hue(design_tokens.PEN_NIGHT)) < 12  # same hue, lighter
 
@@ -162,3 +168,20 @@ class TestCategoryRanges:
             assert font.startswith("Geist,")
             for old in ("Public Sans", "Bricolage", "Baloo", "Mukta", "Plex"):
                 assert old not in font
+
+    def test_lines_are_the_pen_and_the_accent_style_is_the_amber_pop(self) -> None:
+        from src.core import design_tokens
+
+        for dark, mode in ((False, "day"), (True, "night")):
+            cfg = vega_config(dark=dark)
+            colours = design_tokens.palette(mode)  # type: ignore[arg-type]
+            surface = colours["sheet"]
+            assert cfg["line"]["color"] == cfg["bar"]["color"]  # not the ink: a near-white line glares at Night
+            accent = cfg["style"]["accent"]["color"]
+            assert accent == colours["accent"]
+            assert _contrast(accent, surface) >= 3.0, mode
+            assert _contrast(cfg["text"]["color"], surface) >= 4.5, mode
+        # Night strokes are heavier, and its grid is told apart from the surface (RULE_NIGHT is ~1.1:1 on it).
+        assert vega_config(dark=True)["line"]["strokeWidth"] > vega_config(dark=False)["line"]["strokeWidth"]
+        night = vega_config(dark=True)
+        assert _contrast(night["axis"]["gridColor"], night["background"]) >= 1.3

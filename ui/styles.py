@@ -206,6 +206,11 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     letter-spacing: .08em; text-transform: uppercase; color: var(--graphite); margin: 0 0 .5rem;
 }}
 
+/* The italic serif word, as the file name is in the page header. */
+.serif-it {{ font-family: var(--serif); font-style: italic; font-weight: 400; color: var(--accent-text); }}
+.tab-head {{ margin: 0 0 .9rem; }}
+.tab-head h2 {{ margin: 0; padding: 0; }}
+
 /* ── Brand: the italic serif wordmark is the logo, on its own ──
    Large on purpose: the logo is the one fixed point of the page. It sits on its own bar (the top bar
    container), vertically centred against the page state and the Day/Night control, with a hairline under
@@ -412,21 +417,26 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 /* Three layers, the same on every tab as in the header band: the page, a warm band that holds a tab's
    content, and lighter cards on that band. What sits inside a card (a nested card, a chip, a header
    strip) goes back to the page tone, so each step down is visible and no card melts into its ground. */
-[data-testid="stTabs"] [data-testid="stTabPanel"] {{
+[data-testid="stTabs"] [role="tabpanel"] {{
     margin-top: 1.25rem; padding: 1.4rem 1.4rem 1.6rem;
     background: var(--sheet-alt); border: 1px solid var(--rule); border-radius: var(--radius);
 }}
 [class*="st-key-audit_"], [class*="st-key-chart_card_"], .st-key-report_preview {{ background: var(--sheet); }}
 /* A pair of charts sits in bordered columns (so both cards are one height): the column is the card. */
 [data-testid="stColumn"]:has(.chart-title) {{ background: var(--sheet); border-radius: var(--radius); }}
-[data-testid="stTabPanel"] [data-testid="stAlertContainer"] {{
+[data-testid="stTabs"] [role="tabpanel"] [data-testid="stAlertContainer"] {{
     background: var(--sheet) !important; border: 1px solid var(--rule);
 }}
 [data-testid="stExpander"] [data-testid="stExpander"], [data-testid="stExpander"] .agent-card,
-[class*="st-key-audit_"] .agent-card, .join-card {{ background: var(--stock) !important; }}
+[class*="st-key-audit_"] .agent-card, .join-card,
+[class*="st-key-audit_"] .gauge,
+[class*="st-key-audit_"] [data-testid="stExpander"], [class*="st-key-audit_"] [data-testid="stAlertContainer"],
+[class*="st-key-chart_card_"] [data-testid="stExpander"], [data-testid="stColumn"]:has(.chart-title) [data-testid="stExpander"],
+.st-key-evidence_panel [data-testid="stExpander"], .st-key-evidence_panel [data-testid="stAlertContainer"],
+.st-key-report_preview [data-testid="stExpander"] {{ background: var(--stock) !important; }}
 .how-head {{ background: var(--stock); }}
 @media (max-width: 768px) {{
-    [data-testid="stTabs"] [data-testid="stTabPanel"] {{ padding: .9rem .75rem 1.1rem; }}
+    [data-testid="stTabs"] [role="tabpanel"] {{ padding: .9rem .75rem 1.1rem; }}
 }}
 
 /* ── 3D plate ── */
@@ -1061,7 +1071,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .st-key-selected_finding [role="radiogroup"] p {{ font-size: var(--text-sm); line-height: 1.45; }}
 .st-key-evidence_panel {{ background: var(--sheet); border-radius: var(--radius); }}
 .evidence-head {{ display: flex; flex-direction: column; align-items: flex-start; gap: .5rem; margin-bottom: .4rem; }}
-.evidence-title {{ font-family: var(--heading); font-size: var(--text-lg) !important; font-weight: 600 !important; line-height: 1.3; margin: 0; padding: 0; }}
+.evidence-title {{ font-family: var(--serif); font-style: italic; font-size: var(--text-xl) !important; font-weight: 500 !important; line-height: 1.3; margin: 0; padding: 0; }}
 .evidence-detail {{ color: var(--ink-2); font-size: var(--text-sm); line-height: 1.6; max-width: 68ch; margin: .4rem 0 .6rem; }}
 .evidence-none, .evidence-source {{ color: var(--graphite); font-size: var(--text-xs); margin: .4rem 0; }}
 .evidence-caveats {{ font-size: var(--text-sm); color: var(--ink); margin: .6rem 0; }}

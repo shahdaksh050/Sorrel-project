@@ -9,7 +9,7 @@ from typing import Any
 import streamlit as st
 
 from src.core.plain_language import plainify
-from ui.components.cards import finding_state, render_dashboard_chart, state_label
+from ui.components.cards import finding_state, render_dashboard_chart, state_label, tab_head
 
 #: One chart height per panel type, so the panels of a row line up: half-width panels share one, and
 #: the full-width panels (the lead chart, time series, anything marked "wide") share a taller one.
@@ -37,6 +37,7 @@ def render_charts_tab(
             return ""
         return f"Evidence for: {plainify(str(f.get('headline', '')))} ({state_label(finding_state(f))})"
 
+    tab_head("Charts", "The charts, most important", "first")
     if dashboard:
         st.caption(
             "Charts are chosen to fit your data, most important first. "

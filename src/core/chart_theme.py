@@ -60,6 +60,8 @@ __all__ = [
     "ACCENT_NIGHT",
     "CATEGORY_RANGE_DAY",
     "CATEGORY_RANGE_NIGHT",
+    "CHART_GRID_NIGHT",
+    "CHART_PEN_DAY",
     "CHART_PEN_NIGHT",
     "FONT_BODY",
     "FONT_HEADING",
@@ -109,8 +111,14 @@ __all__ = [
 # >= 8 Day / >= 11 Night), each mark >= 3:1 against the chart surface (`sheet`),
 # and every slot >= 15 CIEDE2000 away from `risk`.
 CHART_PEN_NIGHT = "#4a9a69"
+#: Day's mark green. `PEN_DAY` (#1f4634) is a UI fill so dark it reads as black on a chart; marks use
+#: this brighter green of the same hue (5:1 on the card, still the first slot of the range).
+CHART_PEN_DAY = "#2e7d57"
+#: Night gridlines. `RULE_NIGHT` is a hairline for the page; on the lighter Night chart surface it is
+#: only ~1.1:1 and the grid vanishes. This is ~1.4:1, the ratio Day's grid has on its surface.
+CHART_GRID_NIGHT = "#363f2f"
 CATEGORY_RANGE_DAY: list[str] = [
-    PEN_DAY,     # 1. Forest green (the pen; the name dates from "Ledger")
+    CHART_PEN_DAY,  # 1. Forest green, chart-mark variant (not PEN_DAY)
     "#2f86d6",   # 2. Ink blue
     "#a8620f",   # 3. Amber-brown
     "#6b2a73",   # 4. Plum
@@ -220,7 +228,8 @@ def vega_config(dark: bool = False) -> dict[str, Any]:
     ink = INK_NIGHT if dark else INK_DAY
     graphite = GRAPHITE_NIGHT if dark else GRAPHITE_DAY
     sheet = SHEET_NIGHT if dark else SHEET_DAY
-    rule = RULE_NIGHT if dark else RULE_DAY
+    rule = CHART_GRID_NIGHT if dark else RULE_DAY
+    accent = ACCENT_NIGHT if dark else ACCENT_DAY
     category = CATEGORY_RANGE_NIGHT if dark else CATEGORY_RANGE_DAY
     # Default mark colour = slot 1, so a mark with no colour encoding matches the first series and
     # clears 3:1 on the chart surface in both modes (raw PEN_NIGHT is only ~2.6:1 there).
@@ -251,11 +260,20 @@ def vega_config(dark: bool = False) -> dict[str, Any]:
         "view": {"stroke": "transparent"},
         "range": {"category": category},
         "mark": {"color": pen},
+        # No `cornerRadiusEnd` here: on a pre-binned histogram (x + x2) Vega-Lite turns the bars into
+        # paths of zero width, so every histogram drew empty.
         "bar": {"color": pen},
-        "line": {"color": ink},
-        "area": {"color": pen, "opacity": 0.35, "line": {"color": pen}},
+        # The main line is the pen green, not ink: near-white lines on the Night surface glare. Night
+        # strokes are 0.5px heavier and fills lighter, so thin marks and tints keep their weight there.
+        "line": {"color": pen, "strokeWidth": 2.5 if dark else 2},
+        "area": {"color": pen, "opacity": 0.28 if dark else 0.35, "line": {"color": pen}},
         "circle": {"color": pen},
         "point": {"color": pen},
         "tick": {"color": ink},
         "rule": {"color": graphite},
+        # Text marks (a reference line's label, bar values) take the ink, not Vega's default black.
+        "text": {"color": ink, "font": FONT_BODY, "fontSize": 11},
+        # The pop: a second thing drawn over the data (a fitted or cumulative line, an uncertainty
+        # band) is the theme's amber accent. A mark opts in with {"style": "accent"}.
+        "style": {"accent": {"color": accent, "strokeWidth": 3 if dark else 2.5}},
     }

@@ -978,6 +978,8 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                 # ---- Stage 6: RLM Decomposition (if enabled & many features, once only) ----
                 if self.enable_rlm and not self._rlm_decomposed and self._should_decompose():
                     progress.update(task_id, description="Stage 6 — RLM task decomposition…")
+                    if self.on_iteration_callback:  # progress notice only; the decomposition is unchanged
+                        self.on_iteration_callback(iteration, "stage6:rlm_decomposition")
                     self._run_rlm_decomposition()
                     self._rlm_decomposed = True
 
@@ -1318,6 +1320,8 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
 
     def _finalize_analysis(self, final_result: dict[str, Any]) -> dict[str, Any]:
         """Stage 7: attach metadata, run the audits, then write the reports."""
+        if self.on_iteration_callback:
+            self.on_iteration_callback(self.memory.iteration_count, "stage7:report")
         self._attach_run_metadata(final_result)
         self._run_post_hoc_audits(final_result)
 

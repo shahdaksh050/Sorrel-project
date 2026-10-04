@@ -325,10 +325,28 @@ def test_each_tab_is_a_warm_band_holding_lighter_cards(monkeypatch: pytest.Monke
             at = sheet.index(selector + " {")
             return sheet[at : sheet.index("}", at)]
 
-        assert "background: var(--sheet-alt)" in body('[data-testid="stTabs"] [data-testid="stTabPanel"]')
+        assert "background: var(--sheet-alt)" in body('[data-testid="stTabs"] [role="tabpanel"]')
         assert "background: var(--sheet)" in body('[class*="st-key-audit_"], [class*="st-key-chart_card_"], .st-key-report_preview')
         assert "var(--stock)" in body(".how-head")
         # The three surfaces are told apart: a card is never the band's colour.
         colours = palette(theme)
         assert len({colours["sheet_alt"].lower(), colours["sheet"].lower(), colours["stock"].lower()}) == 3
         assert contrast(colours["ink"], colours["sheet_alt"]) >= 4.5  # text sitting straight on the band
+
+
+def test_stylesheet_only_targets_test_ids_this_streamlit_renders() -> None:
+    """A rule keyed on a `data-testid` the installed Streamlit never emits silently styles nothing
+    (`stTabPanel` did: the tab bands never rendered). Ids Streamlit builds at runtime are listed."""
+    import re
+    from pathlib import Path
+
+    import streamlit
+
+    js_dir = Path(streamlit.__file__).parent / "static" / "static" / "js"
+    bundle = "".join(p.read_text(encoding="utf-8", errors="ignore") for p in js_dir.glob("*.js"))
+    built_at_runtime = ("stAlertContent", "stBaseButton-")
+    source = Path("ui/styles.py").read_text(encoding="utf-8")
+    ids = set(re.findall(r'data-testid="(st[A-Za-z_-]+)"', source))
+    # stToggle: Streamlit 1.57 draws a toggle as a checkbox; the rule that uses it is already dead.
+    dead = sorted(i for i in ids if i not in bundle and not i.startswith(built_at_runtime) and i != "stToggle")
+    assert not dead, f"selectors Streamlit does not render: {dead}"

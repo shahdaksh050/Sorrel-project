@@ -113,10 +113,12 @@ def render_answers_tab(
 
     # 1. The question as the heading, the answer under it.
     answer = html.escape(plainify(view.reasoning)) if view.reasoning else ""
+    if view.objective or answer:
+        st.markdown('<span class="eyebrow">Sorrel · Answers</span>', unsafe_allow_html=True)
     if view.objective:
         st.markdown(
             '<div class="exec-directive">'
-            f"<h2>You asked: {html.escape(view.objective)}</h2>"
+            f'<h2>You asked: <span class="serif-it">{html.escape(view.objective)}</span></h2>'
             + (f'<p class="dir-content">{answer}</p>' if answer else "")
             + "</div>",
             unsafe_allow_html=True,

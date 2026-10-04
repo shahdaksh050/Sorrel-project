@@ -72,6 +72,17 @@ def section(title: str, note: str = "", level: str = "h3") -> None:
     )
 
 
+def tab_head(tab: str, title: str, accent: str = "") -> None:
+    """The head of a tab: a mono eyebrow naming the tab, then the title with one italic serif word,
+    as the workspace header reads ("SORREL · WORKSPACE", "Results for *file.csv*")."""
+    accent_html = f' <span class="serif-it">{html.escape(accent)}</span>' if accent else ""
+    st.markdown(
+        f'<div class="tab-head"><span class="eyebrow">Sorrel · {html.escape(tab)}</span>'
+        f"<h2>{html.escape(title)}{accent_html}</h2></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def audit_head_html(title: str, note: str = "") -> str:
     """Title and one plain line for a section of the Details audit trail."""
     note_html = f"<p>{html.escape(str(note))}</p>" if note else ""

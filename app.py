@@ -311,8 +311,9 @@ def _run_progress() -> None:
         unsafe_allow_html=True,
     )
     # The stepper and the 3D plate sit in the page header and are drawn by the full script, so a change
-    # of stage (a handful of times per run) asks for one full redraw; the polling here stays cheap.
-    _stage_sig = tuple((n, status) for n, status, _ in snap.stage_log)
+    # of stage or of what a stage reports (which tool is running, which cycle) asks for one full redraw;
+    # the polling here stays cheap.
+    _stage_sig = tuple(snap.stage_log)
     if st.session_state.get("_stage_sig", _stage_sig) != _stage_sig:
         st.session_state["_stage_sig"] = _stage_sig
         st.rerun()

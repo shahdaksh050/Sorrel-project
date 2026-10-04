@@ -1,10 +1,10 @@
-# DSA Agent — Autonomous Data Analysis and Interpretation System
+# Sorrel — Autonomous Data Analysis and Interpretation System
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-active%20development-orange.svg)]()
 
-DSA Agent is a final-year B.Tech CSE project that turns a tabular dataset and
+Sorrel is a final-year B.Tech CSE project that turns a tabular dataset and
 a plain-language question into an auditable analysis. It profiles the data,
 selects suitable deterministic analysis tools, optionally uses an LLM to plan
 and interpret the workflow, checks the evidence behind reported claims, and

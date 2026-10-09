@@ -133,6 +133,20 @@ Example (illustrative column names — use this dataset's real ones):
 {"step_number": 3, "tool_name": "execute_dynamic_code", "parameters": {"code": "g = df.groupby('region')['amount'].mean().sort_values(ascending=False).reset_index()\\nRESULT = g\\nCHART = dsa.chart.bar(g, x='region', y='amount', title='Average amount by region', y_format='currency')\\nFINDING = {'headline': f'{g.region[0]} has the highest average amount ({g.amount[0]:,.2f})', 'evidence': {'region': g.region[0], 'avg_amount': round(float(g.amount[0]), 2)}}"}, "rationale": "Check which region has the highest average amount."}
 `define_analysis_tool` registers reusable code as a named tool; use it only \
 when you will call the same computation again with different parameters.
+
+## Domain and causal reasoning
+For an unfamiliar field, describe the domain and method requirements in the
+structured cycle-1 contracts. Do not pretend a named method exists as a built-in
+tool. If no listed tool implements it, use `execute_dynamic_code` for a one-off
+calculation or `define_analysis_tool` for reuse: both are governed sandbox paths.
+Never place executable code anywhere except a parameter of one of those two
+code-executing tools.
+
+An association is not a causal effect. A treatment/arm column does not prove
+random assignment. Mark a design randomized only when the user objective or
+supplied metadata explicitly says assignment was randomized. Propose causal
+roles and assumptions in `causal_design`; the controller decides whether the
+effect is identifiable and may refuse causal estimation.
 <<ML_DIRECTIVE>>
 ## Reply forms
 Form 1 — more analysis needed:
@@ -184,6 +198,10 @@ Top-level names:
 headline = one plain sentence with the number and unit; every number in it goes in `evidence`.
 - `CHART = dsa.chart.bar(...)` (optional).
 Limits: ~45 s, no file or network access, imports only from: <<MODULES>>.
+For an unfamiliar method, executable code is allowed only inside
+`execute_dynamic_code` or `define_analysis_tool`; those are sandboxed. A group
+or treatment column alone never proves random assignment. Use the cycle-1
+domain and causal contracts; the controller validates them.
 <<ML_DIRECTIVE>>
 ## Reply forms
 Form 1 (more analysis): {"status": "in_progress", "reasoning": "<2 sentences>", "steps": [{"step_number": 1, "tool_name": "<exact name>", "parameters": {...}, "rationale": "<one sentence>"}]}
@@ -211,18 +229,28 @@ _COMPACT_BELOW_TOKENS = 12_000
 INITIAL_ANALYSIS_PROMPT = """\
 ## Dataset
 {dataset_metadata}
-{profile}{objective}{draft_plan}
+{profile}{objective}
+## Dataset-derived question agenda
+{questions}
+{draft_plan}
 ## Your task (cycle 1)
 1. Describe the data in `data_understanding` — short, factual, from the \
 profile above. Confirm or correct the profiler's archetype.
-2. Plan the first cycle: start with clean_data (it does not impute — \
+2. Fill `domain_analysis` with the row grain, domain-specific questions,
+method requirements, assumptions, invalid analyses, and information that is
+missing. Use exact column names. This is a proposal: the controller validates it.
+3. If and only if the objective asks a causal question, fill `causal_design`.
+Classify causal roles, time order and the desired estimand. Never infer
+randomization from a treatment/arm column name. Use `requested: false` for a
+descriptive, predictive, or association-only objective.
+4. Plan the first cycle: start with clean_data (it does not impute — \
 leave missing values; models impute inside cross-validation), then 3-6 \
 analyses that together give a broad baseline for this kind of data \
 (distributions, relationships, group/time/text/geo structure — whatever \
 the profile shows). Start from the suggested plan: keep steps that fit, \
 drop ones that don't, fix parameters (right columns, sum vs mean), and add \
 what it misses — execute_dynamic_code for anything no tool covers.
-3. Optional `roles` in data_understanding (allowed roles: {roles}) — only for \
+5. Optional `roles` in data_understanding (allowed roles: {roles}) — only for \
 columns whose meaning the names don't make obvious; use exact names. Each \
 is checked against the data and dropped if it doesn't fit.
 
@@ -239,12 +267,72 @@ Reply with exactly this shape:
    "caveats": ["<data issue that changes interpretation, max 15 words>"],
    "questions": ["<question worth answering, max 20 words>"]
  }},
+ "domain_analysis": {{
+   "row_entity": "<what one row measures>",
+   "domain": "<specific field>",
+   "grain": "<unit and time grain>",
+   "key_measures": ["<exact column>"],
+   "key_dimensions": ["<exact column>"],
+   "units": {{"<exact column>": "<unit or unknown>"}},
+   "domain_questions": ["<answerable domain question>"],
+   "suggested_methods": ["<method name, not code>"],
+   "assumptions": ["<assumption to verify>"],
+   "prohibited_analyses": ["<misleading analysis to avoid>"],
+   "missing_information": ["<needed codebook/design fact>"]
+ }},
+ "causal_design": {{
+   "requested": false,
+   "design": "observational",
+   "treatment": null,
+   "outcome": null,
+   "confounders": [],
+   "mediators": [],
+   "colliders": [],
+   "instruments": [],
+   "time_column": null,
+   "entity_column": null,
+   "estimand": null,
+   "assumptions": []
+ }},
  "reasoning": "<2-3 sentences>",
  "steps": [{{"step_number": 1, "tool_name": "clean_data", "parameters": {{}}, "rationale": "..."}}]}}
 """
 
 
 # ---------------------------------------------------------------------------
+ADVERSARIAL_CAUSAL_REVIEW_PROMPT = """\
+## Dataset
+{dataset_metadata}
+## User Objective
+{objective}
+## Causal Design Under Review
+- Study design: {study_design}
+- Treatment: {treatment}
+- Outcome: {outcome}
+- Pre-treatment confounders: {confounders}
+- Context / Keys: {time_entity}
+## Current Estimate & Summary
+{estimate_summary}
+
+## Your Task: Adversarial Causal Review
+Act as a skeptical causal inference referee. Critically red-team this proposed causal interpretation:
+1. Plausible Unmeasured Confounders: What specific, realistic variables in this domain might confound the relationship between {treatment} and {outcome}?
+2. Reverse Causality: Could {outcome} precede, cause, or select {treatment}?
+3. Post-Treatment / Collider Risk: Could any adjusted variable be a mediator or collider rather than a true pre-treatment confounder?
+4. Assumption Breaches: What violations (e.g. parallel trends failure, spillover / SUTVA breach, simultaneous policy changes) would break identification?
+
+Reply with exactly this JSON format:
+{{
+  "critique_summary": "<1-2 concise sentences summarizing the primary causal threat>",
+  "plausible_unmeasured_confounders": ["<confounder 1>", "<confounder 2>"],
+  "reverse_causality_risk": "<low | medium | high — brief reason>",
+  "mediator_collider_concerns": ["<concern or leave empty>"],
+  "untestable_assumption_caveats": ["<specific domain caveat 1>", "<specific domain caveat 2>"],
+  "recommendation": "<conditional_interpretation | reject_causal_claim>"
+}}
+"""
+
+
 # Stage 4+5 — Result interpretation & iterative refinement
 # ---------------------------------------------------------------------------
 
@@ -610,6 +698,56 @@ class PromptManager:
                 lines.append(f"- {key}: {'; '.join(_sp(v, max_len=160) for v in u[key])}")
         return "\n".join(lines) + "\n"
 
+    def _domain_analysis_block(self) -> str:
+        """Validated metadata-only domain contract for later reasoning cycles."""
+        domain = self.memory.get_context("domain_analysis")
+        if not isinstance(domain, dict) or not domain:
+            return ""
+        lines = ["\n## Validated domain analysis contract (proposal, not evidence)"]
+        for key in ("domain", "row_entity", "grain", "readiness", "confidence"):
+            if domain.get(key) not in (None, "", []):
+                lines.append(f"- {key}: {_sp(domain[key], max_len=240)}")
+        for key in (
+            "key_measures", "key_dimensions", "domain_questions", "suggested_methods",
+            "assumptions", "prohibited_analyses", "missing_information", "warnings",
+        ):
+            values = domain.get(key)
+            if isinstance(values, list) and values:
+                lines.append(f"- {key}: {'; '.join(_sp(value, max_len=160) for value in values[:12])}")
+        lines.append(
+            "- execution rule: unfamiliar/custom computations may run only through "
+            "execute_dynamic_code or define_analysis_tool (governed sandbox)."
+        )
+        return "\n".join(lines) + "\n"
+
+    def _causal_design_block(self) -> str:
+        """Deterministically validated causal-identification decision."""
+        design = self.memory.get_context("causal_design")
+        if not isinstance(design, dict) or design.get("status") == "not_requested":
+            return ""
+        lines = ["\n## Validated causal identification gate"]
+        for key in (
+            "status", "study_design", "treatment", "outcome", "estimand", "estimator",
+            "execution_route",
+        ):
+            if design.get(key) not in (None, "", []):
+                lines.append(f"- {key}: {_sp(design[key], max_len=240)}")
+        for key in (
+            "pre_treatment_confounders", "mediators", "colliders", "instruments",
+            "diagnostics_required", "assumptions", "missing_requirements", "warnings",
+        ):
+            values = design.get(key)
+            if isinstance(values, list) and values:
+                lines.append(f"- {key}: {'; '.join(_sp(value, max_len=180) for value in values[:16])}")
+        if design.get("status") == "not_identified":
+            lines.append("- directive: do not estimate or state a causal effect; report what information is missing.")
+        else:
+            lines.append(
+                "- directive: identification remains conditional until execution diagnostics pass; "
+                "do not turn an adjusted association into causal proof."
+            )
+        return "\n".join(lines) + "\n"
+
     def _draft_plan_block(self) -> str:
         """Profile-derived default plan, offered as a draft to edit — a weak
         model edits a good plan far better than it authors one."""
@@ -812,6 +950,7 @@ class PromptManager:
             dataset_metadata=self._metadata(level),
             profile=self._profile_block(self._profile_lines(level)),
             objective=self._objective_block(),
+            questions=self._open_questions_block(),
             draft_plan=self._draft_plan_block(),
             archetypes=" | ".join(ARCHETYPES),
             roles=", ".join(ALLOWED_ROLES),
@@ -827,6 +966,8 @@ class PromptManager:
                 + self._generated_tools_block()
                 + self._interrupt_block()
                 + self._hypotheses_block()
+                + self._domain_analysis_block()
+                + self._causal_design_block()
             )
             if level < 3:
                 extras += self._rlm_block()
@@ -863,7 +1004,10 @@ class PromptManager:
                 # small model's context window on repetition.
                 results_summary=self._results(-1, level),
             )
-            return prompt + self._rlm_block() if level < 3 else prompt
+            contracts = self._domain_analysis_block() + self._causal_design_block()
+            if level < 3:
+                contracts += self._rlm_block()
+            return prompt + contracts
 
         return self._fit(render)
 

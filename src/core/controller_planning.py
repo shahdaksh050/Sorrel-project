@@ -198,6 +198,49 @@ class PlanMixin(ControllerState):
             )
         return steps
 
+    def _ensure_preprocessing_steps(self, steps: list[AnalysisStep]) -> list[AnalysisStep]:
+        """Make deterministic data preparation non-optional in an LLM plan.
+
+        The model may edit the suggested plan, but it cannot safely decide to
+        analyse raw composite strings or skip the cleaned-file contract. Tool
+        ``applies_to`` remains the generic relevance gate, so this does not
+        force feature extraction onto already tidy numeric data.
+        """
+        meta = self.memory.dataset_metadata
+        if meta is None:
+            return steps
+        completed = {
+            result.tool_name for result in self.memory.tool_results if result.status == "success"
+        }
+        planned = {step.tool_name for step in steps}
+        prefix: list[AnalysisStep] = []
+        if "clean_data" not in completed and "clean_data" not in planned:
+            prefix.append(AnalysisStep(
+                step_number=0,
+                tool_name="clean_data",
+                parameters={"file_path": meta.file_path, "target_column": meta.target_column},
+                rationale="Required preprocessing: establish the cleaned dataset used by every downstream tool.",
+            ))
+        if (
+            self.tool_registry.has("extract_structured_features")
+            and "extract_structured_features" not in completed
+            and "extract_structured_features" not in planned
+            and self.tool_registry.get("extract_structured_features").applies_to(self.last_profile, meta) > 0.0
+        ):
+            prefix.append(AnalysisStep(
+                step_number=0,
+                tool_name="extract_structured_features",
+                parameters={"file_path": meta.file_path},
+                rationale=(
+                    "Required preprocessing: derive typed features from composite/unit-bearing "
+                    "fields and quarantine semantic mismatches."
+                ),
+            ))
+        ordered = [*prefix, *steps]
+        for number, step in enumerate(ordered, 1):
+            step.step_number = number
+        return ordered
+
     #: Nature-driven tools included in the fallback plan when applies_to()
     #: scores them at full confidence (1.0) — same tools, same gating logic
     #: the LLM planner sees, so there's one source of truth for "what suits
@@ -208,6 +251,7 @@ class PlanMixin(ControllerState):
     #: the code and is meaningless without one.
     _FALLBACK_EXCLUDED_TOOLS = frozenset({
         "ingest_dataset", "clean_data", "generate_report",
+        "extract_structured_features",
         "train_model", "evaluate_model", "cluster_data",
         "execute_dynamic_code",
         # Now returns chart specs the dashboard renders, but everything it
@@ -278,6 +322,23 @@ class PlanMixin(ControllerState):
             },
         ]
 
+        # Semantic/unit extraction is a preprocessing stage, not an optional
+        # analytical hypothesis. Its own applies_to gate keeps clean numeric
+        # datasets untouched; when relevant it must run before correlations,
+        # segment comparisons or models see composite strings.
+        if self.tool_registry.has("extract_structured_features"):
+            feature_tool = self.tool_registry.get("extract_structured_features")
+            if feature_tool.applies_to(profile, meta) > 0.0:
+                steps.append({
+                    "step_number": len(steps) + 1,
+                    "tool_name": "extract_structured_features",
+                    "parameters": {"file_path": fp},
+                    "rationale": (
+                        "Fallback plan: convert unit-bearing/composite fields into "
+                        "typed features and quarantine semantic mismatches before analysis."
+                    ),
+                })
+
         # detect_outliers/correlation_analysis are near-universal but not
         # unconditional — e.g. correlation_analysis needs 2+ numeric columns
         # — so they go through the same applies_to gate as everything else
@@ -304,9 +365,32 @@ class PlanMixin(ControllerState):
         # reachable. The previous hardcoded tuple silently excluded every
         # tool it predated.
         already = {s["tool_name"] for s in steps} | self._FALLBACK_EXCLUDED_TOOLS
-        for tool in self.tool_registry.candidate_tools(
+        candidate_tools = list(self.tool_registry.candidate_tools(
             profile, meta, use_ml=self.use_ml, use_llm=self.use_llm
-        ):
+        ))
+        recommended_order: dict[str, int] = {}
+        routing_family: str = ""
+        if hasattr(self, "question_routing") and self.question_routing:
+            routing_family = getattr(self.question_routing, "primary_family", "")
+            rec_tools = getattr(self.question_routing, "recommended_tools", [])
+            recommended_order = {n: i for i, n in enumerate(rec_tools)}
+        elif self.memory:
+            stored_routing = self.memory.get_context("question_routing")
+            if isinstance(stored_routing, dict):
+                routing_family = str(stored_routing.get("primary_family") or "")
+                rec_tools = list(stored_routing.get("recommended_tools") or [])
+                recommended_order = {n: i for i, n in enumerate(rec_tools)}
+
+        if recommended_order:
+            candidate_tools.sort(
+                key=lambda t: (
+                    0 if getattr(t, "name", "") in recommended_order else 1,
+                    recommended_order.get(getattr(t, "name", ""), 999),
+                    -t.applies_to(profile, meta),
+                )
+            )
+
+        for tool in candidate_tools:
             name = getattr(tool, "name", "")
             if name in already:
                 continue
@@ -346,8 +430,8 @@ class PlanMixin(ControllerState):
                 "tool_name": name,
                 "parameters": tool_params,
                 "rationale": (
-                    f"Fallback plan: profile-driven selection scored '{name}' "
-                    f"at {score:.2f} for this dataset."
+                    f"Fallback plan: matched objective intent '{routing_family}' recommending '{name}' (applies_to {score:.2f})." if name in recommended_order and routing_family else f"Fallback plan: profile-driven selection scored '{name}' at {score:.2f} for this dataset."
+
                 ),
             })
             already.add(name)

@@ -11,6 +11,7 @@ from src.tools.ml_pipeline import (
     SKEW_TREATMENT_THRESHOLD,
     EvaluateModelTool,
     TrainModelTool,
+    _detect_target_leakage,
     _prepare_features,
 )
 
@@ -33,6 +34,24 @@ class TestAutoTreatments:
         X, _y, treatments = _prepare_features(_make_df(), "label")
         assert "customer_id" not in X.columns
         assert any("identifier" in t for t in treatments)
+
+    def test_raw_free_text_is_not_one_hot_encoded(self) -> None:
+        df = _make_df()
+        df["specification"] = [
+            f"processor family {i % 4} with camera package and battery option {i % 3}"
+            for i in range(len(df))
+        ]
+        X, _y, treatments = _prepare_features(df, "label")
+        assert "specification" not in X.columns
+        assert any("raw prose" in treatment for treatment in treatments)
+
+    def test_categorical_mapping_can_leak_continuous_target(self) -> None:
+        groups = pd.Series((["a", "b", "c", "d"] * 25), name="lookup")
+        y = groups.map({"a": 10.0, "b": 20.0, "c": 30.0, "d": 40.0})
+        warnings = _detect_target_leakage(
+            pd.DataFrame({"lookup": groups}), y, "regression"
+        )
+        assert any("continuous target variance" in warning for warning in warnings)
 
     def test_skewed_feature_reported_via_training_pipeline(self, tmp_path: Path) -> None:
         """P0.1: the log1p decision now happens inside the fitted Pipeline

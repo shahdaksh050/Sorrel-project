@@ -131,7 +131,7 @@ class ReportMixin(ControllerState):
             if self._rlm_engine is not None:
                 self._rlm_engine.record_usage(reply.get("_rlm_usage"))
                 self.memory.set_context("llm_usage", self._rlm_engine.usage_summary())
-            design = design_from_reply(df, reply)
+            design = design_from_reply(df, reply, findings)
             designed = [
                 c for i, raw in enumerate(design.charts)
                 if (c := designed_chart(raw, i, findings)) is not None

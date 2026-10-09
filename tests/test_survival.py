@@ -121,6 +121,7 @@ def test_large_frame_is_fast(tmp_path: Path) -> None:
     start = time.perf_counter()
     result = SurvivalAnalysisTool().run(file_path=str(path), group_column="plan")
     assert result.status == "success", result.error_message
+    assert result.output["cox"]["n"] == 4_000
     assert time.perf_counter() - start < 6.0
 
 

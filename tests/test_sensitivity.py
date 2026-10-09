@@ -22,6 +22,7 @@ def test_sensitivity_robust_finding() -> None:
     }
 
     report = audit_finding_sensitivity(df, finding, trim_pct=0.01)
+    assert report["status"] == "passed"
     assert report["is_fragile"] is False
     assert report["fragility_score"] < 0.5
     assert "Robust" in report["diagnosis"]
@@ -46,9 +47,68 @@ def test_sensitivity_fragile_finding_with_extreme_outlier() -> None:
     }
 
     report = audit_finding_sensitivity(df, finding, trim_pct=0.01)
+    assert report["status"] == "failed"
     assert report["is_fragile"] is True
     assert report["effect_shift_pct"] > 30.0
     assert "Fragile finding" in report["diagnosis"]
+
+
+def test_sensitivity_non_numeric_measure_is_not_a_robust_pass() -> None:
+    df = pd.DataFrame({"label": ["a"] * 30, "segment": ["x"] * 30})
+
+    report = audit_finding_sensitivity(df, {"measure": "label", "dimension": "segment"})
+
+    assert report["status"] == "not_applicable"
+    assert report["is_fragile"] is None
+    assert report["fragility_score"] is None
+
+
+def test_sensitivity_unsupported_model_driver_is_not_a_robust_pass() -> None:
+    x = np.arange(30, dtype=float)
+    df = pd.DataFrame({"feature": x, "outcome": x * 2.0})
+
+    report = audit_finding_sensitivity(
+        df,
+        {"kind": "driver", "measure": "outcome", "dimension": "feature", "effect_kind": "r"},
+    )
+
+    assert report["status"] == "not_applicable"
+    assert report["is_fragile"] is None
+
+
+def test_sensitivity_categorical_segment_recomputes_level_vs_rest_lift() -> None:
+    df = pd.DataFrame({
+        "segment": ["A"] * 20 + ["B"] * 20,
+        "score": [10.0] * 20 + [5.0] * 20,
+    })
+    finding = {
+        "kind": "segment_lift",
+        "measure": "score",
+        "dimension": "segment",
+        "level": "A",
+        "effect_kind": "lift",
+    }
+
+    report = audit_finding_sensitivity(df, finding)
+
+    assert report["status"] == "passed"
+    assert report["baseline_effect"] == 1.0
+    assert report["trimmed_effect"] == 1.0
+
+
+def test_sensitivity_categorical_without_supported_contrast_is_not_a_pass() -> None:
+    df = pd.DataFrame({
+        "segment": ["A"] * 20 + ["B"] * 20,
+        "score": list(range(40)),
+    })
+
+    report = audit_finding_sensitivity(
+        df,
+        {"kind": "test", "measure": "score", "dimension": "segment", "effect_kind": "eta_sq"},
+    )
+
+    assert report["status"] == "not_applicable"
+    assert report["is_fragile"] is None
 
 
 def test_leakage_ignores_near_unique_identifier_column() -> None:

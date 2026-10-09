@@ -80,7 +80,7 @@ from src.core.joins import join_related
 from src.core.llm_client import _DEFAULT_MODELS as _DEFAULT_MODELS
 from src.core.llm_client import LLMClient as LLMClient
 from src.core.llm_client import LocalOnlyError as LocalOnlyError
-from src.core.memory import DatasetMetadata, MemorySystem, ToolResult
+from src.core.memory import AnalysisStep, DatasetMetadata, MemorySystem, ToolResult
 from src.core.model_telemetry import get_limiter
 from src.core.profiler import DatasetProfile, profile_dataframe
 from src.core.prompt_manager import (
@@ -92,7 +92,6 @@ from src.core.question_router import route_question
 from src.core.run_config import RunConfig
 from src.core.run_context import objective_scope
 from src.core.security import sanitize_for_prompt
-from src.core.shared_context import SharedAnalysisContext
 from src.core.step_validation import _COLUMN_PARAM_NAMES as _COLUMN_PARAM_NAMES
 from src.core.tool_registry import _INJECTED_PARAMS as _INJECTED_PARAMS
 from src.core.tool_registry import ToolRegistry as ToolRegistry
@@ -218,7 +217,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # (7.4 needs profile-before-target; class-imbalance warnings need
         # target-before-profile). Cleared at the end of load_dataset.
         self._pending_df: pd.DataFrame | None = None
-        self.shared_context: SharedAnalysisContext | None = None
+
         self.study_design: str = "observational"
         # Charts from the most recent dashboard build (for the HTML report).
         self._last_charts: list[dict[str, Any]] = []
@@ -271,9 +270,33 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         actually asks for prediction. Autonomy includes the autonomy to
         decline to model (T2).
         """
-        profile = self.last_profile
         objective_l = self.objective.lower()
         wants_prediction = any(kw in objective_l for kw in self._PREDICTION_INTENT_KEYWORDS)
+
+        # A blank objective is an instruction to discover answerable
+        # questions, not permission to invent a prediction problem. More
+        # generally, auto-detection may suggest a candidate for later use,
+        # but only explicit predictive/driver intent may turn that candidate
+        # into the run's target. An explicit ``target_hint`` bypasses this
+        # method in ``load_dataset`` and therefore remains supported.
+        if not wants_prediction:
+            reason = (
+                "No objective was supplied — running broad, question-led EDA and "
+                "letting the dataset determine which descriptive, comparative, "
+                "relationship and quality questions can be answered."
+                if not self.objective
+                else "The objective does not request prediction or driver modelling — "
+                "the candidate is retained for analysis but not promoted to a target."
+            )
+            return {
+                "mode": "describe",
+                "target": None,
+                "candidate": col,
+                "rationale": reason,
+                "alternatives_rejected": (
+                    [f"auto-model on '{col}' (no predictive intent)"] if col else []
+                ),
+            }
 
         # A candidate below the autonomy floor (_AUTODETECT_LOW) is not a
         # real target — it's exactly the "very low confidence" band that
@@ -301,28 +324,6 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     f"model on '{col}' (confidence {confidence:.0%}, below autonomy floor)"
                 ],
             }
-
-        if col and profile and not wants_prediction:
-            col_profile = next((c for c in profile.columns if c.name == col), None)
-            is_transactional = bool(profile.domains) or (
-                profile.entity_col is not None and (profile.rows_per_entity or 0) > 1.5
-            )
-            if col_profile is not None and col_profile.semantic_role == "measure" and is_transactional:
-                return {
-                    "mode": "describe",
-                    "target": None,
-                    "candidate": col,
-                    "rationale": (
-                        f"'{col}' is a descriptive measure at transaction grain "
-                        f"({'domain: ' + profile.domains[0].domain if profile.domains else 'repeat-row entity structure'}), "
-                        "and no prediction was requested — describing it (totals, "
-                        "concentration, trend) is a better answer than training a "
-                        "regressor on a name-matched column."
-                    ),
-                    "alternatives_rejected": [
-                        f"regression on '{col}' (name-matched only, confidence {confidence:.2f})"
-                    ],
-                }
 
         if col:
             return {
@@ -452,8 +453,8 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             df, read_report = read_any(file_path)
             df, coercions = coerce_types(df, delimiter=read_report.delimiter)
             self._pending_df = df
-            self.shared_context = SharedAnalysisContext(df=df)
-            self.memory.set_context("shared_analysis_context", self.shared_context)
+
+
             self.study_design = classify_study_design(df, self.objective)
             self.memory.set_context("study_design", self.study_design)
             profile = profile_dataframe(df, target_column=None)
@@ -661,6 +662,11 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             self.memory.set_context("question_agenda", [q.to_dict() for q in agenda])
         except Exception as exc:
             console.print(f"  [yellow]⚠ Question agenda build skipped (non-fatal): {exc}[/]")
+
+        # Establish a conservative causal record even in deterministic mode.
+        # An LLM-enabled run may replace it in cycle 1, but a causal request
+        # must never disappear merely because the provider is unavailable.
+        self._store_reasoning_contracts({})
 
         return metadata
 
@@ -927,6 +933,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
 
                 if iteration == 1:
                     self._store_data_understanding(llm_response)
+                    self._store_reasoning_contracts(llm_response)
 
                 # A "complete" reply before any tool ran can only be
                 # invented insights: run the profile-driven plan first.
@@ -948,6 +955,8 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
 
                 # ---- Parse plan steps (tolerant of malformed entries) ----
                 steps = self._parse_steps(llm_response, cap=not llm_response.get("deterministic"))
+                steps = self._ensure_preprocessing_steps(steps)
+                steps = self._ensure_causal_analysis_step(steps)
                 if not steps:
                     console.print(
                         f"[yellow]⚠ No valid steps on iteration {iteration} — synthesising final report.[/]"
@@ -1097,7 +1106,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             return llm_response, llm_response
 
     def _deterministic_cycle(self, progress: Progress, task_id: TaskID) -> dict[str, Any]:
-        """Deterministic mode (LLM off by choice): run the profile-driven plan once.
+        """Deterministic mode (LLM off by choice): run the profile-driven plan.
 
         Distinct from the failure path in `_request_plan`. Nothing is "degraded"
         here — the user asked for a deterministic run, so the plan executes once
@@ -1117,6 +1126,31 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             self.memory.store_analysis_plan(steps)
             progress.update(task_id, description=f"Stage 3 — Executing {len(steps)} tool(s)…")
             self._execute_steps(steps)
+            # Extraction can reveal typed measures and dimensions that the
+            # raw profile could not see. Build one bounded second pass from
+            # the refreshed profile and execute only tool families that did
+            # not already succeed; this is discovery, not an unbounded loop.
+            if self.memory.get_context("structured_feature_provenance"):
+                refreshed = self._parse_steps(self._build_fallback_plan(), cap=False)
+                completed = {
+                    result.tool_name
+                    for result in self.memory.tool_results
+                    if result.status == "success"
+                }
+                follow_up = [step for step in refreshed if step.tool_name not in completed]
+                for offset, step in enumerate(follow_up, len(steps) + 1):
+                    step.step_number = offset
+                if follow_up:
+                    console.print(
+                        f"[cyan]🧭 Structured features unlocked {len(follow_up)} "
+                        "additional profile-driven analysis step(s).[/]"
+                    )
+                    self.memory.store_analysis_plan([*steps, *follow_up])
+                    progress.update(
+                        task_id,
+                        description=f"Stage 3 — Executing {len(follow_up)} follow-up tool(s)…",
+                    )
+                    self._execute_steps(follow_up)
             self.memory.save()
         return self._deterministic_final()
 
@@ -1149,6 +1183,17 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         column_roles = (self.memory.get_context("column_roles") or {}).get("accepted")
         if column_roles:
             final_result.setdefault("column_roles", column_roles)
+        for context_key in (
+            "analysis_decision",
+            "semantic_readiness",
+            "semantic_quarantine",
+            "structured_feature_provenance",
+            "domain_analysis",
+            "causal_design",
+        ):
+            context_value = self.memory.get_context(context_key)
+            if context_value:
+                final_result.setdefault(context_key, context_value)
         governance = self._governor.summary(self.memory.get_context("llm_usage"))
         self.memory.set_context("governance", governance)
         final_result["governance"] = governance
@@ -1166,6 +1211,32 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             }
             final_result["api_telemetry"] = api_telem
             self.memory.set_context("api_telemetry", api_telem)
+
+        # Execution failures are analytical limitations, not console-only
+        # diagnostics.  Reports must never imply full coverage when a chart,
+        # statistical test or report tool failed.  Keep the payload compact
+        # and free of parameters/raw data; the full structured result remains
+        # in MemorySystem for the audit trail.
+        execution_issues = [
+            {
+                "tool": result.tool_name,
+                "status": result.status,
+                "message": str(result.error_message or result.output.get("summary", ""))[:300],
+            }
+            for result in self.memory.tool_results
+            if result.status in {"error", "interrupt"}
+        ]
+        if execution_issues:
+            final_result["execution_issues"] = execution_issues
+            degradations = list(self.memory.get_context("degradations") or [])
+            for issue in execution_issues:
+                note = (
+                    f"Analysis step '{issue['tool']}' ended with {issue['status']}: "
+                    f"{issue['message'] or 'no diagnostic was returned'}."
+                )
+                if note not in degradations:
+                    degradations.append(note)
+            self.memory.set_context("degradations", degradations)
         try:
             agenda = self.memory.get_context("question_agenda") or []
             final_result["coverage"] = coverage_report(
@@ -1203,6 +1274,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         self._audit_contract(final_result, audit_df)
         if audit_df is not None:
             self._audit_dependence(final_result, audit_df)
+        self._run_adversarial_causal_review(final_result)
         leakage_alerts = self._audit_target_leakage(final_result, audit_df)
         fragility_by_id = self._audit_fragility(final_result, audit_df)
         self._attach_audit_checks(final_result, leakage_alerts, fragility_by_id)
@@ -1268,6 +1340,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
     ) -> dict[str, bool]:
         """Finding Fragility Audit (sensitivity.py): finding_id -> is_fragile."""
         fragility_by_id: dict[str, bool] = {}
+        audit_reports: dict[str, dict[str, Any]] = {}
         if df is None:
             return fragility_by_id
         try:
@@ -1278,10 +1351,18 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             for f in self.memory.ranked_findings()[:8]:
                 if f.measure and f.effect is not None:
                     report = audit_finding_sensitivity(df, f)
-                    is_fragile = bool(report.get("is_fragile"))
+                    audit_reports[f.finding_id] = report
+                    status = report.get("status")
+                    # Only a completed audit earns a robust/fragile check.
+                    # skipped/not_applicable is unknown, never a pass.
+                    if status not in {"passed", "failed"}:
+                        continue
+                    is_fragile = status == "failed"
                     fragility_by_id[f.finding_id] = is_fragile
-                    if is_fragile:
+                    if is_fragile and report.get("diagnosis"):
                         f.caveats.append(report["diagnosis"])
+            final_result["sensitivity_audits"] = audit_reports
+            self.memory.set_context("sensitivity_audits", audit_reports)
             final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
         except Exception as exc:
             console.print(f"  [yellow]⚠ Finding fragility audit skipped (non-fatal): {exc}[/]")
@@ -1317,6 +1398,91 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             causal_flagged_ids=causal_flagged_ids,
         )
         final_result["findings"] = [f.to_dict() for f in self.memory.ranked_findings()]
+
+    def _run_adversarial_causal_review(self, final_result: dict[str, Any]) -> None:
+        """Adversarial LLM pass challenging proposed causal interpretations.
+
+        The adversarial review red-teams the causal hypothesis for omitted confounding,
+        reverse causality, mediator/collider conditioning, and unmeasured shocks.
+        Crucially, this pass can ONLY downgrade claims or add caveats/warnings;
+        it can never upgrade an observational association into causation.
+        """
+        design = self.memory.get_context("causal_design")
+        if not isinstance(design, dict) or design.get("status") not in {"identified", "partially_identified"}:
+            return
+
+        from src.core.causal_design import validate_adversarial_critique
+
+        treatment = str(design.get("treatment") or "treatment")
+        outcome = str(design.get("outcome") or "outcome")
+        study_design = str(design.get("study_design") or "observational")
+
+        causal_summary = "Causal design evaluated; observational cautions apply."
+        for r in self.memory.tool_results:
+            if r.tool_name in {"causal_analysis", "difference_in_differences", "experiment_analysis"} and r.status == "success":
+                causal_summary = str(r.output.get("summary") or causal_summary)
+                break
+
+        critique_payload: dict[str, Any] = {}
+        if self.use_llm and self._rlm_engine is not None and not self._llm_budget_exhausted():
+            try:
+                from src.core.prompt_manager import ADVERSARIAL_CAUSAL_REVIEW_PROMPT
+
+                confounders_list = design.get("pre_treatment_confounders") or ["none specified"]
+                confounders_str = ", ".join(confounders_list) if isinstance(confounders_list, list) else str(confounders_list)
+                prompt = ADVERSARIAL_CAUSAL_REVIEW_PROMPT.format(
+                    dataset_metadata=self.memory.get_metadata_prompt(),
+                    objective=self.objective,
+                    study_design=study_design,
+                    treatment=treatment,
+                    outcome=outcome,
+                    confounders=confounders_str,
+                    time_entity=f"Time: {design.get('time_column')}, Entity: {design.get('entity_column')}",
+                    estimate_summary=causal_summary,
+                )
+                raw_critique = self._rlm_engine.invoke(
+                    prompt, depth=0, stage="stage4:adversarial_causal_review"
+                )
+                if isinstance(raw_critique, dict):
+                    critique_obj = validate_adversarial_critique(raw_critique)
+                    critique_payload = critique_obj.to_dict()
+            except Exception as exc:
+                console.print(f"  [yellow]⚠ Adversarial causal review skipped (non-fatal): {exc}[/]")
+
+        if not critique_payload:
+            default_summary = (
+                f"Observational study design for {treatment} → {outcome} cannot rule out "
+                "unmeasured confounders, selection effects, or reverse causality."
+            )
+            critique_obj = validate_adversarial_critique(
+                {"critique_summary": default_summary, "recommendation": "conditional_interpretation"}
+            )
+            critique_payload = critique_obj.to_dict()
+
+        design["adversarial_critique"] = critique_payload
+        warnings = list(design.get("warnings") or [])
+        warnings.extend(critique_payload.get("warnings") or [])
+        design["warnings"] = list(dict.fromkeys(warnings))
+
+        if critique_payload.get("recommendation") == "reject_causal_claim":
+            design["status"] = "not_identified"
+            missing = list(design.get("missing_requirements") or [])
+            missing.append("resolution of critical adversarial threats (omitted confounding/reverse causality)")
+            design["missing_requirements"] = list(dict.fromkeys(missing))
+
+        self.memory.set_context("causal_design", design)
+        final_result["causal_design"] = design
+
+        caveats_to_add = list(critique_payload.get("untestable_assumption_caveats") or [])
+        unmeasured = critique_payload.get("plausible_unmeasured_confounders")
+        if isinstance(unmeasured, list) and unmeasured:
+            caveats_to_add.append("Potential unmeasured confounders: " + ", ".join(unmeasured))
+
+        for f in self.memory.findings:
+            if f.source_tool in {"causal_analysis", "difference_in_differences"} or "causal" in f.finding_id:
+                for c in caveats_to_add:
+                    if c not in f.caveats:
+                        f.caveats.append(c)
 
     def _finalize_analysis(self, final_result: dict[str, Any]) -> dict[str, Any]:
         """Stage 7: attach metadata, run the audits, then write the reports."""
@@ -1413,6 +1579,146 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                 clean[key] = items[:6]
         if clean:
             self.memory.set_context("data_understanding", clean)
+
+    def _store_reasoning_contracts(self, llm_response: dict[str, Any]) -> None:
+        """Validate the planner's domain and causal proposals before reuse.
+
+        Only metadata and exact column names enter these contracts. An LLM
+        proposal can recommend a method, but cannot authorize randomization,
+        causal identification, or an unsandboxed execution path.
+        """
+        meta = self.memory.dataset_metadata
+        columns = list(meta.columns) if meta is not None else []
+
+        from src.core.domain_reasoning import validate_domain_analysis_spec
+
+        raw_domain = llm_response.get("domain_analysis")
+        if not isinstance(raw_domain, dict):
+            understanding = llm_response.get("data_understanding")
+            if isinstance(understanding, dict):
+                raw_domain = {
+                    "row_entity": understanding.get("subject"),
+                    "domain": understanding.get("domain"),
+                    "archetype": understanding.get("archetype"),
+                    "key_measures": understanding.get("key_measures"),
+                    "key_dimensions": understanding.get("key_dimensions"),
+                    "domain_questions": understanding.get("questions"),
+                    "assumptions": understanding.get("caveats"),
+                }
+        if isinstance(raw_domain, dict):
+            validation = validate_domain_analysis_spec(raw_domain, columns)
+            domain_payload = validation.spec.to_dict()
+            domain_payload["key_dimensions"] = list(domain_payload.get("dimensions") or [])
+            domain_payload.update({
+                "warnings": list(validation.warnings),
+                "readiness": validation.readiness,
+                "readiness_score": validation.readiness_score,
+                "confidence": validation.confidence,
+                "source": "llm_proposal_validated_against_metadata",
+                "custom_execution_policy": "sandbox_only",
+            })
+            self.memory.set_context("domain_analysis", domain_payload)
+
+        from src.core.causal_design import (
+            objective_requests_causality,
+            validate_causal_design,
+        )
+
+        causal_requested = objective_requests_causality(self.objective)
+        raw_causal = llm_response.get("causal_design")
+        proposal = dict(raw_causal) if isinstance(raw_causal, dict) else {}
+        # The user's objective, not the model, controls whether a causal
+        # analysis was requested. This prevents unsolicited causal stories.
+        proposal["causal_requested"] = causal_requested
+        known_design = self.study_design if self.study_design == "randomized_experiment" else None
+        causal = validate_causal_design(proposal, columns, known_design)
+        causal_payload = causal.to_dict()
+        causal_payload.update({
+            "validated": True,
+            "randomization_verified": bool(
+                causal.study_design == "randomized_experiment"
+                and known_design == "randomized_experiment"
+            ),
+            "source": "llm_proposal_validated_against_metadata_and_user_intent",
+        })
+        if causal.status in {"identified", "partially_identified"}:
+            if causal.study_design == "observational_cross_section":
+                causal_payload["execution_route"] = "built_in:causal_analysis"
+            elif causal.study_design == "panel_difference_in_differences":
+                causal_payload["execution_route"] = "built_in:difference_in_differences"
+            elif causal.study_design == "randomized_experiment":
+                causal_payload["execution_route"] = "built_in:experiment_analysis"
+            else:
+                from src.core.governance import code_execution_available
+
+                causal_payload["execution_route"] = (
+                    f"sandbox_required:{causal.estimator}"
+                    if code_execution_available()
+                    else "unavailable:code_execution_disabled"
+                )
+        self.memory.set_context("causal_design", causal_payload)
+
+    def _ensure_causal_analysis_step(self, steps: list[AnalysisStep]) -> list[AnalysisStep]:
+        """Add a supported built-in estimator only after causal validation."""
+        design = self.memory.get_context("causal_design")
+        if not isinstance(design, dict) or design.get("status") not in {
+            "identified", "partially_identified"
+        }:
+            return steps
+        completed = {
+            result.tool_name for result in self.memory.tool_results if result.status == "success"
+        }
+        planned = {step.tool_name for step in steps}
+        treatment = design.get("treatment")
+        outcome = design.get("outcome")
+        if not isinstance(treatment, str) or not isinstance(outcome, str):
+            return steps
+
+        tool_name: str | None = None
+        params: dict[str, Any] = {}
+        if design.get("study_design") == "observational_cross_section" and self.use_ml:
+            covariates = design.get("pre_treatment_confounders")
+            if isinstance(covariates, list) and covariates:
+                tool_name = "causal_analysis"
+                params = {
+                    "treatment": treatment,
+                    "outcome": outcome,
+                    "covariates": covariates,
+                    "method": "ipw",
+                }
+        elif design.get("study_design") == "panel_difference_in_differences":
+            time_col = design.get("time_column")
+            entity_col = design.get("entity_column")
+            if isinstance(time_col, str) and isinstance(entity_col, str):
+                tool_name = "difference_in_differences"
+                params = {
+                    "treatment": treatment,
+                    "outcome": outcome,
+                    "time_column": time_col,
+                    "entity_column": entity_col,
+                }
+                covariates = design.get("pre_treatment_confounders")
+                if isinstance(covariates, list) and covariates:
+                    params["covariates"] = covariates
+        elif design.get("study_design") == "randomized_experiment":
+            tool_name = "experiment_analysis"
+            params = {"group_column": treatment, "metric_column": outcome}
+        if (
+            tool_name is None
+            or not self.tool_registry.has(tool_name)
+            or tool_name in completed
+            or tool_name in planned
+        ):
+            return steps
+        return [
+            *steps,
+            AnalysisStep(
+                step_number=max((step.step_number for step in steps), default=0) + 1,
+                tool_name=tool_name,
+                parameters=params,
+                rationale="Validated causal design selected this guarded estimator.",
+            ),
+        ]
 
 
 

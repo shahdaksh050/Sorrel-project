@@ -16,6 +16,13 @@ class TestCurrency:
         assert coercions[0].rule == "currency"
         assert coercions[0].column == "amount"
 
+    def test_indian_rupee_with_thousands_separator(self) -> None:
+        df = pd.DataFrame({"price": ["₹14,999"] * 20})
+        out, coercions = coerce_types(df)
+        assert out["price"].iloc[0] == 14999
+        assert pd.api.types.is_numeric_dtype(out["price"])
+        assert coercions[0].rule == "currency"
+
 
 class TestPercent:
     def test_percent_stored_as_fraction(self) -> None:

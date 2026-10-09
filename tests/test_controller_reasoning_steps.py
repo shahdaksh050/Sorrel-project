@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
 import pytest
 
 from src.core.controller import AgentController
+from src.core.memory import AnalysisStep, DatasetMetadata, ToolResult
+from src.core.profiler import profile_dataframe
 
 
 class _FakeEngine:
@@ -88,3 +91,241 @@ def test_request_plan_failure_after_first_cycle_synthesises_final(agent: AgentCo
     reply, final = agent._request_plan(2, "p", "s")
     assert reply == {} and final == {"status": "complete", "marker": 1}
     assert "RuntimeError" in str(agent.memory.get_context("llm_error"))
+
+
+def test_required_preprocessing_is_restored_when_planner_omits_it(
+    agent: AgentController,
+) -> None:
+    frame = pd.DataFrame(
+        {"specification": [f"{index + 1} GB memory with feature package" for index in range(40)]}
+    )
+    agent.last_profile = profile_dataframe(frame)
+    agent.memory.store_dataset_metadata(
+        DatasetMetadata(
+            file_path="catalog.csv",
+            row_count=len(frame),
+            column_count=1,
+            columns={"specification": "str"},
+            missing_values={"specification": 0},
+            numerical_cols=[],
+            categorical_cols=["specification"],
+        )
+    )
+    steps = [AnalysisStep(1, "text_analysis", {}, "planner choice")]
+
+    restored = agent._ensure_preprocessing_steps(steps)
+
+    assert [step.tool_name for step in restored[:2]] == [
+        "clean_data",
+        "extract_structured_features",
+    ]
+    assert [step.step_number for step in restored] == [1, 2, 3]
+
+
+def test_deterministic_cycle_discovers_tools_unlocked_by_extraction(
+    agent: AgentController,
+) -> None:
+    plans = iter(
+        [
+            {
+                "status": "in_progress",
+                "deterministic": True,
+                "steps": [
+                    {"step_number": 1, "tool_name": "clean_data"},
+                    {"step_number": 2, "tool_name": "extract_structured_features"},
+                ],
+            },
+            {
+                "status": "in_progress",
+                "deterministic": True,
+                "steps": [
+                    {"step_number": 1, "tool_name": "clean_data"},
+                    {"step_number": 2, "tool_name": "extract_structured_features"},
+                    {"step_number": 3, "tool_name": "segment_comparison"},
+                ],
+            },
+        ]
+    )
+    executed: list[list[str]] = []
+    agent._build_fallback_plan = lambda: next(plans)  # type: ignore[method-assign]
+
+    def execute(steps: list[AnalysisStep]) -> None:
+        names = [step.tool_name for step in steps]
+        executed.append(names)
+        if len(executed) == 1:
+            agent.memory.set_context("structured_feature_provenance", [{"derived_column": "memory_gb"}])
+            for name in names:
+                agent.memory.append_tool_result(
+                    ToolResult(tool_name=name, status="success", output={"summary": "ok"})
+                )
+
+    agent._execute_steps = execute  # type: ignore[method-assign]
+    agent._deterministic_final = lambda: {"status": "complete"}  # type: ignore[method-assign]
+
+    class _Progress:
+        def update(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    result = agent._deterministic_cycle(_Progress(), 1)  # type: ignore[arg-type]
+
+    assert result == {"status": "complete"}
+    assert executed == [
+        ["clean_data", "extract_structured_features"],
+        ["segment_comparison"],
+    ]
+
+
+def test_reasoning_contracts_ground_domain_and_causal_roles(
+    agent: AgentController,
+) -> None:
+    agent.objective = "Estimate the causal effect of treatment on outcome"
+    agent.memory.store_dataset_metadata(
+        DatasetMetadata(
+            file_path="study.csv",
+            row_count=500,
+            column_count=4,
+            columns={"treatment": "int64", "outcome": "float64", "age": "float64", "region": "str"},
+            missing_values={},
+            numerical_cols=["treatment", "outcome", "age"],
+            categorical_cols=["region"],
+        )
+    )
+
+    agent._store_reasoning_contracts({
+        "domain_analysis": {
+            "domain": "public health",
+            "row_entity": "one patient",
+            "key_measures": ["outcome", "invented"],
+            "key_dimensions": ["region"],
+            "domain_questions": ["How does outcome vary after treatment?"],
+            "suggested_methods": ["causal adjustment"],
+            "assumptions": ["Measurements are comparable."],
+            "prohibited_analyses": ["Do not call correlation causation."],
+        },
+        "causal_design": {
+            "requested": True,
+            "design": "observational",
+            "treatment": "treatment",
+            "outcome": "outcome",
+            "confounders": ["age"],
+            "assumptions": ["conditional_exchangeability", "positivity", "consistency"],
+        },
+    })
+
+    domain = agent.memory.get_context("domain_analysis")
+    causal = agent.memory.get_context("causal_design")
+    assert domain["key_measures"] == ["outcome"]
+    assert domain["key_dimensions"] == ["region"]
+    assert domain["custom_execution_policy"] == "sandbox_only"
+    assert causal["status"] == "partially_identified"
+    assert causal["execution_route"] == "built_in:causal_analysis"
+    assert causal["randomization_verified"] is False
+
+
+def test_llm_cannot_initiate_causal_analysis_without_user_intent(
+    agent: AgentController,
+) -> None:
+    agent.objective = "Describe the dataset"
+    agent.memory.store_dataset_metadata(
+        DatasetMetadata(
+            file_path="study.csv",
+            row_count=100,
+            column_count=2,
+            columns={"treatment": "int64", "outcome": "float64"},
+            missing_values={},
+            numerical_cols=["treatment", "outcome"],
+            categorical_cols=[],
+        )
+    )
+
+    agent._store_reasoning_contracts({
+        "causal_design": {
+            "requested": True,
+            "design": "randomized_experiment",
+            "treatment": "treatment",
+            "outcome": "outcome",
+            "assumptions": ["random_assignment"],
+        }
+    })
+
+    assert agent.memory.get_context("causal_design")["status"] == "not_requested"
+
+
+def test_validated_observational_design_adds_guarded_estimator(
+    agent: AgentController,
+) -> None:
+    agent.memory.set_context("causal_design", {
+        "status": "partially_identified",
+        "study_design": "observational_cross_section",
+        "treatment": "treatment",
+        "outcome": "outcome",
+        "pre_treatment_confounders": ["age"],
+    })
+
+    steps = agent._ensure_causal_analysis_step([AnalysisStep(1, "clean_data")])
+
+    assert [step.tool_name for step in steps] == ["clean_data", "causal_analysis"]
+    assert steps[-1].parameters == {
+        "treatment": "treatment",
+        "outcome": "outcome",
+        "covariates": ["age"],
+        "method": "ipw",
+    }
+
+
+def test_validated_panel_did_design_adds_difference_in_differences_estimator(
+    agent: AgentController,
+) -> None:
+    agent.memory.set_context("causal_design", {
+        "status": "partially_identified",
+        "study_design": "panel_difference_in_differences",
+        "treatment": "treatment",
+        "outcome": "outcome",
+        "time_column": "year",
+        "entity_column": "firm_id",
+        "pre_treatment_confounders": ["assets"],
+    })
+
+    steps = agent._ensure_causal_analysis_step([AnalysisStep(1, "clean_data")])
+
+    assert [step.tool_name for step in steps] == ["clean_data", "difference_in_differences"]
+    assert steps[-1].parameters == {
+        "treatment": "treatment",
+        "outcome": "outcome",
+        "time_column": "year",
+        "entity_column": "firm_id",
+        "covariates": ["assets"],
+    }
+
+
+def test_adversarial_causal_review_attaches_caveats_and_warnings(
+    agent: AgentController,
+) -> None:
+    from src.core.findings import Finding
+
+    agent.memory.set_context("causal_design", {
+        "status": "partially_identified",
+        "study_design": "observational_cross_section",
+        "treatment": "treatment",
+        "outcome": "outcome",
+    })
+    agent.memory.append_finding(
+        Finding(
+            finding_id="causal_outcome_treatment",
+            kind="test",
+            headline="Observed contrast 4.2",
+            source_tool="causal_analysis",
+            caveats=[],
+        )
+    )
+
+    final_result: dict[str, Any] = {}
+    agent._run_adversarial_causal_review(final_result)
+
+    causal = agent.memory.get_context("causal_design")
+    assert causal["status"] == "partially_identified"
+    assert "adversarial_critique" in causal
+    assert causal["warnings"]
+    finding = agent.memory.findings[0]
+    assert any("unmeasured" in c.lower() or "observational" in c.lower() for c in finding.caveats)
+

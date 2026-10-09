@@ -15,6 +15,7 @@ filling each x/y cell, aggregated with `agg`).
 from __future__ import annotations
 
 import operator
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,14 +58,27 @@ class ChartDesign:
     drop_ids: list[str] = field(default_factory=list)
 
 
-def design_from_reply(df: pd.DataFrame, reply: dict[str, Any]) -> ChartDesign:
-    """Run the recipes (up to _MAX_RECIPES) of an LLM reply {"charts": [...], "drop": [...]}."""
+def design_from_reply(
+    df: pd.DataFrame,
+    reply: dict[str, Any],
+    findings: Sequence[Mapping[str, Any]] | None = None,
+) -> ChartDesign:
+    """Run recipes from an LLM reply into safe, evidence-linked chart specs.
+
+    ``findings`` is deliberately optional for callers that predate the chart
+    evidence contract.  A caller may instead include its trusted finding
+    records in ``reply["finding_metadata"]`` (or the legacy ``"findings"``)
+    before handing the reply here.  A recipe that claims a ``finding_id`` is
+    rejected unless that record proves the recipe plots the finding's measure,
+    dimension, and estimand.  Goal-only charts remain backwards compatible.
+    """
     try:
         recipes = reply.get("charts")
         drops = reply.get("drop")
+        by_id = _finding_index(findings, reply)
         charts = [
             spec for recipe in (recipes[:_MAX_RECIPES] if isinstance(recipes, list) else [])
-            if (spec := run_recipe(df, recipe)) is not None
+            if (spec := run_recipe(df, recipe, findings=by_id)) is not None
         ]
         ids = [d.strip() for d in (drops[:_MAX_DROPS] if isinstance(drops, list) else []) if isinstance(d, str)]
         return ChartDesign(charts, list(dict.fromkeys(i for i in ids if i)))
@@ -72,10 +86,19 @@ def design_from_reply(df: pd.DataFrame, reply: dict[str, Any]) -> ChartDesign:
         return ChartDesign()
 
 
-def run_recipe(df: pd.DataFrame, recipe: dict[str, Any]) -> dict[str, Any] | None:
-    """Execute one recipe into a raw chart spec, or None when invalid/unrunnable."""
+def run_recipe(
+    df: pd.DataFrame,
+    recipe: dict[str, Any],
+    *,
+    findings: Mapping[str, Mapping[str, Any]] | Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Execute one recipe into a raw chart spec, or None when invalid/unrunnable.
+
+    Supplying findings activates the evidence contract for recipes with a
+    ``finding_id``.  The keyword-only shape keeps existing callers unchanged.
+    """
     try:
-        return _run(df, recipe)
+        return _run(df, recipe, _finding_index(findings))
     except Exception:
         return None
 
@@ -106,6 +129,108 @@ def _records(frame: pd.DataFrame) -> list[dict[str, Any]]:
 
 def _text(value: Any) -> str | None:
     return value.strip()[:_MAX_TEXT] or None if isinstance(value, str) else None
+
+
+def _finding_index(
+    findings: Mapping[str, Mapping[str, Any]] | Sequence[Mapping[str, Any]] | None,
+    reply: Mapping[str, Any] | None = None,
+) -> dict[str, Mapping[str, Any]]:
+    """Return trusted finding metadata keyed by id without mutating callers' data."""
+    candidates: list[Any] = []
+    if findings is not None:
+        candidates.append(findings)
+    if reply is not None:
+        # ``finding_metadata`` is the explicit transport; ``findings`` keeps
+        # compatibility with callers that already enrich their reply object.
+        candidates.extend((reply.get("finding_metadata"), reply.get("findings")))
+    indexed: dict[str, Mapping[str, Any]] = {}
+    for candidate in candidates:
+        values: Any = candidate.values() if isinstance(candidate, Mapping) else candidate
+        if not isinstance(values, Iterable) or isinstance(values, (str, bytes)):
+            continue
+        for finding in values:
+            if not isinstance(finding, Mapping):
+                continue
+            finding_id = finding.get("finding_id")
+            if isinstance(finding_id, str) and finding_id.strip():
+                indexed[finding_id.strip()] = finding
+    return indexed
+
+
+_AGG_ALIASES = {
+    "average": "mean", "avg": "mean", "mean": "mean",
+    "total": "sum", "sum": "sum",
+    "median": "median", "count": "count", "frequency": "count",
+    "unique": "nunique", "nunique": "nunique",
+    "minimum": "min", "min": "min", "maximum": "max", "max": "max",
+}
+_COMPARISON_KINDS = frozenset({"segment_lift", "driver", "test", "change", "correlation"})
+_DEFAULT_ESTIMANDS = {
+    "segment_lift": "mean", "driver": "mean", "test": "mean", "change": "mean",
+    "concentration": "sum", "distribution": "count",
+}
+
+
+def _expected_agg(finding: Mapping[str, Any]) -> tuple[str | None, bool]:
+    """Return (aggregation, explicit) from a finding's auditable metadata."""
+    evidence = finding.get("evidence")
+    sources = [finding, evidence] if isinstance(evidence, Mapping) else [finding]
+    for source in sources:
+        for key in ("estimand", "aggregation", "agg"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip().lower() in _AGG_ALIASES:
+                return _AGG_ALIASES[value.strip().lower()], True
+    kind = finding.get("kind")
+    return (_DEFAULT_ESTIMANDS.get(kind) if isinstance(kind, str) else None), False
+
+
+def _linked_recipe_matches(
+    recipe: Mapping[str, Any],
+    finding: Mapping[str, Any] | None,
+    actual_agg: str | None,
+) -> bool:
+    """Whether a linked recipe represents the finding rather than merely sharing text.
+
+    We intentionally require exact column names.  Guessing that a related
+    column is interchangeable is how a valid-looking dashboard ended up
+    presenting camera descriptions as card types in the smartphone run.
+    """
+    if finding is None:
+        return False
+    measure = finding.get("measure")
+    dimension = finding.get("dimension")
+    if not isinstance(measure, str) or not measure or not isinstance(dimension, str) or not dimension:
+        return False
+    kind = finding.get("kind") if isinstance(finding.get("kind"), str) else ""
+    chart_type = recipe.get("type")
+    axes = {value for key in ("x", "y", "value", "series") if isinstance((value := recipe.get(key)), str)}
+    if measure not in axes or dimension not in axes:
+        return False
+    if chart_type in ("histogram", "boxplot"):
+        return False
+    expected, explicit = _expected_agg(finding)
+    if expected is None or actual_agg != expected:
+        return False
+    # Extrema can be a valid descriptive chart, but are not evidence for a
+    # comparison/driver claim unless the finding itself explicitly estimates an
+    # extremum.  This avoids a maximum-value chart standing in for an average.
+    if actual_agg in {"min", "max"} and kind in _COMPARISON_KINDS and not explicit:
+        return False
+    return True
+
+
+def _caption_with_context(caption: str | None, agg: str | None, sample_n: int | None) -> str | None:
+    """Append the estimand and usable-row context to a chart caption."""
+    if agg is None and sample_n is None:
+        return caption
+    names = {"mean": "Mean", "sum": "Sum", "median": "Median", "count": "Count", "nunique": "Unique count", "min": "Minimum", "max": "Maximum"}
+    context = names.get(agg or "", "")
+    if sample_n is not None:
+        context = f"{context}{' ' if context else ''}(n={sample_n:,})"
+    if not context:
+        return caption
+    base = caption.rstrip(". ") if caption else ""
+    return f"{base}. {context}." if base else f"{context}."
 
 
 def _is_num(s: pd.Series) -> bool:
@@ -202,7 +327,9 @@ def _fold(g: pd.DataFrame, col: str, val: str, cap: int, additive: bool, keys: l
     return g.groupby(keys, sort=False, observed=True)[val].sum().reset_index()
 
 
-def _run(df: pd.DataFrame, r: dict[str, Any]) -> dict[str, Any] | None:
+def _run(
+    df: pd.DataFrame, r: dict[str, Any], findings: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Any] | None:
     if not isinstance(df, pd.DataFrame) or not isinstance(r, dict) or not df.columns.is_unique:
         return None
     kind = r.get("type")
@@ -231,7 +358,11 @@ def _run(df: pd.DataFrame, r: dict[str, Any]) -> dict[str, Any] | None:
         out = _aggregate(d, kind, r, x, y, series, value)
     if out is None:
         return None
-    rows, y_name, color, agg = out
+    rows, y_name, color, agg, sample_n = out
+    fid = r.get("finding_id")
+    finding_id = fid.strip()[:80] if isinstance(fid, str) and fid.strip() else None
+    if finding_id is not None and not _linked_recipe_matches(r, findings.get(finding_id), agg):
+        return None
     spec: dict[str, Any] = {"type": kind, "x": x, "data": rows}
     if y_name:
         spec["y"] = y_name
@@ -246,15 +377,16 @@ def _run(df: pd.DataFrame, r: dict[str, Any]) -> dict[str, Any] | None:
     y_format = r.get("y_format")
     if y_format not in Y_FORMATS:
         y_format = "count" if agg in ("count", "nunique") else None
-    for key, val in (("title", _text(r.get("title"))), ("caption", _text(r.get("caption"))), ("y_format", y_format)):
+    caption = _caption_with_context(_text(r.get("caption")), agg, sample_n)
+    for key, val in (("title", _text(r.get("title"))), ("caption", caption), ("y_format", y_format)):
         if val:
             spec[key] = val
-    fid = r.get("finding_id")
-    spec["finding_id"] = fid.strip()[:80] or None if isinstance(fid, str) else None
+    spec["finding_id"] = finding_id
     return spec
 
 
-_Out = tuple[list[dict[str, Any]], str | None, str | None, str | None] | None  # rows, y, color, agg
+_Out = tuple[list[dict[str, Any]], str | None, str | None, str | None, int | None] | None
+# rows, y, color, aggregation, usable sample size
 
 
 def _histogram(d: pd.DataFrame, x: str) -> _Out:
@@ -265,7 +397,7 @@ def _histogram(d: pd.DataFrame, x: str) -> _Out:
         return None
     if len(s) > MAX_CHART_ROWS:
         s = s.sample(MAX_CHART_ROWS, random_state=0)
-    return [{x: _py(v)} for v in s], None, None, None
+    return [{x: _py(v)} for v in s], None, None, None, len(s)
 
 
 def _scatter(d: pd.DataFrame, x: str, y: str, series: str | None) -> _Out:
@@ -279,7 +411,7 @@ def _scatter(d: pd.DataFrame, x: str, y: str, series: str | None) -> _Out:
         w = w.sample(_SCATTER_ROWS, random_state=0)
     if len(w) < 2 or w[x].nunique() < 2:
         return None
-    return _records(w), y, None, None
+    return _records(w), y, None, None, len(w)
 
 
 def _boxplot(d: pd.DataFrame, x: str, y: str, grain: Any) -> _Out:
@@ -294,7 +426,7 @@ def _boxplot(d: pd.DataFrame, x: str, y: str, grain: Any) -> _Out:
         w = w.sample(MAX_CHART_ROWS, random_state=0)
     if len(w) < 2 or w[x].nunique() < 2:
         return None
-    return _records(w.sort_values(x, kind="stable")), y, None, None
+    return _records(w.sort_values(x, kind="stable")), y, None, None, len(w)
 
 
 def _aggregate(
@@ -356,4 +488,4 @@ def _aggregate(
         g = g.iloc[np.argsort(-score.to_numpy(dtype=float), kind="stable")]
     else:
         g = g.sort_values(by, kind="stable")
-    return _records(g), (axis2 if heat else name), (name if heat else None), agg
+    return _records(g), (axis2 if heat else name), (name if heat else None), agg, len(w)

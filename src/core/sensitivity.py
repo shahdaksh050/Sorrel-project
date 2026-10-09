@@ -1,14 +1,15 @@
 """
-Statistical Sensitivity, Jackknife Fragility, and Target Leakage Audits.
+Statistical sensitivity, jackknife fragility, and target-leakage audits.
 
-Provides rigorous guards against brittle findings driven by extreme leverage points
-and target leakage in predictive features.
+Sensitivity results distinguish a completed audit from one that could not be
+run.  In particular, an unsupported or skipped audit is never evidence that a
+finding is robust.
 """
 from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -29,71 +30,203 @@ _POST_OUTCOME_SUFFIXES = ("_after", "_resolved", "_outcome", "_date", "_reason")
 #: `_LEAKAGE_MIN_GROUP_RATIO` in src/tools/ml_pipeline.py.
 _LEAKAGE_MIN_GROUP_RATIO = 0.5
 
+AuditStatus = Literal["passed", "failed", "skipped", "not_applicable"]
+
+
+def _non_passing_result(
+    status: Literal["skipped", "not_applicable"],
+    diagnosis: str,
+) -> dict[str, Any]:
+    """Build an explicit result for an audit that did not establish robustness."""
+    return {
+        "status": status,
+        # ``None`` is intentionally distinct from False: legacy consumers that
+        # only know ``is_fragile`` must not interpret this as an audit pass.
+        "is_fragile": None,
+        "fragility_score": None,
+        "diagnosis": diagnosis,
+        "effect_shift_pct": None,
+    }
+
+
+def _cohens_d(level_values: pd.Series, rest_values: pd.Series) -> float | None:
+    """Return the two-sample pooled-standard-deviation effect size."""
+    if len(level_values) < 2 or len(rest_values) < 2:
+        return None
+    level_var = float(level_values.var(ddof=1))
+    rest_var = float(rest_values.var(ddof=1))
+    denominator_df = len(level_values) + len(rest_values) - 2
+    pooled_variance = (
+        (len(level_values) - 1) * level_var + (len(rest_values) - 1) * rest_var
+    ) / denominator_df
+    if pooled_variance <= 0:
+        return None
+    return float((level_values.mean() - rest_values.mean()) / np.sqrt(pooled_variance))
+
+
+def _categorical_contrast_effect(
+    frame: pd.DataFrame,
+    measure: str,
+    level: str,
+    effect_kind: str | None,
+) -> tuple[float | None, np.ndarray, str | None]:
+    """Recompute a level-versus-rest effect and return per-row residuals.
+
+    The residuals identify observations most able to distort this exact group
+    contrast.  Only effect definitions used by ``segment_comparison`` are
+    accepted; guessing a regression coefficient or an omnibus test would make
+    a false robustness claim.
+    """
+    group_values = frame["_dimension"].astype("string")
+    in_level = group_values.eq(str(level)).to_numpy()
+    level_values = frame.loc[in_level, measure]
+    rest_values = frame.loc[~in_level, measure]
+    if len(level_values) < 2 or len(rest_values) < 2:
+        return None, np.array([], dtype=float), "The selected level or its comparison group has fewer than two rows."
+
+    if effect_kind == "lift":
+        rest_mean = float(rest_values.mean())
+        if abs(rest_mean) <= 1e-12:
+            return None, np.array([], dtype=float), "The comparison-group mean is zero, so lift is undefined."
+        effect = float(level_values.mean() / rest_mean - 1.0)
+    elif effect_kind == "cohens_d":
+        cohens_d = _cohens_d(level_values, rest_values)
+        if cohens_d is None:
+            return None, np.array([], dtype=float), "The group contrast has no pooled variance for Cohen's d."
+        effect = cohens_d
+    else:
+        return None, np.array([], dtype=float), (
+            "Categorical sensitivity requires a supported level-versus-rest effect "
+            "(lift or cohens_d)."
+        )
+
+    group_means = frame.groupby("_dimension", observed=True)[measure].transform("mean")
+    residuals = (frame[measure] - group_means).abs().to_numpy(dtype=float)
+    return effect, residuals, None
+
+
+def _categorical_audit(
+    valid_df: pd.DataFrame,
+    measure: str,
+    dimension: str,
+    level: str | None,
+    effect_kind: str | None,
+    trim_pct: float,
+) -> tuple[float, float, int] | dict[str, Any]:
+    """Audit a supported categorical level-versus-rest contrast."""
+    if level is None:
+        return _non_passing_result(
+            "not_applicable",
+            "Categorical sensitivity needs a named level to reproduce the group contrast.",
+        )
+
+    points = valid_df[[dimension, measure]].dropna().rename(columns={dimension: "_dimension"})
+    if len(points) < 20:
+        return _non_passing_result("skipped", "Insufficient categorical comparison points for leverage trimming.")
+
+    baseline_effect, residuals, error = _categorical_contrast_effect(
+        points, measure, level, effect_kind
+    )
+    if baseline_effect is None or error is not None:
+        return _non_passing_result("not_applicable", error or "Unable to reproduce the categorical contrast.")
+
+    k_drop = max(1, int(len(points) * trim_pct))
+    top_leverage_idx = points.index[np.argsort(residuals)[-k_drop:]]
+    trimmed_points = points.drop(index=top_leverage_idx)
+    trimmed_effect, _, trim_error = _categorical_contrast_effect(
+        trimmed_points, measure, level, effect_kind
+    )
+    if trimmed_effect is None or trim_error is not None:
+        return _non_passing_result(
+            "skipped", trim_error or "Leverage trimming left no valid categorical contrast."
+        )
+    return baseline_effect, trimmed_effect, k_drop
+
 
 def audit_finding_sensitivity(
     df: pd.DataFrame,
     finding: dict[str, Any] | Finding,
     trim_pct: float = 0.01,
 ) -> dict[str, Any]:
-    """
-    Audit whether a quantitative finding relies critically on a tiny fraction
-    of extreme leverage points (Jackknife Fragility).
+    """Audit whether a finding is sensitive to a small set of leverage points.
 
-    Drops the top 1% leverage observations and checks if the metric/effect shifts
-    dramatically or flips sign.
+    A completed result has status ``passed`` or ``failed``. ``skipped`` and
+    ``not_applicable`` mean the pipeline has no robustness verdict and set
+    ``is_fragile`` to ``None`` rather than silently treating it as robust.
     """
+    if not 0.0 < trim_pct < 1.0:
+        return _non_passing_result("not_applicable", "trim_pct must be between zero and one.")
+
     f_dict = finding.to_dict() if hasattr(finding, "to_dict") else dict(finding)
     measure = f_dict.get("measure")
     dimension = f_dict.get("dimension")
+    level = f_dict.get("level")
+    effect_kind = f_dict.get("effect_kind")
+    finding_kind = f_dict.get("kind")
 
-    if not measure or measure not in df.columns or not pd.api.types.is_numeric_dtype(df[measure]):
-        return {
-            "is_fragile": False,
-            "fragility_score": 0.0,
-            "diagnosis": "Non-numeric or unanchored measure; sensitivity audit skipped.",
-            "effect_shift_pct": 0.0,
-        }
+    if not isinstance(measure, str) or measure not in df.columns:
+        return _non_passing_result("not_applicable", "The finding has no measure anchored to this dataset.")
+    if not pd.api.types.is_numeric_dtype(df[measure]):
+        return _non_passing_result("not_applicable", "The finding measure is non-numeric; this audit does not apply.")
 
     valid_df = df.dropna(subset=[measure])
     if len(valid_df) < 20:
-        return {
-            "is_fragile": False,
-            "fragility_score": 0.0,
-            "diagnosis": "Sample size too small for robust leverage trimming.",
-            "effect_shift_pct": 0.0,
-        }
+        return _non_passing_result("skipped", "Sample size is too small for robust leverage trimming.")
 
-    # Identify top leverage points
-    if dimension and dimension in df.columns and pd.api.types.is_numeric_dtype(df[dimension]):
-        # Bivariate leverage (Mahalanobis distance on (dimension, measure))
-        pts = valid_df[[dimension, measure]].dropna()
-        if len(pts) < 20:
-            return {"is_fragile": False, "fragility_score": 0.0, "diagnosis": "Insufficient bivariate points."}
-        try:
-            cov = np.cov(pts.values, rowvar=False)
-            inv_cov = np.linalg.pinv(cov)
-            diff = pts.values - pts.mean().values
-            dists = np.sum(diff @ inv_cov * diff, axis=1)
-            k_drop = max(1, int(len(pts) * trim_pct))
-            top_leverage_idx = pts.index[np.argsort(dists)[-k_drop:]]
-            trimmed_pts = pts.drop(index=top_leverage_idx)
+    base_val: float
+    trim_val: float
+    k_drop: int
 
-            r_base, _ = stats.pearsonr(pts[dimension], pts[measure])
-            r_trim, _ = stats.pearsonr(trimmed_pts[dimension], trimmed_pts[measure])
-
-            base_val = float(r_base)
-            trim_val = float(r_trim)
-        except Exception:
-            return {"is_fragile": False, "fragility_score": 0.0, "diagnosis": "Leverage calculation error."}
+    if isinstance(dimension, str) and dimension in df.columns:
+        if pd.api.types.is_numeric_dtype(df[dimension]):
+            # A regression driver is not a Pearson correlation even if its
+            # effect_kind is ``r``; audit only correlations or legacy findings
+            # without a kind, where the historical contract was correlation.
+            if finding_kind not in (None, "", "correlation"):
+                return _non_passing_result(
+                    "not_applicable",
+                    "Numeric sensitivity can reproduce correlations, not this finding's model-specific effect.",
+                )
+            points = valid_df[[dimension, measure]].dropna()
+            if len(points) < 20:
+                return _non_passing_result("skipped", "Insufficient bivariate points for correlation trimming.")
+            try:
+                cov = np.cov(points.values, rowvar=False)
+                inv_cov = np.linalg.pinv(cov)
+                diff = points.values - points.mean().values
+                distances = np.sum(diff @ inv_cov * diff, axis=1)
+                k_drop = max(1, int(len(points) * trim_pct))
+                top_leverage_idx = points.index[np.argsort(distances)[-k_drop:]]
+                trimmed_points = points.drop(index=top_leverage_idx)
+                base_val = float(stats.pearsonr(points[dimension], points[measure])[0])
+                trim_val = float(stats.pearsonr(trimmed_points[dimension], trimmed_points[measure])[0])
+            except (ValueError, np.linalg.LinAlgError, FloatingPointError):
+                return _non_passing_result("skipped", "Correlation leverage calculation could not be completed.")
+        else:
+            if finding_kind not in (None, "", "segment_lift"):
+                return _non_passing_result(
+                    "not_applicable",
+                    "Categorical sensitivity can reproduce a level-versus-rest contrast, not this finding type.",
+                )
+            categorical_result = _categorical_audit(
+                valid_df, measure, dimension, str(level) if level is not None else None,
+                str(effect_kind) if effect_kind is not None else None, trim_pct,
+            )
+            if isinstance(categorical_result, dict):
+                return categorical_result
+            base_val, trim_val, k_drop = categorical_result
     else:
-        # Univariate leverage (Z-score / extreme values on measure)
-        vals = valid_df[measure].values
-        k_drop = max(1, int(len(vals) * trim_pct))
-        z_scores = np.abs((vals - np.mean(vals)) / max(np.std(vals), 1e-9))
+        if finding_kind not in (None, "", "univariate"):
+            return _non_passing_result(
+                "not_applicable",
+                "Univariate sensitivity cannot reproduce this finding's stated effect.",
+            )
+        values = valid_df[measure].to_numpy(dtype=float)
+        k_drop = max(1, int(len(values) * trim_pct))
+        z_scores = np.abs((values - np.mean(values)) / max(np.std(values), 1e-9))
         top_leverage_idx = valid_df.index[np.argsort(z_scores)[-k_drop:]]
         trimmed_df = valid_df.drop(index=top_leverage_idx)
-
-        base_val = float(np.mean(vals))
+        base_val = float(np.mean(values))
         trim_val = float(trimmed_df[measure].mean())
 
     denom = abs(base_val) if abs(base_val) > 1e-5 else 1.0
@@ -115,6 +248,7 @@ def audit_finding_sensitivity(
         )
 
     return {
+        "status": "failed" if is_fragile else "passed",
         "is_fragile": is_fragile,
         "fragility_score": round(fragility_score, 3),
         "baseline_effect": round(base_val, 4),

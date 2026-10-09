@@ -28,17 +28,47 @@ def apply_benjamini_hochberg(
     pvalue_tests: list[dict[str, Any]], alpha: float = DEFAULT_ALPHA
 ) -> list[dict[str, Any]]:
     """Each dict must have a "p_value" key; every other key is passed
-    through unchanged. Adds "p_adjusted" and "significant_after_correction"."""
+    through unchanged. Adds "p_adjusted" and "significant_after_correction".
+
+    Non-finite/out-of-range values are retained as non-testable rows with a
+    null adjusted p-value; they never contaminate the valid BH family.
+    """
     if not pvalue_tests:
         return []
     from statsmodels.stats.multitest import multipletests
 
-    pvals = [float(t["p_value"]) for t in pvalue_tests]
-    reject, p_adjusted, _, _ = multipletests(pvals, alpha=alpha, method="fdr_bh")
-    return [
-        {**t, "p_adjusted": round(float(adj), 6), "significant_after_correction": bool(rej)}
-        for t, adj, rej in zip(pvalue_tests, p_adjusted, reject, strict=True)
+    valid: list[tuple[int, float]] = []
+    for index, test in enumerate(pvalue_tests):
+        value = test.get("p_value")
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            p_value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(p_value) and 0.0 <= p_value <= 1.0:
+            valid.append((index, p_value))
+
+    result = [
+        {**test, "p_adjusted": None, "significant_after_correction": False}
+        for test in pvalue_tests
     ]
+    valid_indexes = {index for index, _p_value in valid}
+    for index, row in enumerate(result):
+        if index not in valid_indexes:
+            # JSON's NaN/Infinity extensions are non-standard and frequently
+            # misread as evidence. Normalise an undefined test statistic to
+            # an explicit null at this boundary.
+            row["p_value"] = None
+    if not valid:
+        return result
+
+    pvals = [p_value for _index, p_value in valid]
+    reject, p_adjusted, _, _ = multipletests(pvals, alpha=alpha, method="fdr_bh")
+    for (index, _p_value), adjusted, rejected in zip(valid, p_adjusted, reject, strict=True):
+        result[index]["p_adjusted"] = round(float(adjusted), 6)
+        result[index]["significant_after_correction"] = bool(rejected)
+    return result
 
 
 def adjust_findings_run_level(findings: list[Finding], alpha: float = DEFAULT_ALPHA) -> int:

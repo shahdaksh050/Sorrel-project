@@ -22,6 +22,32 @@ if TYPE_CHECKING:
 
 _TOKEN_RE = re.compile(r"[a-zA-Z']+")
 
+# Unit-bearing, compact strings are specifications rather than prose.  This
+# deliberately names measurement units rather than products or domains, so it
+# generalises to devices, lab results, engineering parts, and product catalogs.
+_STRUCTURED_UNIT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:"
+    r"(?:milli|centi|kilo)?(?:meter|metre|gram|liter|litre|second|minute|hour|volt|watt|hertz|byte)|"
+    r"mm|cm|km|mg|kg|ml|l|mah|ah|wh|kwh|mv|v|kv|mw|w|kw|hz|khz|mhz|ghz|"
+    r"mb|gb|tb|mp|dpi|fps|rpm|ohm|db|°c|°f|%"
+    r")\b",
+    re.IGNORECASE,
+)
+_MAX_WORDS_FOR_COMPACT_SPEC = 14
+_STRUCTURED_SPEC_FRACTION = 0.65
+_PROSE_NAME_HINTS = frozenset({
+    "comment", "comments", "description", "feedback", "message", "messages",
+    "narrative", "note", "notes", "review", "reviews", "summary", "text",
+    "transcript", "verbatim",
+})
+_STRUCTURED_NAME_HINTS = frozenset({
+    "battery", "camera", "capacity", "charging", "clock", "cpu", "dimension",
+    "display", "frequency", "memory", "network", "operating", "platform",
+    "power", "processor", "ram", "resolution", "screen", "spec", "specification",
+    "storage",
+})
+_PROSE_WITHOUT_NAME_MIN_WORDS = 15.0
+
 #: Minimum average word count for a column to be treated as free text when
 #: the caller doesn't name one explicitly (mirrors profiler.FREE_TEXT_AVG_WORDS).
 _MIN_AVG_WORDS = 3.0
@@ -35,12 +61,33 @@ _STOPWORDS = frozenset({
 })
 
 
+def _is_structured_spec_series(series: Any) -> bool:
+    """Whether a text-like series is dominated by compact unit specifications.
+
+    A genuine prose field can mention measurements, so a single unit is not
+    enough.  The column is excluded only when a clear majority of its observed
+    cells are short specification-like values containing one or more units.
+    """
+    values = series.dropna().astype(str).head(200)
+    if values.empty:
+        return False
+    structured = 0
+    for value in values:
+        unit_matches = len(_STRUCTURED_UNIT_RE.findall(value))
+        word_count = len(_TOKEN_RE.findall(value))
+        if unit_matches >= 2 or (unit_matches >= 1 and word_count <= _MAX_WORDS_FOR_COMPACT_SPEC):
+            structured += 1
+    return structured / len(values) >= _STRUCTURED_SPEC_FRACTION
+
+
 def _autodetect_text_column(df: Any) -> str | None:
     best_col: str | None = None
     best_avg = 0.0
     for col in df.select_dtypes(exclude="number").columns:
         sample = df[col].dropna().astype(str).head(200)
         if sample.empty:
+            continue
+        if _is_structured_spec_series(sample):
             continue
         avg_words = float(sample.str.split().str.len().mean())
         if avg_words > best_avg:
@@ -60,7 +107,20 @@ class TextAnalysisTool(BaseTool):
     )
 
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
-        return 1.0 if profile is not None and profile.text_cols else 0.0
+        if profile is None:
+            return 0.0
+        for column in profile.columns:
+            if column.kind != "text":
+                continue
+            name_tokens = set(re.findall(r"[a-z]+", column.name.lower()))
+            average_words = float(column.stats.get("avg_word_count") or 0.0)
+            if name_tokens & _PROSE_NAME_HINTS:
+                return 1.0
+            if name_tokens & _STRUCTURED_NAME_HINTS:
+                continue
+            if average_words >= _PROSE_WITHOUT_NAME_MIN_WORDS:
+                return 1.0
+        return 0.0
 
     def execute(  # type: ignore[override]
         self,
@@ -78,6 +138,12 @@ class TextAnalysisTool(BaseTool):
                 "No free-text column found. Pass text_column explicitly."
             )
 
+        if _is_structured_spec_series(df[text_column]):
+            raise ToolExecutionError(
+                f"Column '{text_column}' is dominated by compact unit-bearing specifications, not prose; "
+                "use structured feature extraction instead of text analysis."
+            )
+
         series = df[text_column].dropna().astype(str)
         if series.empty:
             raise ToolExecutionError(f"Column '{text_column}' has no non-null values.")
@@ -86,12 +152,27 @@ class TextAnalysisTool(BaseTool):
         word_lengths = series.str.split().str.len()
 
         tokens: Counter[str] = Counter()
+        documents_by_token: Counter[str] = Counter()
         for text in series:
+            document_tokens: set[str] = set()
             for tok in _TOKEN_RE.findall(text.lower()):
                 if tok not in _STOPWORDS and len(tok) > 1:
                     tokens[tok] += 1
+                    document_tokens.add(tok)
+            for tok in document_tokens:
+                documents_by_token[tok] += 1
 
         top_tokens = dict(tokens.most_common(top_n))
+        total_token_count = sum(tokens.values())
+        top_token_stats = {
+            token: {
+                "occurrence_count": count,
+                "document_count": documents_by_token[token],
+                "document_prevalence": round(documents_by_token[token] / len(series), 4),
+                "occurrence_frequency": round(count / total_token_count, 4) if total_token_count else 0.0,
+            }
+            for token, count in top_tokens.items()
+        }
 
         return {
             "summary": (
@@ -106,6 +187,8 @@ class TextAnalysisTool(BaseTool):
             "avg_word_count": round(float(word_lengths.mean()), 2),
             "vocab_size": len(tokens),
             "top_tokens": top_tokens,
+            "total_token_count": total_token_count,
+            "top_token_stats": top_token_stats,
         }
 
     def findings(
@@ -119,28 +202,44 @@ class TextAnalysisTool(BaseTool):
         top_tokens = output.get("top_tokens")
         non_null = output.get("non_null_count")
         text_column = output.get("text_column")
-        if top_tokens and non_null:
+        token_stats = output.get("top_token_stats")
+        if top_tokens and non_null and isinstance(token_stats, dict):
             top_word, top_count = next(iter(top_tokens.items()))
-            occurrence_rate = top_count / non_null
-            if occurrence_rate > 0.05:
+            top_stats = token_stats.get(top_word)
+            if not isinstance(top_stats, dict):
+                return results
+            document_count = top_stats.get("document_count")
+            document_prevalence = top_stats.get("document_prevalence")
+            occurrence_frequency = top_stats.get("occurrence_frequency")
+            if isinstance(document_count, int) and isinstance(document_prevalence, (int, float)) and document_prevalence > 0.05:
                 results.append(
                     Finding(
                         finding_id=f"{self.name}_top_token",
                         kind="text",
                         headline=(
                             f"'{top_word}' is the most frequent term in '{text_column}' "
-                            f"({top_count:,} occurrences across {non_null:,} entries)"
+                            f"({document_count:,} of {non_null:,} rows; {top_count:,} total occurrences)"
                         ),
                         detail=(
                             f"Vocabulary of {output.get('vocab_size', 0):,} distinct token(s); "
-                            f"top {len(top_tokens)} shown."
+                            f"the term appears in {document_prevalence:.1%} of rows"
+                            + (
+                                f" and represents {occurrence_frequency:.1%} of retained token occurrences."
+                                if isinstance(occurrence_frequency, (int, float))
+                                else "."
+                            )
                         ),
-                        evidence={"top_tokens": top_tokens, "non_null_count": non_null},
-                        measure="token_frequency",
+                        evidence={
+                            "top_tokens": top_tokens,
+                            "top_token_stats": {top_word: top_stats},
+                            "non_null_count": non_null,
+                            "total_token_count": output.get("total_token_count"),
+                        },
+                        measure="document_prevalence",
                         dimension=text_column,
                         level=top_word,
-                        effect=round(min(occurrence_rate, 1.0), 4),
-                        effect_kind="pct",
+                        effect=round(float(document_prevalence), 4),
+                        effect_kind="share",
                         confidence=0.5,
                         surprise=0.2,
                     )

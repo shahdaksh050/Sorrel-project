@@ -42,6 +42,45 @@ from src.core.run_view import (
 #: directories that carry it, directly under the system temp root.
 RUN_DIR_PREFIX = "dsa-run-"
 
+
+def _retained_run_dir() -> Path:
+    """Reserve a unique local directory for the durable copy of one UI run."""
+    root = Path("output") / "runs"
+    root.mkdir(parents=True, exist_ok=True)
+    # Microseconds avoid ordinary collisions; the suffix closes the small
+    # remaining race between concurrent browser sessions.
+    stamp = datetime.now().strftime("ui-%Y%m%d-%H%M%S-%f")
+    for suffix in range(1000):
+        candidate = root / (stamp if suffix == 0 else f"{stamp}-{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise OSError("could not allocate a directory for retained run artifacts")
+
+
+def retain_run_artifacts(output_dir: str) -> str | None:
+    """Copy a completed run's full artifact tree into ``output/runs``.
+
+    The UI's temporary directory is cleaned when its tab is discarded, so a
+    comparison summary alone is not sufficient to reproduce a result.  This
+    copies reports, audit logs, models, visualisations, and any derived data
+    without deciding which artifacts matter.  The returned path remains the
+    retained summary location for the existing comparison UI.
+    """
+    source = Path(output_dir).resolve()
+    if not source.is_dir() or source.is_symlink():
+        return None
+    try:
+        destination = _retained_run_dir().resolve()
+        # A configuration pointing the run output at output/runs could make a
+        # recursive copy.  Refuse rather than copying an unbounded tree.
+        if destination.is_relative_to(source):
+            return None
+        shutil.copytree(source, destination, symlinks=True)
+        summary = destination / "reports" / "summary.json"
+        return str(summary) if summary.is_file() else None
+    except OSError:
+        return None
+
 RunState = Literal["running", "done", "error"]
 StageEntry = tuple[str, str, str]  # (stage number, status, detail)
 
@@ -126,8 +165,9 @@ class RunSpec:
     ml_n_cv_folds: int | None = None
     ml_tune: bool | None = None
     is_sample: bool = False
-    #: Copy the run's summary where "Compare with a previous run" looks. Off on
-    #: a shared deployment, where that folder would mix visitors' runs.
+    #: Persist the completed artifact tree where "Compare with a previous run"
+    #: looks. Off on a shared deployment, where that folder would mix visitors'
+    #: runs.  The name is retained for configuration compatibility.
     keep_summary: bool = True
 
 
@@ -500,15 +540,8 @@ def _execute(run: ActiveRun) -> None:
             dashboard = None
 
     summary_path: str | None = None
-    sum_path = Path(spec.output_dir) / "reports" / "summary.json"
-    if sum_path.exists() and spec.keep_summary:
-        try:  # keep a copy where "Compare with a previous run" looks
-            keep = Path("output") / "runs" / f"ui-{datetime.now():%Y%m%d-%H%M%S}" / "reports"
-            keep.mkdir(parents=True, exist_ok=True)
-            (keep / "summary.json").write_bytes(sum_path.read_bytes())
-            summary_path = str(keep / "summary.json")
-        except OSError:
-            summary_path = None
+    if spec.keep_summary:
+        summary_path = retain_run_artifacts(spec.output_dir)
 
     llm_err = agent.memory.get_context("llm_error")
     run._complete(

@@ -29,7 +29,14 @@ from src.core.sentinels import format_value, null_sentinels
 #: Fraction of non-null values that must match a rule before a column is coerced.
 COERCE_MATCH_THRESHOLD = 0.95
 
-_CURRENCY_RE = re.compile(r"^[\$€£¥]\s*-?[\d,]+(\.\d+)?$|^-?[\d,]+(\.\d+)?\s*[\$€£¥]$")
+# Use Unicode escapes here rather than source glyphs. Apart from avoiding
+# encoding-dependent mojibake, this keeps the supported set explicit: US
+# dollar, euro, pound, yen/yuan and Indian rupee.
+_CURRENCY_SYMBOLS = r"\$\u20ac\u00a3\u00a5\u20b9"
+_CURRENCY_RE = re.compile(
+    rf"^[{_CURRENCY_SYMBOLS}]\s*-?[\d,]+(\.\d+)?$|"
+    rf"^-?[\d,]+(\.\d+)?\s*[{_CURRENCY_SYMBOLS}]$"
+)
 _PERCENT_RE = re.compile(r"^-?[\d,]+(\.\d+)?\s*%$")
 _THOUSANDS_RE = re.compile(r"^-?\d{1,3}(,\d{3})+$")
 #: A comma NOT followed by exactly three digits can never be a thousands separator.
@@ -77,7 +84,7 @@ class Coercion:
 def _parse_currency(s: str) -> float | None:
     if not _CURRENCY_RE.match(s):
         return None
-    cleaned = re.sub(r"[\$€£¥,]", "", s)
+    cleaned = re.sub(rf"[{_CURRENCY_SYMBOLS},]", "", s)
     try:
         return float(cleaned)
     except ValueError:

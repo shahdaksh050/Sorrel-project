@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from ui.run import RUN_DIR_PREFIX, ActiveRun, RunSpec, remove_run_dir
+from ui.run import RUN_DIR_PREFIX, ActiveRun, RunSpec, remove_run_dir, retain_run_artifacts
 
 from src.core.run_config import RunConfig
 
@@ -155,6 +155,31 @@ def test_remove_run_dir_only_touches_prefixed_dirs_under_the_temp_root(tmp_path:
     assert keep.exists()
     remove_run_dir(None)
     remove_run_dir("")
+
+
+def test_retained_run_contains_the_complete_artifact_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "temporary-output"
+    report = source / "reports" / "summary.json"
+    audit = source / "audit" / "llm_calls.jsonl"
+    model = source / "models" / "model.pkl"
+    image = source / "visualizations" / "plot.png"
+    derived = source / "data" / "derived" / "features.csv"
+    for path, contents in (
+        (report, "{}"), (audit, "audit"), (model, "model"), (image, "image"), (derived, "features"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    summary_path = retain_run_artifacts(str(source))
+
+    assert summary_path is not None
+    retained = Path(summary_path).parents[1]
+    assert Path(summary_path).read_text(encoding="utf-8") == "{}"
+    assert (retained / "audit" / "llm_calls.jsonl").read_text(encoding="utf-8") == "audit"
+    assert (retained / "models" / "model.pkl").read_text(encoding="utf-8") == "model"
+    assert (retained / "visualizations" / "plot.png").read_text(encoding="utf-8") == "image"
+    assert (retained / "data" / "derived" / "features.csv").read_text(encoding="utf-8") == "features"
 
 
 def test_a_run_cannot_be_started_twice(tmp_path: Path) -> None:

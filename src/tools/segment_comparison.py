@@ -69,6 +69,11 @@ _MAX_DIM_CARD = 20
 #: pointing this at a near-identifier column.
 _MAX_LEVELS_TESTED = 20
 
+# Auto-discovery should not elevate a tiny residual category into the lead
+# story merely because a ratio against it is enormous. Explicit user-chosen
+# dimensions still use the privacy floor below.
+_MIN_AUTO_SEGMENT_N = 20
+
 #: Ceiling on how many (measure, dimension) pairs get swept when neither
 #: column is pinned by the caller — combinatorial guard (IMPROVEMENTS.md 7.2).
 _MAX_PAIRS = 12
@@ -284,7 +289,9 @@ def _format_value(value: float, is_rate: bool, unit_hint: str | None) -> str:
     if is_rate:
         return f"{value * 100:.1f}%"
     if unit_hint == "currency":
-        return f"${value:,.2f}"
+        # The profiler knows this is money but not which currency. Inventing
+        # a dollar sign for INR/EUR/etc. is worse than a neutral number.
+        return f"{value:,.2f} currency units"
     if unit_hint == "percent":
         return f"{value:.1f}%"
     return f"{value:,.2f}"
@@ -340,8 +347,15 @@ class SegmentComparisonTool(BaseTool):
         # no-LLM plan on every classification-target dataset.
         target = getattr(metadata, "target_column", None)
         target_measure = next((m for m in measures if m.name == target), None)
-        chosen = target_measure or measures[0]
-        return {"measure_column": chosen.name}
+        if target_measure is not None:
+            return {"measure_column": target_measure.name}
+        # Blank-objective EDA has no privileged outcome. Leaving the measure
+        # unpinned activates `_build_pairs()`'s bounded round-robin family
+        # sweep, so binary rates and continuous measures are both compared
+        # across plausible dimensions. Picking `measures[0]` here used to
+        # turn broad discovery into one arbitrary question and could miss a
+        # dominant relationship such as churn by contract.
+        return {}
 
     def _build_pairs(
         self,
@@ -373,6 +387,7 @@ class SegmentComparisonTool(BaseTool):
         profile: DatasetProfile,
         entity_col: str | None = None,
         suppressed: set[tuple[str, str]] | None = None,
+        auto_dimension: bool = False,
     ) -> list[dict[str, Any]]:
         k = min_cell_size()
         is_rate = _is_rate_measure(df, measure_column, profile)
@@ -429,11 +444,13 @@ class SegmentComparisonTool(BaseTool):
         for level in levels:
             level_vals, rest_vals = level_values[level]
             n, n_rest = len(level_vals), len(rest_vals)
-            if n < k:
+            required_n = max(k, _MIN_AUTO_SEGMENT_N) if auto_dimension else k
+            if n < required_n:
                 if suppressed is not None:
-                    suppressed.add((dimension_column, str(level)))
+                    if n < k:
+                        suppressed.add((dimension_column, str(level)))
                 continue
-            if n_rest < k:
+            if n_rest < required_n:
                 continue
 
             baseline_mean = float(rest_vals.mean())
@@ -460,13 +477,17 @@ class SegmentComparisonTool(BaseTool):
             if is_rate and entity is None:
                 succ_level = int(level_vals.sum())
                 succ_rest = int(rest_vals.sum())
-                try:
-                    _stat, p_value = proportions_ztest(
-                        [succ_level, succ_rest], [n, n_rest]
-                    )
-                    p_value = float(p_value)
-                except (ValueError, ZeroDivisionError):
+                pooled_rate = (succ_level + succ_rest) / (n + n_rest)
+                if pooled_rate <= 0.0 or pooled_rate >= 1.0:
                     p_value = None
+                else:
+                    try:
+                        _stat, p_value = proportions_ztest(
+                            [succ_level, succ_rest], [n, n_rest]
+                        )
+                        p_value = float(p_value)
+                    except (ValueError, ZeroDivisionError):
+                        p_value = None
                 try:
                     ci_lo, ci_hi = proportion_confint(succ_level, n, alpha=_ALPHA, method="wilson")
                 except (ValueError, ZeroDivisionError):
@@ -628,7 +649,17 @@ class SegmentComparisonTool(BaseTool):
         comparisons: list[dict[str, Any]] = []
         suppressed: set[tuple[str, str]] = set()
         for measure, dimension in pairs:
-            comparisons.extend(self._compare_one(df, measure, dimension, profile, entity_col, suppressed))
+            comparisons.extend(
+                self._compare_one(
+                    df,
+                    measure,
+                    dimension,
+                    profile,
+                    entity_col,
+                    suppressed,
+                    auto_dimension=dimension_column is None,
+                )
+            )
 
         if not comparisons:
             raise ToolExecutionError(

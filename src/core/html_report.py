@@ -344,6 +344,71 @@ def data_understanding_rows(
     return rows, caveats
 
 
+def _domain_and_causal_html(llm_insights: dict[str, Any]) -> str:
+    """Validated domain-method and causal-identification contracts."""
+    sections: list[str] = []
+    domain = llm_insights.get("domain_analysis")
+    if isinstance(domain, dict) and domain:
+        rows: list[tuple[str, Any]] = []
+        for key, label in (
+            ("domain", "Domain"),
+            ("row_entity", "Row entity"),
+            ("grain", "Grain"),
+            ("readiness", "Readiness"),
+            ("confidence", "Confidence"),
+        ):
+            if domain.get(key) not in (None, "", []):
+                rows.append((label, domain[key]))
+        for key, label in (
+            ("domain_questions", "Questions selected"),
+            ("suggested_methods", "Methods considered"),
+            ("assumptions", "Assumptions to verify"),
+            ("prohibited_analyses", "Analyses ruled out"),
+            ("missing_information", "Information still needed"),
+            ("warnings", "Validation warnings"),
+        ):
+            values = domain.get(key)
+            if isinstance(values, list) and values:
+                rows.append((label, "; ".join(str(value) for value in values)))
+        if rows:
+            table = "".join(f"<tr><td>{_esc(label)}</td><td>{_esc(value)}</td></tr>" for label, value in rows)
+            sections.append("<h2>Domain analysis plan</h2><table>" + table + "</table>")
+
+    causal = llm_insights.get("causal_design")
+    if isinstance(causal, dict) and causal and causal.get("status") != "not_requested":
+        status = causal.get("status") or causal.get("identification_status") or "not_identified"
+        rows = [("Identification status", status)]
+        for key, label in (
+            ("design", "Study design"),
+            ("treatment", "Treatment"),
+            ("outcome", "Outcome"),
+            ("estimand", "Estimand"),
+            ("estimator", "Estimator"),
+        ):
+            if causal.get(key) not in (None, "", []):
+                rows.append((label, causal[key]))
+        for key, label in (
+            ("diagnostics_required", "Required diagnostics"),
+            ("assumptions", "Identification assumptions"),
+            ("missing_requirements", "Missing requirements"),
+            ("warnings", "Warnings"),
+        ):
+            values = causal.get(key)
+            if isinstance(values, list) and values:
+                rows.append((label, "; ".join(str(value) for value in values)))
+        critique = causal.get("adversarial_critique")
+        if isinstance(critique, dict) and critique:
+            if critique.get("critique_summary"):
+                rows.append(("Adversarial critique", critique["critique_summary"]))
+            if critique.get("plausible_unmeasured_confounders"):
+                rows.append(("Plausible unmeasured confounders", "; ".join(critique["plausible_unmeasured_confounders"])))
+            if critique.get("reverse_causality_risk"):
+                rows.append(("Reverse causality risk", critique["reverse_causality_risk"]))
+        table = "".join(f"<tr><td>{_esc(label)}</td><td>{_esc(value)}</td></tr>" for label, value in rows)
+        sections.append("<h2>Causal identification</h2><table>" + table + "</table>")
+    return "".join(sections)
+
+
 def governance_rows(llm_insights: dict[str, Any]) -> list[tuple[str, str]]:
     """Code-execution and LLM-usage accounting for the run, from
     `llm_insights["governance"]` (src.core.governance) plus `llm_usage`
@@ -712,6 +777,9 @@ def build_html_report(
         if understanding_caveats:
             section += "<p>What it flagged to watch out for:</p>" + _cards(understanding_caveats, "treat")
         sections.append(section)
+
+    if contract_html := _domain_and_causal_html(llm_insights):
+        sections.append(contract_html)
 
     methodology_html = ""
     if plan_rationales:

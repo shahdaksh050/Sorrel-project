@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 _MAX_ROWS = 50_000
 #: PHReg is O(unique event times x rows) per iteration; a random subset this
 #: size gives hazard ratios as precise as the analyst can use.
-_COX_MAX_ROWS = 8_000
+_COX_MAX_ROWS = 4_000
 _MAX_GROUPS = 6
 _MAX_COVARIATES = 5
 _MAX_COVARIATE_LEVELS = 6

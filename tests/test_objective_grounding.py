@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.core.controller import AgentController
 from src.core.memory import DatasetMetadata
 from src.core.profiler import ground_objective_column, pick_measures, profile_dataframe
 from src.tools.anomaly import AnomalyAnalysisTool
@@ -62,6 +63,23 @@ def test_driver_objective_raises_target_confidence() -> None:
     assert meta.detect_target_with_confidence()[1] <= 0.40
     # Naming a column without driver phrasing does not create a target.
     assert meta.detect_target_with_confidence("show CO levels")[1] <= 0.40
+
+
+def test_blank_objective_never_invents_prediction_target() -> None:
+    controller = object.__new__(AgentController)
+    controller.objective = ""
+    decision = controller._decide_analysis_mode("rating", 0.95)
+    assert decision["mode"] == "describe"
+    assert decision["target"] is None
+    assert decision["candidate"] == "rating"
+
+
+def test_predictive_objective_can_promote_detected_target() -> None:
+    controller = object.__new__(AgentController)
+    controller.objective = "predict rating from the available features"
+    decision = controller._decide_analysis_mode("rating", 0.95)
+    assert decision["mode"] == "model"
+    assert decision["target"] == "rating"
 
 
 def test_anomaly_default_measure_follows_objective(monkeypatch: pytest.MonkeyPatch) -> None:

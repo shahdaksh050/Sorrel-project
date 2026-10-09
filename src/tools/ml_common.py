@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from src.core.profiler import profile_dataframe
 from src.tools.data_processing import (
     _read_df as _read_df,  # re-exported: src.tools.clustering imports it from here
 )
@@ -56,11 +57,25 @@ def _prepare_features(
     y = df[target_column]
     features = df.drop(columns=[target_column]).copy()
     n_rows = max(len(features), 1)
+    profile = profile_dataframe(df, target_column=target_column)
+    column_profiles = {column.name: column for column in profile.columns}
 
     # is_numeric_dtype, not `dtype == object`: pandas 3 strings are `str` dtype
     for col in list(features.columns):
         series = features[col]
-        if pd.api.types.is_datetime64_any_dtype(series):
+        column_profile = column_profiles.get(str(col))
+        if column_profile is not None and (
+            column_profile.pii
+            or column_profile.kind in {"text", "identifier", "constant"}
+            or column_profile.semantic_role in {"text", "identifier", "constant"}
+        ):
+            features = features.drop(columns=[col])
+            treatments.append(
+                f"Dropped non-model feature '{col}' ({column_profile.kind}/"
+                f"{column_profile.semantic_role}); use deterministic structured "
+                "features instead of one-hot encoding raw prose or identifiers."
+            )
+        elif pd.api.types.is_datetime64_any_dtype(series):
             dt = pd.to_datetime(series)
             days_since_min = (dt - dt.min()).dt.days
             features[f"{col}_year"] = dt.dt.year.fillna(-1).astype(int)

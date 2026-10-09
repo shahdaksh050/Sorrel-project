@@ -349,6 +349,49 @@ def _workforce_structure(
     return score, evidence
 
 
+def _product_catalog_structure(
+    df: pd.DataFrame, profile: DatasetProfile, roles: dict[str, str]
+) -> tuple[float, list[str]]:
+    """Confirm a one-row-per-product catalogue rather than a transaction log.
+
+    Product and price names alone also occur in order-line data.  Catalogue
+    structure requires the product key to be almost unique and no dominant
+    time axis; descriptive/specification columns provide corroboration but
+    are deliberately optional so tidy catalogues still match.
+    """
+    evidence: list[str] = []
+    score = 0.0
+    product = roles["product"]
+    unique_share = float(df[product].nunique(dropna=True)) / max(1, len(df))
+    if unique_share >= 0.90:
+        score += 0.25
+        evidence.append(f"One row per product ({unique_share:.0%} unique product keys).")
+    else:
+        score -= 0.25
+        evidence.append(
+            f"Product keys repeat ({unique_share:.0%} unique), which resembles transactions rather than a catalogue."
+        )
+
+    price = pd.to_numeric(df[roles["price"]], errors="coerce").dropna()
+    if not price.empty and float((price > 0).mean()) >= 0.90:
+        score += 0.10
+        evidence.append("Price is numeric and predominantly positive.")
+    else:
+        score -= 0.10
+
+    if not profile.datetime_cols:
+        score += 0.05
+        evidence.append("No dominant time axis — consistent with a point-in-time catalogue.")
+
+    descriptive = [
+        role for role in ("brand", "category", "rating", "specification") if role in roles
+    ]
+    if descriptive:
+        score += min(0.10, 0.025 * len(descriptive))
+        evidence.append(f"Product attributes present: {', '.join(descriptive)}.")
+    return score, evidence
+
+
 # --------------------------------------------------------------------------
 # Built-in domains
 # --------------------------------------------------------------------------
@@ -436,7 +479,39 @@ WORKFORCE = DomainSpec(
     structural=_workforce_structure,
 )
 
-for _spec in (FINANCIAL, TRANSACTIONAL, WORKFORCE):
+PRODUCT_CATALOG = DomainSpec(
+    name="product_catalog",
+    description=(
+        "One-row-per-product catalogue — prices, ratings, categories and "
+        "specifications. Price tiers, feature coverage, value relationships "
+        "and catalogue completeness are the meaningful analyses."
+    ),
+    roles=(
+        RoleSpec(
+            "product",
+            ("product", "product_id", "item", "item_id", "sku", "model", "title", "name"),
+            ("identifier", "categorical"),
+            required=True,
+        ),
+        RoleSpec(
+            "price",
+            ("price", "list_price", "sale_price", "cost", "amount", "mrp"),
+            ("numeric",),
+            required=True,
+        ),
+        RoleSpec("brand", ("brand", "manufacturer", "make"), ("categorical",)),
+        RoleSpec("category", ("category", "type", "family", "segment"), ("categorical",)),
+        RoleSpec("rating", ("rating", "score", "review_score", "quality"), ("numeric",)),
+        RoleSpec(
+            "specification",
+            ("specification", "spec", "features", "description", "details"),
+            ("text", "categorical"),
+        ),
+    ),
+    structural=_product_catalog_structure,
+)
+
+for _spec in (FINANCIAL, TRANSACTIONAL, WORKFORCE, PRODUCT_CATALOG):
     register_domain(_spec)
 
 

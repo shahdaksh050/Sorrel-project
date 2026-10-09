@@ -419,14 +419,37 @@ def _detect_target_leakage(
                         f"relationship. Drop it and re-train to get a "
                         f"meaningful score."
                     )
-            elif pd.api.types.is_numeric_dtype(feature):
-                corr = float(pd.Series(feature).corr(pd.Series(y)))
-                if abs(corr) >= _LEAKAGE_PURITY:
-                    warnings.append(
-                        f"'{column}' correlates with the target at r={corr:.4f} "
-                        f"— near-perfect, so the model is likely restating a "
-                        f"definition. Drop it and re-train."
-                    )
+            else:
+                if pd.api.types.is_numeric_dtype(feature):
+                    corr = float(pd.Series(feature).corr(pd.Series(y)))
+                    if abs(corr) >= _LEAKAGE_PURITY:
+                        warnings.append(
+                            f"'{column}' correlates with the target at r={corr:.4f} "
+                            f"— near-perfect, so the model is likely restating a "
+                            f"definition. Drop it and re-train."
+                        )
+                    continue
+
+                # A categorical feature can leak a continuous target just as
+                # completely as a numeric one (for example a product/spec
+                # label whose levels each carry one fixed score).  Compare
+                # group-mean predictions with the target and flag only a
+                # near-deterministic mapping.  Near-unique IDs remain outside
+                # the test because their in-sample R² is vacuous.
+                n_groups = int(feature.nunique(dropna=True))
+                if 2 <= n_groups <= len(X) * _LEAKAGE_MIN_GROUP_RATIO:
+                    pair = pd.DataFrame({"feature": feature, "target": y}).dropna()
+                    if len(pair) >= 10:
+                        predictions = pair.groupby("feature", observed=True)["target"].transform("mean")
+                        residual = float(((pair["target"] - predictions) ** 2).sum())
+                        total = float(((pair["target"] - pair["target"].mean()) ** 2).sum())
+                        explained = 1.0 - residual / total if total > 0 else 0.0
+                        if explained >= _LEAKAGE_PURITY:
+                            warnings.append(
+                                f"'{column}' determines {explained * 100:.1f}% of the "
+                                "continuous target variance by category — likely a "
+                                "definition or lookup leak. Drop it and re-train."
+                            )
         except Exception:
             # A diagnostic must never take the training run down.
             continue

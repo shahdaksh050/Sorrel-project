@@ -166,6 +166,39 @@ class TestProfileInjection:
         prompt = pm.get_initial_user_prompt()
         assert "Your task (cycle 1)" in prompt
         assert "clean_data" in prompt
+        assert '"domain_analysis"' in prompt
+        assert '"causal_design"' in prompt
+
+    def test_system_prompt_requires_sandbox_for_custom_domain_methods(
+        self, pm: PromptManager
+    ) -> None:
+        prompt = pm.get_system_prompt()
+        assert "governed sandbox paths" in prompt
+        assert "Never place executable code anywhere except" in prompt
+
+    def test_validated_reasoning_contracts_reach_later_prompts(
+        self, pm: PromptManager, memory: MemorySystem
+    ) -> None:
+        memory.set_context("domain_analysis", {
+            "domain": "epidemiology",
+            "row_entity": "one participant",
+            "readiness": "ready",
+            "suggested_methods": ["survival analysis"],
+            "custom_execution_policy": "sandbox_only",
+        })
+        memory.set_context("causal_design", {
+            "status": "not_identified",
+            "study_design": "observational_cross_section",
+            "missing_requirements": ["pre treatment confounders"],
+        })
+
+        iteration = pm.get_iteration_user_prompt()
+        final = pm.get_final_interpretation_prompt()
+        for prompt in (iteration, final):
+            assert "Validated domain analysis contract" in prompt
+            assert "epidemiology" in prompt
+            assert "Validated causal identification gate" in prompt
+            assert "do not estimate or state a causal effect" in prompt
 
     def test_two_tier_findings_representation(
         self, pm: PromptManager, memory: MemorySystem

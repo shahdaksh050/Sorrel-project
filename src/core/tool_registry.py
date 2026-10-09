@@ -41,6 +41,7 @@ class ToolRegistry:
     def _register_builtin_tools(self) -> None:
         from src.tools.anomaly import AnomalyAnalysisTool
         from src.tools.basket import BasketAnalysisTool
+        from src.tools.causal_analysis import CausalAnalysisTool, DifferenceInDifferencesTool
         from src.tools.change_analysis import ChangeAnalysisTool
         from src.tools.clustering import ClusterDataTool
         from src.tools.cohort_analysis import CohortAnalysisTool
@@ -68,6 +69,7 @@ class ToolRegistry:
         from src.tools.report_generator import GenerateReportTool
         from src.tools.segment_comparison import SegmentComparisonTool
         from src.tools.statistical_analysis import SelectStatisticalTestTool
+        from src.tools.structured_features import StructuredFeatureExtractionTool
         from src.tools.survival import SurvivalAnalysisTool
         from src.tools.text_analysis import TextAnalysisTool
         from src.tools.time_series import TimeSeriesAnalysisTool
@@ -78,6 +80,7 @@ class ToolRegistry:
         for tool in (
             IngestDatasetTool(),
             CleanDataTool(),
+            StructuredFeatureExtractionTool(),
             DetectOutliersTool(),
             CorrelationAnalysisTool(),
             SelectStatisticalTestTool(),
@@ -110,6 +113,8 @@ class ToolRegistry:
             # SRM) and anomalies (spikes, level shifts, unusual segments).
             RegressionAnalysisTool(),
             ExperimentAnalysisTool(),
+            CausalAnalysisTool(),
+            DifferenceInDifferencesTool(),
             AnomalyAnalysisTool(),
             # Domain tools — each gates itself in applies_to (score 0 = never
             # offered), so they cost the planner prompt nothing on data they

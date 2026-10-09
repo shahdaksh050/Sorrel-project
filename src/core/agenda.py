@@ -49,6 +49,7 @@ def build_agenda(
     profile: DatasetProfile | None,
     decision: dict[str, Any] | None,
     objective: str = "",
+    excluded_columns: set[str] | None = None,
 ) -> list[Question]:
     """
     Generate a ranked question agenda from the semantic profile.
@@ -64,9 +65,24 @@ def build_agenda(
     from src.core.profiler import ARCHETYPE_EXPERIMENT, SEMANTIC_ORDINAL, find_experiment_arm
 
     questions: list[Question] = []
+    excluded = excluded_columns or set()
     objective_l = objective.lower()
-    measures = profile.measures()
-    dimensions = profile.dimensions()
+    measures = [column for column in profile.measures() if column.name not in excluded]
+    dimensions = [
+        column
+        for column in profile.dimensions()
+        if column.name not in excluded and 2 <= column.nunique <= 20
+    ]
+    # Column order is an ingestion accident. Prefer complete, compact
+    # dimensions, otherwise a useful segment appended by deterministic
+    # feature extraction can be crowded out by the first four raw columns.
+    dimensions.sort(
+        key=lambda column: (
+            column.missing_pct,
+            abs(column.nunique - 5),
+            column.name.lower(),
+        )
+    )
     # Ordinal scales (satisfaction 1-5) are compared by their mean across
     # segments just like a measure, but never summed or trended as totals.
     segment_measures = [*measures[:3], *profile.columns_of_role(SEMANTIC_ORDINAL)[:2]]
@@ -80,8 +96,8 @@ def build_agenda(
     # "Which segments differ most?" — one per (measure, dimension) pair,
     # capped so a wide dataset doesn't produce a combinatorial agenda.
     for measure in segment_measures:
-        for dim in dimensions[:4]:
-            if dim.nunique < 2 or dim.nunique > 20 or (arm is not None and dim.name == arm.name):
+        for dim in dimensions[:6]:
+            if arm is not None and dim.name == arm.name:
                 continue
             value = 0.7 if measure.unit_hint == "currency" else 0.5
             questions.append(Question(
@@ -95,6 +111,35 @@ def build_agenda(
                 expected_value=value,
                 suggested_tool="segment_comparison",
             ))
+
+    # Distributions and data quality are first-class questions even when
+    # the data also supports group comparisons. Previously they appeared
+    # only as a last-resort fallback, so a catalogue with one dubious
+    # categorical column could suppress the basic price/rating overview.
+    for measure in measures[:3]:
+        questions.append(Question(
+            text=f"How is '{measure.name}' distributed, where is its centre/spread, and which values are unusual?",
+            kind="distribution",
+            columns=[measure.name],
+            expected_value=0.6,
+            suggested_tool="detect_outliers",
+        ))
+
+    incomplete = [
+        column.name for column in profile.columns
+        if column.name not in excluded and column.missing_count > 0
+    ]
+    questions.append(Question(
+        text=(
+            "Is the dataset complete and semantically usable, and is missingness systematic?"
+            if incomplete
+            else "Is the dataset structurally and semantically usable for analysis?"
+        ),
+        kind="quality",
+        columns=incomplete[:6],
+        expected_value=0.9,
+        suggested_tool="integrity_audit",
+    ))
 
     # "What concentrates?" — needs a measure and an entity-like grain.
     if measures and profile.entity_col:
@@ -155,7 +200,7 @@ def build_agenda(
     # Fallback so a dataset with no dimension, entity or time axis (a sensor
     # dump, a lab table) still gets an agenda: ask about each top measure's
     # distribution and outliers (a generic "what correlates" doesn't count).
-    if not any(q.kind != "relationship" for q in questions):
+    if not any(q.kind not in {"relationship", "quality"} for q in questions):
         for measure in [*measures[:3], *profile.columns_of_role(SEMANTIC_ORDINAL)[:1]]:
             questions.append(Question(
                 text=f"How is '{measure.name}' distributed, and which values are outliers?",
@@ -484,6 +529,10 @@ def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> d
             # detect_outliers reports method_fit findings that carry no
             # measure column, so its having reported at all is the answer.
             hit = llm_hit or any(f.get("source_tool") == q.suggested_tool for f in findings)
+        elif q.kind == "quality":
+            # Integrity findings use several kinds (method_fit, test,
+            # coverage_gap); the audited source is the stable contract.
+            hit = any(f.get("source_tool") == q.suggested_tool for f in findings)
         elif q.columns:
             # A question that names specific columns is only answered by a
             # finding that's actually ABOUT those columns — matching on

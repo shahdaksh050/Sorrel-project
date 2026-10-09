@@ -445,7 +445,9 @@ class SelectStatisticalTestTool(BaseTool):
                 if c.name == feature_column or c.name not in df.columns:
                     continue
                 if 2 <= c.nunique <= MAX_DIMENSION_CARDINALITY:
-                    candidates.append(c.name)
+                    counts = df[c.name].value_counts(dropna=True)
+                    if int((counts >= MIN_RELIABLE_GROUP_SIZE).sum()) >= 2:
+                        candidates.append(c.name)
         else:
             # Defensive fallback if profiling itself failed above — mirrors
             # the categorical/boolean heuristic this tool used before 7.6.
@@ -458,7 +460,9 @@ class SelectStatisticalTestTool(BaseTool):
                     continue
                 if pd.api.types.is_numeric_dtype(series) and nunique > 2:
                     continue  # looks like a continuous/count measure, not a category
-                candidates.append(col)
+                counts = series.value_counts(dropna=True)
+                if int((counts >= MIN_RELIABLE_GROUP_SIZE).sum()) >= 2:
+                    candidates.append(col)
         if (
             explicit_group_column
             and explicit_group_column in df.columns
@@ -490,7 +494,33 @@ class SelectStatisticalTestTool(BaseTool):
         totals: dict[str, int] = {}
         for dim in candidate_dims:
             try:
-                r, n = self._run_single_test(df, feature_column, dim, alpha, profile, bin_numeric_group)
+                test_df = df
+                excluded_levels = 0
+                if dim != explicit_group_column:
+                    # Autonomous family discovery omits underpowered levels
+                    # while retaining an otherwise useful dimension. An
+                    # explicit caller request is never silently filtered.
+                    counts = df[dim].value_counts(dropna=True)
+                    supported = counts[counts >= MIN_RELIABLE_GROUP_SIZE].index
+                    excluded_levels = len(counts) - len(supported)
+                    test_df = df[df[dim].isin(supported)]
+                r, n = self._run_single_test(
+                    test_df,
+                    feature_column,
+                    dim,
+                    alpha,
+                    profile,
+                    bin_numeric_group,
+                )
+                if excluded_levels:
+                    support_note = (
+                        f"{excluded_levels} underpowered level(s) with fewer than "
+                        f"{MIN_RELIABLE_GROUP_SIZE} observations were omitted from autonomous testing."
+                    )
+                    r["excluded_underpowered_levels"] = excluded_levels
+                    r["sample_size_note"] = " ".join(
+                        part for part in (r.get("sample_size_note"), support_note) if part
+                    )
             except ToolExecutionError:
                 continue
             raw_results[dim] = r

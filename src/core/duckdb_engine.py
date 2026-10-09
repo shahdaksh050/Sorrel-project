@@ -177,63 +177,6 @@ class HighThroughputQueryEngine:
         except Exception as exc:
             raise DuckDBQueryError(f"Polars SQL query failed: {exc}") from exc
 
-    def fast_groupby(
-        self,
-        df: pd.DataFrame,
-        group_cols: list[str],
-        aggregations: dict[str, list[str]],
-    ) -> pd.DataFrame:
-        """
-        Vectorized high-speed group-by aggregation.
-
-        Example:
-            aggregations = {"amount": ["sum", "avg", "count"], "price": ["min", "max"]}
-        """
-        if df.empty or not group_cols or not aggregations:
-            return pd.DataFrame()
-
-        grp_str = ", ".join(f'"{c}"' for c in group_cols)
-        agg_exprs: list[str] = [f'"{c}"' for c in group_cols]
-
-        for col, funcs in aggregations.items():
-            for fn in funcs:
-                fn_clean = fn.upper()
-                if fn_clean == "MEAN":
-                    fn_clean = "AVG"
-                out_name = f"{col}_{fn.lower()}"
-                agg_exprs.append(f'{fn_clean}("{col}") AS "{out_name}"')
-
-        select_clause = ", ".join(agg_exprs)
-        sql = f'SELECT {select_clause} FROM dataset GROUP BY {grp_str}'
-        return self.execute_query(sql, {"dataset": df})
-
-    def fast_quantiles(
-        self,
-        df: pd.DataFrame,
-        col: str,
-        quantiles: list[float] | None = None,
-    ) -> dict[float, float]:
-        """Compute exact quantiles using DuckDB/Polars percentile functions."""
-        if df.empty or col not in df.columns:
-            return {}
-
-        qs = quantiles or [0.25, 0.50, 0.75]
-        q_exprs = [
-            f'QUANTILE_CONT("{col}", {q}) AS "q_{int(q*100)}"'
-            for q in qs
-        ]
-        sql = f'SELECT {", ".join(q_exprs)} FROM dataset'
-        res = self.execute_query(sql, {"dataset": df})
-        if res.empty:
-            return {}
-
-        out: dict[float, float] = {}
-        for q in qs:
-            key = f"q_{int(q*100)}"
-            if key in res.columns:
-                out[q] = float(res.iloc[0][key])
-        return out
-
 
 # Global singleton engine instance
 _ENGINE: HighThroughputQueryEngine | None = None

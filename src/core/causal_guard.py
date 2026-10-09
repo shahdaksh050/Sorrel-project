@@ -14,9 +14,9 @@ from typing import Any
 
 import pandas as pd
 
-_EXPERIMENTAL_COL_PATTERNS = (
-    re.compile(r"^(?:treatment|variant|arm|experiment_group|test_control|group_assigned)$", re.I),
-    re.compile(r"^(?:is_treatment|in_treatment|control_variant)$", re.I),
+_RANDOMIZATION_EVIDENCE_PATTERNS = (
+    re.compile(r"^(?:randomi[sz]ed|is_randomi[sz]ed|random_assignment)$", re.I),
+    re.compile(r"^(?:assignment_randomi[sz]ed|randomi[sz]ation_group)$", re.I),
 )
 
 _QUASI_EXPERIMENTAL_PATTERNS = (
@@ -50,24 +50,18 @@ def classify_study_design(df: pd.DataFrame | None = None, objective: str = "") -
     """
     if objective:
         obj_lower = objective.lower()
-        if any(w in obj_lower for w in ("a/b test", "ab test", "randomized", "experiment arm", "clinical trial")):
+        if any(w in obj_lower for w in ("a/b test", "ab test", "randomized", "randomised")):
             return "randomized_experiment"
         if any(w in obj_lower for w in ("diff-in-diff", "difference in differences", "interrupted time series")):
             return "quasi_experiment"
 
     if df is not None:
         for col in df.columns:
-            for pat in _EXPERIMENTAL_COL_PATTERNS:
-                # A column *named* "treatment"/"arm"/"group_assigned" only
-                # implies random assignment when it actually looks like one
-                # (few, repeated levels — an arm label or a 0/1 flag). An
-                # observational medical dataset with a "treatment" column
-                # naming the actual drug/procedure given (many distinct
-                # values, one per patient's real-world care) is not an RCT
-                # just because the column has that name — without this
-                # check it would be misclassified as randomized_experiment,
-                # silently disabling the causal-language guard on
-                # observational data.
+            for pat in _RANDOMIZATION_EVIDENCE_PATTERNS:
+                # Treatment, arm and variant columns identify comparison
+                # groups, not the assignment mechanism. Only an explicit
+                # randomisation-evidence field (or explicit objective above)
+                # can disable the observational causal-language guard.
                 if pat.search(str(col)) and 2 <= df[col].nunique(dropna=True) <= 4:
                     return "randomized_experiment"
             for pat in _QUASI_EXPERIMENTAL_PATTERNS:

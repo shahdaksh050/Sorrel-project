@@ -3,6 +3,11 @@ Unit tests for Question-Type Router (FutureScope Phase 2).
 """
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
 from src.core.question_router import route_question
 
 
@@ -67,3 +72,34 @@ def test_route_time_series_profile_does_not_override_explicit_intent() -> None:
         profile=_FakeProfile(is_time_series=True),
     )
     assert res.primary_family == "compare"
+
+
+def test_fallback_plan_prioritizes_routed_tools(tmp_path: Path) -> None:
+    """Wired integration (IMPROVEMENTS.md 10.7):
+    Fallback plan candidate tools must prioritize recommendations from question_routing."""
+    from src.core.controller import AgentController
+
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2024-01-01", periods=60, freq="D"),
+        "sales": np.linspace(10.0, 100.0, 60),
+        "region": ["North"] * 30 + ["South"] * 30,
+    })
+    csv_file = tmp_path / "sales_ts.csv"
+    df.to_csv(csv_file, index=False)
+
+    ctrl = AgentController(
+        output_dir=str(tmp_path / "out"),
+        objective="Forecast sales trends for next quarter",
+        use_ml=False,
+        use_llm=False,
+    )
+    ctrl.load_dataset(str(csv_file))
+
+    plan = ctrl._build_fallback_plan()
+    tool_names = [s["tool_name"] for s in plan.get("steps", [])]
+    rationales = [s.get("rationale", "") for s in plan.get("steps", [])]
+
+    # Verify that time-series or forecast tools were planned and have intent matching rationale
+    has_routed_tool = any("time_series_analysis" in name or "forecast_analysis" in name for name in tool_names)
+    assert has_routed_tool, f"Expected routed tools in plan, got: {tool_names}"
+    assert any("matched objective intent 'forecast'" in r for r in rationales)

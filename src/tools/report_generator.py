@@ -185,6 +185,76 @@ def _format_data_understanding(
     return lines
 
 
+def _format_domain_and_causal_contracts(llm_insights: dict[str, Any]) -> list[str]:
+    """Render the validated domain and causal contracts carried on the final result.
+
+    These blocks describe proposed semantics and identification limits; they
+    never substitute for tool-computed findings.
+    """
+    lines: list[str] = []
+    domain = llm_insights.get("domain_analysis")
+    if isinstance(domain, dict) and domain:
+        lines += ["## Domain Analysis Plan", ""]
+        for label, key in (
+            ("Domain", "domain"),
+            ("Row entity", "row_entity"),
+            ("Grain", "grain"),
+            ("Readiness", "readiness"),
+            ("Confidence", "confidence"),
+        ):
+            value = domain.get(key)
+            if value not in (None, "", []):
+                lines.append(f"- **{label}**: {value}")
+        for label, key in (
+            ("Questions selected", "domain_questions"),
+            ("Methods considered", "suggested_methods"),
+            ("Assumptions to verify", "assumptions"),
+            ("Analyses ruled out", "prohibited_analyses"),
+            ("Information still needed", "missing_information"),
+            ("Validation warnings", "warnings"),
+        ):
+            values = domain.get(key)
+            if isinstance(values, list) and values:
+                lines += ["", f"**{label}:**", *[f"- {value}" for value in values]]
+        lines.append("")
+
+    causal = llm_insights.get("causal_design")
+    if isinstance(causal, dict) and causal and causal.get("status") != "not_requested":
+        lines += ["## Causal Identification", ""]
+        status = causal.get("status") or causal.get("identification_status") or "not_identified"
+        lines.append(f"- **Identification status**: {status}")
+        for label, key in (
+            ("Study design", "design"),
+            ("Treatment", "treatment"),
+            ("Outcome", "outcome"),
+            ("Estimand", "estimand"),
+            ("Estimator", "estimator"),
+        ):
+            value = causal.get(key)
+            if value not in (None, "", []):
+                lines.append(f"- **{label}**: {value}")
+        for label, key in (
+            ("Required diagnostics", "diagnostics_required"),
+            ("Identification assumptions", "assumptions"),
+            ("Missing requirements", "missing_requirements"),
+            ("Warnings", "warnings"),
+        ):
+            values = causal.get(key)
+            if isinstance(values, list) and values:
+                lines += ["", f"**{label}:**", *[f"- {value}" for value in values]]
+        critique = causal.get("adversarial_critique")
+        if isinstance(critique, dict) and critique:
+            lines += ["", "**Adversarial critique & unmeasured confounding:**"]
+            if critique.get("critique_summary"):
+                lines.append(f"- Summary: {critique['critique_summary']}")
+            if critique.get("plausible_unmeasured_confounders"):
+                lines.append(f"- Plausible unmeasured confounders: {', '.join(critique['plausible_unmeasured_confounders'])}")
+            if critique.get("reverse_causality_risk"):
+                lines.append(f"- Reverse causality risk: {critique['reverse_causality_risk']}")
+        lines.append("")
+    return lines
+
+
 def _format_governance(llm_insights: dict[str, Any]) -> list[str]:
     """Code-execution and LLM-usage accounting for the run — rows shared
     with src.core.html_report."""
@@ -479,7 +549,16 @@ def _format_additional_analyses(tool_results: list[dict[str, Any]]) -> list[str]
             lines.append(f"- Vocabulary size: {out.get('vocab_size', '—')}")
             lines.append(f"- Avg. words/row: {out.get('avg_word_count', '—')}")
             top = out.get("top_tokens") or []
-            words = [t.get("token", t) if isinstance(t, dict) else t for t in top[:6]]
+            if isinstance(top, dict):
+                token_items: list[Any] = list(top.keys())
+            elif isinstance(top, (list, tuple)):
+                token_items = list(top)
+            else:
+                token_items = []
+            words = [
+                item.get("token", item) if isinstance(item, dict) else item
+                for item in token_items[:6]
+            ]
             if words:
                 lines.append(f"- Most frequent words: {', '.join(str(w) for w in words)}")
         elif name == "geospatial_analysis":
@@ -612,6 +691,7 @@ class GenerateReportTool(BaseTool):
         # read time (item 2) and repaired before analysis (item 3).
         md_lines += _format_data_overview(data_profile, read_report, coercions)
         md_lines += _format_data_understanding(llm_insights, data_profile)
+        md_lines += _format_domain_and_causal_contracts(llm_insights)
 
         # 7.9 layered skeleton, headline first: the top-ranked findings from
         # the shared bus, in plain language with the numbers embedded. Falls

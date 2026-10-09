@@ -93,6 +93,37 @@ class TestGenerateReportTool:
         )
         assert "summary" in result.output
 
+    def test_report_surfaces_domain_and_causal_limits(self, report_dir: str) -> None:
+        insights = {
+            **LLM_INSIGHTS,
+            "domain_analysis": {
+                "domain": "epidemiology",
+                "row_entity": "one participant",
+                "readiness": "partial",
+                "suggested_methods": ["survival analysis"],
+                "missing_information": ["outcome codebook"],
+            },
+            "causal_design": {
+                "status": "not_identified",
+                "design": "observational_cross_section",
+                "treatment": "exposure",
+                "outcome": "recovery",
+                "missing_requirements": ["pre-treatment confounders"],
+            },
+        }
+        result = GenerateReportTool().run(
+            dataset_name="causal_limits",
+            tool_results_json="[]",
+            llm_insights=insights,
+            output_dir=report_dir,
+        )
+
+        content = Path(result.output["markdown_path"]).read_text(encoding="utf-8")
+        assert "## Domain Analysis Plan" in content
+        assert "## Causal Identification" in content
+        assert "not_identified" in content
+        assert "pre-treatment confounders" in content
+
     def test_additional_analyses_section_for_unbespoke_tools(self, report_dir: str) -> None:
         """cluster_data (and text/geo/time-series/dimensionality) must get a
         real subsection, not survive only as a truncated Tool Execution Log
@@ -132,6 +163,30 @@ class TestGenerateReportTool:
         )
         content = Path(result.output["markdown_path"]).read_text(encoding="utf-8")
         assert "## Additional Analyses" not in content
+
+    def test_text_analysis_with_dict_top_tokens_generates_report(self, report_dir: str) -> None:
+        results = [
+            {
+                "tool_name": "text_analysis",
+                "status": "success",
+                "output": {
+                    "summary": "Profiled notes.",
+                    "vocab_size": 5,
+                    "avg_word_count": 4.2,
+                    "top_tokens": {"camera": 12, "battery": 9},
+                },
+                "error": None,
+            },
+        ]
+        result = GenerateReportTool().run(
+            dataset_name="text_tokens",
+            tool_results_json=json.dumps(results),
+            llm_insights=LLM_INSIGHTS,
+            output_dir=report_dir,
+        )
+        content = Path(result.output["markdown_path"]).read_text(encoding="utf-8")
+        assert result.status == "success"
+        assert "Most frequent words: camera, battery" in content
 
     def test_old_four_params_still_succeed_without_new_sections(self, report_dir: str) -> None:
         """Back-compat: scripts/validate.py and other direct callers only

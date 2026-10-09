@@ -135,7 +135,11 @@ def test_audit_findings_causal_language() -> None:
 
 def test_classify_study_design() -> None:
     df_exp = pd.DataFrame({"treatment": [0, 1, 0, 1], "y": [1, 2, 1, 3]})
-    assert classify_study_design(df_exp) == "randomized_experiment"
+    # A comparison-group column does not reveal how assignment happened.
+    assert classify_study_design(df_exp) == "observational"
+
+    df_randomized = pd.DataFrame({"random_assignment": [0, 1, 0, 1], "y": [1, 2, 1, 3]})
+    assert classify_study_design(df_randomized) == "randomized_experiment"
 
     df_obs = pd.DataFrame({"age": [20, 30], "income": [50000, 70000]})
     assert classify_study_design(df_obs) == "observational"
@@ -157,13 +161,12 @@ def test_classify_study_design_treatment_column_name_alone_is_not_enough() -> No
     assert df_obs_treatment["treatment"].nunique() == 5
     assert classify_study_design(df_obs_treatment) == "observational"
 
-    # Planted case: a genuine small-arm assignment column still classifies
-    # as an experiment (guard against over-fixing away the real signal).
+    # Even a small-arm assignment column does not itself prove randomisation.
     df_three_arm = pd.DataFrame({
         "treatment": ["control", "low_dose", "high_dose"] * 10,
         "y": list(range(30)),
     })
-    assert classify_study_design(df_three_arm) == "randomized_experiment"
+    assert classify_study_design(df_three_arm) == "observational"
 
 
 # ---------------------------------------------------------------------------

@@ -43,12 +43,83 @@ class StepMixin(ControllerState):
         "detect_outliers", "correlation_analysis", "select_statistical_test",
         "segment_comparison", "time_series_analysis", "text_analysis",
         "geospatial_analysis", "experiment_analysis", "anomaly_analysis",
+        "causal_analysis", "difference_in_differences",
         "survival_analysis", "basket_analysis", "price_elasticity_analysis", "equity_analysis",
         "curve_fit_analysis",
     })
 
     #: Concurrent-safe tools that write a fixed-name output file.
     _FILE_WRITING_TOOLS: frozenset[str] = frozenset({"detect_outliers"})
+
+    def _activate_structured_dataset(self, output: dict[str, Any]) -> None:
+        """Promote a successful extraction artifact to the analysis dataset.
+
+        Re-profiling here is essential: later tools prepare their parameters
+        after this step and therefore see the typed features, updated domain,
+        semantic readiness and question agenda.
+        """
+        derived = output.get("derived_dataset")
+        path = derived.get("path") if isinstance(derived, dict) else None
+        if not isinstance(path, str) or not path:
+            return
+        self.memory.set_context("cleaned_file_path", path)
+        self.memory.set_context("structured_feature_provenance", output.get("provenance") or [])
+        quarantined = output.get("quarantined_columns") or []
+        self.memory.set_context("semantic_quarantine", quarantined)
+        try:
+            from src.core.agenda import build_agenda
+            from src.core.analysis_io import read_analysis_df
+            from src.core.domains import infer_domains
+            from src.core.profiler import profile_dataframe
+
+            frame = read_analysis_df(path)
+            target = getattr(self.memory.dataset_metadata, "target_column", None)
+            profile = profile_dataframe(frame, target_column=target)
+            profile.domains = infer_domains(frame, profile)
+            # The extractor assessed the source columns before adding
+            # canonical numeric features. Reassessing unit-normalised values
+            # would incorrectly call them non-conformant merely because the
+            # units now live in provenance instead of every cell.
+            readiness = output.get("semantic_readiness") or {
+                "readiness_score": 100.0,
+                "columns_with_issues": 0,
+            }
+            if quarantined:
+                profile.quality_score = max(0, profile.quality_score - min(25, 5 * len(quarantined)))
+                quarantine_warning = (
+                    f"{len(quarantined)} source column(s) were quarantined because their values did not "
+                    "conform to the semantics implied by their headers."
+                )
+                profile.warnings.append(quarantine_warning)
+                degradations = list(self.memory.get_context("degradations") or [])
+                if quarantine_warning not in degradations:
+                    degradations.append(quarantine_warning)
+                self.memory.set_context("degradations", degradations)
+            self.last_profile = profile
+            self.memory.set_context("data_profile", profile.to_dict())
+            summary = profile.to_prompt_string()
+            summary += (
+                f"\nSemantic readiness: {readiness['readiness_score']}/100; "
+                f"{readiness['columns_with_issues']} assessed column(s) still have semantic issues; "
+                f"{len(quarantined)} raw column(s) quarantined."
+            )
+            self.memory.set_context("data_profile_summary", summary)
+            self.memory.set_context("semantic_readiness", readiness)
+            decision = self.memory.get_context("analysis_decision")
+            excluded = {
+                str(item.get("source_column"))
+                for item in quarantined
+                if isinstance(item, dict) and item.get("source_column")
+            }
+            agenda = build_agenda(profile, decision, self.objective, excluded_columns=excluded)
+            self.memory.set_context("question_agenda", [question.to_dict() for question in agenda])
+        except Exception as exc:
+            degradations = list(self.memory.get_context("degradations") or [])
+            degradations.append(
+                f"Structured features were created, but re-profiling the analysis-ready dataset failed: {exc}."
+            )
+            self.memory.set_context("degradations", degradations)
+            console.print(f"  [yellow]Structured-dataset profiling skipped: {exc}[/]")
 
     def _all_steps_cached(self, steps: list[AnalysisStep]) -> bool:
         """True when every planned step would be answered from the step cache."""
@@ -278,6 +349,9 @@ class StepMixin(ControllerState):
                 console.print(
                     f"  [dim]Derived dataset '{derived['name']}' → {derived['path']}[/]"
                 )
+
+            if step.tool_name == "extract_structured_features":
+                self._activate_structured_dataset(result.output)
 
         if step.tool_name == "define_analysis_tool" and result.status == "success":
             self._maybe_register_generated_tool(result)
@@ -553,7 +627,8 @@ class StepMixin(ControllerState):
         If any tool raises a ToolInterruptSignal, execution of the remaining
         steps is halted so the agent can replan.
         """
-        ordered = sorted(steps, key=lambda s: s.tool_name != "clean_data")
+        preprocessing_order = {"clean_data": 0, "extract_structured_features": 1}
+        ordered = sorted(steps, key=lambda step: preprocessing_order.get(step.tool_name, 2))
         total_steps = len(ordered)
         batch: list[tuple[int, AnalysisStep]] = []
         for idx, step in enumerate(ordered, 1):

@@ -116,7 +116,7 @@ let isNight = THEME === 'night';
 // Day / Night never falls back to a colour typed here. The literals are only the last resort if the
 // state arrived without them, and they are the Sorrel token values.
 const FALLBACK_TOKENS = {
-  night: { stock: '#141712', sheet: '#1c2219', sheet_alt: '#1a1e17', ink: '#edf0e4', graphite: '#8a927d', pen: '#326d48', accent_soft: '#1c2b20', accent_text: '#7fc79a', margin: '#b3a06a', risk: '#cf5544', positive: '#4ca167', grid: '#2a3324', paper_elevated: '#22291e', bg_deep: '#0d120e' },
+  night: { stock: '#000000', sheet: '#141414', sheet_alt: '#1a1a1a', ink: '#edf0e4', graphite: '#9ca3af', pen: '#047857', accent_soft: '#062419', accent_text: '#34d399', margin: '#b3a06a', risk: '#cf5544', positive: '#10b981', grid: '#262626', paper_elevated: '#1e1e1e', bg_deep: '#000000' },
   day: { stock: '#f7f4ed', sheet: '#fffdf7', sheet_alt: '#efeae0', ink: '#1a1a17', graphite: '#66665e', pen: '#1f4634', accent_soft: '#e4ebe5', accent_text: '#1f4634', margin: '#9a8650', risk: '#8a3a2a', positive: '#24643c', grid: '#d9d3c4', paper_elevated: '#ffffff', bg_deep: '#12241a' },
 };
 function tokensFor(mode) {

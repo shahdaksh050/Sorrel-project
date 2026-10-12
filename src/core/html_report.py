@@ -290,6 +290,48 @@ def _finding_evidence_html(finding: dict[str, Any]) -> str:
     return "".join(bits)
 
 
+def _action_matrix_html(findings: list[dict[str, Any]] | None) -> str:
+    if not findings:
+        return ""
+    from src.core.findings import classify_action_matrix
+    matrix = classify_action_matrix(findings)
+    quadrants = [
+        ("quick_wins", "⚡ Quick Wins", "High Impact · High Feasibility", "rec"),
+        ("strategic_bets", "🎯 Strategic Bets", "High Impact · Structural / Complex", "insight"),
+        ("incremental", "🔧 Incremental Gains", "Moderate Impact · High Feasibility", "treat"),
+        ("watch_caveats", "⚠️ Guardrails & Watch", "Confounders / Sensitive / Fragile", "warn"),
+    ]
+    quad_cards = []
+    has_any = False
+    for key, title, subtitle, card_cls in quadrants:
+        items = matrix.get(key, [])
+        if not items:
+            continue
+        has_any = True
+        body = []
+        for it in items[:3]:
+            lever = _esc(it.get("lever", it.get("headline", "")))
+            rationale = _esc(it.get("rationale", ""))
+            eff = it.get("effect")
+            eff_badge = f' <span class="kind">({eff:+0.1%})</span>' if isinstance(eff, (int, float)) and abs(eff) < 10 else ""
+            body.append(f'<div style="margin-bottom:.4rem;"><strong>{lever}</strong>{eff_badge}<br/><span style="font-size:.82rem;color:var(--graphite);">{rationale}</span></div>')
+        content = "".join(body)
+        quad_cards.append(
+            f'<div class="card {card_cls}" style="flex:1 1 45%;min-width:280px;padding:.8rem 1rem;">'
+            f'<div style="font-weight:600;font-size:.95rem;margin-bottom:.2rem;">{title}</div>'
+            f'<div style="font-size:.75rem;color:var(--graphite);margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.04em;">{subtitle}</div>'
+            f'{content}</div>'
+        )
+    if not has_any:
+        return ""
+    return (
+        '<h2>Action Prioritization Matrix (2x2)</h2>'
+        '<div style="display:flex;flex-wrap:wrap;gap:.8rem;margin:1rem 0 1.5rem;">'
+        + "".join(quad_cards)
+        + '</div>'
+    )
+
+
 #: 3d — mirrors src.tools.report_generator's _MAX_BH_ROWS/_sort_bh_tests:
 #: the controller now feeds the BH correction every family-mode test *and*
 #: every segment_comparison test in one run, which can run into the dozens.
@@ -675,6 +717,9 @@ def build_html_report(
     recs = llm_insights.get("recommendations") or []
     if recs:
         sections.append("<h2>What to do next</h2>" + _cards([plainify(str(r)) for r in recs], "rec"))
+    matrix_html = _action_matrix_html(findings)
+    if matrix_html:
+        sections.append(matrix_html)
 
     # ---- drivers (explainability) ----
     eval_out = _find_tool_output(tool_results, "evaluate_model")

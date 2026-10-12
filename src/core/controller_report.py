@@ -1,5 +1,5 @@
 """
-AgentController mixin: Stage 5 — final synthesis, dashboard, HTML/JSON report and claim verification.
+AgentController mixin: Stage 7 — final synthesis, dashboard, HTML/JSON report and claim verification.
 
 Split out of controller.py; `AgentController` inherits it, so the methods keep
 their `self.*` state. Shared constants live in controller_common.
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 class ReportMixin(ControllerState):
-    """Stage 5 — final synthesis, dashboard, HTML/JSON report and claim verification."""
+    """Stage 7 — final synthesis, dashboard, HTML/JSON report and claim verification."""
 
     def _final_synthesis(self, stage: str) -> dict[str, Any]:
         """One LLM call for the final interpretation of everything found so
@@ -188,7 +188,7 @@ class ReportMixin(ControllerState):
                 llm_insights=llm_final,
                 tool_results=[r.to_dict() for r in self.memory.tool_results],
                 charts=self._last_charts,
-                objective=self.objective,
+                objective=self.objective or self.memory.get_context("autonomous_objective") or "",
                 profile=self.memory.get_context("data_profile"),
                 read_report=self.memory.get_context("read_report"),
                 coercions=self.memory.get_context("coercions"),
@@ -296,8 +296,11 @@ class ReportMixin(ControllerState):
                 "Machine learning was switched off for this run — no model was "
                 "fitted. Turn it on for predictive modelling and clustering."
             )
+        auto_obj = self.memory.get_context("autonomous_objective")
         if self.objective:
             reasoning = f"User objective: {self.objective}\n{reasoning}"
+        elif auto_obj:
+            reasoning = f"{auto_obj}\n{reasoning}"
 
         return {
             "status": "complete",
@@ -305,6 +308,7 @@ class ReportMixin(ControllerState):
             "deterministic_mode": not self.use_llm,
             "ml_enabled": self.use_ml,
             "reasoning": reasoning,
+            "autonomous_objective": auto_obj,
             "insights": insights,
             "recommendations": recommendations,
             "best_model": best_model,
@@ -451,7 +455,7 @@ class ReportMixin(ControllerState):
 
     def _generate_final_report(self, llm_final: dict[str, Any]) -> None:
         """
-        Stage 5: Invoke GenerateReportTool to produce the Markdown/JSON report.
+        Stage 7: Invoke GenerateReportTool to produce the Markdown/JSON report.
 
         The report tool is called with the serialised tool results and the
         LLM's final interpretation so it can produce a complete document.
@@ -486,7 +490,7 @@ class ReportMixin(ControllerState):
         if result.status == "success":
             console.print(
                 Panel(
-                    f"[bold green]Stage 5 — Report Generated[/]\n"
+                    f"[bold green]Stage 7 — Report Generated[/]\n"
                     f"Markdown: {result.output.get('markdown_path')}\n"
                     f"JSON:     {result.output.get('json_path')}",
                     border_style="green",

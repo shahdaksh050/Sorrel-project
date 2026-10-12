@@ -140,3 +140,73 @@ def test_leakage_flags_genuine_deterministic_mapping() -> None:
         a["column"] == "plan_tier" and a["leakage_type"] == "deterministic_mapping"
         for a in alerts
     )
+
+
+def test_simpsons_paradox_detected_on_reversal() -> None:
+    # Classic Simpson's paradox:
+    # Subgroup 1: X in [10, 20], Y = -2*X + 50 (negative correlation within group)
+    # Subgroup 2: X in [30, 40], Y = -2*X + 130 (negative correlation within group)
+    # But Subgroup 2 has much higher X and Y, making aggregate correlation positive!
+    np.random.seed(42)
+    n = 40
+    x1 = np.linspace(10, 20, n)
+    y1 = -1.5 * x1 + 50 + np.random.normal(0, 1, n)
+    g1 = ["GroupA"] * n
+
+    x2 = np.linspace(30, 40, n)
+    y2 = -1.5 * x2 + 130 + np.random.normal(0, 1, n)
+    g2 = ["GroupB"] * n
+
+    df = pd.DataFrame({
+        "study_hours": np.concatenate([x1, x2]),
+        "exam_score": np.concatenate([y1, y2]),
+        "department": g1 + g2,
+    })
+
+    from src.core.sensitivity import audit_simpsons_paradox
+
+    finding = {
+        "kind": "correlation",
+        "measure": "exam_score",
+        "dimension": "study_hours",
+        "effect": 0.80,
+    }
+
+    report = audit_simpsons_paradox(df, finding)
+    assert report["status"] == "failed"
+    assert report["has_paradox"] is True
+    assert report["stratifier"] == "department"
+    assert "Simpson's Paradox detected" in report["diagnosis"]
+
+
+def test_simpsons_paradox_passes_when_consistent() -> None:
+    np.random.seed(42)
+    n = 40
+    x1 = np.linspace(10, 20, n)
+    y1 = 2.0 * x1 + np.random.normal(0, 1, n)
+    g1 = ["GroupA"] * n
+
+    x2 = np.linspace(10, 20, n)
+    y2 = 2.0 * x2 + 5 + np.random.normal(0, 1, n)
+    g2 = ["GroupB"] * n
+
+    df = pd.DataFrame({
+        "tenure": np.concatenate([x1, x2]),
+        "salary": np.concatenate([y1, y2]),
+        "location": g1 + g2,
+    })
+
+    from src.core.sensitivity import audit_simpsons_paradox
+
+    finding = {
+        "kind": "correlation",
+        "measure": "salary",
+        "dimension": "tenure",
+        "effect": 0.90,
+    }
+
+    report = audit_simpsons_paradox(df, finding)
+    assert report["status"] == "passed"
+    assert report["has_paradox"] is False
+    assert "Robust" in report["diagnosis"]
+

@@ -115,7 +115,7 @@ class TestSorrelReport:
 
     def test_report_css_uses_sorrel_tokens_and_families(self) -> None:
         doc = build_html_report("ds", {}, [], [])
-        assert "--pen: #1f4634;" in doc and "--pen: #326d48;" in doc  # Day and Night from design_tokens
+        assert f"--pen: {palette('day')['pen']};" in doc and f"--pen: {palette('night')['pen']};" in doc  # Day and Night from design_tokens
         css = doc[doc.rindex("<style>") :]
         assert "'Geist'" in css and "'Newsreader'" in css and "'Geist Mono'" in css
         for old in ("Baloo", "Mukta", "Bricolage", "Public Sans"):

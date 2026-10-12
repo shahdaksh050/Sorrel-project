@@ -330,3 +330,184 @@ def detect_target_leakage(df: pd.DataFrame, target_col: str) -> list[dict[str, A
                     })
 
     return alerts
+
+
+def audit_simpsons_paradox(
+    df: pd.DataFrame,
+    finding: dict[str, Any] | Finding,
+    candidate_stratifiers: list[str] | tuple[str, ...] | None = None,
+    min_stratum_n: int = 15,
+) -> dict[str, Any]:
+    """Audit whether a finding suffers from Simpson's Paradox across subgroups.
+
+    Checks whether the sign of a bivariate correlation or categorical contrast reverses
+    when conditioning on third-party categorical variables (stratifiers).
+    """
+    f_dict = finding.to_dict() if hasattr(finding, "to_dict") else dict(finding)
+    measure = f_dict.get("measure")
+    dimension = f_dict.get("dimension")
+    level = f_dict.get("level")
+    effect_kind = f_dict.get("effect_kind")
+    finding_kind = f_dict.get("kind")
+
+    if not isinstance(measure, str) or measure not in df.columns:
+        return _non_passing_result("not_applicable", "The finding has no measure anchored to this dataset.")
+    if not pd.api.types.is_numeric_dtype(df[measure]):
+        return _non_passing_result("not_applicable", "The finding measure is non-numeric; Simpson's audit does not apply.")
+    if not isinstance(dimension, str) or dimension not in df.columns:
+        return _non_passing_result("not_applicable", "The finding has no dimension anchored to test for subgroup reversal.")
+
+    # Identify potential stratifiers (confounders)
+    if candidate_stratifiers is not None:
+        stratifiers = [c for c in candidate_stratifiers if c in df.columns and c not in (measure, dimension)]
+    else:
+        stratifiers = [
+            c for c in df.columns
+            if c not in (measure, dimension)
+            and 2 <= df[c].nunique(dropna=True) <= 8
+            and not pd.api.types.is_numeric_dtype(df[c])
+        ]
+        # If no non-numeric columns, allow low-cardinality discrete numeric
+        if not stratifiers:
+            stratifiers = [
+                c for c in df.columns
+                if c not in (measure, dimension)
+                and 2 <= df[c].nunique(dropna=True) <= 6
+            ]
+
+    if not stratifiers:
+        return {
+            "status": "not_applicable",
+            "has_paradox": None,
+            "is_fragile": None,
+            "diagnosis": "No suitable categorical stratifiers available to test subgroup reversal.",
+            "stratifier": None,
+            "strata_effects": {},
+        }
+
+    is_num_dim = pd.api.types.is_numeric_dtype(df[dimension])
+    tested_stratifiers: list[str] = []
+
+    for strat in stratifiers[:4]:  # test up to 4 most plausible stratifiers
+        valid = df[[dimension, measure, strat]].dropna()
+        if len(valid) < max(30, min_stratum_n * 2):
+            continue
+
+        strata_vals = valid[strat].unique()
+        strata_effects: dict[str, float] = {}
+
+        if is_num_dim:
+            if finding_kind not in (None, "", "correlation"):
+                continue
+            try:
+                base_r, _ = stats.pearsonr(valid[dimension], valid[measure])
+            except Exception:
+                continue
+            if abs(base_r) < 0.12:
+                continue
+
+            base_sign = 1 if base_r > 0 else -1
+            reversal_count = 0
+            valid_strata_count = 0
+
+            for s_val in strata_vals:
+                sub = valid[valid[strat] == s_val]
+                if len(sub) < min_stratum_n:
+                    continue
+                try:
+                    s_r, _ = stats.pearsonr(sub[dimension], sub[measure])
+                    if np.isnan(s_r):
+                        continue
+                    strata_effects[str(s_val)] = round(float(s_r), 3)
+                    valid_strata_count += 1
+                    if (1 if s_r > 0 else -1) != base_sign and abs(s_r) >= 0.08:
+                        reversal_count += 1
+                except Exception:
+                    continue
+
+            if valid_strata_count >= 2:
+                tested_stratifiers.append(strat)
+                if reversal_count >= 2 and (reversal_count / valid_strata_count) >= 0.60:
+                    strata_str = ", ".join(f"{k}: {v:+0.2f}" for k, v in strata_effects.items())
+                    return {
+                        "status": "failed",
+                        "has_paradox": True,
+                        "is_fragile": True,
+                        "stratifier": strat,
+                        "aggregate_effect": round(float(base_r), 3),
+                        "strata_effects": strata_effects,
+                        "diagnosis": (
+                            f"Simpson's Paradox detected: overall correlation ({base_r:+0.2f}) "
+                            f"reverses within subgroups of '{strat}' ({strata_str}). "
+                            f"Controlling for '{strat}' inverts the direction."
+                        ),
+                    }
+        else:
+            # Categorical dimension: level-vs-rest contrast
+            if level is None:
+                continue
+            base_effect_val, _, err = _categorical_contrast_effect(
+                valid.rename(columns={dimension: "_dimension"}),
+                measure,
+                str(level),
+                str(effect_kind or "lift"),
+            )
+            if base_effect_val is None or err is not None or abs(base_effect_val) < 0.04:
+                continue
+
+            base_sign = 1 if base_effect_val > 0 else -1
+            reversal_count = 0
+            valid_strata_count = 0
+
+            for s_val in strata_vals:
+                sub = valid[valid[strat] == s_val].rename(columns={dimension: "_dimension"})
+                if len(sub) < min_stratum_n:
+                    continue
+                s_effect, _, s_err = _categorical_contrast_effect(
+                    sub, measure, str(level), str(effect_kind or "lift")
+                )
+                if s_effect is None or s_err is not None:
+                    continue
+                strata_effects[str(s_val)] = round(float(s_effect), 3)
+                valid_strata_count += 1
+                if (1 if s_effect > 0 else -1) != base_sign and abs(s_effect) >= 0.02:
+                    reversal_count += 1
+
+            if valid_strata_count >= 2:
+                tested_stratifiers.append(strat)
+                if reversal_count >= 2 and (reversal_count / valid_strata_count) >= 0.60:
+                    strata_str = ", ".join(f"{k}: {v:+0.2f}" for k, v in strata_effects.items())
+                    return {
+                        "status": "failed",
+                        "has_paradox": True,
+                        "is_fragile": True,
+                        "stratifier": strat,
+                        "aggregate_effect": round(float(base_effect_val), 3),
+                        "strata_effects": strata_effects,
+                        "diagnosis": (
+                            f"Simpson's Paradox detected: overall {effect_kind or 'lift'} ({base_effect_val:+0.2f}) "
+                            f"reverses within subgroups of '{strat}' ({strata_str}). "
+                            f"Controlling for '{strat}' inverts the conclusion."
+                        ),
+                    }
+
+    if tested_stratifiers:
+        return {
+            "status": "passed",
+            "has_paradox": False,
+            "is_fragile": False,
+            "stratifier": None,
+            "tested_stratifiers": tested_stratifiers,
+            "strata_effects": {},
+            "diagnosis": f"Robust across subgroup stratification (tested on: {', '.join(tested_stratifiers)}); no Simpson's reversal detected.",
+        }
+
+    return {
+        "status": "skipped",
+        "has_paradox": None,
+        "is_fragile": None,
+        "stratifier": None,
+        "strata_effects": {},
+        "diagnosis": "Insufficient observations per subgroup stratum to evaluate Simpson's paradox.",
+    }
+

@@ -110,13 +110,13 @@ __all__ = [
 # protanopia, deuteranopia and tritanopia (Machado 2009, severity 1.0; every pair
 # >= 8 Day / >= 11 Night), each mark >= 3:1 against the chart surface (`sheet`),
 # and every slot >= 15 CIEDE2000 away from `risk`.
-CHART_PEN_NIGHT = "#4a9a69"
+CHART_PEN_NIGHT = "#34d399"
 #: Day's mark green. `PEN_DAY` (#1f4634) is a UI fill so dark it reads as black on a chart; marks use
 #: this brighter green of the same hue (5:1 on the card, still the first slot of the range).
 CHART_PEN_DAY = "#2e7d57"
 #: Night gridlines. `RULE_NIGHT` is a hairline for the page; on the lighter Night chart surface it is
 #: only ~1.1:1 and the grid vanishes. This is ~1.4:1, the ratio Day's grid has on its surface.
-CHART_GRID_NIGHT = "#363f2f"
+CHART_GRID_NIGHT = "#262626"
 CATEGORY_RANGE_DAY: list[str] = [
     CHART_PEN_DAY,  # 1. Forest green, chart-mark variant (not PEN_DAY)
     "#2f86d6",   # 2. Ink blue

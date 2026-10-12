@@ -61,3 +61,40 @@ def test_autonomous_discovery_skips_tiny_residual_groups_but_explicit_request_ho
     assert {row["group_column"] for row in family["family_results"]} == {"platform"}
     assert family["excluded_underpowered_levels"] == 1
     assert "were omitted" in family["sample_size_note"]
+
+
+def test_two_way_interaction_synergy_discovered(tmp_path: Path) -> None:
+    # Construct a dataset where Tier=VIP has +15% lift, Channel=Direct has +10% lift,
+    # but the joint segment (VIP x Direct) has a super-additive synergy (+60% lift).
+    import numpy as np
+
+    np.random.seed(42)
+    n = 200
+    tiers = np.random.choice(["VIP", "Standard"], n, p=[0.3, 0.7])
+    channels = np.random.choice(["Direct", "Partner"], n, p=[0.4, 0.6])
+
+    spend = 100.0 + np.random.normal(0, 10, n)
+    for i in range(n):
+        if tiers[i] == "VIP" and channels[i] == "Direct":
+            spend[i] += 70.0  # Big joint synergy!
+        elif tiers[i] == "VIP":
+            spend[i] += 15.0
+        elif channels[i] == "Direct":
+            spend[i] += 10.0
+
+    csv_path = tmp_path / "synergy.csv"
+    pd.DataFrame({"spend": spend, "tier": tiers, "channel": channels}).to_csv(csv_path, index=False)
+
+    tool = SegmentComparisonTool()
+    res = tool.execute(file_path=str(csv_path), measure_column="spend")
+    assert "interactions" in res
+    assert len(res["interactions"]) > 0
+    vip_direct = next(i for i in res["interactions"] if "VIP" in i["joint_level"] and "Direct" in i["joint_level"])
+    assert vip_direct["interaction_type"] == "synergy"
+    assert vip_direct["synergy_diff"] > 0.05
+
+    findings = tool.findings(res, None, None)
+    synergy_findings = [f for f in findings if f.kind == "interaction_synergy"]
+    assert len(synergy_findings) >= 1
+    assert any("VIP" in f.headline and "Direct" in f.headline for f in synergy_findings)
+

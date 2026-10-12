@@ -224,18 +224,18 @@ def test_visible_naming_is_sorrel() -> None:
     assert "Sorrel is the working name of DSA Agent" in app
 
 
-def test_the_stepper_lists_all_five_stages_with_a_shape_and_a_word_each() -> None:
+def test_the_stepper_is_a_list_of_seven_with_a_shape_and_a_word_each() -> None:
     from ui.components.cards import STAGE_DEFS, render_stepper
 
     out = render_stepper([("1", "done", ""), ("2", "active", ""), ("3", "error", ""), ("4", "skipped", "")])
-    assert out.count('role="listitem"') == len(STAGE_DEFS) == 5
+    assert out.count('role="listitem"') == len(STAGE_DEFS) == 7
     # Plain divs with list roles, not ol/li: Streamlit styles those, and an ol collapsed to a narrow column.
     assert 'role="list"' in out and "<ol" not in out and "<li" not in out
     for word in ("✓ Done", "● Working", "! Stopped", "– Skipped", "○ Waiting"):
         assert word in out
-    assert 'aria-label="Analysis steps, 1 of 5 done"' in out
+    assert 'aria-label="Analysis steps, 1 of 7 done"' in out
     # one polite sentence names the stage in progress; the row itself is not a live region
-    assert out.count('role="status"') == 1 and "Working on step 2 of 5" in out
+    assert out.count('role="status"') == 1 and "Working on step 2 of 7" in out
     assert "aria-live" not in out
     assert 'role="status"' not in render_stepper([("1", "done", "")])
 

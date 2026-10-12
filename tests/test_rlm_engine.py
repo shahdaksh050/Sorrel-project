@@ -1,11 +1,11 @@
-"""Unit tests for inference tracing and token/cost accounting."""
+"""Unit tests for the RLM Engine — recursive invocation, decomposition, and REPL state."""
 from __future__ import annotations
 
 from typing import Any
 
 import pytest
 
-from src.rlm.engine import RLMEngine
+from src.rlm.engine import REPLEnvironment, RLMEngine, RLMSubTask
 
 
 def _echo_llm(system_prompt: str, user_prompt: str) -> dict[str, Any]:
@@ -15,6 +15,19 @@ def _echo_llm(system_prompt: str, user_prompt: str) -> dict[str, Any]:
 @pytest.fixture
 def engine() -> RLMEngine:
     return RLMEngine(llm_callable=_echo_llm, system_prompt="system", max_depth=2)
+
+
+class TestREPLEnvironment:
+    def test_set_and_get(self) -> None:
+        env = REPLEnvironment()
+        env.set("k", [1, 2, 3])
+        assert env.get("k") == [1, 2, 3]
+
+    def test_get_default(self) -> None:
+        assert REPLEnvironment().get("missing", "fallback") == "fallback"
+
+    def test_summary_empty(self) -> None:
+        assert REPLEnvironment().summary() == "(empty)"
 
 
 class TestRLMEngine:
@@ -41,6 +54,52 @@ class TestRLMEngine:
         trace = engine.trace
         trace.clear()
         assert len(engine.trace) == 1
+
+    def test_decompose_and_invoke_returns_per_task_results(self, engine: RLMEngine) -> None:
+        tasks = [
+            RLMSubTask("t1", "first", {"cols": ["a"]}),
+            RLMSubTask("t2", "second", {"cols": ["b"]}),
+        ]
+        results = engine.decompose_and_invoke(tasks, lambda t: f"analyse {t.task_id}", depth=1)
+        assert set(results.keys()) == {"t1", "t2"}
+        assert all(r["status"] == "complete" for r in results.values())
+
+    def test_decompose_stores_repl_context_and_results(self, engine: RLMEngine) -> None:
+        tasks = [RLMSubTask("grp", "group", {"cols": ["a", "b"]})]
+        engine.decompose_and_invoke(tasks, lambda t: t.description, depth=1)
+        assert engine.repl_env.get("subtask_ctx_grp") == {"cols": ["a", "b"]}
+        assert engine.repl_env.get("subtask_result_grp") is not None
+
+    def test_decompose_runs_sub_tasks_concurrently(self) -> None:
+        """P1.5: sub-tasks are independent LLM round trips and must run in
+        parallel, not one at a time — this is what makes it worth having a
+        thread pool at all rather than the old sequential loop."""
+        import time as _time
+
+        def _slow_llm(system_prompt: str, user_prompt: str) -> dict[str, Any]:
+            _time.sleep(0.05)
+            return {"status": "complete"}
+
+        engine = RLMEngine(llm_callable=_slow_llm, system_prompt="s", max_depth=2)
+        tasks = [RLMSubTask(f"t{i}", f"task {i}", {}) for i in range(5)]
+
+        start = _time.perf_counter()
+        results = engine.decompose_and_invoke(tasks, lambda t: t.description, depth=1)
+        elapsed = _time.perf_counter() - start
+
+        assert set(results.keys()) == {t.task_id for t in tasks}
+        # Serial would take >= 0.25s (5 * 0.05s); a shared bounded pool
+        # keeps it well under that even with scheduling overhead.
+        assert elapsed < 0.20, f"expected concurrent execution, took {elapsed:.3f}s"
+
+    def test_decompose_result_order_is_deterministic(self, engine: RLMEngine) -> None:
+        """Results and REPL-stored state must not depend on which thread
+        happens to finish first."""
+        tasks = [RLMSubTask(f"t{i}", f"task {i}", {"n": i}) for i in range(8)]
+        results = engine.decompose_and_invoke(tasks, lambda t: t.description, depth=1)
+        assert list(results.keys()) == [f"t{i}" for i in range(8)]
+        for i in range(8):
+            assert engine.repl_env.get(f"subtask_ctx_t{i}") == {"n": i}
 
     def test_usage_payload_is_accounted(self) -> None:
         def metered(system_prompt: str, user_prompt: str) -> dict[str, Any]:

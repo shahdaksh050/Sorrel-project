@@ -320,8 +320,14 @@ def build_run_view(
     findings = _dict_tuple(result.get("findings"))
     headline = select_headline_findings(findings)
     coverage = result.get("coverage")
+    obj = objective.strip()
+    if not obj and ctx.get("autonomous_objective"):
+        obj = str(ctx["autonomous_objective"]).strip()
+    elif not obj and result.get("autonomous_objective"):
+        obj = str(result["autonomous_objective"]).strip()
+
     return RunView(
-        objective=objective.strip(),
+        objective=obj,
         is_sample=is_sample,
         verdict=compute_verdict(headline),
         findings=findings,

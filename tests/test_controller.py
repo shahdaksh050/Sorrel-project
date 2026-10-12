@@ -150,7 +150,7 @@ class TestAnalyzeWorkflow:
         assert agent.memory.get_context("cleaned_file_path")
 
         report_dir = Path(agent._output_dir) / "reports"
-        assert list(report_dir.glob("*.md")), "Stage 5 must write a Markdown report"
+        assert list(report_dir.glob("*.md")), "Stage 7 must write a Markdown report"
 
     def test_llm_failure_triggers_fallback_and_deterministic_final(
         self, agent: AgentController, sample_csv: str

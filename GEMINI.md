@@ -141,6 +141,9 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
 | BE-7 | Antigravity (Gemini) | Complete | Dynamic chart cluster labels & stale fragment timer cleanup: rich cluster labels in legend/tooltips, on-chart centroid markers & text callouts, axis variance, and Streamlit fragment timer reset & log filter. |
 | AI-1 | Antigravity (Gemini) | Complete | Milestone A (External AI Compatibility): AI access policy, origin configuration, public/ discovery files (robots, sitemap, llms.txt, security.txt), docs/public/*.md, surface linter script, and discovery test suite. |
 | AI-2 | Antigravity (Gemini) | Complete | Rewire public origin to localhost:8501, landing navbar branding clean-up (removed [s] seal & student badge), and Human/AI view mode segmented switcher with contextual LLM overlay. |
+| BE-8 | Antigravity (Gemini) | Complete | Restored 7-stage workflow and RLM feature-group decomposition (RLMEngine.decompose_and_invoke, REPLEnvironment, prompt_manager subtask templates, controller Stage 6, 7-stage UI stepper & Detail Handler agent card, and unit tests). |
+| BE-9 | Antigravity (Gemini) | Complete | Senior quantitative pipeline upgrades: Simpson's paradox & confounder auditing, 2-way categorical interaction screening, ScenarioSimulationTool for what-if driver interventions & gap closing, and 2x2 Action Prioritization Matrix in Markdown and HTML reports. |
+| BE-10 | Antigravity (Gemini) | Complete | Autonomous unprompted investigation engine: semantic North Star inference, lead hypothesis promotion from Question Agenda, autonomous mission prompt injection, and What-If scenario pre-seeding. |
 
 ### I. Sandbox Optimization & Group Comparison Steering (2026-10-09) [Task BE-3]
 - **Worker Subprocess Lightening** ([`src/core/_sandbox_worker.py`](file:///d:/(Dev2)DSA_AGENT/src/core/_sandbox_worker.py)): Replaced heavy `profile_dataframe(df)` in `_build_schema` with a lightweight, direct pandas dtype classifier, dropping the costly profiling pass and regex scans inside the child process.
@@ -222,5 +225,56 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
   - `mypy src/` (0 errors across 106 source files)
   - `pytest tests/test_ai_discovery.py tests/test_landing.py tests/test_landing_v2.py -v` (36 passed)
   - `pytest tests/test_cinematic_3d.py tests/test_contrast.py tests/test_architecture.py tests/test_ai_discovery.py -v` (39 passed)
+
+### O. 7-Stage Workflow & RLM Decomposition Restoration (2026-10-12) [Task BE-8]
+- **RLM Engine & REPL Environment** ([`src/rlm/engine.py`](file:///d:/(Dev2)DSA_AGENT/src/rlm/engine.py), [`src/rlm/__init__.py`](file:///d:/(Dev2)DSA_AGENT/src/rlm/__init__.py)):
+  - Restored `REPLEnvironment` and `RLMSubTask` dataclass.
+  - Restored `RLMEngine.decompose_and_invoke()` with bounded parallel thread pool (`_MAX_DECOMPOSE_WORKERS = 6`), per-subtask error isolation, token budget retry expansion (`_RETRY_MAX_TOKENS_CEILING = 8192`), and deterministic result ordering.
+- **Prompt Manager Subtask Assembly** ([`src/core/prompt_manager.py`](file:///d:/(Dev2)DSA_AGENT/src/core/prompt_manager.py)):
+  - Restored `RLM_SUBTASK_SYSTEM`, `RLM_SUBTASK_PROMPT`, `_rlm_block()`, `_column_patterns()`, and `rlm_group_findings()`.
+  - Re-injected `_rlm_block()` into iteration and final synthesis prompts so feature-group findings enrich executive conclusions.
+- **Controller Stage 6 Decomposition** ([`src/core/controller.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller.py), [`src/core/controller_report.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller_report.py)):
+  - Restored `_should_decompose()`, `_rlm_skip_reason()`, and `_run_rlm_decomposition()` for datasets with >12 columns.
+  - Restored Stage 7 synthesis tags (`stage7:no_steps_synthesis`, `stage7:converged_synthesis`, `stage7:max_iter_synthesis`, `stage7:report`).
+- **UI Stepper, Run Worker & Agent Grid** ([`ui/components/cards.py`](file:///d:/(Dev2)DSA_AGENT/ui/components/cards.py), [`ui/run.py`](file:///d:/(Dev2)DSA_AGENT/ui/run.py)):
+  - Restored 7-stage definitions: Reading Your File (1), Understanding Your Question (2), Running the Numbers (3), Making Sense of It (4), Double-Checking (5), Solving the Tricky Parts (6), Writing Your Report (7).
+  - Restored `Detail Handler` agent card in `render_agent_grid()` and deep dive modal.
+  - Fixed `RunSpec` dataclass field order in `ui/run.py` and restored Stage 6 / Stage 7 callbacks and completion logs.
+- **Verification & Documentation**:
+  - `AGENTS.md`: Restored 7-Stage Workflow table and Success Criteria.
+  - Test suites updated and passing: `test_rlm_engine.py` (13 passed), `test_rlm_truncation.py` (6 passed), `test_presentation_cards.py` (22 passed), `test_run_worker.py` (12 passed), `test_prompt_manager.py` (21 passed), `test_controller.py` (29 passed), `test_html_report.py` (14 passed).
+  - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 106 source files).
+
+### P. Senior Quantitative Analytical Upgrades (2026-10-12) [Task BE-9]
+- **Simpson's Paradox & Confounder Auditor** ([`src/core/sensitivity.py`](file:///d:/(Dev2)DSA_AGENT/src/core/sensitivity.py), [`src/core/findings.py`](file:///d:/(Dev2)DSA_AGENT/src/core/findings.py), [`src/core/controller.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller.py)):
+  - Implemented `audit_simpsons_paradox(df, finding, candidate_stratifiers, min_stratum_n)` checking whether bivariate correlations or categorical segment contrasts invert sign across third-party subgroups.
+  - Attached to finding audit checks (`checks["paradox_free"] = not has_paradox`) in `attach_finding_checks()`.
+  - Wired into Stage 5 post-hoc audit loop in `AgentController._audit_simpsons_paradox()`.
+- **2-Way Categorical Interaction Screening** ([`src/tools/segment_comparison.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/segment_comparison.py)):
+  - Implemented `_screen_interactions()` evaluating compound cross-products ($D_1 \times D_2$) vs additive expectations ($\text{Lift}(A) + \text{Lift}(B)$).
+  - Emits `Finding(kind="interaction_synergy", ...)` for statistically significant compound effects ($p < 0.05$ and deviation $> 0.08$).
+- **What-If Scenario Simulation Tool** ([`src/tools/scenario_simulation.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/scenario_simulation.py), [`src/core/tool_registry.py`](file:///d:/(Dev2)DSA_AGENT/src/core/tool_registry.py)):
+  - Implemented `ScenarioSimulationTool(BaseTool)`: models parametric continuous driver shifts (+5%, +10%, +25%, -10%), population-level impact, and 95% confidence intervals, plus segment equalization opportunity. Emits `decision_scenario` findings and Markdown decision tables.
+- **Action Prioritization Matrix (2x2)** ([`src/core/findings.py`](file:///d:/(Dev2)DSA_AGENT/src/core/findings.py), [`src/tools/report_generator.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/report_generator.py), [`src/core/html_report.py`](file:///d:/(Dev2)DSA_AGENT/src/core/html_report.py)):
+  - Implemented `classify_action_matrix()` sorting findings into 4 quadrants: `quick_wins` (High Impact, High Feasibility), `strategic_bets` (High Impact, High Complexity / Structural), `incremental` (Moderate Impact, High Feasibility), and `watch_caveats` (Confounders / Sensitive / Fragile).
+  - Formatted into Markdown decision table in `GenerateReportTool` and responsive styled cards in `generate_html_report()`.
+- **Verification & Tests**:
+  - Unit tests added: [`tests/test_scenario_simulation.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_scenario_simulation.py) (5 passed), [`tests/test_action_matrix.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_action_matrix.py) (3 passed), plus regression tests in `test_sensitivity.py` (10 passed), `test_segment_discovery.py` (4 passed), `test_report_generator.py` (15 passed), `test_html_report.py` (14 passed), and `test_architecture.py` (3 passed).
+  - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 107 source files).
+
+### Q. Autonomous Unprompted Mode Upgrades (2026-10-12) [Task BE-10]
+- **North Star Inference & Autonomous Objective Synthesis** ([`src/core/controller.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller.py)):
+  - Implemented `_synthesize_autonomous_objective(profile, agenda)` selecting currency, count, conversion, or top variance measures and key categorical dimensions.
+  - Automatically synthesizes and stores `autonomous_objective` in `MemorySystem` when `user_objective` is empty.
+  - Automatically promotes the #1 ranked investigative question from `build_agenda()` into `HypothesisTree` as the Lead Hypothesis (`parent_id="H1"`).
+- **Prompt Manager Autonomous Mission Injection** ([`src/core/prompt_manager.py`](file:///d:/(Dev2)DSA_AGENT/src/core/prompt_manager.py)):
+  - Updated `_objective_block()` to inject `## Analysis Mission (Autonomous Discovery)` when no natural language prompt was provided, giving the LLM planner and synthesizers a grounded, domain-specific North Star instead of drifting aimlessly.
+- **Decision Intelligence Pre-Seeding in Fallback Plan** ([`src/core/controller_planning.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller_planning.py)):
+  - Pre-seeded `scenario_simulation` alongside `segment_comparison` in `_build_fallback_plan()`, ensuring What-If driver shifts and segment gap recovery opportunities are always quantified in unprompted mode.
+- **Reporting & Run View Surfacing** ([`src/core/controller_report.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller_report.py), [`src/core/run_view.py`](file:///d:/(Dev2)DSA_AGENT/src/core/run_view.py), [`src/tools/report_generator.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/report_generator.py)):
+  - Forwarded `autonomous_objective` into `build_run_view()`, Markdown report header, and HTML report header so unprompted runs clearly state the autonomous investigation mission rather than `(none stated)`.
+- **Verification & Tests**:
+  - Unit tests added in [`tests/test_autonomous_mode.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_autonomous_mode.py) (4 passed).
+  - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 107 source files).
 
 

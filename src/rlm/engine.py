@@ -1,17 +1,36 @@
-"""Lightweight inference manager with tracing and token/cost accounting."""
+"""Recursive inference layer — task decomposition and context offloading."""
 from __future__ import annotations
 
 import inspect
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any
 
 from rich.console import Console
 from rich.table import Table
 
+from src.core.llm_client import llm_concurrency
+
 console = Console()
+
+#: Bounded worker pool for parallel sub-task invocation in
+#: decompose_and_invoke(). These are I/O-bound HTTP calls, so threads are
+#: correct and the GIL is irrelevant; bounded by policy (not hardware) so a
+#: wide decomposition doesn't slam the provider's own rate limits.
+_MAX_DECOMPOSE_WORKERS = 6
+
+#: Appended to a sub-task prompt on its one retry: a model that wrote prose
+#: (chain-of-thought) instead of JSON, and ran out of tokens doing it, gets
+#: told plainly what shape is wanted.
+_JSON_ONLY_REMINDER = (
+    "\n\nReply with ONE JSON object only. No preamble, no reasoning, no markdown."
+)
+#: A retried sub-task may use up to twice the original max_tokens, but not
+#: more than this (unless the original budget was already larger).
+_RETRY_MAX_TOKENS_CEILING = 8192
 
 # ---------------------------------------------------------------------------
 # P3.1 — Token / cost accounting
@@ -85,6 +104,48 @@ def _extract_usage(response: Any) -> tuple[int, int, str | None]:
 
 
 # ---------------------------------------------------------------------------
+# REPL Environment — external state store (RLM paradigm)
+# ---------------------------------------------------------------------------
+
+class REPLEnvironment:
+    """
+    Persistent key-value store representing the external REPL environment
+    from the recursive-decomposition paradigm.
+
+    The controller writes sub-task context here so each recursive invocation
+    can read prior results without inflating the main LLM context window.
+    """
+
+    def __init__(self) -> None:
+        self.variables: dict[str, Any] = {}
+
+    def set(self, key: str, value: Any) -> None:
+        self.variables[key] = value
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.variables.get(key, default)
+
+    def summary(self) -> str:
+        if not self.variables:
+            return "(empty)"
+        lines = [f"  {k}: {str(v)[:80]}" for k, v in self.variables.items()]
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# RLMSubTask — unit of decomposed work for Stage 6
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RLMSubTask:
+    """A single decomposed reasoning unit passed to decompose_and_invoke()."""
+
+    task_id: str
+    description: str
+    context: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # Reasoning trace entry
 # ---------------------------------------------------------------------------
 
@@ -107,10 +168,12 @@ class _TraceEntry:
 
 class RLMEngine:
     """
-    Provider-agnostic inference manager.
+    Recursive inference engine.
 
     Wraps a provider-agnostic LLM callable and adds:
-      - Depth guard retained for compatibility with existing callers
+      - Depth-bounded recursive invocation (max_depth guard)
+      - External REPL environment for cross-call state sharing
+      - Sub-task decomposition (Stage 6)
       - Full reasoning trace for post-run inspection
 
     The engine never imports memory, tools, or the controller — it only
@@ -126,8 +189,13 @@ class RLMEngine:
         base_max_tokens: int = 4096,
     ) -> None:
         self._llm = llm_callable
-        # Retained in the public constructor for configuration compatibility.
-        _ = base_max_tokens
+        #: The LLM's normal max_tokens, so a retry can raise it (x2, capped).
+        self._base_max_tokens = base_max_tokens
+        #: task_id -> {"status": "failed", "error": ..., "attempts": n} for
+        #: the sub-tasks of the latest decompose_and_invoke() that never
+        #: produced a usable reply (they are absent from its return value).
+        self.last_failures: dict[str, dict[str, Any]] = {}
+        self.repl_env = REPLEnvironment()
         #: Whether the callable accepts per-call `max_tokens` / `reasoning_effort`
         #: (LLMClient.call does; a plain two-argument callable does not).
         try:
@@ -271,6 +339,145 @@ class RLMEngine:
                 "call_count": len(self._trace),
             }
 
+    def decompose_and_invoke(
+        self,
+        sub_tasks: list[RLMSubTask],
+        prompt_builder: Callable[[RLMSubTask], str],
+        depth: int = 1,
+        max_total_tokens: int | None = None,
+        system_prompt: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """
+        Stage 6: run one LLM call per sub-task and aggregate results.
+
+        Sub-tasks are independent — prompt_builder only ever reads a
+        sub-task's own task_id/description/context, never a sibling's
+        REPL-stored result — so they run concurrently on a small bounded
+        thread pool instead of one LLM round trip at a time. Each
+        sub-task's context is stored in the REPL environment under
+        ``subtask_ctx_<task_id>`` before any call starts, and every
+        result under ``subtask_result_<task_id>`` once all calls finish
+        (written back in ``sub_tasks`` order, not completion order, so the
+        REPL env's final state is deterministic regardless of which
+        thread happened to finish first).
+
+        Args:
+            sub_tasks:        List of RLMSubTask instances to process.
+            prompt_builder:   Callable that turns an RLMSubTask into a prompt string.
+            depth:            Recursion depth to pass to invoke().
+            system_prompt:    System prompt for every sub-task call (default:
+                the engine's own planner prompt).
+            max_total_tokens: Optional running-total token budget (prompt +
+                completion, across this engine's whole lifetime, per
+                usage_summary()). Once exceeded, remaining sub-tasks are
+                skipped and the loop ends gracefully — it returns results
+                for whatever sub-tasks it already completed, the same as it
+                would on normal exhaustion, rather than raising. Enforcing
+                this requires checking the budget *between* calls, so a
+                budgeted run processes sub-tasks sequentially instead of
+                on the concurrent thread pool (bounded by policy anyway —
+                see _MAX_DECOMPOSE_WORKERS — so this trades some latency
+                for the ability to stop mid-decomposition).
+
+        Returns:
+            Dict mapping task_id -> LLM response dict, for the sub-tasks
+            actually run. Sub-tasks skipped by the token budget or that
+            raised (a transient LLM/provider failure on that one call) are
+            both simply absent from the returned dict — one bad sub-task
+            must not discard the others that already succeeded, same
+            graceful-degradation rationale as the caller's own try/except
+            around this whole method. A sub-task whose reply was truncated
+            or not JSON is retried once (larger max_tokens, JSON-only
+            reminder, low reasoning effort) after the first pass; those that
+            still fail are reported in ``self.last_failures``.
+        """
+        self.last_failures = {}
+        for sub_task in sub_tasks:
+            self.repl_env.set(f"subtask_ctx_{sub_task.task_id}", sub_task.context)
+
+        def _run(sub_task: RLMSubTask, retry: bool = False) -> dict[str, Any]:
+            prompt = prompt_builder(sub_task)
+            stage = f"stage6:decompose:{sub_task.task_id}"
+            if not retry:
+                return self.invoke(prompt, depth=depth, stage=stage, system_prompt=system_prompt)
+            # The one retry: bigger budget, JSON-only reminder, low reasoning.
+            return self.invoke(
+                prompt + _JSON_ONLY_REMINDER,
+                depth=depth,
+                stage=f"{stage}:retry",
+                system_prompt=system_prompt,
+                max_tokens=max(
+                    self._base_max_tokens,
+                    min(self._base_max_tokens * 2, _RETRY_MAX_TOKENS_CEILING),
+                ),
+                reasoning_effort="low",
+            )
+
+        def _run_safe(sub_task: RLMSubTask) -> tuple[RLMSubTask, dict[str, Any] | None, Exception | None]:
+            try:
+                return sub_task, _run(sub_task), None
+            except Exception as exc:  # per-sub-task isolation, see docstring
+                return sub_task, None, exc
+
+        def _budget_exceeded() -> bool:
+            return (
+                max_total_tokens is not None
+                and self.usage_summary()["total_tokens"] >= max_total_tokens
+            )
+
+        completed: list[tuple[RLMSubTask, dict[str, Any]]] = []
+        failed: list[tuple[RLMSubTask, Exception]] = []
+
+        def _record(sub_task: RLMSubTask, response: dict[str, Any] | None, exc: Exception | None) -> None:
+            if exc is not None:
+                failed.append((sub_task, exc))
+                return
+            assert response is not None
+            completed.append((sub_task, response))
+
+        if max_total_tokens is not None or len(sub_tasks) <= 1:
+            for sub_task in sub_tasks:
+                if _budget_exceeded():
+                    break
+                _record(*_run_safe(sub_task))
+        else:
+            # Also bounded by LLM_MAX_CONCURRENCY (1 for a local model), so a
+            # local server isn't handed parallel sub-tasks it would only queue.
+            workers = min(_MAX_DECOMPOSE_WORKERS, llm_concurrency(), len(sub_tasks))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for sub_task, response, exc in pool.map(_run_safe, sub_tasks):
+                    _record(sub_task, response, exc)
+
+        # Sequential retry, once, for sub-tasks whose reply was truncated or
+        # not JSON (ValueError from the client). Other failures (network,
+        # auth, policy) are not fixed by a bigger budget, so they are final.
+        for sub_task, first_exc in failed:
+            attempts, last_exc = 1, first_exc
+            if isinstance(first_exc, ValueError) and not _budget_exceeded():
+                attempts = 2
+                console.print(
+                    f"[yellow]  ↻ sub-task '{sub_task.task_id}' reply unusable "
+                    f"({str(first_exc)[:120]}) — retrying once with a larger budget.[/]"
+                )
+                try:
+                    completed.append((sub_task, _run(sub_task, retry=True)))
+                    continue
+                except Exception as exc:
+                    last_exc = exc
+            console.print(f"[yellow]  ⚠ sub-task '{sub_task.task_id}' failed: {last_exc}[/]")
+            self.last_failures[sub_task.task_id] = {
+                "status": "failed", "error": str(last_exc), "attempts": attempts,
+            }
+
+        order = {t.task_id: i for i, t in enumerate(sub_tasks)}
+        completed.sort(key=lambda pair: order[pair[0].task_id])
+        results: dict[str, dict[str, Any]] = {}
+        for sub_task, response in completed:
+            results[sub_task.task_id] = response
+            self.repl_env.set(f"subtask_result_{sub_task.task_id}", response)
+
+        return results
+
     def print_reasoning_trace(self) -> None:
         """Render the full reasoning trace as a Rich table."""
         if not self._trace:
@@ -278,7 +485,7 @@ class RLMEngine:
             return
 
         table = Table(
-            title="Inference Trace",
+            title="RLM Reasoning Trace",
             show_lines=True,
             highlight=True,
         )

@@ -85,6 +85,15 @@ class TestPromptManager:
         assert "clean_data" in prompt
         assert "Form 2" in prompt
 
+    def test_rlm_subtask_prompt_scopes_to_task(self, pm: PromptManager) -> None:
+        prompt = pm.get_rlm_subtask_prompt(
+            task_id="numerical_group_1",
+            description="Analyse 2-feature group",
+            context_summary='{"columns": ["age", "income"]}',
+        )
+        assert "numerical_group_1" in prompt
+        assert '"age"' in prompt
+
     def test_hypotheses_and_interrupt_text_are_sanitized(
         self, pm: PromptManager, memory: MemorySystem
     ) -> None:

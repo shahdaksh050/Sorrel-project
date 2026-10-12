@@ -120,28 +120,28 @@ PAPER_ELEVATED_DAY = "#ffffff"
 # ---------------------------------------------------------------------------
 # Night — carbon ledger stock
 # ---------------------------------------------------------------------------
-STOCK_NIGHT = "#141712"
-SHEET_NIGHT = "#232a1f"
-SHEET_ALT_NIGHT = "#1a1e17"
+STOCK_NIGHT = "#000000"
+SHEET_NIGHT = "#141414"
+SHEET_ALT_NIGHT = "#1a1a1a"
 INK_NIGHT = "#edf0e4"
-GRAPHITE_NIGHT = "#8a927d"
-PEN_NIGHT = "#326d48"          # a fill: use ACCENT_TEXT_NIGHT for text
-PEN_HOVER_NIGHT = "#2b6040"    # deeper than `pen`, so button text stays at 6.4:1 on hover (the prototype's lighter hover was 4.0:1)
+GRAPHITE_NIGHT = "#9ca3af"
+PEN_NIGHT = "#047857"          # a fill: use ACCENT_TEXT_NIGHT for text
+PEN_HOVER_NIGHT = "#065f46"    # deeper than `pen`, so button text stays at 6.6:1 on hover
 RISK_NIGHT = "#cf5544"         # a fill/mark: use DANGER_TEXT_NIGHT for text
 ACCENT_NIGHT = "#d48239"
-POSITIVE_NIGHT = "#4ca167"
-RULE_NIGHT = "#2a3324"
-RULE_FAINT_NIGHT = "#20271b"
+POSITIVE_NIGHT = "#10b981"
+RULE_NIGHT = "#262626"
+RULE_FAINT_NIGHT = "#1f1f1f"
 MARGIN_NIGHT = "#b3a06a"
 CODE_BG_NIGHT = SHEET_ALT_NIGHT
-INK_2_NIGHT = "#c4c9b6"
-INK_4_NIGHT = "#5a6150"
-ACCENT_SOFT_NIGHT = "#1c2b20"
+INK_2_NIGHT = "#d1d5db"
+INK_4_NIGHT = "#6b7280"
+ACCENT_SOFT_NIGHT = "#062419"
 ACCENT_INK_NIGHT = "#edf0e4"
-ACCENT_TEXT_NIGHT = "#7fc79a"
+ACCENT_TEXT_NIGHT = "#34d399"
 DANGER_TEXT_NIGHT = "#e8826a"
-BG_DEEP_NIGHT = "#0d120e"
-PAPER_ELEVATED_NIGHT = "#22291e"
+BG_DEEP_NIGHT = "#000000"
+PAPER_ELEVATED_NIGHT = "#1e1e1e"
 
 #: Iteration order for `css_root_block` and any table/report of the full
 #: token set — CSS custom-property name (hyphenated) is this key with `_`

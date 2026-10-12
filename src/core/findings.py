@@ -216,6 +216,7 @@ def attach_finding_checks(
     leakage_alerts: list[dict[str, Any]] | None = None,
     fragility_by_id: dict[str, bool] | None = None,
     causal_flagged_ids: set[str] | None = None,
+    simpsons_by_id: dict[str, bool] | None = None,
 ) -> None:
     """Write the audited-entry check marks (FrontendPlan.md section 5) into
     each finding's `evidence["checks"]`, in place.
@@ -228,14 +229,15 @@ def attach_finding_checks(
 
     Callers pass the per-finding results of audits that already ran
     elsewhere in the pipeline (`detect_target_leakage`, `audit_finding_sensitivity`,
-    `audit_findings_causal_language` — see `AgentController`), because those
-    audits key off dataframes and study design this module has no access to.
+    `audit_simpsons_paradox`, `audit_findings_causal_language` — see `AgentController`),
+    because those audits key off dataframes and study design this module has no access to.
     """
     leaked_columns = {
         str(alert["column"]) for alert in (leakage_alerts or []) if alert.get("column")
     }
     fragility_by_id = fragility_by_id or {}
     causal_flagged_ids = causal_flagged_ids or set()
+    simpsons_by_id = simpsons_by_id or {}
 
     for f in findings:
         checks: dict[str, Any] = {}
@@ -254,6 +256,9 @@ def attach_finding_checks(
 
         if f.finding_id in fragility_by_id:
             checks["robust"] = not fragility_by_id[f.finding_id]
+
+        if f.finding_id in simpsons_by_id:
+            checks["paradox_free"] = not simpsons_by_id[f.finding_id]
 
         if leaked_columns and ({f.dimension, f.measure} & leaked_columns):
             checks["leakage"] = True
@@ -432,3 +437,126 @@ def rank_findings(
         [f for f in result if f.kind not in CAVEAT_FINDING_KINDS]
         + [f for f in result if f.kind in CAVEAT_FINDING_KINDS]
     )
+
+
+def classify_action_matrix(
+    findings: list[Finding] | list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Classify findings into an actionable 2x2 Impact vs Feasibility matrix.
+
+    Returns:
+        {
+            "quick_wins": [...],          # High Impact, High Feasibility (immediate execution)
+            "strategic_bets": [...],       # High Impact, Lower Feasibility / Structural
+            "incremental": [...],          # Moderate/Low Impact, High Feasibility (routine optimizations)
+            "watch_caveats": [...],        # Needs Guardrails / Paradoxes / Fragility / High Uncertainty
+        }
+    """
+    matrix: dict[str, list[dict[str, Any]]] = {
+        "quick_wins": [],
+        "strategic_bets": [],
+        "incremental": [],
+        "watch_caveats": [],
+    }
+
+    for item in findings:
+        evidence: dict[str, Any] = {}
+        if isinstance(item, Finding):
+            finding_id = item.finding_id
+            kind = item.kind
+            headline = item.headline
+            measure = item.measure
+            dimension = item.dimension
+            level = item.level
+            effect = item.effect
+            conf = item.effective_confidence()
+            norm_eff = item.normalized_effect()
+            imp = item.importance or item.compute_importance()
+            caveats = list(item.caveats)
+            if isinstance(item.evidence, dict):
+                evidence = item.evidence
+        elif isinstance(item, dict):
+            finding_id = str(item.get("finding_id", ""))
+            kind = str(item.get("kind", ""))
+            headline = str(item.get("headline", ""))
+            measure = item.get("measure")
+            dimension = item.get("dimension")
+            level = item.get("level")
+            effect = item.get("effect")
+            conf = float(item.get("confidence", 0.5))
+            norm_eff = abs(float(effect)) if isinstance(effect, (int, float)) else 0.0
+            imp = float(item.get("importance", 0.5))
+            caveats = list(item.get("caveats") or [])
+            raw_ev = item.get("evidence")
+            if isinstance(raw_ev, dict):
+                evidence = raw_ev
+        else:
+            continue
+
+        checks = evidence.get("checks", {}) if isinstance(evidence, dict) else {}
+        has_paradox = checks.get("paradox_free") is False
+        is_fragile = checks.get("robust") is False
+        is_caveat_kind = kind in CAVEAT_FINDING_KINDS
+
+        lever = headline
+        if dimension and level:
+            lever = f"Target {dimension}='{level}'"
+        elif dimension:
+            lever = f"Leverage {dimension}"
+        elif measure:
+            lever = f"Optimize {measure}"
+
+        entry = {
+            "finding_id": finding_id,
+            "headline": headline,
+            "lever": lever,
+            "kind": kind,
+            "effect": effect,
+            "confidence": round(conf, 2),
+            "importance": round(imp, 3),
+            "caveats": caveats,
+        }
+
+        # 1. Watch / Caveat items
+        if is_caveat_kind or has_paradox or is_fragile or len(caveats) > 0 or conf < 0.45:
+            reason = []
+            if has_paradox:
+                reason.append("Subgroup reversal detected (Simpson's paradox)")
+            if is_fragile:
+                reason.append("Sensitive to outlier trimming")
+            if caveats:
+                reason.extend(caveats)
+            if not reason:
+                reason.append("Low statistical confidence or caveat kind")
+            entry["rationale"] = "; ".join(reason)
+            matrix["watch_caveats"].append(entry)
+            continue
+
+        # 2. Impact evaluation
+        is_high_impact = (
+            norm_eff >= 0.18
+            or (isinstance(effect, (int, float)) and abs(effect) >= 0.15)
+            or imp >= 0.45
+            or kind in ("decision_scenario", "interaction_synergy")
+        )
+
+        # 3. Feasibility evaluation
+        is_high_feasibility = (
+            conf >= 0.65
+            and kind in ("segment_lift", "concentration", "correlation", "decision_scenario")
+        )
+
+        if is_high_impact and is_high_feasibility:
+            entry["rationale"] = f"High lift with robust statistical confidence ({int(conf * 100)}%)."
+            matrix["quick_wins"].append(entry)
+        elif is_high_impact:
+            entry["rationale"] = "High potential upside; requires structural or cross-dimensional alignment."
+            matrix["strategic_bets"].append(entry)
+        elif is_high_feasibility:
+            entry["rationale"] = "Low-risk operational tuning with clear evidence."
+            matrix["incremental"].append(entry)
+        else:
+            entry["rationale"] = "Moderate effect with standard feasibility."
+            matrix["incremental"].append(entry)
+
+    return matrix

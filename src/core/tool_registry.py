@@ -67,6 +67,7 @@ class ToolRegistry:
         from src.tools.ml_pipeline import EvaluateModelTool, TrainModelTool
         from src.tools.regression import RegressionAnalysisTool
         from src.tools.report_generator import GenerateReportTool
+        from src.tools.scenario_simulation import ScenarioSimulationTool
         from src.tools.segment_comparison import SegmentComparisonTool
         from src.tools.statistical_analysis import SelectStatisticalTestTool
         from src.tools.structured_features import StructuredFeatureExtractionTool
@@ -131,6 +132,8 @@ class ToolRegistry:
             VariableScaleAnalysisTool(),
             # FutureScope Phase 5: Graph analysis
             GraphAnalysisTool(),
+            # Decision intelligence: What-If scenario simulation
+            ScenarioSimulationTool(),
         ):
             self.register(tool)
 

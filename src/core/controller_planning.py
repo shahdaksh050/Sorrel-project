@@ -480,6 +480,23 @@ class PlanMixin(ControllerState):
                         already.add("segment_comparison")
                         break
 
+        # Decision Intelligence: pre-seed scenario simulation for continuous drivers
+        if self.tool_registry.has("scenario_simulation") and not any(s["tool_name"] == "scenario_simulation" for s in steps):
+            sim_tool = self.tool_registry.get("scenario_simulation")
+            if sim_tool.applies_to(profile, meta) > 0.0:
+                sim_params: dict[str, Any] = {"file_path": fp}
+                try:
+                    sim_params.update(sim_tool.default_params(profile, meta) or {})
+                except Exception:
+                    pass
+                steps.append({
+                    "step_number": len(steps) + 1,
+                    "tool_name": "scenario_simulation",
+                    "parameters": sim_params,
+                    "rationale": "Fallback plan: quantify What-If driver shifts and segment gap opportunities.",
+                })
+                already.add("scenario_simulation")
+
         if not self.use_ml:
             # No model-fitting branch at all: no supervised training and no
             # clustering fallback. The profile-driven analyses above already

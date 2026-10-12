@@ -571,8 +571,47 @@ def _format_additional_analyses(tool_results: list[dict[str, Any]]) -> list[str]
             lines.append(f"- Components for target variance: {out.get('n_components_for_threshold', '—')}")
             pairs = out.get("high_correlation_pairs") or []
             lines.append(f"- Highly correlated pairs: {len(pairs)}")
+        elif name == "scenario_simulation":
+            dec_table = out.get("decision_table")
+            if dec_table:
+                lines.append(str(dec_table))
 
         lines.append("")
+    return lines
+
+
+def _format_action_matrix(findings: list[dict[str, Any]] | None) -> list[str]:
+    """Render an Action Prioritization Matrix (2x2) in Markdown from audited findings."""
+    if not findings:
+        return []
+    from src.core.findings import classify_action_matrix
+    matrix = classify_action_matrix(findings)
+    lines: list[str] = [
+        "## Action Prioritization Matrix (2x2)",
+        "",
+        "| Quadrant | Priority & Strategic Lever | Impact & Evidence | Feasibility & Rationale |",
+        "| :--- | :--- | :--- | :--- |",
+    ]
+    has_items = False
+    quadrant_meta = [
+        ("quick_wins", "⚡ Quick Wins (High Impact, High Feasibility)"),
+        ("strategic_bets", "🎯 Strategic Bets (High Impact, High Complexity)"),
+        ("incremental", "🔧 Incremental (Moderate Impact, High Feasibility)"),
+        ("watch_caveats", "⚠️ Risk & Watch Items (Requires Guardrails)"),
+    ]
+    for key, title in quadrant_meta:
+        items = matrix.get(key, [])
+        for item in items[:3]:
+            has_items = True
+            headline = plainify(str(item.get("headline", "")))
+            effect_val = item.get("effect")
+            effect_str = f"Effect: {effect_val:+0.2f}" if isinstance(effect_val, (int, float)) else "Audited driver"
+            lines.append(
+                f"| **{title}** | {item.get('lever', headline)} | {effect_str} | {item.get('rationale', 'Audited')} |"
+            )
+    if not has_items:
+        return []
+    lines.append("")
     return lines
 
 
@@ -677,11 +716,16 @@ class GenerateReportTool(BaseTool):
         tool_results: list[dict[str, Any]] = _parsed if isinstance(_parsed, list) else []
 
         # Build Markdown
+        auto_obj = llm_insights.get("autonomous_objective")
         md_lines: list[str] = [
             "# Sorrel analysis report",
             "",
             f"**Dataset**: {dataset_name}  ",
             f"**Generated**: {timestamp}  ",
+        ]
+        if auto_obj:
+            md_lines.append(f"**Mission**: {auto_obj}  ")
+        md_lines += [
             "",
             "---",
             "",
@@ -722,6 +766,10 @@ class GenerateReportTool(BaseTool):
             for rec in recs:
                 md_lines.append(f"- {plainify(str(rec))}")
             md_lines.append("")
+
+        matrix_lines = _format_action_matrix(findings)
+        if matrix_lines:
+            md_lines += matrix_lines
 
         # Model performance — 3b: only call this "Model Performance" when a
         # model was actually trained; a describe-only (EDA) run's

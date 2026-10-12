@@ -18,6 +18,7 @@ from src.core.plain_language import describe_uncertainty, format_p, plainify
 from ui.components.icons import (
     ICON_CHART,
     ICON_COMPASS,
+    ICON_GLOBE,
     ICON_REPEAT,
     ICON_RULER,
     ICON_SEARCH,
@@ -27,10 +28,12 @@ from ui.components.icons import (
 
 STAGE_DEFS: list[tuple[str, str]] = [
     ("1", "Reading Your File"),
-    ("2", "Planning the Analysis"),
+    ("2", "Understanding Your Question"),
     ("3", "Running the Numbers"),
-    ("4", "Refining the Findings"),
-    ("5", "Auditing and Writing the Report"),
+    ("4", "Making Sense of It"),
+    ("5", "Double-Checking"),
+    ("6", "Solving the Tricky Parts"),
+    ("7", "Writing Your Report"),
 ]
 
 
@@ -459,15 +462,23 @@ def render_agent_grid(
             "name": "Double-Checker",
             "role": "Goes back for another pass",
             "desc": "Looks at what's been found so far, and if there are loose ends or your question isn't fully answered yet, sends the work back for another round.",
-            "stage": "4",
+            "stage": "5",
             "tool": "Another pass",
+        },
+        {
+            "icon": ICON_GLOBE,
+            "name": "Detail Handler",
+            "role": "Handles the tricky, many-part questions",
+            "desc": "When a question has too many moving parts to answer in one go, this splits it into smaller pieces, solves each one separately, and brings the answers back together.",
+            "stage": "6",
+            "tool": "Splitting up work",
         },
         {
             "icon": ICON_CHART,
             "name": "Report Writer",
             "role": "Builds your charts and report",
             "desc": "Builds charts that fit your data, then puts everything together into the report you can download and share.",
-            "stage": "5",
+            "stage": "7",
             "tool": "Charts & report",
         },
     ]
@@ -506,6 +517,8 @@ def render_agent_grid(
             agent_output = "Checked every model for memorisation. Applied a penalty to any that didn't hold up."
         elif ag["name"] == "Double-Checker":
             agent_output = "Finished reviewing. Went back for more passes where needed."
+        elif ag["name"] == "Detail Handler":
+            agent_output = f"{len(report.get('rlm_sub_results', []))} smaller questions solved separately and combined."
         elif ag["name"] == "Report Writer":
             agent_output = "Report finished, with charts, key findings, and what to do next."
 
@@ -628,6 +641,12 @@ def render_agent_deep_dive(
             "directive": "Sends the work back for another pass if things haven't settled down yet, up to a set limit of tries.",
             "tools": "Review and another pass",
             "output": "Finished reviewing. Went back for more passes where needed.",
+        },
+        "🌐 Detail Handler": {
+            "mission": "Splits a big, many-part question into smaller pieces, solves each on its own, then brings the answers back together.",
+            "directive": "Keeps each piece small and separate, so a complicated question doesn't overwhelm any single step.",
+            "tools": "Splitting up and recombining work",
+            "output": f"{len(report.get('rlm_sub_results', []))} smaller questions solved separately and combined.",
         },
         "📊 Report Writer": {
             "mission": "Builds charts that fit your data and puts everything into a report you can download and share.",

@@ -703,6 +703,8 @@ class SegmentComparisonTool(BaseTool):
             if stratified:
                 c["stratified"] = stratified
 
+        interactions = self._screen_interactions(df, profile, pairs, all_rows, entity_col)
+
         # n counts entities when rows were aggregated per entity.
         row_noun = _row_noun(df[[entity_col]] if entity_col else df)
         if entity_col and row_noun == "rows":
@@ -711,6 +713,12 @@ class SegmentComparisonTool(BaseTool):
         summary = self._headline(best, row_noun)
         if best.get("stratified", {}).get("caveat"):
             summary += f" {best['stratified']['caveat']}"
+        if interactions:
+            top_int = interactions[0]
+            summary += (
+                f" Subgroup {top_int['interaction_type']}: '{top_int['joint_level']}' shows "
+                f"{top_int['joint_lift']:+.1%} lift ({top_int['synergy_diff']:+.1%} beyond additive expectation)."
+            )
 
         return {
             "summary": summary,
@@ -718,12 +726,103 @@ class SegmentComparisonTool(BaseTool):
             "n_comparisons": len(all_rows),
             "alpha": _ALPHA,
             "comparisons": all_rows,
+            "interactions": interactions,
             "row_noun": row_noun,
             "unit_of_analysis": entity_col or "row",
             "stratify_by": stratify_by or (to_stratify[0][1] if to_stratify else None),
             "suppressed_levels": len(suppressed),
             "caveats": caveats,
         }
+
+    def _screen_interactions(
+        self,
+        df: pd.DataFrame,
+        profile: DatasetProfile,
+        pairs: list[tuple[str, str]],
+        comparisons: list[dict[str, Any]],
+        entity_col: str | None,
+    ) -> list[dict[str, Any]]:
+        """Screen for 2-way categorical interaction synergies."""
+        dims = [
+            col.name for col in _pick_dimension_columns(profile)
+            if col.name != entity_col and 2 <= col.nunique <= 6
+        ]
+        if len(dims) < 2 or not pairs:
+            return []
+
+        primary_measure = pairs[0][0]
+        dim_a, dim_b = dims[0], dims[1]
+
+        # Map marginal lifts
+        marginal_lifts: dict[tuple[str, str], float] = {}
+        for c in comparisons:
+            if c.get("measure") == primary_measure and c.get("effect_kind") == "lift":
+                marginal_lifts[(c["dimension"], str(c["level"]))] = float(c["effect"])
+
+        valid = df[[dim_a, dim_b, primary_measure]].dropna().copy()
+        valid[primary_measure] = pd.to_numeric(valid[primary_measure], errors="coerce")
+        valid = valid.dropna()
+        if len(valid) < 40:
+            return []
+
+        interactions: list[dict[str, Any]] = []
+        overall_mean = float(valid[primary_measure].mean())
+        if abs(overall_mean) < 1e-6:
+            return []
+
+        levels_a = valid[dim_a].astype(str).value_counts().head(4).index.tolist()
+        levels_b = valid[dim_b].astype(str).value_counts().head(4).index.tolist()
+
+        for la in levels_a:
+            for lb in levels_b:
+                joint_mask = (valid[dim_a].astype(str) == la) & (valid[dim_b].astype(str) == lb)
+                n_joint = int(joint_mask.sum())
+                n_rest = len(valid) - n_joint
+                if n_joint < 15 or n_rest < 20:
+                    continue
+
+                joint_vals = valid.loc[joint_mask, primary_measure]
+                rest_vals = valid.loc[~joint_mask, primary_measure]
+                rest_mean = float(rest_vals.mean())
+                if abs(rest_mean) < 1e-6:
+                    continue
+
+                joint_mean = float(joint_vals.mean())
+                joint_lift = (joint_mean / rest_mean) - 1.0
+
+                lift_a = marginal_lifts.get((dim_a, la), 0.0)
+                lift_b = marginal_lifts.get((dim_b, lb), 0.0)
+                expected_additive = lift_a + lift_b
+                synergy_diff = joint_lift - expected_additive
+
+                if abs(synergy_diff) >= 0.08:
+                    p_val = None
+                    try:
+                        _stat, p_val = stats.ttest_ind(joint_vals, rest_vals, equal_var=False)
+                        p_val = float(p_val)
+                    except Exception:
+                        p_val = None
+
+                    if p_val is not None and p_val < 0.05:
+                        interaction_type = "synergy" if synergy_diff > 0 else "antagonism"
+                        interactions.append({
+                            "measure": primary_measure,
+                            "dimension_a": dim_a,
+                            "level_a": la,
+                            "dimension_b": dim_b,
+                            "level_b": lb,
+                            "joint_level": f"{la} × {lb}",
+                            "joint_lift": round(joint_lift, 4),
+                            "expected_additive_lift": round(expected_additive, 4),
+                            "synergy_diff": round(synergy_diff, 4),
+                            "interaction_type": interaction_type,
+                            "n": n_joint,
+                            "n_rest": n_rest,
+                            "p_value": p_val,
+                        })
+
+        interactions.sort(key=lambda x: abs(x["synergy_diff"]), reverse=True)
+        return interactions[:3]
 
     @staticmethod
     def _headline(c: dict[str, Any], row_noun: str) -> str:
@@ -792,6 +891,34 @@ class SegmentComparisonTool(BaseTool):
                 surprise=min(1.0, abs(effect)),
                 caveats=([stratum_caveat] if stratum_caveat else []) + privacy_caveats,
             ))
+
+        for j, inter in enumerate(output.get("interactions", [])):
+            synergy_pct = f"{inter['synergy_diff']:+.1%}"
+            headline = (
+                f"Subgroup {inter['interaction_type']}: {inter['dimension_a']}='{inter['level_a']}' "
+                f"and {inter['dimension_b']}='{inter['level_b']}' show {inter['joint_lift']:+.1%} lift in {inter['measure']} "
+                f"({synergy_pct} beyond individual factors, n={inter['n']:,})."
+            )
+            results.append(Finding(
+                finding_id=f"interaction_{j}_{_slug(inter['measure'])}_{_slug(inter['joint_level'])}",
+                kind="interaction_synergy",
+                headline=headline,
+                detail=(
+                    f"Joint lift: {inter['joint_lift']:+.1%}; expected additive lift: {inter['expected_additive_lift']:+.1%}; "
+                    f"net interaction effect: {inter['synergy_diff']:+.1%}; p={inter['p_value']:.4g} (n={inter['n']})."
+                ),
+                evidence=inter,
+                source_tool=self.name,
+                measure=inter["measure"],
+                dimension=f"{inter['dimension_a']} × {inter['dimension_b']}",
+                level=inter["joint_level"],
+                effect=inter["synergy_diff"],
+                effect_kind="lift",
+                p_value=inter["p_value"],
+                confidence=min(1.0, inter["n"] / 100.0),
+                surprise=min(1.0, abs(inter["synergy_diff"]) * 2),
+            ))
+
         return results
 
     def get_schema(self) -> dict[str, Any]:

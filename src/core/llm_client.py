@@ -30,8 +30,7 @@ _local_ctx_warned = False
 #: LLMClient.stage) when neither the caller nor LLM_MAX_TOKENS sets one.
 _STAGE_MAX_TOKENS: tuple[tuple[str, int], ...] = (
     ("chart_design", 2500),
-    ("stage7", 2500),
-    ("stage6", 1200),
+    ("stage5", 2500),
     ("understanding", 1200),
     ("stage2", 1500),
     ("stage4", 1500),
@@ -130,8 +129,8 @@ class LLMClient:
         # this (best-effort by design: an endpoint may not report usage).
         #
         # Round 8 hardening — this LLMClient instance is shared across RLM
-        # worker threads (RLMEngine.decompose_and_invoke runs concurrent
-        # `call()`s on a ThreadPoolExecutor for Stage 6 decomposition), so a
+        # worker threads (auxiliary inference calls may run concurrently
+        # `call()`s from worker threads), so a
         # single `self._last_usage` instance attribute was a data race: one
         # thread's dispatch could overwrite it between another thread's
         # dispatch and its read, attaching the wrong call's usage (or
@@ -438,7 +437,7 @@ class LLMClient:
             resolved_effort = "none"
         if resolved_effort == "adaptive":
             stage_str = (self.stage or "").lower()
-            heavy = any(k in stage_str for k in ("stage2", "stage7", "initial", "synthesis", "report"))
+            heavy = any(k in stage_str for k in ("stage2", "stage5", "initial", "synthesis", "report"))
             resolved_effort = "medium" if heavy else "low"
 
         model_l = self.model.lower()

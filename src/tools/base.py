@@ -59,24 +59,51 @@ _PRIOR_VALUE_CAP_CHARS = 2_000
 _PRIOR_SKIP_KEYS = frozenset({"chart", "stdout"})
 
 
-def _needs_cleaned_redirect(file_path: Any, memory: MemorySystem) -> bool:
-    """Redirect to the cleaned dataset unless the planner named a derived
-    dataset this run registered (execute_dynamic_code's `save_as`). Only
-    registered paths are honoured — an arbitrary existing path from the
-    planner would otherwise let a tool read any file on disk into a prompt."""
-    if not file_path or not isinstance(file_path, str):
-        return True
-    derived = memory.get_context("derived_datasets") or {}
+def _resolved_path(value: Any) -> Path | None:
+    """Return a canonical path for a planner value, or ``None`` if invalid."""
+    if not isinstance(value, str) or not value.strip():
+        return None
     try:
-        target = Path(file_path).resolve()
-        registered = {
-            Path(info["path"]).resolve()
-            for info in derived.values()
-            if isinstance(info, dict) and info.get("path")
-        }
-    except OSError:
-        return True
-    return target not in registered
+        return Path(value).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _registered_derived_paths(memory: MemorySystem) -> set[Path]:
+    """Return canonical paths created and registered during this run."""
+    derived = memory.get_context("derived_datasets") or {}
+    if not isinstance(derived, dict):
+        return set()
+    paths: set[Path] = set()
+    for info in derived.values():
+        if not isinstance(info, dict):
+            continue
+        path = _resolved_path(info.get("path"))
+        if path is not None:
+            paths.add(path)
+    return paths
+
+
+def _confine_file_path(file_path: Any, memory: MemorySystem) -> tuple[Path, bool]:
+    """Validate a tool input path against this analysis run's allowlist.
+
+    The execution layer checks this independently of the controller so a
+    direct tool caller cannot use planner-controlled parameters to read an
+    arbitrary host file.
+    """
+    target = _resolved_path(file_path)
+    raw = _resolved_path(
+        memory.dataset_metadata.file_path if memory.dataset_metadata is not None else None
+    )
+    cleaned = _resolved_path(memory.get_context("cleaned_file_path"))
+    derived = _registered_derived_paths(memory)
+    allowed = {path for path in (raw, cleaned) if path is not None} | derived
+    if target is None or target not in allowed:
+        raise ToolExecutionError(
+            "file_path is not the loaded dataset, cleaned dataset, or a registered "
+            "derived dataset."
+        )
+    return target, target in derived
 
 
 def collect_prior_results(memory: MemorySystem) -> dict[str, Any]:
@@ -185,7 +212,8 @@ class BaseTool(ABC):
         Resolve this step's parameters against pipeline state before execute().
 
         Generic policy driven by the declarations above:
-          - redirect file_path to cleaned_file_path (if uses_cleaned_file)
+          - confine file_path to this run's loaded/cleaned/derived datasets,
+            then redirect it to cleaned_file_path (if uses_cleaned_file)
           - inject output_dir under output_root/output_subdir (if unset)
           - fill any param named in requires_context from memory context
             (only when the planner left it empty)
@@ -197,9 +225,10 @@ class BaseTool(ABC):
         still apply.
         """
         params = dict(params)
-        if self.uses_cleaned_file:
+        if "file_path" in params:
+            _target, is_derived = _confine_file_path(params["file_path"], memory)
             cleaned = memory.get_context("cleaned_file_path")
-            if cleaned and "file_path" in params and _needs_cleaned_redirect(params["file_path"], memory):
+            if self.uses_cleaned_file and cleaned and not is_derived:
                 params["file_path"] = cleaned
         if self.output_subdir and not params.get("output_dir"):
             params["output_dir"] = str(Path(output_root) / self.output_subdir)

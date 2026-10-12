@@ -11,12 +11,14 @@
   <meta name="description" content="Sorrel (the DSA Agent project) is a final-year project: a seven-stage data analysis assistant that runs Python tools on your table, checks its own findings, and says what it could not verify.">
   <meta name="keywords" content="data analysis assistant, checked findings, cross-validation, overfit warnings, plain-language report">
   <meta name="author" content="DSA Agent Team">
-  <link rel="canonical" href="https://dsa-agent.local/">
+  <link rel="canonical" href="http://localhost:8501/">
+  <link rel="alternate" type="text/markdown" href="http://localhost:8501/docs/overview.md">
+  <link rel="describedby" href="http://localhost:8501/llms.txt">
 
   <meta property="og:title" content="Sorrel: data analysis that checks its own findings">
   <meta property="og:description" content="Ask a question of your table. Python tools do the calculations, and every finding shows the checks it passed or failed.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://dsa-agent.local/">
+  <meta property="og:url" content="http://localhost:8501/">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Sorrel: data analysis that checks its own findings">
   <meta name="twitter:description" content="Python tools do the calculations, and every finding shows the checks it passed or failed.">
@@ -236,30 +238,323 @@
     .brand {
       display: flex;
       align-items: center;
-      gap: 12px;
-      font-weight: 600;
-      font-size: 15.5px;
-      letter-spacing: -0.01em;
-      color: var(--ink);
+      gap: 8px;
       text-decoration: none;
     }
-    .brand-seal {
-      width: 24px;
-      height: 24px;
-      background: var(--pen);
-      color: var(--accent-ink);
-      border-radius: 3px;
-      display: grid;
-      place-items: center;
-      font-size: 12.5px;
-      font-weight: 700;
+    .brand-name {
+      font-family: var(--serif);
+      font-style: italic;
+      font-size: 26px;
+      font-weight: 400;
+      letter-spacing: -0.015em;
+      color: var(--ink);
+      line-height: 1;
+      transition: color 0.15s ease;
     }
-    
+    .brand:hover .brand-name {
+      color: var(--pen);
+    }
 
     .nav-right {
       display: flex;
       align-items: center;
-      gap: 14px;
+      gap: 12px;
+    }
+
+    /* ── Audience View Switcher (Human vs AI / Agent) ── */
+    .mode-segmented-control {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px;
+      background: var(--sheet-alt);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius-pill);
+      gap: 2px;
+    }
+    .mode-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 11px;
+      border-radius: var(--radius-pill);
+      border: none;
+      background: transparent;
+      color: var(--graphite);
+      font-family: var(--mono);
+      font-size: 11.5px;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .mode-btn:hover {
+      color: var(--ink);
+    }
+    .mode-btn.active {
+      background: var(--sheet);
+      color: var(--ink);
+      font-weight: 600;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    }
+    .mode-btn.active .mode-icon {
+      color: var(--pen);
+    }
+    .mode-icon {
+      flex-shrink: 0;
+      transition: color 0.15s ease;
+    }
+
+    /* ── AI Surface Modal / Drawer ── */
+    .ai-surface-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background: color-mix(in srgb, var(--stock) 92%, transparent);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 32px 20px 60px;
+      overflow-y: auto;
+      transition: opacity 0.25s ease;
+    }
+    .ai-surface-overlay.active {
+      display: flex;
+    }
+    .ai-surface-container {
+      width: 100%;
+      max-width: 980px;
+      background: var(--sheet);
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.14);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      animation: modalFadeIn 0.2s ease-out;
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .ai-surface-header {
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--rule);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--sheet-alt);
+    }
+    .ai-surface-title-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .ai-surface-title {
+      font-family: var(--sans);
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--ink);
+      letter-spacing: -0.01em;
+    }
+    .ai-close-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      background: var(--sheet);
+      border: 1px solid var(--rule);
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 12px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .ai-close-btn:hover {
+      border-color: var(--ink);
+    }
+    .ai-surface-bar {
+      padding: 12px 24px;
+      background: var(--sheet);
+      border-bottom: 1px solid var(--rule-soft);
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .ai-action-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      background: var(--pen);
+      color: var(--accent-ink);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: var(--radius);
+      border: none;
+      cursor: pointer;
+      transition: background 0.15s ease;
+      text-decoration: none;
+    }
+    .ai-action-btn:hover {
+      background: var(--pen-hover);
+    }
+    .ai-secondary-links {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .ai-quick-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--graphite);
+      background: var(--sheet-alt);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      padding: 4px 8px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .ai-quick-link:hover {
+      color: var(--ink);
+      border-color: var(--ink);
+    }
+    .ai-panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .ai-panel-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .ai-sub-action-btn, .ai-raw-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 500;
+      padding: 4px 10px;
+      border-radius: var(--radius);
+      border: 1px solid var(--rule);
+      background: var(--sheet);
+      color: var(--ink);
+      text-decoration: none;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .ai-sub-action-btn:hover, .ai-raw-link:hover {
+      border-color: var(--pen);
+      color: var(--pen);
+    }
+    .ai-doc-browser-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--rule);
+    }
+    .ai-doc-selector-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .ai-doc-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--graphite);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .ai-doc-select {
+      font-family: var(--mono);
+      font-size: 12px;
+      padding: 5px 10px;
+      background: var(--stock);
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      color: var(--ink);
+      cursor: pointer;
+      outline: none;
+    }
+    .ai-doc-select:focus {
+      border-color: var(--pen);
+    }
+    .ai-nav-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--rule);
+      background: var(--sheet-alt);
+      padding: 0 16px;
+      gap: 6px;
+      overflow-x: auto;
+    }
+    .ai-tab-btn {
+      padding: 10px 14px;
+      border: none;
+      background: transparent;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--graphite);
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .ai-tab-btn:hover {
+      color: var(--ink);
+    }
+    .ai-tab-btn.active {
+      color: var(--ink);
+      font-weight: 600;
+      border-bottom-color: var(--pen);
+    }
+    .ai-tab-panel {
+      display: none;
+      padding: 24px;
+      background: var(--sheet);
+    }
+    .ai-tab-panel.active {
+      display: block;
+    }
+    .ai-code-block {
+      background: var(--stock);
+      border: 1px solid var(--rule);
+      border-radius: 6px;
+      padding: 16px 20px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--ink);
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      user-select: text;
+    }
+    .ai-panel-lede {
+      font-family: var(--sans);
+      font-size: 13.5px;
+      color: var(--graphite);
+      margin-bottom: 12px;
+      line-height: 1.5;
     }
 
     /* Theme Toggle */
@@ -1438,9 +1733,181 @@
           setTheme(theme() === 'day' ? 'night' : 'day');
           setValue({ enter: false, theme: theme() });
         });
+
+        // Audience View Switcher: Human vs AI / Agent
+        var btnHuman = document.getElementById('btn-mode-human');
+        var btnAi = document.getElementById('btn-mode-ai');
+        var overlay = document.getElementById('ai-surface-overlay');
+        var btnCloseAi = document.getElementById('btn-close-ai-surface');
+
+        function setViewMode(mode) {
+          var isAi = mode === 'ai';
+          if (btnHuman) {
+            btnHuman.classList.toggle('active', !isAi);
+            btnHuman.setAttribute('aria-pressed', String(!isAi));
+          }
+          if (btnAi) {
+            btnAi.classList.toggle('active', isAi);
+            btnAi.setAttribute('aria-pressed', String(isAi));
+          }
+          if (overlay) {
+            overlay.classList.toggle('active', isAi);
+            document.body.style.overflow = isAi ? 'hidden' : '';
+          }
+        }
+
+        if (btnHuman) btnHuman.addEventListener('click', function () { setViewMode('human'); });
+        if (btnAi) btnAi.addEventListener('click', function () { setViewMode('ai'); });
+        if (btnCloseAi) btnCloseAi.addEventListener('click', function () { setViewMode('human'); });
+
+        // Copy llms.txt context
+        var copyBtn = document.getElementById('btn-copy-llms');
+        if (copyBtn) {
+          copyBtn.addEventListener('click', function () {
+            var code = document.getElementById('llms-code-content');
+            if (code && navigator.clipboard) {
+              navigator.clipboard.writeText(code.innerText || code.textContent).then(function () {
+                var txt = document.getElementById('copy-btn-text');
+                if (txt) {
+                  txt.textContent = 'Copied to Clipboard!';
+                  setTimeout(function () { txt.textContent = 'Copy Context for LLM'; }, 2000);
+                }
+              });
+            }
+          });
+        }
+
+        // Embedded Documentation Registry
+        var DOCS_REGISTRY = {"overview": "# Product Overview\n\nVersion: 1.0.0  \nLast Updated: 2026-10-12  \nCanonical: http://localhost:8501/docs/overview.md  \n\nSorrel is an evidence-first, autonomous data analysis engine. It ingests tabular datasets, executes a governed, iterative seven-stage analytical loop, and returns audited statistical findings, interactive charts, executive dossiers, and a reproducible computation ledger.\n\n---\n\n## What Sorrel Does\n\n1. **Ingests and Profiles Tables**: Safely loads CSV, Parquet, TSV, and JSON tables; validates schema integrity, column distributions, outliers, missingness, and cardinality.\n2. **Generates Empirical Hypotheses**: Uses domain reasoning and structured objectives to formulate verifiable hypotheses.\n3. **Executes Sandboxed Tools**: Calls deterministic, type-safe Python tools for exploratory analysis, statistical hypothesis testing, machine learning pipelines, and causal inference.\n4. **Checks Its Own Findings**: Automatically applies multiple-testing corrections (Benjamini-Hochberg FDR), statistical sensitivity analysis, adversarial counter-checks, and verbatim number verification.\n5. **Produces Audited Dossiers**: Generates an executive summary, ranked evidence cards with clear confidence scores, quantified action items, and transparent limitations.\n\n---\n\n## What Sorrel Does Not Do\n\n- **Does Not Hallucinate Claims**: Every reported number in a finding must trace back to audited tool execution output in memory. Unverified assertions are strictly rejected by the claim verifier.\n- **Does Not Expose Raw Rows to LLMs**: Datasets are never sent in prompts. LLMs receive only schema profiles, aggregate statistics, and tool execution summaries.\n- **Does Not Train on Customer Data**: Uploaded datasets, intermediate state, and reports are private, tenant-isolated, and never used for model training.\n- **Does Not Run Unbounded Code**: Sandboxed execution enforces strict wall-clock timeouts (60 seconds), memory ceilings (1024 MB), and restricted module allowlists.\n\n---\n\n## Integration Interfaces\n\nSorrel is accessible across multiple interfaces that all converge on the same governed workflow:\n\n- **Interactive Workspace**: Streamlit browser interface for human analysts.\n- **REST API (Beta)**: Versioned JSON endpoints for asynchronous run creation, status polling, and artifact retrieval (`http://localhost:8501/docs/api-quickstart.md`).\n- **Remote Model Context Protocol (MCP)**: Streamable HTTP tools for external autonomous agents such as ChatGPT, Claude, and Codex (`http://localhost:8501/docs/mcp.md`).\n- **AI-Readable Index**: `/llms.txt` and clean Markdown documentation for autonomous discovery and reasoning.\n", "workflow": "# Analysis Workflow\n\nVersion: 1.0.0  \nLast Updated: 2026-10-12  \nCanonical: http://localhost:8501/docs/workflow.md  \n\nSorrel executes all analyses through a strict, multi-stage governed reasoning and execution workflow. External clients (REST, MCP, and UI) observe progress across these stages through typed events and run handles.\n\n---\n\n## The Workflow Stages\n\n```text\n[Stage 1: Ingestion & Profiling]\n            \u2502\n            \u25bc\n[Stage 2: Hypothesis & Plan Generation]\n            \u2502\n            \u25bc\n[Stage 3: Tool Execution & Sandbox Verification] \u25c4\u2500\u2500\u2510 (Iterative Loop)\n            \u2502                                       \u2502\n            \u25bc                                       \u2502\n[Stage 4: Iterative Refinement & Adversarial Review]\u2500\u2518\n            \u2502\n            \u25bc\n[Stage 5: Synthesis, Post-Hoc Audits & Dossier Generation]\n```\n\n### Stage 1: Dataset Ingestion & Profiling\n- **Parsing**: Uploaded tables are safely coerced into uniform columnar representations.\n- **Profiling**: Columns are categorized into continuous, discrete, categorical, datetime, or text modalities.\n- **Statistical Baselines**: Calculates quantile spreads, missingness rates, skewness, variance, entropy, and prominent categorical distributions.\n- **Integrity Checks**: Detects ID-like unique keys, constant columns, high missingness traps, and invalid sentinel encodings.\n\n### Stage 2: Hypothesis & Plan Generation\n- **Domain Framing**: Evaluates dataset schemas against domain packs (e.g. e-commerce, healthcare, finance, industrial).\n- **Hypothesis Formulation**: Formulates prioritized testable propositions aligned with the user objective or discovered distributions.\n- **Step Decomposition**: Constructs a directed analytical plan consisting of specific tool invocations (e.g., correlations, segment comparisons, statistical tests).\n\n### Stage 3: Tool Execution & Sandbox Verification\n- **Execution Layer**: Invocations execute through `BaseTool.run()`. Tools include `CorrelationAnalysisTool`, `SegmentComparisonTool`, `StatisticalTestingTool`, `ClusterDataTool`, `TrainModelTool`, and `CausalAnalysisTool`.\n- **Sandbox Quarantining**: Custom calculations or dynamic scripts run inside an audited sandbox with strict timeouts (60s) and memory ceilings (1024 MB).\n- **Finding Extraction**: Each tool execution registers candidate `Finding` objects capturing effect sizes, p-values, sample sizes, and baseline metrics.\n\n### Stage 4: Iterative Refinement & Adversarial Review\n- **Multiple Testing Guard**: Corrects raw p-values across all executed hypotheses using the Benjamini-Hochberg False Discovery Rate (FDR) procedure.\n- **Adversarial Critique**: Subject candidate findings to robustness tests, confounding checks, and sensitivity checks (e.g., verifying whether segment lifts persist after controlling for covariates).\n- **Adaptive Re-planning**: If initial hypotheses yield weak signals or high uncertainty, generates follow-up steps.\n\n### Stage 5: Synthesis, Post-Hoc Audits & Dossier Generation\n- **Claim Verification**: The `ClaimVerification` engine cross-examines every numeric quantity in narrative summaries against the audited execution ledger. Unbacked assertions are stripped or flagged.\n- **Dossier Compilation**: Produces structured findings, charts, concrete unit/dollar-quantified recommendations, and explicit analytical limitations.\n- **Report Rendering**: Generates downloadable executive reports in Markdown, JSON, and standalone HTML formats.\n\n---\n\n## Finding Structure & Evidence\n\nEvery finding produced by the workflow includes:\n- **`headline`**: High-signal, human-readable summary of the observed phenomenon.\n- **`kind`**: Finding category (e.g. `segment_lift`, `correlation`, `model_performance`, `anomaly`).\n- **`importance`**: Computed relevance score (0.0 to 1.0) based on effect magnitude and sample coverage.\n- **`confidence`**: Audited confidence incorporating p-values, cross-validation stability, and FDR bounds.\n- **`evidence`**: Audited metric values, baseline comparisons, sample counts, and passed verification tests.\n", "safety": "# Safety, Privacy, and Governance\n\nVersion: 1.0.0  \nLast Updated: 2026-10-12  \nCanonical: http://localhost:8501/docs/safety.md  \n\nSorrel is designed around strict computational and data-handling guardrails. Untrusted datasets, external agent instructions, and LLM reasoning steps operate within fortified trust zones.\n\n---\n\n## 1. Zero Raw Data in Prompts\n\n- **Metadata-Only Prompts**: Raw data rows and tabular contents are never injected into LLM prompts. The LLM receives only anonymized schema definitions, statistical summaries (quantiles, missingness rates), and tool result summaries.\n- **Automatic PII Redaction**: Detected personal identifying information (e.g. emails, phone numbers, credit card tokens, social security IDs, IP addresses) is masked before metadata profiles reach the prompt layer (`REDACT_PII=true`).\n- **Prompt Sanitization**: All user objectives and column headers undergo strict input sanitization to neutralize prompt injection or delimiter breakout attempts.\n\n---\n\n## 2. Sandboxed Code Execution\n\nWhen dynamic data manipulation or exploratory calculations are required, code authored by the LLM is subject to multi-layered sandboxing:\n\n- **AST Normalization & Static Analysis**: Before execution, code passes through an AST security scanner that rejects forbidden imports (`os`, `sys`, `socket`, `subprocess`, `requests`), filesystem calls, and private attribute access.\n- **Kernel-Level Isolation**: In hosted environments (`DSA_HOSTED=true`), code executes inside non-root Docker containers with seccomp filtering and no network access.\n- **Resource Ceilings**:\n  - Wall-clock timeout: 60 seconds (`SANDBOX_TIMEOUT_S=60`).\n  - Memory ceiling: 1024 MB RSS (`SANDBOX_MEMORY_MB=1024`).\n  - Max executions per analysis: 40 runs (`MAX_CODE_EXECUTIONS=40`).\n- **Immutable Audit Trail**: Every executed script, SHA-256 hash, execution duration, and memory footprint is logged to `output/audit/code_executions.jsonl`.\n\n---\n\n## 3. Machine Learning Governance\n\n- **Anti-Overfitting Contract**: All model training pipelines enforce 5-fold cross-validation (`cv_mean`), track train/test performance gaps, and raise automated warnings if `train_test_gap > 0.10`.\n- **HMAC Signed Artifacts**: Serialized model files (`.pkl`) are signed using HMAC-SHA256 upon creation. Pickles with missing or invalid signatures are rejected upon load, preventing arbitrary code execution during deserialization.\n\n---\n\n## 4. Data Privacy & Retention Policy\n\n- **Ephemeral Retention**: Datasets uploaded via the REST API or MCP server, intermediate scratchpads, and execution artifacts expire and are purged after **24 hours** by default.\n- **Zero Model Training**: Customer datasets and derived findings are strictly quarantined and never used to train or fine-tune proprietary or foundation AI models.\n- **Tenant Isolation**: Every analysis allocates an isolated, cryptographically random workspace directory (`output/runs/<run_id>/`). Cross-tenant file lookups return safe `404 Not Found` responses.\n\n---\n\n## 5. Security Inquiries and Vulnerability Reporting\n\nTo report potential vulnerabilities, consult [security.txt](file:///d:/(Dev2)DSA_AGENT/public/.well-known/security.txt) or email `security@sorrel.ai`. Responsible disclosures are reviewed promptly by the security engineering team.\n", "api-quickstart": "# API Quickstart\n\nVersion: 1.0.0  \nLast Updated: 2026-10-12  \nCanonical: http://localhost:8501/docs/api-quickstart.md  \n\nThe Sorrel REST API enables automated systems to run evidence-first analyses. The API is asynchronous and handle-based: analysis requests return immediately with a `run_id`, allowing clients to poll status or stream Server-Sent Events (SSE).\n\n---\n\n## 1. Authentication\n\nAll requests to the `/v1/` API require a Bearer token in the `Authorization` header:\n\n```bash\nAuthorization: Bearer sorrel_live_xxxxxxxxxxxxxxxxxxxxxxxx\n```\n\n---\n\n## 2. The Four-Step Workflow\n\n```text\n1. Upload Table \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u25ba POST /v1/datasets \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u25ba dataset_id\n2. Start Analysis \u2500\u2500\u2500\u2500\u2500\u25ba POST /v1/runs \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u25ba run_id (HTTP 202)\n3. Poll / Stream \u2500\u2500\u2500\u2500\u2500\u2500\u25ba GET /v1/runs/{id} \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u25ba status: running | succeeded\n4. Retrieve Results \u2500\u2500\u2500\u25ba GET /v1/runs/{id}/result \u2500\u25ba Audited findings & evidence\n```\n\n### Step 1: Upload a Dataset\n\nUpload your tabular file (`.csv`, `.parquet`, `.json`, `.tsv`) as multipart form data:\n\n```bash\ncurl -X POST http://localhost:8501/v1/datasets \\\n  -H \"Authorization: Bearer $SORREL_API_KEY\" \\\n  -F \"file=@customer_churn.csv\"\n```\n\n**Response (HTTP 201 Created):**\n```json\n{\n  \"dataset_id\": \"ds_9f8b2c1a4e7d\",\n  \"filename\": \"customer_churn.csv\",\n  \"bytes\": 1048576,\n  \"rows\": 10000,\n  \"columns\": 14,\n  \"created_at\": \"2026-10-12T12:00:00Z\",\n  \"expires_at\": \"2026-10-13T12:00:00Z\"\n}\n```\n\n### Step 2: Start an Analysis\n\nInitiate the governed analysis run. Pass the `dataset_id`, analytical objective, and optional configuration:\n\n```bash\ncurl -X POST http://localhost:8501/v1/runs \\\n  -H \"Authorization: Bearer $SORREL_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -H \"Idempotency-Key: churn-q4-2026-analysis\" \\\n  -d '{\n    \"dataset_id\": \"ds_9f8b2c1a4e7d\",\n    \"objective\": \"Identify the primary drivers of customer churn and quantify retention levers.\",\n    \"target\": \"churn\",\n    \"options\": {\n      \"use_ml\": true,\n      \"max_iterations\": 8\n    }\n  }'\n```\n\n**Response (HTTP 202 Accepted):**\n```json\n{\n  \"run_id\": \"run_3d8e9a2b5c1f\",\n  \"status\": \"queued\",\n  \"location\": \"/v1/runs/run_3d8e9a2b5c1f\",\n  \"created_at\": \"2026-10-12T12:00:05Z\"\n}\n```\n\n### Step 3: Monitor Run Progress\n\nPoll the run status endpoint:\n\n```bash\ncurl -X GET http://localhost:8501/v1/runs/run_3d8e9a2b5c1f \\\n  -H \"Authorization: Bearer $SORREL_API_KEY\"\n```\n\n**Response (HTTP 200 OK):**\n```json\n{\n  \"run_id\": \"run_3d8e9a2b5c1f\",\n  \"status\": \"running\",\n  \"current_stage\": 3,\n  \"stage_name\": \"Tool Execution & Sandbox Verification\",\n  \"progress_pct\": 55,\n  \"active_step\": \"Comparing segments across contract_type\"\n}\n```\n\nAlternatively, stream real-time updates via Server-Sent Events (SSE):\n```bash\ncurl -N -H \"Authorization: Bearer $SORREL_API_KEY\" \\\n  http://localhost:8501/v1/runs/run_3d8e9a2b5c1f/events\n```\n\n### Step 4: Retrieve Structured Results & Artifacts\n\nOnce `status` reaches `\"succeeded\"`, fetch the final audited result:\n\n```bash\ncurl -X GET http://localhost:8501/v1/runs/run_3d8e9a2b5c1f/result \\\n  -H \"Authorization: Bearer $SORREL_API_KEY\"\n```\n\nList and download generated artifacts (reports, charts, serialized models):\n```bash\n# List available artifacts\ncurl -X GET http://localhost:8501/v1/runs/run_3d8e9a2b5c1f/artifacts \\\n  -H \"Authorization: Bearer $SORREL_API_KEY\"\n\n# Download the executive markdown report\ncurl -X GET http://localhost:8501/v1/runs/run_3d8e9a2b5c1f/artifacts/analysis-report \\\n  -H \"Authorization: Bearer $SORREL_API_KEY\" \\\n  -o executive_report.md\n```\n\n---\n\n## 3. Cancelling a Run\n\nRuns can be cancelled cooperatively at any time:\n\n```bash\ncurl -X POST http://localhost:8501/v1/runs/run_3d8e9a2b5c1f/cancel \\\n  -H \"Authorization: Bearer $SORREL_API_KEY\"\n```\n\n---\n\n## 4. Error Envelope\n\nAll non-2xx responses follow a uniform error shape:\n\n```json\n{\n  \"error\": {\n    \"code\": \"quota_exceeded\",\n    \"message\": \"Maximum concurrent analyses limit reached for this tenant.\",\n    \"request_id\": \"req_8b7a6c5d4e\",\n    \"retry_after_s\": 30\n  }\n}\n```\n", "mcp": "# Model Context Protocol (MCP) Setup\n\nVersion: 1.0.0  \nLast Updated: 2026-10-12  \nCanonical: http://localhost:8501/docs/mcp.md  \n\nSorrel provides a remote Model Context Protocol (MCP) server over Streamable HTTP, enabling external AI agents (such as Claude Desktop, ChatGPT, and Codex) to orchestrate data analysis workflows as first-class tools.\n\n---\n\n## 1. Remote Server Configuration\n\nConnect your MCP client to the Sorrel remote endpoint:\n\n```json\n{\n  \"mcpServers\": {\n    \"sorrel\": {\n      \"url\": \"http://localhost:8501/mcp\",\n      \"headers\": {\n        \"Authorization\": \"Bearer YOUR_SORREL_API_KEY\"\n      }\n    }\n  }\n}\n```\n\n---\n\n## 2. Exposed Agent Tools\n\nThe MCP server exposes narrow, governed tools that wrap the full analysis lifecycle:\n\n| Tool Name | Purpose | Side Effects |\n| :--- | :--- | :--- |\n| `get_sorrel_capabilities` | Inspect supported file formats, row caps, and active features | Read-only |\n| `create_dataset_upload` | Allocate a secure, short-lived presigned upload slot for a file | Creates upload resource |\n| `start_data_analysis` | Initiate the 7-stage governed analysis for a `dataset_id` | Enqueues analysis run |\n| `get_analysis_status` | Query current stage, percentage progress, and safe event trace | Read-only |\n| `get_analysis_result` | Retrieve structured findings, evidence metrics, and caveats | Read-only |\n| `list_analysis_artifacts` | Enumerate available reports, charts, and model files for a run | Read-only |\n| `cancel_data_analysis` | Cooperatively halt an ongoing analysis run | Modifies run state |\n\n---\n\n## 3. Read-Only MCP Resources\n\nCompleted run artifacts and public documentation are accessible as URI resources:\n\n```text\nsorrel://docs/overview\nsorrel://runs/{run_id}/result\nsorrel://runs/{run_id}/report.md\nsorrel://runs/{run_id}/dashboard.json\n```\n\n---\n\n## 4. Guardrails and Agent Boundaries\n\nTo ensure security and analytical integrity, the MCP interface enforces the following boundaries:\n\n- **No Raw Tool Injection**: External agents cannot bypass `AgentController` to invoke internal tools (e.g. `CorrelationAnalysisTool`) or inject arbitrary SQL/Python scripts directly.\n- **Asynchronous Run Handles**: Analysis operations return a `run_id` handle immediately. Agents are expected to inspect progress via `get_analysis_status` rather than blocking tool calls.\n- **Data Privacy**: Tool outputs contain only aggregated statistics and structured findings. Individual raw rows are never returned to the agent context.\n", "file-formats": "# Supported File Formats and Upload Limits\n\nVersion: 1.0.0  \nLast Updated: 2026-10-12  \nCanonical: http://localhost:8501/docs/file-formats.md  \n\nSorrel accepts standard tabular datasets for automated profiling and analysis. All uploaded files undergo pre-parse quarantine validation to ensure structural integrity and prevent malicious file exploitation.\n\n---\n\n## 1. Supported Formats\n\n| Format | Extension | Media Type | Notes |\n| :--- | :--- | :--- | :--- |\n| **CSV** | `.csv` | `text/csv` | Delimiters: comma `,`, semicolon `;`, tab `\\t`. UTF-8 preferred. |\n| **Parquet** | `.parquet` | `application/vnd.apache.parquet` | Snappy or gzip compressed columnar data. Highly recommended for tables > 100k rows. |\n| **JSON** | `.json` | `application/json` | Array of records `[{...}, {...}]` or JSON-lines format. |\n| **TSV** | `.tsv`, `.tab` | `text/tab-separated-values` | Tab-delimited plain text tables. |\n\n---\n\n## 2. Size and Dimension Limits\n\n- **Maximum Upload File Size**: 250 MB per file.\n- **Maximum Row Count**: 1,000,000 rows (sub-sampled with stratified sampling for exploratory phases if exceeded).\n- **Maximum Column Count**: 500 columns.\n- **Minimum Data Requirements**: At least 5 observations (rows) and 2 columns.\n\n---\n\n## 3. Quarantine and Validation Boundary\n\nBefore files are handed to tabular parsers (`pandas` / `pyarrow`), the `validate_upload()` engine enforces:\n\n1. **Magic Byte Verification**: File header signatures must match the declared file extension (e.g. Parquet files must begin with `PAR1`).\n2. **Decompression Bomb Protection**: Compressed uploads (gzip, zip) enforce a strict decompression ratio ceiling (maximum 10:1) and maximum uncompressed size of 500 MB.\n3. **Encoding Coercion**: Files are parsed with strict UTF-8 decoding, falling back to Latin-1/CP1252 if BOM or multi-byte errors are detected.\n4. **Archive Integrity**: Multi-file archives containing sub-folders, symlinks, executables, or ambiguous multiple datasets are rejected with HTTP `422 Unprocessable Entity`.\n", "result-schema": "# Result Schema Specification\n\nVersion: 1.0.0  \nLast Updated: 2026-10-12  \nCanonical: http://localhost:8501/docs/result-schema.md  \n\nThis document specifies the public, version-stable JSON schema returned by `GET /v1/runs/{run_id}/result` and the `get_analysis_result` MCP tool.\n\n---\n\n## 1. Schema Overview\n\nThe result payload is an authoritative, typed dictionary containing audited findings, verified numbers, business recommendations, and governance metadata:\n\n```json\n{\n  \"schema_version\": \"1.0\",\n  \"run_id\": \"run_3d8e9a2b5c1f\",\n  \"status\": \"succeeded\",\n  \"objective\": \"Identify the primary drivers of customer churn.\",\n  \"analysis_mode\": \"supervised_ml\",\n  \"dataset_summary\": {\n    \"rows\": 10000,\n    \"columns\": 14,\n    \"numeric_columns\": 8,\n    \"categorical_columns\": 6,\n    \"missingness_pct\": 0.4\n  },\n  \"findings\": [\n    {\n      \"id\": \"find_01j9a8b7c6\",\n      \"kind\": \"segment_lift\",\n      \"headline\": \"Month-to-month contracts exhibit 3.2x higher churn rate than annual contracts\",\n      \"explanation\": \"Customers on month-to-month terms churn at 42.7% compared to the 13.3% baseline.\",\n      \"importance\": 0.94,\n      \"confidence\": 0.98,\n      \"p_value\": 0.0001,\n      \"effect_size\": 3.21,\n      \"evidence\": {\n        \"metric\": \"churn_rate\",\n        \"segment\": \"Month-to-month\",\n        \"segment_mean\": 0.427,\n        \"baseline_mean\": 0.133,\n        \"sample_size\": 4200,\n        \"checks_passed\": [\"fdr_bh_correction\", \"chi_square_independence\", \"sample_size_adequate\"]\n      }\n    }\n  ],\n  \"recommendations\": [\n    {\n      \"action\": \"Incentivize annual contract migration for new sign-ups\",\n      \"target_segment\": \"Month-to-month\",\n      \"quantified_impact\": \"Estimated 14% reduction in overall churn volume (~$320,000 ARR preservation)\",\n      \"confidence\": \"high\"\n    }\n  ],\n  \"limitations\": [\n    \"Unobserved tenure confounding: contract type and tenure are strongly correlated.\",\n    \"Dataset lacks payment failure telemetry.\"\n  ],\n  \"governance\": {\n    \"code_executions_count\": 6,\n    \"pii_redacted_columns\": [\"email\", \"phone_number\"],\n    \"claims_verified\": 4,\n    \"claims_unverified\": 0\n  },\n  \"artifacts\": [\n    {\n      \"name\": \"analysis-report\",\n      \"media_type\": \"text/markdown\",\n      \"bytes\": 42100,\n      \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n      \"download_url\": \"/v1/runs/run_3d8e9a2b5c1f/artifacts/analysis-report\"\n    }\n  ],\n  \"created_at\": \"2026-10-12T12:00:05Z\",\n  \"completed_at\": \"2026-10-12T12:01:22Z\"\n}\n```\n\n---\n\n## 2. Field Definitions\n\n| Field | Type | Description |\n| :--- | :--- | :--- |\n| `schema_version` | string | Constant `\"1.0\"`. Breaking changes will increment the major version. |\n| `run_id` | string | Unique, opaque analysis handle. |\n| `status` | string | Terminal status: `\"succeeded\"` or `\"failed\"`. |\n| `findings` | array | Prioritized, evidence-backed findings checked against the execution ledger. |\n| `findings[].importance` | float | Relative importance score normalized from `0.0` to `1.0`. |\n| `findings[].confidence` | float | Audited statistical confidence accounting for FDR correction and sample size. |\n| `recommendations` | array | Plain-language, unit/dollar-quantified business recommendations. |\n| `limitations` | array | Explicit analytical constraints, confounding risks, or missing features. |\n| `governance` | object | Summary of security controls, sandboxing runs, and claim verification outcomes. |\n| `artifacts` | array | Manifest of downloadable reports, Vega-Lite charts, and signed models. |\n", "limits": "# Runtime Limits and Quotas\n\nVersion: 1.0.0  \nLast Updated: 2026-10-12  \nCanonical: http://localhost:8501/docs/limits.md  \n\nTo ensure system stability, multi-tenant isolation, and predictable resource utilization, Sorrel enforces operational limits across all API and agent interactions.\n\n---\n\n## 1. Concurrency and Quotas\n\n| Dimension | Default Limit | Behavior on Exceeding |\n| :--- | :--- | :--- |\n| **Concurrent Analyses** | 2 active runs per tenant | Returns HTTP `429 Too Many Requests` with `Retry-After` header. |\n| **Daily Run Quota** | 50 analyses per day | Returns HTTP `429 Too Many Requests` (`quota_exceeded`). |\n| **API Request Rate** | 60 requests / minute | Returns HTTP `429 Too Many Requests`. |\n| **Dataset Storage** | 5 GB cumulative storage | Refuses new uploads until older datasets are removed or expire. |\n\n---\n\n## 2. Analysis Execution Ceilings\n\n- **Maximum Run Duration**: 600 seconds (10 minutes) total wall-clock time per analysis. Runs exceeding this ceiling transition to state `\"failed\"` with error `timeout_exceeded`.\n- **Maximum Planning Iterations**: 10 iterative refinement steps (`max_iterations`).\n- **Sandbox Subprocess Timeout**: 60 seconds per code block.\n- **Sandbox Memory RSS Limit**: 1024 MB per subprocess tree.\n- **Maximum Sandboxed Code Invocations**: 40 executions per analysis. Further execution attempts are refused.\n\n---\n\n## 3. Upload & Tabular Data Ceilings\n\n- **Maximum Upload File Size**: 250 MB.\n- **Maximum Uncompressed Size**: 500 MB.\n- **Maximum Rows**: 1,000,000 observations.\n- **Maximum Columns**: 500 dimensions.\n- **Dataset Retention**: Ephemeral datasets expire and are automatically purged after 24 hours.\n\n---\n\n## 4. Backpressure and Retry Semantics\n\nWhen rate limits or concurrency ceilings are reached:\n- Sorrel emits standard HTTP `429 Too Many Requests` status codes.\n- Responses include a `Retry-After: <seconds>` header indicating the wait interval before retrying.\n- Non-idempotent operations must include an `Idempotency-Key` header to safely retry requests without duplicate billing or execution.\n", "changelog": "# Changelog\n\nVersion: 1.0.0  \nLast Updated: 2026-10-12  \nCanonical: http://localhost:8501/docs/changelog.md  \n\nAll notable public API, protocol, and compatibility changes to Sorrel are documented in this file.\n\n---\n\n## [1.0.0] \u2014 2026-10-12\n\n### Added\n- **External AI Discovery Surface**:\n  - Root `/llms.txt` index adhering to standard machine-readable agent specification.\n  - Public `sitemap.xml` enumerating canonical documentation endpoints.\n  - Crawler policy `robots.txt` explicitly governing search indexers vs. AI training scrapers.\n  - RFC 9116 security declaration at `/.well-known/security.txt` and `/security.txt`.\n- **Public AI Documentation**:\n  - Released comprehensive Markdown documentation across `docs/public/` covering product overview, seven-stage workflow, safety boundaries, API quickstart, MCP server, file limits, result schemas, and quotas.\n- **Origin Configuration Engine**:\n  - Introduced `src/core/origin_config.py` with environment variable override (`SORREL_PUBLIC_ORIGIN`) and non-local validation.\n- **Surface Validation Script**:\n  - Added `scripts/check_ai_surface.py` to continuously validate root assets, anchor integrity, and schema compliance in CI.\n- **Discovery Test Suite**:\n  - Implemented `tests/test_ai_discovery.py` verifying contract integrity and crawler compliance.\n"};
+
+        // Tab activation logic
+        function activateAiTab(panelId) {
+          var tabBtns = document.querySelectorAll('.ai-tab-btn');
+          tabBtns.forEach(function (b) {
+            var match = b.getAttribute('data-tab') === panelId;
+            b.classList.toggle('active', match);
+            b.setAttribute('aria-selected', String(match));
+          });
+          document.querySelectorAll('.ai-tab-panel').forEach(function (p) {
+            p.classList.toggle('active', p.id === panelId);
+          });
+          if (panelId === 'panel-docs') {
+            updateSelectedDoc();
+          }
+        }
+
+        // Quick-jump bar buttons
+        document.querySelectorAll('.ai-quick-link').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var target = btn.getAttribute('data-tab-target');
+            if (target) activateAiTab(target);
+          });
+        });
+
+        // Tab buttons
+        document.querySelectorAll('.ai-tab-btn').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var target = btn.getAttribute('data-tab');
+            if (target) activateAiTab(target);
+          });
+        });
+
+        // Generic copy with button feedback
+        function copyTextWithFeedback(text, buttonEl, defaultLabel) {
+          if (!navigator.clipboard) return;
+          navigator.clipboard.writeText(text).then(function () {
+            var prevText = buttonEl.textContent;
+            buttonEl.textContent = 'Copied!';
+            setTimeout(function () { buttonEl.textContent = defaultLabel || prevText; }, 2000);
+          });
+        }
+
+        // Generic client-side file download
+        function downloadFile(content, filename, mimeType) {
+          var blob = new Blob([content], { type: mimeType || 'text/plain;charset=utf-8' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(function () {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }, 100);
+        }
+
+        // Wire copy buttons in panels
+        document.querySelectorAll('.ai-sub-action-btn[data-copy-block]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var blockId = btn.getAttribute('data-copy-block');
+            var block = document.getElementById(blockId);
+            if (block) copyTextWithFeedback(block.innerText || block.textContent, btn, 'Copy');
+          });
+        });
+
+        // Wire download buttons in panels
+        document.querySelectorAll('.ai-sub-action-btn[data-download-block]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var blockId = btn.getAttribute('data-download-block');
+            var filename = btn.getAttribute('data-filename') || 'file.txt';
+            var block = document.getElementById(blockId);
+            if (block) {
+              var mime = filename.endsWith('.xml') ? 'application/xml;charset=utf-8' : 'text/plain;charset=utf-8';
+              downloadFile(block.innerText || block.textContent, filename, mime);
+            }
+          });
+        });
+
+        // Wire Document Browser
+        var docSelect = document.getElementById('ai-doc-select');
+        var docContent = document.getElementById('ai-doc-content');
+        var docRawLink = document.getElementById('ai-doc-raw-link');
+        var btnCopyDoc = document.getElementById('btn-copy-doc');
+        var btnDownloadDoc = document.getElementById('btn-download-doc');
+
+        function updateSelectedDoc() {
+          if (!docSelect || !docContent) return;
+          var key = docSelect.value || 'overview';
+          var text = DOCS_REGISTRY[key] || '';
+          docContent.textContent = text;
+          if (docRawLink) {
+            docRawLink.href = '/docs/' + key + '.md';
+          }
+        }
+
+        if (docSelect) {
+          docSelect.addEventListener('change', updateSelectedDoc);
+          updateSelectedDoc();
+        }
+
+        if (btnCopyDoc && docContent) {
+          btnCopyDoc.addEventListener('click', function () {
+            copyTextWithFeedback(docContent.textContent, btnCopyDoc, 'Copy');
+          });
+        }
+
+        if (btnDownloadDoc && docSelect && docContent) {
+          btnDownloadDoc.addEventListener('click', function () {
+            var key = docSelect.value || 'overview';
+            downloadFile(docContent.textContent, key + '.md', 'text/markdown;charset=utf-8');
+          });
+        }
       });
       window.addEventListener('keydown', function (e) {
         if (window.__dsaModuleReady) return;
+        if (e.key === 'Escape' || e.code === 'Escape') {
+          var overlay = document.getElementById('ai-surface-overlay');
+          if (overlay && overlay.classList.contains('active')) {
+            var btnHuman = document.getElementById('btn-mode-human');
+            var btnAi = document.getElementById('btn-mode-ai');
+            if (btnHuman) { btnHuman.classList.add('active'); btnHuman.setAttribute('aria-pressed', 'true'); }
+            if (btnAi) { btnAi.classList.remove('active'); btnAi.setAttribute('aria-pressed', 'false'); }
+            overlay.classList.remove('active');
+            document.body.style.overflow = '';
+            return;
+          }
+        }
         var a = document.activeElement;
         if (a && a !== document.body) return;
         if (e.code === 'Enter' || e.code === 'NumpadEnter') { e.preventDefault(); enter(); }
@@ -1462,9 +1929,7 @@
   <header class="site-header" id="site-header">
     <div class="container nav-inner">
       <a href="#" class="brand" aria-label="Sorrel, back to top">
-        <span class="brand-seal" aria-hidden="true">s</span>
         <span class="brand-name">Sorrel</span>
-        <span class="brand-badge">Student project</span>
       </a>
 
       <nav aria-label="Main navigation">
@@ -1477,6 +1942,22 @@
       </nav>
 
       <div class="nav-right">
+        <!-- Audience View Switcher: Human vs AI / Agent -->
+        <div class="mode-segmented-control" role="group" aria-label="Audience view switcher">
+          <button class="mode-btn active" id="btn-mode-human" aria-pressed="true" title="Interactive visual interface for humans">
+            <svg class="mode-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+            </svg>
+            <span>Human</span>
+          </button>
+          <button class="mode-btn" id="btn-mode-ai" aria-pressed="false" title="Machine-readable discovery, llms.txt, and API contract for AI agents">
+            <svg class="mode-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/>
+            </svg>
+            <span>AI / Agent</span>
+          </button>
+        </div>
+
         <button class="theme-toggle-btn" id="btn-theme-toggle" aria-label="Day mode is on. Switch to night mode.">
           <span id="theme-icon" aria-hidden="true">&#9788;</span>
           <span id="theme-label">Day Mode</span>
@@ -1485,6 +1966,272 @@
       </div>
     </div>
   </header>
+
+  <!-- AI Agent & Developer Surface Modal -->
+  <div class="ai-surface-overlay" id="ai-surface-overlay" role="dialog" aria-modal="true" aria-labelledby="ai-surface-heading">
+    <div class="ai-surface-container">
+      <div class="ai-surface-header">
+        <div class="ai-surface-title-group">
+          <span class="brand-name" style="font-size: 20px;">Sorrel</span>
+          <span class="ai-surface-title" id="ai-surface-heading">AI &amp; Machine Contract</span>
+        </div>
+        <button class="ai-close-btn" id="btn-close-ai-surface" aria-label="Close AI view and return to human interface">
+          <span aria-hidden="true">&times;</span>
+          <span>Return to Human UI</span>
+        </button>
+      </div>
+
+      <div class="ai-surface-bar">
+        <button class="ai-action-btn" id="btn-copy-llms" title="Copy full llms.txt text to clipboard">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <span id="copy-btn-text">Copy Context for LLM</span>
+        </button>
+        <div class="ai-secondary-links">
+          <button type="button" class="ai-quick-link" data-tab-target="panel-llms">/llms.txt</button>
+          <button type="button" class="ai-quick-link" data-tab-target="panel-robots">/robots.txt</button>
+          <button type="button" class="ai-quick-link" data-tab-target="panel-sitemap">/sitemap.xml</button>
+          <button type="button" class="ai-quick-link" data-tab-target="panel-docs">Public Docs</button>
+        </div>
+      </div>
+
+      <div class="ai-nav-tabs" role="tablist">
+        <button class="ai-tab-btn active" role="tab" id="tab-btn-llms" aria-selected="true" data-tab="panel-llms">/llms.txt</button>
+        <button class="ai-tab-btn" role="tab" id="tab-btn-robots" aria-selected="false" data-tab="panel-robots">/robots.txt</button>
+        <button class="ai-tab-btn" role="tab" id="tab-btn-sitemap" aria-selected="false" data-tab="panel-sitemap">/sitemap.xml</button>
+        <button class="ai-tab-btn" role="tab" id="tab-btn-docs" aria-selected="false" data-tab="panel-docs">Public Docs</button>
+        <button class="ai-tab-btn" role="tab" id="tab-btn-api" aria-selected="false" data-tab="panel-api">cURL / REST API</button>
+        <button class="ai-tab-btn" role="tab" id="tab-btn-mcp" aria-selected="false" data-tab="panel-mcp">Remote MCP</button>
+        <button class="ai-tab-btn" role="tab" id="tab-btn-policy" aria-selected="false" data-tab="panel-policy">Security Policy</button>
+      </div>
+
+      <div class="ai-tab-panel active" id="panel-llms" role="tabpanel">
+        <div class="ai-panel-header">
+          <p class="ai-panel-lede">Machine-readable capability index served at <code>/llms.txt</code> for LLMs (Claude, ChatGPT, Cursor).</p>
+          <div class="ai-panel-actions">
+            <a href="/llms.txt" target="_blank" rel="noopener noreferrer" class="ai-raw-link">&nearr; Open Raw</a>
+            <button type="button" class="ai-sub-action-btn" data-copy-block="llms-code-content">Copy</button>
+            <button type="button" class="ai-sub-action-btn" data-download-block="llms-code-content" data-filename="llms.txt">Download</button>
+          </div>
+        </div>
+        <pre class="ai-code-block" id="llms-code-content"># Sorrel
+
+&gt; Sorrel is an evidence-first data-analysis service. It accepts tabular datasets,
+&gt; executes a governed seven-stage workflow, and returns checked findings, charts,
+&gt; reports, limitations, and an audit trail.
+
+Use the API or MCP endpoint for actions. Public documentation never grants access to
+uploaded datasets. Analysis runs are asynchronous and return a run identifier.
+
+## Start Here
+- [Product overview](http://localhost:8501/docs/overview.md): What Sorrel does and does not do.
+- [Analysis workflow](http://localhost:8501/docs/workflow.md): The seven stages and their outputs.
+- [Safety and privacy](http://localhost:8501/docs/safety.md): Data handling, sandboxing, PII, and retention.
+
+## Integrate
+- [API quickstart](http://localhost:8501/docs/api-quickstart.md): Upload, start, poll, and fetch a result.
+- [MCP setup](http://localhost:8501/docs/mcp.md): Remote MCP endpoint, tools, and authentication.
+
+## Reference
+- [Supported files](http://localhost:8501/docs/file-formats.md): Accepted formats and upload limits.
+- [Result schema](http://localhost:8501/docs/result-schema.md): Findings, evidence, caveats, and artifacts.
+- [Limits](http://localhost:8501/docs/limits.md): Runtime, concurrency, quotas, and model behavior.
+
+## Optional
+- [Changelog](http://localhost:8501/docs/changelog.md): Contract and product changes.</pre>
+      </div>
+
+      <div class="ai-tab-panel" id="panel-robots" role="tabpanel">
+        <div class="ai-panel-header">
+          <p class="ai-panel-lede">Crawler directives served at <code>/robots.txt</code> under RFC 9309. Permits search bots while declining scrapers.</p>
+          <div class="ai-panel-actions">
+            <a href="/robots.txt" target="_blank" rel="noopener noreferrer" class="ai-raw-link">&nearr; Open Raw</a>
+            <button type="button" class="ai-sub-action-btn" data-copy-block="robots-code-content">Copy</button>
+            <button type="button" class="ai-sub-action-btn" data-download-block="robots-code-content" data-filename="robots.txt">Download</button>
+          </div>
+        </div>
+        <pre class="ai-code-block" id="robots-code-content">User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /runs/
+Disallow: /uploads/
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: GPTBot
+Disallow: /
+
+User-agent: Google-Extended
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+
+Sitemap: http://localhost:8501/sitemap.xml</pre>
+      </div>
+
+      <div class="ai-tab-panel" id="panel-sitemap" role="tabpanel">
+        <div class="ai-panel-header">
+          <p class="ai-panel-lede">Canonical XML sitemap served at <code>/sitemap.xml</code> indexing all public documentation pages.</p>
+          <div class="ai-panel-actions">
+            <a href="/sitemap.xml" target="_blank" rel="noopener noreferrer" class="ai-raw-link">&nearr; Open Raw</a>
+            <button type="button" class="ai-sub-action-btn" data-copy-block="sitemap-code-content">Copy</button>
+            <button type="button" class="ai-sub-action-btn" data-download-block="sitemap-code-content" data-filename="sitemap.xml">Download</button>
+          </div>
+        </div>
+        <pre class="ai-code-block" id="sitemap-code-content">&lt;?xml version="1.0" encoding="UTF-8"?&gt;
+&lt;urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"&gt;
+  &lt;url&gt;
+    &lt;loc&gt;http://localhost:8501/&lt;/loc&gt;
+    &lt;lastmod&gt;2026-10-12&lt;/lastmod&gt;
+    &lt;changefreq&gt;weekly&lt;/changefreq&gt;
+    &lt;priority&gt;1.0&lt;/priority&gt;
+  &lt;/url&gt;
+  &lt;url&gt;
+    &lt;loc&gt;http://localhost:8501/docs/overview.md&lt;/loc&gt;
+    &lt;lastmod&gt;2026-10-12&lt;/lastmod&gt;
+    &lt;changefreq&gt;weekly&lt;/changefreq&gt;
+    &lt;priority&gt;0.9&lt;/priority&gt;
+  &lt;/url&gt;
+  &lt;url&gt;
+    &lt;loc&gt;http://localhost:8501/docs/workflow.md&lt;/loc&gt;
+    &lt;lastmod&gt;2026-10-12&lt;/lastmod&gt;
+    &lt;changefreq&gt;weekly&lt;/changefreq&gt;
+    &lt;priority&gt;0.8&lt;/priority&gt;
+  &lt;/url&gt;
+  &lt;url&gt;
+    &lt;loc&gt;http://localhost:8501/docs/safety.md&lt;/loc&gt;
+    &lt;lastmod&gt;2026-10-12&lt;/lastmod&gt;
+    &lt;changefreq&gt;monthly&lt;/changefreq&gt;
+    &lt;priority&gt;0.8&lt;/priority&gt;
+  &lt;/url&gt;
+  &lt;url&gt;
+    &lt;loc&gt;http://localhost:8501/docs/api-quickstart.md&lt;/loc&gt;
+    &lt;lastmod&gt;2026-10-12&lt;/lastmod&gt;
+    &lt;changefreq&gt;weekly&lt;/changefreq&gt;
+    &lt;priority&gt;0.8&lt;/priority&gt;
+  &lt;/url&gt;
+  &lt;url&gt;
+    &lt;loc&gt;http://localhost:8501/docs/mcp.md&lt;/loc&gt;
+    &lt;lastmod&gt;2026-10-12&lt;/lastmod&gt;
+    &lt;changefreq&gt;weekly&lt;/changefreq&gt;
+    &lt;priority&gt;0.8&lt;/priority&gt;
+  &lt;/url&gt;
+  &lt;url&gt;
+    &lt;loc&gt;http://localhost:8501/docs/file-formats.md&lt;/loc&gt;
+    &lt;lastmod&gt;2026-10-12&lt;/lastmod&gt;
+    &lt;changefreq&gt;monthly&lt;/changefreq&gt;
+    &lt;priority&gt;0.7&lt;/priority&gt;
+  &lt;/url&gt;
+  &lt;url&gt;
+    &lt;loc&gt;http://localhost:8501/docs/result-schema.md&lt;/loc&gt;
+    &lt;lastmod&gt;2026-10-12&lt;/lastmod&gt;
+    &lt;changefreq&gt;monthly&lt;/changefreq&gt;
+    &lt;priority&gt;0.7&lt;/priority&gt;
+  &lt;/url&gt;
+  &lt;url&gt;
+    &lt;loc&gt;http://localhost:8501/docs/limits.md&lt;/loc&gt;
+    &lt;lastmod&gt;2026-10-12&lt;/lastmod&gt;
+    &lt;changefreq&gt;monthly&lt;/changefreq&gt;
+    &lt;priority&gt;0.6&lt;/priority&gt;
+  &lt;/url&gt;
+  &lt;url&gt;
+    &lt;loc&gt;http://localhost:8501/docs/changelog.md&lt;/loc&gt;
+    &lt;lastmod&gt;2026-10-12&lt;/lastmod&gt;
+    &lt;changefreq&gt;weekly&lt;/changefreq&gt;
+    &lt;priority&gt;0.5&lt;/priority&gt;
+  &lt;/url&gt;
+&lt;/urlset&gt;</pre>
+      </div>
+
+      <div class="ai-tab-panel" id="panel-docs" role="tabpanel">
+        <div class="ai-doc-browser-header">
+          <div class="ai-doc-selector-wrapper">
+            <label for="ai-doc-select" class="ai-doc-label">Document:</label>
+            <select id="ai-doc-select" class="ai-doc-select">
+              <option value="overview">overview.md — Product Overview</option>
+              <option value="workflow">workflow.md — 7-Stage Workflow</option>
+              <option value="safety">safety.md — Safety &amp; Governance</option>
+              <option value="api-quickstart">api-quickstart.md — API Quickstart</option>
+              <option value="mcp">mcp.md — Remote MCP Setup</option>
+              <option value="file-formats">file-formats.md — Accepted Formats</option>
+              <option value="result-schema">result-schema.md — Result Schema</option>
+              <option value="limits">limits.md — Service Limits</option>
+              <option value="changelog">changelog.md — Changelog</option>
+            </select>
+          </div>
+          <div class="ai-panel-actions">
+            <a id="ai-doc-raw-link" href="/docs/overview.md" target="_blank" rel="noopener noreferrer" class="ai-raw-link">&nearr; Open Raw</a>
+            <button type="button" class="ai-sub-action-btn" id="btn-copy-doc">Copy</button>
+            <button type="button" class="ai-sub-action-btn" id="btn-download-doc">Download .md</button>
+          </div>
+        </div>
+        <pre class="ai-code-block" id="ai-doc-content"></pre>
+      </div>
+
+      <div class="ai-tab-panel" id="panel-api" role="tabpanel">
+        <div class="ai-panel-header">
+          <p class="ai-panel-lede">Asynchronous 4-step ticket flow: upload table, enqueue analysis handle (HTTP 202), poll status, and retrieve audited findings.</p>
+          <div class="ai-panel-actions">
+            <button type="button" class="ai-sub-action-btn" data-copy-block="api-code-content">Copy</button>
+          </div>
+        </div>
+        <pre class="ai-code-block" id="api-code-content"># 1. Upload dataset (returns dataset_id)
+curl -X POST http://localhost:8501/v1/datasets \
+  -H "Authorization: Bearer $SORREL_API_KEY" \
+  -F "file=@customer_churn.csv"
+
+# 2. Start governed 7-stage run (returns run_id handle)
+curl -X POST http://localhost:8501/v1/runs \
+  -H "Authorization: Bearer $SORREL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dataset_id": "ds_...", "objective": "Analyze churn drivers"}'
+
+# 3. Poll run status
+curl -X GET http://localhost:8501/v1/runs/run_... \
+  -H "Authorization: Bearer $SORREL_API_KEY"
+
+# 4. Fetch structured result and evidence
+curl -X GET http://localhost:8501/v1/runs/run_.../result \
+  -H "Authorization: Bearer $SORREL_API_KEY"</pre>
+      </div>
+
+      <div class="ai-tab-panel" id="panel-mcp" role="tabpanel">
+        <div class="ai-panel-header">
+          <p class="ai-panel-lede">Add Sorrel as a remote tool server in Claude Desktop, Cursor, or your agent runtime.</p>
+          <div class="ai-panel-actions">
+            <button type="button" class="ai-sub-action-btn" data-copy-block="mcp-code-content">Copy</button>
+          </div>
+        </div>
+        <pre class="ai-code-block" id="mcp-code-content">{
+  "mcpServers": {
+    "sorrel": {
+      "url": "http://localhost:8501/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_SORREL_API_KEY"
+      }
+    }
+  }
+}</pre>
+      </div>
+
+      <div class="ai-tab-panel" id="panel-policy" role="tabpanel">
+        <div class="ai-panel-header">
+          <p class="ai-panel-lede">Security contacts defined under RFC 9116 and served at <code>/.well-known/security.txt</code>.</p>
+          <div class="ai-panel-actions">
+            <a href="/.well-known/security.txt" target="_blank" rel="noopener noreferrer" class="ai-raw-link">&nearr; Open Raw</a>
+            <button type="button" class="ai-sub-action-btn" data-copy-block="policy-code-content">Copy</button>
+            <button type="button" class="ai-sub-action-btn" data-download-block="policy-code-content" data-filename="security.txt">Download</button>
+          </div>
+        </div>
+        <pre class="ai-code-block" id="policy-code-content">Contact: mailto:security@sorrel.ai
+Canonical: http://localhost:8501/.well-known/security.txt
+Policy: http://localhost:8501/docs/safety.md
+Preferred-Languages: en</pre>
+      </div>
+    </div>
+  </div>
+
 
   <main id="main">
     <!-- Hero. The headline reveal is the scroll-effects script's (once per session). -->

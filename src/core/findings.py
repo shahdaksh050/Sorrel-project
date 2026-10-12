@@ -136,6 +136,13 @@ class Finding:
             expected = evidence.get("expected_share", evidence.get("uniform_share"))
             if isinstance(expected, (int, float)):
                 effect = abs(self.effect - expected)
+        if self.kind == "cluster":
+            evidence = self.evidence if isinstance(self.evidence, dict) else {}
+            sil = evidence.get("silhouette_score")
+            quality = evidence.get("separation_quality")
+            if (isinstance(sil, (int, float)) and sil < 0.35) or quality in ("weak", "none"):
+                sil_val = max(0.05, float(sil)) if isinstance(sil, (int, float)) else 0.25
+                effect = effect * min(1.0, sil_val / 0.5)
         return min(1.0, effect / benchmark)
 
     def effective_confidence(self) -> float:
@@ -144,8 +151,18 @@ class Finding:
         evidence discounts either way."""
         confidence = self.confidence
         p = self.p_adjusted if self.p_adjusted is not None else self.p_value
-        if confidence == 0.5 and p is not None:
-            confidence = 0.9 if p < 0.001 else 0.8 if p < 0.01 else 0.65 if p < 0.05 else 0.3
+        if p is not None:
+            p_conf = 0.9 if p < 0.001 else 0.8 if p < 0.01 else 0.65 if p < 0.05 else 0.3
+            if self.kind in ("segment_lift", "driver", "test") and p < 0.05:
+                confidence = max(confidence, p_conf)
+            elif confidence == 0.5:
+                confidence = p_conf
+        if self.kind == "cluster":
+            evidence = self.evidence if isinstance(self.evidence, dict) else {}
+            sil = evidence.get("silhouette_score")
+            quality = evidence.get("separation_quality")
+            if (isinstance(sil, (int, float)) and sil < 0.35) or quality in ("weak", "none"):
+                confidence = min(confidence, 0.25)
         if isinstance(self.evidence, dict):
             sizes = [
                 v for k in _SAMPLE_SIZE_KEYS
@@ -364,6 +381,15 @@ def _drop_unskilled_drivers(findings: list[Finding]) -> list[Finding]:
     ]
 
 
+def _is_weak_cluster(f: Finding) -> bool:
+    if f.kind != "cluster":
+        return False
+    evidence = f.evidence if isinstance(f.evidence, dict) else {}
+    sil = evidence.get("silhouette_score")
+    quality = evidence.get("separation_quality")
+    return (isinstance(sil, (int, float)) and sil < 0.35) or quality in ("weak", "none")
+
+
 def rank_findings(
     findings: list[Finding],
     suppress_trivial: bool = True,
@@ -390,7 +416,11 @@ def rank_findings(
     findings = _drop_unskilled_drivers(findings)
     for f in findings:
         f.compute_importance()
-    ranked = sorted(findings, key=lambda f: f.importance, reverse=True)
+    ranked = sorted(
+        findings,
+        key=lambda f: (not _is_weak_cluster(f), f.importance),
+        reverse=True,
+    )
     if suppress_trivial:
         kept = [f for f in ranked if not is_trivial(f)]
         ranked = kept if kept else ranked

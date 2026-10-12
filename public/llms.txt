@@ -1,0 +1,26 @@
+# Sorrel
+
+> Sorrel is an evidence-first data-analysis service. It accepts tabular datasets, executes a governed seven-stage workflow, and returns checked findings, charts, reports, limitations, and an audit trail.
+
+Use the API or MCP endpoint for actions. Public documentation never grants access to uploaded datasets. Analysis runs are asynchronous and return a run identifier.
+
+## Start Here
+
+- [Product overview](http://localhost:8501/docs/overview.md): What Sorrel does and does not do.
+- [Analysis workflow](http://localhost:8501/docs/workflow.md): The seven stages and their outputs.
+- [Safety and privacy](http://localhost:8501/docs/safety.md): Data handling, sandboxing, PII, and retention.
+
+## Integrate
+
+- [API quickstart](http://localhost:8501/docs/api-quickstart.md): Upload, start, poll, and fetch a result.
+- [MCP setup](http://localhost:8501/docs/mcp.md): Remote MCP endpoint, tools, and authentication.
+
+## Reference
+
+- [Supported files](http://localhost:8501/docs/file-formats.md): Accepted formats and upload limits.
+- [Result schema](http://localhost:8501/docs/result-schema.md): Findings, evidence, caveats, and artifacts.
+- [Limits](http://localhost:8501/docs/limits.md): Runtime, concurrency, quotas, and model behavior.
+
+## Optional
+
+- [Changelog](http://localhost:8501/docs/changelog.md): Contract and product changes.

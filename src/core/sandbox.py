@@ -118,6 +118,8 @@ _BLOCKED_ATTRS: frozenset[str] = frozenset({
     "to_pickle", "to_parquet", "to_feather", "to_orc", "to_hdf", "to_sql",
     "to_clipboard", "to_excel", "to_stata", "ExcelWriter", "ExcelFile", "HDFStore",
     "dump_svmlight_file", "load_svmlight_file", "load_svmlight_files",
+    # pandas expression evaluators can reach Python engines or arbitrary callables
+    "eval", "query", "pipe",
 })
 
 #: Attribute-name prefixes blocked for the same reason: every pandas/pyarrow
@@ -201,6 +203,242 @@ class SandboxResult:
     backend: str = ""
 
 
+_READER_ATTR_NAMES: frozenset[str] = frozenset(
+    {
+        "read_csv",
+        "read_table",
+        "read_excel",
+        "read_parquet",
+        "read_feather",
+        "read_json",
+        "read_stata",
+        "read_sas",
+        "read_spss",
+        "read_pickle",
+        "read_sql",
+        "read_sql_query",
+        "read_sql_table",
+        "read_clipboard",
+        "read_xml",
+        "read_html",
+        "read_fwf",
+    }
+)
+
+
+def _assigns_name_in_scope(node: ast.AST, name: str) -> bool:
+    """Check if `name` is assigned within `node`'s scope without descending into nested functions."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(child, ast.Assign):
+            if any(isinstance(t, ast.Name) and t.id == name for t in child.targets):
+                return True
+        elif isinstance(child, ast.AnnAssign):
+            if isinstance(child.target, ast.Name) and child.target.id == name:
+                return True
+        elif isinstance(child, ast.AugAssign):
+            if isinstance(child.target, ast.Name) and child.target.id == name:
+                return True
+        if _assigns_name_in_scope(child, name):
+            return True
+    return False
+
+
+_RESULT_CANDIDATES: frozenset[str] = frozenset({
+    "result", "res", "output", "summary", "agg", "table",
+    "ans", "answer", "df_out", "findings", "finding", "metrics", "stats", "data", "report",
+})
+_RESULT_SUFFIXES: tuple[str, ...] = (
+    "_df", "_result", "_summary", "_table", "_data", "_out", "_stats", "_metrics",
+)
+
+
+def _is_result_candidate(name: str) -> bool:
+    low = name.lower()
+    return low in _RESULT_CANDIDATES or any(low.endswith(sfx) for sfx in _RESULT_SUFFIXES)
+
+
+class _SandboxedCodeTransformer(ast.NodeTransformer):
+    """
+    Normalizes dataset-reading calls (e.g. `df = pd.read_csv(...)`,
+    `from pandas import read_csv`) into direct references to the already
+    loaded in-memory `df`, fixes common hallucinated pandas methods
+    (`.reset()` -> `.reset_index()`, `.to_dataframe()` -> `.to_frame()`),
+    and auto-wires RESULT if omitted.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.transformed: bool = False
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
+        if node.module in ("pandas", "pd") or (node.module and node.module.startswith("pandas.")):
+            old_len = len(node.names)
+            node.names = [
+                a for a in node.names if not (a.name in _READER_ATTR_NAMES or a.name.startswith("read_"))
+            ]
+            if len(node.names) != old_len:
+                self.transformed = True
+            if not node.names:
+                return None
+        return node
+
+    def visit_Call(self, node: ast.Call) -> Any:
+        is_reader = False
+        if isinstance(node.func, ast.Attribute):
+            if (
+                (
+                    isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in ("pd", "pandas")
+                    and node.func.attr.startswith("read_")
+                )
+                or node.func.attr in _READER_ATTR_NAMES
+            ):
+                is_reader = True
+            elif node.func.attr == "reset":
+                node.func.attr = "reset_index"
+                self.transformed = True
+            elif node.func.attr == "to_dataframe":
+                node.func.attr = "to_frame"
+                self.transformed = True
+            elif node.func.attr in ("drop_column", "drop_columns"):
+                node.func.attr = "drop"
+                if node.args and not any(k.arg == "columns" for k in node.keywords):
+                    col_arg = node.args.pop(0)
+                    if node.func.attr == "drop_column" and not isinstance(col_arg, ast.List):
+                        col_arg = ast.List(elts=[col_arg], ctx=ast.Load())
+                    node.keywords.append(ast.keyword(arg="columns", value=col_arg))
+                self.transformed = True
+            elif node.func.attr in ("rename_column", "rename_columns"):
+                node.func.attr = "rename"
+                if node.args and not any(k.arg == "columns" for k in node.keywords):
+                    col_arg = node.args.pop(0)
+                    node.keywords.append(ast.keyword(arg="columns", value=col_arg))
+                self.transformed = True
+            elif node.func.attr == "sort":
+                node.func.attr = "sort_values"
+                if node.args and not any(k.arg == "by" for k in node.keywords):
+                    by_arg = node.args.pop(0)
+                    node.keywords.append(ast.keyword(arg="by", value=by_arg))
+                self.transformed = True
+        elif isinstance(node.func, ast.Name) and (
+            node.func.id in _READER_ATTR_NAMES or node.func.id.startswith("read_")
+        ):
+            is_reader = True
+
+        if is_reader:
+            self.transformed = True
+            return ast.copy_location(ast.Name(id="df", ctx=ast.Load()), node)
+
+        return self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> Any:
+        if (
+            isinstance(node.value, ast.Name)
+            and node.value.id in ("pd", "pandas")
+            and (node.attr in _READER_ATTR_NAMES or node.attr.startswith("read_"))
+        ):
+            self.transformed = True
+            return ast.copy_location(
+                ast.Lambda(
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[],
+                        vararg=ast.arg(arg="args"),
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        kwarg=ast.arg(arg="kwargs"),
+                        defaults=[],
+                    ),
+                    body=ast.Name(id="df", ctx=ast.Load()),
+                ),
+                node,
+            )
+        return self.generic_visit(node)
+
+    def _handle_func_def(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> Any:
+        self.generic_visit(node)
+        assigns_df = _assigns_name_in_scope(node, "df")
+        params = {a.arg for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs}
+        if node.args.vararg:
+            params.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            params.add(node.args.kwarg.arg)
+        has_global_df = any(isinstance(stmt, ast.Global) and "df" in stmt.names for stmt in node.body)
+        if assigns_df and "df" not in params and not has_global_df:
+            node.body.insert(0, ast.Global(names=["df"]))
+            self.transformed = True
+        return node
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
+        return self._handle_func_def(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        return self._handle_func_def(node)
+
+
+_ReaderCallTransformer = _SandboxedCodeTransformer
+
+
+def _normalize_sandboxed_code(code: str) -> str:
+    """
+    Preprocess sandboxed code to safely normalize common LLM data-loading
+    constructs and method hallucinations into robust pandas expressions:
+    - `pd.read_csv(...)` -> `df`
+    - `df.reset()` -> `df.reset_index()`
+    - `s.to_dataframe()` -> `s.to_frame()`
+    - `df.drop_column(...)` -> `df.drop(columns=...)`
+    - `df.rename_column(...)` -> `df.rename(columns=...)`
+    - `df.sort(...)` -> `df.sort_values(...)`
+    - Auto-assigns `RESULT = candidate` when omitted.
+    """
+    if not code or not code.strip():
+        return code
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+
+    transformer = _SandboxedCodeTransformer()
+    new_tree = transformer.visit(tree)
+
+    # Check if RESULT is assigned anywhere in the AST
+    if not _assigns_name_in_scope(new_tree, RESULT_VAR_NAME) and new_tree.body:
+        last_stmt = new_tree.body[-1]
+        if isinstance(last_stmt, ast.Expr):
+            new_tree.body[-1] = ast.copy_location(
+                ast.Assign(
+                    targets=[ast.Name(id=RESULT_VAR_NAME, ctx=ast.Store())],
+                    value=last_stmt.value,
+                ),
+                last_stmt,
+            )
+            transformer.transformed = True
+        elif isinstance(last_stmt, ast.Assign) and last_stmt.targets:
+            target = last_stmt.targets[0]
+            if isinstance(target, ast.Name) and _is_result_candidate(target.id):
+                new_tree.body.append(
+                    ast.copy_location(
+                        ast.Assign(
+                            targets=[ast.Name(id=RESULT_VAR_NAME, ctx=ast.Store())],
+                            value=ast.Name(id=target.id, ctx=ast.Load()),
+                        ),
+                        last_stmt,
+                    )
+                )
+                transformer.transformed = True
+
+    if not transformer.transformed:
+        return code
+
+    ast.fix_missing_locations(new_tree)
+    try:
+        return ast.unparse(new_tree)
+    except Exception:
+        return code
+
+
 def _static_check(code: str) -> tuple[str, str] | None:
     """
     Validate `code` before any subprocess is spawned.
@@ -210,6 +448,7 @@ def _static_check(code: str) -> tuple[str, str] | None:
     RESULT assignment or an import outside the allowlist — in
     milliseconds, without burning a timeout cycle on a subprocess.
     """
+    code = _normalize_sandboxed_code(code)
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
@@ -519,6 +758,7 @@ class SubprocessSandbox(SandboxBackend):
         derived_dest: str | None = None,
     ) -> SandboxResult:
         t0 = time.perf_counter()
+        code = _normalize_sandboxed_code(code)
 
         static_error = _static_check(code)
         if static_error is not None:
@@ -582,6 +822,7 @@ class SubprocessSandbox(SandboxBackend):
                 ps_proc = None
 
             killed_as: str | None = None
+            last_rss_check = 0.0
             while True:
                 try:
                     proc.wait(timeout=_POLL_INTERVAL_S)
@@ -590,7 +831,8 @@ class SubprocessSandbox(SandboxBackend):
                     elapsed = time.perf_counter() - t0
                     if elapsed > timeout_s:
                         killed_as = "timeout"
-                    elif ps_proc is not None:
+                    elif ps_proc is not None and (elapsed - last_rss_check >= 1.0):
+                        last_rss_check = elapsed
                         try:
                             if _tree_rss_mb(ps_proc) > memory_limit_mb:
                                 killed_as = "memory"
@@ -605,10 +847,11 @@ class SubprocessSandbox(SandboxBackend):
             duration_ms = (time.perf_counter() - t0) * 1000
 
             if killed_as == "timeout":
+                tail = _stderr_tail(stderr_path)
                 return SandboxResult(
                     status="error", result=None, finding=None, stdout="",
                     error_type="timeout",
-                    traceback=None,
+                    traceback=f"Worker stderr (tail):\n{tail}" if tail else None,
                     hint=(
                         f"Execution exceeded {timeout_s:.0f}s. Avoid unbounded "
                         "loops; operate on df directly instead of iterating rows."
@@ -735,6 +978,7 @@ class DockerSandbox(SandboxBackend):
         derived_dest: str | None = None,
     ) -> SandboxResult:
         t0 = time.perf_counter()
+        code = _normalize_sandboxed_code(code)
 
         static_error = _static_check(code)
         if static_error is not None:
@@ -969,9 +1213,10 @@ def run_sandboxed(
     SANDBOX_MEMORY_MB (1024).
     """
     if timeout_s is None:
-        timeout_s = _env_number("SANDBOX_TIMEOUT_S", 45.0)
+        timeout_s = _env_number("SANDBOX_TIMEOUT_S", 60.0)
     if memory_limit_mb is None:
         memory_limit_mb = int(_env_number("SANDBOX_MEMORY_MB", 1024))
+    code = _normalize_sandboxed_code(code)
     active_backend = backend or get_sandbox_backend()
     if active_backend is None:
         return SandboxResult(

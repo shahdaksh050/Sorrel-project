@@ -96,6 +96,12 @@ JSON_FLATTEN_MAX_DEPTH = 3
 #: limit is a config change (DSA_MAX_ROWS), not a hunt through call sites.
 MAX_ROWS_DEFAULT = 1_000_000
 
+#: Default ceiling for data expanded from gzip/zip containers.  Keep this in
+#: lockstep with src.core.security.DEFAULT_MAX_UNCOMPRESSED_MB without importing
+#: that module (security imports SUPPORTED_EXTENSIONS from here).
+DEFAULT_MAX_UNCOMPRESSED_MB = 500
+_DECOMPRESS_CHUNK_BYTES = 1024 * 1024
+
 _FORMAT_BY_SUFFIX = {
     ".csv": "csv", ".tsv": "tsv", ".xlsx": "xlsx", ".xls": "xls",
     ".json": "json", ".jsonl": "jsonl", ".parquet": "parquet",
@@ -128,6 +134,15 @@ def get_max_rows() -> int:
         return max(1, int(os.getenv("DSA_MAX_ROWS", str(MAX_ROWS_DEFAULT))))
     except ValueError:
         return MAX_ROWS_DEFAULT
+
+
+def get_max_uncompressed_bytes() -> int:
+    """Return the configured cap for bytes expanded from an archive."""
+    try:
+        mb = int(os.getenv("MAX_UNCOMPRESSED_MB", str(DEFAULT_MAX_UNCOMPRESSED_MB)))
+    except ValueError:
+        mb = DEFAULT_MAX_UNCOMPRESSED_MB
+    return max(1, mb) * 1024 * 1024
 
 
 @dataclass
@@ -228,19 +243,52 @@ def _find_duplicate_headers(text_sample: str, delimiter: str) -> list[str]:
 
 def _decompress(raw: bytes, compression: str, filename: str) -> bytes:
     """Unwrap gzip/zip so the rest of _read_delimited never knows the
-    input was compressed — same encoding/delimiter detection either way."""
+    input was compressed — same encoding/delimiter detection either way.
+
+    Reads are deliberately streamed and capped.  ``gzip.decompress`` and
+    ``ZipFile.read`` allocate based on attacker-controlled expanded content,
+    so validating only the compressed upload size is insufficient.
+    """
+    limit = get_max_uncompressed_bytes()
+
+    def _read_bounded(stream: Any) -> bytes:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = stream.read(min(_DECOMPRESS_CHUNK_BYTES, limit - total + 1))
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > limit:
+                raise DatasetReadError(
+                    f"'{filename}' expands beyond the configured "
+                    f"{limit // 1_048_576} MB limit."
+                )
+            chunks.append(chunk)
+
     if compression == "gzip":
         try:
-            return gzip.decompress(raw)
-        except OSError as exc:
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gzip_stream:
+                return _read_bounded(gzip_stream)
+        except (OSError, EOFError) as exc:
             raise DatasetReadError(f"'{filename}' could not be gunzipped: {exc}") from exc
     if compression == "zip":
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-                members = [n for n in zf.namelist() if not n.endswith("/")]
+                members = [info for info in zf.infolist() if not info.is_dir()]
                 if not members:
                     raise DatasetReadError(f"'{filename}' zip archive contains no files.")
-                return zf.read(members[0])
+                if len(members) != 1:
+                    raise DatasetReadError(
+                        f"'{filename}' zip archive must contain exactly one dataset file."
+                    )
+                if members[0].file_size > limit:
+                    raise DatasetReadError(
+                        f"'{filename}' expands beyond the configured "
+                        f"{limit // 1_048_576} MB limit."
+                    )
+                with zf.open(members[0]) as zip_stream:
+                    return _read_bounded(zip_stream)
         except zipfile.BadZipFile as exc:
             raise DatasetReadError(f"'{filename}' is not a valid zip archive: {exc}") from exc
     return raw

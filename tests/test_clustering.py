@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.tools.clustering import PCA_POINT_CAP, ClusterDataTool
+from src.tools.clustering import PCA_POINT_CAP, ClusterDataTool, _format_metric_value
 
 RNG = np.random.default_rng(42)
 
@@ -63,7 +63,10 @@ class TestClusterDataTool:
         out = ClusterDataTool().run(file_path=blobs_csv, output_dir=str(tmp_path / "m")).output
         points = out["pca_points"]
         assert 0 < len(points) <= PCA_POINT_CAP
-        assert all({"x", "y", "cluster"} <= set(p.keys()) for p in points)
+        assert "cluster_labels" in out
+        assert "cluster_short_labels" in out
+        assert all({"x", "y", "cluster", "cluster_label", "cluster_short_label"} <= set(p.keys()) for p in points)
+        assert all("Cluster " in p["cluster_label"] for p in points)
 
     def test_model_saved(self, blobs_csv: str, tmp_path: Path) -> None:
         out = ClusterDataTool().run(file_path=blobs_csv, output_dir=str(tmp_path / "m")).output
@@ -87,3 +90,41 @@ class TestClusterDataTool:
         b = ClusterDataTool().run(file_path=blobs_csv, output_dir=str(tmp_path / "b")).output
         assert a["silhouette_score"] == b["silhouette_score"]
         assert a["cluster_sizes"] == b["cluster_sizes"]
+
+    def test_format_metric_value(self) -> None:
+        assert _format_metric_value(48500.0) == "48,500"
+        assert _format_metric_value(31400.0) == "31,400"
+        assert _format_metric_value(1201.1968) == "1,201.2"
+        assert _format_metric_value(17.7356) == "17.74"
+        assert _format_metric_value(2.9167) == "2.92"
+        assert _format_metric_value(0.0034) == "0.0034"
+        assert _format_metric_value(0.0) == "0"
+        assert _format_metric_value(None) == "n/a"
+        assert "e+" not in _format_metric_value(48500.0)
+        assert "e+" not in _format_metric_value(1234567.89)
+
+    def test_weak_clustering_gating(self) -> None:
+        tool = ClusterDataTool()
+        output = {
+            "n_clusters": 3,
+            "silhouette_score": 0.304,
+            "separation_quality": "weak",
+            "cluster_sizes": {"cluster_0": 100, "cluster_1": 50, "cluster_2": 50},
+            "cluster_profiles": {
+                "cluster_0": {"price": 48500.0},
+                "cluster_1": {"price": 20000.0},
+                "cluster_2": {"price": 15000.0},
+            },
+            "features_used": ["price"],
+        }
+        findings = tool.findings(output, profile=None, metadata=None)
+        assert len(findings) == 2
+        seg_finding = next(f for f in findings if f.finding_id == "cluster_data_segments")
+        prof_finding = next(f for f in findings if f.finding_id == "cluster_data_cluster_0_profile")
+
+        assert seg_finding.effect_kind == "silhouette"
+        assert seg_finding.confidence <= 0.25
+        assert prof_finding.confidence <= 0.25
+        assert "e+" not in prof_finding.headline
+        assert "48,500" in prof_finding.headline
+        assert prof_finding.importance <= 0.35

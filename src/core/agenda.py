@@ -99,7 +99,16 @@ def build_agenda(
         for dim in dimensions[:6]:
             if arm is not None and dim.name == arm.name:
                 continue
-            value = 0.7 if measure.unit_hint == "currency" else 0.5
+            # Higher expected value for prominent categories and key measures:
+            # Comparing a core measure across 2-10 clean categories (e.g. brand,
+            # platform, category) is the primary story of tabular business data.
+            base_val = 0.75 if measure.unit_hint == "currency" else 0.60
+            if 2 <= dim.nunique <= 10:
+                base_val += 0.10
+            dim_lower = dim.name.lower()
+            if any(term in dim_lower for term in ("brand", "platform", "category", "type", "segment", "tier", "region", "group")):
+                base_val += 0.05
+            value = round(min(0.95, base_val), 2)
             questions.append(Question(
                 text=(
                     f"Does '{measure.name}' (total and per-row average) differ meaningfully by '{dim.name}'?"

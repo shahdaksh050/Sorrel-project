@@ -4,7 +4,7 @@ Agentic Data Analysis System — Entry Point.
 Usage:
     python main.py --dataset path/to/data.csv
     python main.py --dataset path/to/data.csv --provider anthropic --target churn
-    python main.py --dataset path/to/data.csv --no-rlm --max-iterations 5
+    python main.py --dataset path/to/data.csv --max-iterations 5
 """
 from __future__ import annotations
 
@@ -65,7 +65,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--min-iterations", type=int, default=None, help="Min reasoning-execution cycles before completion.")
     parser.add_argument("--max-iterations", type=int, default=15, help="Max reasoning-execution cycles.")
-    parser.add_argument("--no-rlm", action="store_true", help="Disable recursive decomposition (flat loop).")
     parser.add_argument(
         "--no-llm",
         action="store_true",
@@ -172,8 +171,6 @@ def main() -> None:
         os.environ["MIN_ITERATIONS"] = str(args.min_iterations)
     os.environ["MAX_ITERATIONS"] = str(args.max_iterations)
     os.environ["OUTPUT_DIR"] = args.output_dir
-    if args.no_rlm:
-        os.environ["ENABLE_RLM_INFERENCE"] = "false"
     if args.target:
         os.environ["TARGET_COLUMN_HINT"] = args.target
     if args.objective:
@@ -184,7 +181,6 @@ def main() -> None:
     agent = AgentController(
         min_iterations=args.min_iterations,
         max_iterations=args.max_iterations,
-        enable_rlm=not args.no_rlm,
         memory_persist_path=args.persist,
         use_llm=not args.no_llm,
         use_ml=not args.no_ml,

@@ -376,7 +376,7 @@ def validate_adversarial_critique(
         "reject_causal_claim" if "reject" in rec else "conditional_interpretation"
     )
 
-    warnings: list[str] = []
+    warnings: list[str] = list(_bounded_strings(reply.get("warnings")))
     if confounders:
         warnings.append(
             f"Adversarial review flagged plausible unmeasured confounders: {', '.join(confounders)}."

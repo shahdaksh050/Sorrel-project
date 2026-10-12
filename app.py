@@ -16,6 +16,7 @@ Key design points
 from __future__ import annotations
 
 import html
+import logging
 import os
 import sys
 import tempfile
@@ -26,10 +27,22 @@ from typing import Any, cast
 
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from src.core.io import read_any_bytes
 from src.core.run_config import RunConfig
 from src.core.security import ALLOWED_EXTENSIONS
+
+
+class _SuppressStaleFragmentFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "does not exist any more" not in record.getMessage()
+
+
+logging.getLogger("streamlit").addFilter(_SuppressStaleFragmentFilter())
+logging.getLogger("streamlit.runtime.fragment").addFilter(_SuppressStaleFragmentFilter())
 
 # ── Project root on sys.path ─────────────────────────────────────────────────
 ROOT = Path(__file__).parent
@@ -284,7 +297,10 @@ def _fold_run(run: ActiveRun) -> None:
     st.session_state["analysis_done"] = True
 
 
-@st.fragment(run_every="1s")
+_run_poll_interval = "1s" if st.session_state.get("_run") is not None else None
+
+
+@st.fragment(run_every=_run_poll_interval)
 def _run_progress() -> None:
     """Poll the worker: show progress and Stop, then fold the result in and rerun."""
     run = _active_run()
@@ -297,7 +313,7 @@ def _run_progress() -> None:
             _reset_pipeline()
         else:
             _fold_run(run)
-        st.rerun()
+        st.rerun(scope="app")
 
     if snap.discard:
         sub = "Cancelling. Waiting for the step in progress to finish."
@@ -307,7 +323,7 @@ def _run_progress() -> None:
         sub = snap.note or "Usually one to three minutes, depending on the dataset and the model."
     _elapsed = int(time.monotonic() - st.session_state.get("_run_started", time.monotonic()))
     _active = next((n for n, status, _ in snap.stage_log if status == "active"), None)
-    _where = f"Step {_active} of 7. " if _active else ""
+    _where = f"Step {_active} of {len(STAGE_DEFS)}. " if _active else ""
     st.markdown(
         f'<div class="run-banner">Running the analysis<span class="sub">'
         f"{html.escape(_where)}Elapsed {_elapsed // 60}:{_elapsed % 60:02d}. {html.escape(sub)}</span></div>",
@@ -425,7 +441,11 @@ def _join_review(uploads: list[Any]) -> dict[int, dict[str, Any]]:
         tables: list[tuple[str, pd.DataFrame]] = []
         for i, u in enumerate(uploads):
             try:
-                tables.append((Path(u.name).stem, read_any_bytes(u.getvalue(), u.name)[0]))
+                from src.core.security import validate_upload
+
+                raw = u.getvalue()
+                safe_name = validate_upload(u.name, raw)
+                tables.append((Path(safe_name).stem, read_any_bytes(raw, safe_name)[0]))
                 idx.append(i)
             except Exception:
                 continue   # unreadable files are reported at run time
@@ -535,7 +555,7 @@ with _bar_theme:
         on_change=_on_theme_change,
     )
 
-# Once there is a file or a run, the header, the readout and the seven steps sit on one warm band.
+# Once there is a file or a run, the header, the readout and the five steps sit on one warm band.
 _hero_box = st.container(key="hero_band") if _workspace_state else st.container()
 # Before a run the inputs are the page's one task; once there is a run they tuck away.
 _inputs_box = (
@@ -902,12 +922,6 @@ with st.sidebar:
         "Thorough": (1, 5),
         "Deep":     (2, 15),
     }[thoroughness]
-    enable_rlm = st.toggle(
-        "Break hard questions into smaller ones",
-        value=False,
-        help="Splits a complex question into smaller sub-questions it can tackle one at a time. Turn on for deep exploration; keep off for the fastest runtime.",
-    )
-
     # ── Privacy and code execution ────────────────────────────────────────────
     # Operator controls (AGENTS.md "Operator controls"). On a shared deployment
     # they come from the server's environment and are shown read-only: a
@@ -1007,7 +1021,7 @@ with _inputs_box:
 # ══════════════════════════════════════════════════════════════════════════════
 with _hero_box:
     # Header: the title on the left, the two view buttons on the right. Under it, in order: the readout
-    # of the run, then the seven steps as a vertical list with the 3D plate beside it.
+    # of the run, then the five steps as a vertical list with the 3D plate beside it.
     if _workspace_state:
         hero_text, hero_actions = st.columns([0.68, 0.32], gap="large", vertical_alignment="center")
     else:
@@ -1046,7 +1060,7 @@ with _hero_box:
                 st.session_state["show_cinematic_hero"] = not _hero_cinema_on
                 st.rerun()
 
-    # The datum line carries the run's readings, the stepper the seven steps and the plate the run itself;
+    # The datum line carries the run's readings, the stepper the five steps and the plate the run itself;
     # all are filled in further down this same script pass, so they show the run as it is now.
     datum_slot = st.empty()
     if _workspace_state:
@@ -1214,7 +1228,6 @@ if (run_clicked or _sample_run) and st.session_state.get("_run") is None:
             target=run_target,
             min_iterations=min_iter,
             max_iterations=max_iter,
-            enable_rlm=enable_rlm,
             use_llm=run_llm,
             use_ml=use_ml,
             run_config=run_config,
@@ -1235,8 +1248,9 @@ if (run_clicked or _sample_run) and st.session_state.get("_run") is None:
     # reflects the active run; the fragment below takes over from here.
     st.rerun()
 
-if st.session_state.get("_run") is not None:
-    _run_progress()
+# Execute polling fragment unconditionally: when an active run exists it polls every 1s;
+# when no run is active it runs with run_every=None and returns immediately, clearing the browser timer.
+_run_progress()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1264,7 +1278,7 @@ _status_str = (
     "Running" if _run_active else
     "Stopped early" if (st.session_state.get("final_report") or {}).get("stopped") else
     "Done" if st.session_state.get("analysis_done") else
-    f"Working on step {_active_step} of 7" if _active_step else
+    f"Working on step {_active_step} of {len(STAGE_DEFS)}" if _active_step else
     "Ready"
 )
 
@@ -1398,6 +1412,6 @@ if (preview_df is None
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown(
     '<div class="site-foot">Sorrel is the working name of DSA Agent, a final-year project: '
-    "a seven-stage data analysis assistant that checks its own findings.</div>",
+    "a five-stage data analysis assistant that checks its own findings.</div>",
     unsafe_allow_html=True,
 )

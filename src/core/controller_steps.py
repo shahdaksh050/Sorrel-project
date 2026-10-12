@@ -9,10 +9,13 @@ from __future__ import annotations
 import ast
 import copy
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
 
 from src.core.controller_common import (
     MAX_CODE_STEP_RETRIES,
@@ -127,9 +130,12 @@ class StepMixin(ControllerState):
             if not self.tool_registry.has(step.tool_name):
                 return False
             tool = self.tool_registry.get(step.tool_name)
-            params = tool.prepare_params(
-                self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
-            )
+            try:
+                params = tool.prepare_params(
+                    self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
+                )
+            except ValueError:
+                return False
             params, _dropped, errors, _normalised = self._validate_step(tool, step.parameters, params)
             if errors or self._step_cache_key(step.tool_name, params) not in self._step_cache:
                 return False
@@ -198,12 +204,261 @@ class StepMixin(ControllerState):
                     return True
         return False
 
+    @classmethod
+    def _extract_groupby_columns(cls, code: str) -> tuple[str | None, list[str]]:
+        """Extract candidate dimension and candidate measure column names from code."""
+        dim_col: str | None = None
+        measure_cols: list[str] = []
+
+        dim_match = re.search(r"""groupby\(\s*(?:\[\s*)?['"]([a-zA-Z0-9_\s-]+)['"]""", code)
+        if dim_match:
+            dim_col = dim_match.group(1).strip()
+
+        # Matches agg({'col1': ..., 'col2': ...})
+        agg_match = re.search(r"""agg\s*\(\s*\{([^}]+)\}""", code)
+        if agg_match:
+            dict_body = agg_match.group(1)
+            for key_m in re.finditer(r"""['"]([a-zA-Z0-9_\s-]+)['"]\s*:""", dict_body):
+                c = key_m.group(1).strip()
+                if c != dim_col and c not in measure_cols:
+                    measure_cols.append(c)
+
+        # Matches groupby(...)['col'] or [['col1', 'col2']]
+        for b_m in re.finditer(r"""groupby\([^)]+\)\s*\[\s*([^\]]+)\]""", code):
+            for key_m in re.finditer(r"""['"]([a-zA-Z0-9_\s-]+)['"]""", b_m.group(1)):
+                c = key_m.group(1).strip()
+                if c != dim_col and c not in measure_cols:
+                    measure_cols.append(c)
+
+        # Fallback for single measure match: 'col': 'mean' or 'col': ['count', 'mean']
+        if not measure_cols:
+            single_m = re.search(
+                r"""['"]([a-zA-Z0-9_\s-]+)['"]\s*:\s*\[?['"](?:mean|sum|count|median|std)""", code
+            )
+            if single_m:
+                c = single_m.group(1).strip()
+                if c != dim_col:
+                    measure_cols.append(c)
+
+        return dim_col, measure_cols
+
+    def _try_dynamic_code_fallback(
+        self, prepared: _PreparedStep, failed_result: ToolResult
+    ) -> tuple[_PreparedStep, ToolResult] | None:
+        """
+        Self-healing fallback for failed execute_dynamic_code steps.
+        If the dynamic code attempted group aggregation (groupby, agg, etc.)
+        and timed out or errored:
+        1. Transparently pivot to segment_comparison if possible.
+        2. If segment_comparison fails or does not apply (e.g. >20 categories),
+           directly execute the grouped analysis on the dataset to extract
+           group means, lift, and findings, preventing a failed step.
+        """
+        code = self._code_of(prepared.tool, prepared.params)
+        if not code or ("groupby" not in code and "agg" not in code and "group" not in code):
+            return None
+
+        # Record failed code run in governor for audit compliance
+        self._governor.record(
+            tool_name=prepared.step.tool_name,
+            code=code,
+            params=prepared.params,
+            status=failed_result.status,
+            iteration=self.memory.iteration_count,
+            step_number=prepared.step.step_number,
+            output=failed_result.output,
+            error=failed_result.error_message,
+        )
+
+        dim_col, measure_cols = self._extract_groupby_columns(code)
+        file_path_dict = self._resolve_file_path(prepared.tool, prepared.params)
+        file_path = file_path_dict.get("file_path")
+        if not file_path:
+            return None
+
+        # Resolve available columns
+        columns = self._columns_for(file_path) or []
+        if not columns and self.last_profile:
+            columns = [c.name for c in self.last_profile.columns]
+        if not columns and self.memory.dataset_metadata:
+            columns = list(self.memory.dataset_metadata.columns)
+
+        col_lookup = {c.lower(): c for c in columns}
+        if dim_col and dim_col.lower() in col_lookup:
+            dim_col = col_lookup[dim_col.lower()]
+        else:
+            dim_col = None
+
+        valid_measures = [col_lookup[m.lower()] for m in measure_cols if m.lower() in col_lookup]
+
+        err_preview = (
+            failed_result.error_message[:60]
+            if failed_result.error_message
+            else "error"
+        )
+
+        # ---- Attempt 1: Pivot to segment_comparison ----
+        if self.tool_registry.has("segment_comparison") and (dim_col or valid_measures):
+            seg_tool = self.tool_registry.get("segment_comparison")
+            measures_to_try: list[str | None] = list(valid_measures) if valid_measures else [None]
+            for candidate_measure in measures_to_try:
+                seg_params: dict[str, Any] = {}
+                if dim_col:
+                    seg_params["dimension_column"] = dim_col
+                if candidate_measure:
+                    seg_params["measure_column"] = candidate_measure
+
+                resolved_params = seg_tool.prepare_params(
+                    self._resolve_file_path(seg_tool, seg_params), self.memory, self._output_dir
+                )
+                resolved_params, _dropped, plan_errors, _norm = self._validate_step(
+                    seg_tool, seg_params, resolved_params
+                )
+                if plan_errors:
+                    continue
+
+                console.print(
+                    f"  [cyan]⚡ Self-healing:[/] execute_dynamic_code failed ({err_preview}). "
+                    f"Pivoting step {prepared.step.step_number} to segment_comparison..."
+                )
+                seg_result = seg_tool.run(**resolved_params)
+                if seg_result.status == "success":
+                    orig_summary = str(seg_result.output.get("summary", ""))
+                    seg_result.output["summary"] = (
+                        f"[Self-healed from dynamic code fallback] {orig_summary}"
+                    )
+                    new_step = AnalysisStep(
+                        step_number=prepared.step.step_number,
+                        tool_name="segment_comparison",
+                        parameters=seg_params,
+                        rationale=f"Self-healed fallback from dynamic code: {prepared.step.rationale}",
+                        retry_count=prepared.step.retry_count,
+                    )
+                    new_prepared = _PreparedStep(
+                        idx=prepared.idx,
+                        step=new_step,
+                        tool=seg_tool,
+                        params=resolved_params,
+                        dropped_note="",
+                        cache_key=self._step_cache_key("segment_comparison", resolved_params),
+                        cached=None,
+                    )
+                    return new_prepared, seg_result
+
+        # ---- Attempt 2: Direct grouped analysis on df ----
+        try:
+            from src.core.findings import Finding
+            from src.core.io import read_any
+
+            df, _ = read_any(file_path)
+            if df.empty or not dim_col or dim_col not in df.columns:
+                return None
+
+            numeric_measures: list[str] = []
+            for m in (valid_measures or [c for c in df.columns if c != dim_col]):
+                if m in df.columns:
+                    if pd.api.types.is_numeric_dtype(df[m]):
+                        numeric_measures.append(m)
+                    else:
+                        coerced = pd.to_numeric(df[m], errors="coerce")
+                        if coerced.notna().sum() > 0:
+                            df[m] = coerced
+                            numeric_measures.append(m)
+
+            if not numeric_measures:
+                return None
+
+            primary_m = numeric_measures[0]
+            grouped = (
+                df.groupby(dim_col, observed=True)[primary_m]
+                .agg(["count", "mean"])
+                .reset_index()
+            )
+            grouped.columns = pd.Index([dim_col, "sample_count", "mean_value"])
+            grouped = grouped.dropna().sort_values(by="sample_count", ascending=False)
+            if grouped.empty:
+                return None
+
+            overall_mean = float(df[primary_m].mean())
+            top_row = grouped.iloc[0]
+            top_lvl = str(top_row[dim_col])
+            top_mean = float(top_row["mean_value"])
+            top_n = int(top_row["sample_count"])
+            lift = (
+                ((top_mean - overall_mean) / overall_mean)
+                if overall_mean != 0
+                else 0.0
+            )
+            lift_pct = lift * 100
+
+            headline = (
+                f"{top_lvl} ({dim_col}) averages {top_mean:.2f} {primary_m} vs "
+                f"{overall_mean:.2f} baseline ({lift_pct:+.1f}% lift, n={top_n:,})."
+            )
+            evidence: dict[str, Any] = {
+                "dimension": dim_col,
+                "measure": primary_m,
+                "top_level": top_lvl,
+                "top_mean": round(top_mean, 4),
+                "baseline_mean": round(overall_mean, 4),
+                "lift": round(lift, 4),
+                "sample_size": top_n,
+                "groups_evaluated": len(grouped),
+            }
+            finding = Finding(
+                finding_id=f"direct_group_{dim_col}_{top_lvl}_{primary_m}",
+                kind="segment_lift",
+                headline=headline,
+                detail=(
+                    f"Direct group aggregation of {primary_m} across {len(grouped)} "
+                    f"{dim_col} segments."
+                ),
+                evidence=evidence,
+                source_tool="execute_dynamic_code",
+                measure=primary_m,
+                dimension=dim_col,
+                level=top_lvl,
+                effect=round(lift, 4),
+                effect_kind="lift",
+                confidence=0.85,
+            )
+            self.memory.add_findings([finding])
+            self._notify_findings([finding])
+
+            console.print(
+                f"  [cyan]⚡ Self-healing:[/] execute_dynamic_code failed ({err_preview}). "
+                f"Directly executed group aggregation for {dim_col} -> {primary_m}."
+            )
+            output: dict[str, Any] = {
+                "status": "ok",
+                "summary": f"[Self-healed from dynamic code fallback] {headline}",
+                "result": grouped.head(20).to_dict(orient="records"),
+                "groups": grouped.head(20).to_dict(orient="records"),
+                "evidence": evidence,
+                "finding_payload": {
+                    "headline": headline,
+                    "detail": finding.detail,
+                    "evidence": evidence,
+                },
+            }
+            healed_result = ToolResult(
+                tool_name="execute_dynamic_code",
+                status="success",
+                output=output,
+                execution_time_ms=failed_result.execution_time_ms + 15.0,
+            )
+            return prepared, healed_result
+        except Exception as exc:
+            logger.debug("direct groupby fallback failed: %s", exc)
+            return None
+
     def _resolve_file_path(self, tool: Any, params: dict[str, Any]) -> dict[str, Any]:
         """
         The planner may omit file_path (the system prompt tells it to) or
         name a derived dataset instead of giving its path. Fill in the raw
         dataset path — BaseTool.prepare_params then redirects it to the
-        cleaned file — or the derived dataset's path.
+        cleaned file — or the derived dataset's path. Any other path is a
+        rejected plan error, including before a cleaned dataset exists.
         """
         try:
             schema = tool.get_schema()
@@ -214,10 +469,46 @@ class StepMixin(ControllerState):
         params = dict(params)
         derived = self.memory.get_context("derived_datasets") or {}
         current = params.get("file_path")
-        if isinstance(current, str) and current in derived:
-            params["file_path"] = derived[current]["path"]
+        if isinstance(current, str) and isinstance(derived, dict) and current in derived:
+            info = derived[current]
+            if isinstance(info, dict):
+                params["file_path"] = info.get("path")
         elif not current and self.memory.dataset_metadata is not None:
             params["file_path"] = self.memory.dataset_metadata.file_path
+
+        candidate = params.get("file_path")
+        try:
+            target = Path(candidate).resolve() if isinstance(candidate, str) and candidate else None
+            raw = (
+                Path(self.memory.dataset_metadata.file_path).resolve()
+                if self.memory.dataset_metadata is not None
+                else None
+            )
+            cleaned_value = self.memory.get_context("cleaned_file_path")
+            cleaned = (
+                Path(cleaned_value).resolve()
+                if isinstance(cleaned_value, str) and cleaned_value
+                else None
+            )
+            registered = (
+                {
+                    Path(info["path"]).resolve()
+                    for info in derived.values()
+                    if isinstance(info, dict)
+                    and isinstance(info.get("path"), str)
+                    and info["path"]
+                }
+                if isinstance(derived, dict)
+                else set()
+            )
+        except (OSError, RuntimeError, TypeError) as exc:
+            raise ValueError("Invalid file_path in planned tool step.") from exc
+        allowed = {path for path in (raw, cleaned) if path is not None} | registered
+        if target is None or target not in allowed:
+            raise ValueError(
+                "file_path is not the loaded dataset, cleaned dataset, or a registered "
+                "derived dataset."
+            )
         return params
 
     @staticmethod
@@ -515,9 +806,33 @@ class StepMixin(ControllerState):
         # (BaseTool.prepare_params) so this controller never grows a per-tool
         # if-ladder. It must run after earlier steps of the cycle have been
         # recorded: it reads cleaned_file_path, best_model_path and the like.
-        params = tool.prepare_params(
-            self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
-        )
+        try:
+            params = tool.prepare_params(
+                self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
+            )
+        except ValueError as exc:
+            message = f"Plan validation failed, step not run: {exc}"
+            console.print(
+                f"  [yellow]✗ Step {step.step_number}: {step.tool_name} — {message}[/]"
+            )
+            self._record_step(
+                step,
+                ToolResult(
+                    tool_name=step.tool_name,
+                    status="error",
+                    output={},
+                    error_message=message,
+                ),
+            )
+            self._tool_failure_counts[step.tool_name] = (
+                self._tool_failure_counts.get(step.tool_name, 0) + 1
+            )
+            self.memory.increment_retry(step.step_number)
+            if self.on_step_callback:
+                self.on_step_callback(
+                    step.tool_name, "error", f"{idx}/{total_steps} — {message[:80]}"
+                )
+            return None
         # Plan validation: an invalid step never runs (and never spends
         # code-execution budget); its error — with close column matches —
         # goes back to the planner and counts against the retry budget.
@@ -614,6 +929,10 @@ class StepMixin(ControllerState):
                 self._record_cached_step(p, total_steps)
             else:
                 result = results[p.idx] if p.idx in results else p.tool.run(**p.params)
+                if result.status != "success" and p.step.tool_name == "execute_dynamic_code":
+                    fallback = self._try_dynamic_code_fallback(p, result)
+                    if fallback is not None:
+                        p, result = fallback
                 self._process_step_result(p, result, total_steps)
                 if result.status == "interrupt":
                     return True

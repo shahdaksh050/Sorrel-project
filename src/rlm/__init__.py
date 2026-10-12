@@ -1,1 +1,1 @@
-"""Recursive inference layer — task decomposition and context offloading."""
+"""Inference layer with provider invocation, usage accounting, and tracing."""

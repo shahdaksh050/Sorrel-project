@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.core.memory import DatasetMetadata, MemorySystem
 from src.tools.ml_pipeline import (
     SKEW_TREATMENT_THRESHOLD,
     EvaluateModelTool,
@@ -16,6 +17,20 @@ from src.tools.ml_pipeline import (
 )
 
 RNG = np.random.default_rng(42)
+
+
+def _memory_with_dataset(path: str = "x.csv") -> MemorySystem:
+    memory = MemorySystem()
+    memory.dataset_metadata = DatasetMetadata(
+        file_path=path,
+        row_count=1,
+        column_count=1,
+        columns={"label": "int64"},
+        missing_values={"label": 0},
+        numerical_cols=["label"],
+        categorical_cols=[],
+    )
+    return memory
 
 
 def _make_df(n: int = 200) -> pd.DataFrame:
@@ -224,9 +239,7 @@ class TestSplitStrategy:
     splitter must actually hear about it instead of shuffling regardless."""
 
     def test_prepare_params_wires_time_series_from_profile(self) -> None:
-        from src.core.memory import MemorySystem
-
-        memory = MemorySystem()
+        memory = _memory_with_dataset()
         memory.set_context(
             "data_profile",
             {"is_time_series": True, "datetime_cols": ["signup_date"], "panel_group_cols": []},
@@ -238,9 +251,7 @@ class TestSplitStrategy:
         assert params["time_column"] == "signup_date"
 
     def test_prepare_params_wires_panel_from_profile(self) -> None:
-        from src.core.memory import MemorySystem
-
-        memory = MemorySystem()
+        memory = _memory_with_dataset()
         memory.set_context(
             "data_profile",
             {"is_time_series": False, "datetime_cols": [], "panel_group_cols": ["customer_id"]},
@@ -252,9 +263,7 @@ class TestSplitStrategy:
         assert params["group_column"] == "customer_id"
 
     def test_prepare_params_leaves_random_when_planner_chose_it(self) -> None:
-        from src.core.memory import MemorySystem
-
-        memory = MemorySystem()
+        memory = _memory_with_dataset()
         memory.set_context(
             "data_profile",
             {"is_time_series": True, "datetime_cols": ["signup_date"], "panel_group_cols": []},
@@ -350,9 +359,7 @@ class TestSplitStrategy:
         assert eval_result.output["accuracy"] == train.output["models_trained"]["logistic_regression"]["test_metrics"]["accuracy"]
 
     def test_evaluate_prepare_params_pulls_persisted_split_strategy(self) -> None:
-        from src.core.memory import MemorySystem
-
-        memory = MemorySystem()
+        memory = _memory_with_dataset()
         memory.set_context("split_strategy", "panel")
         memory.set_context("split_time_column", None)
         memory.set_context("split_group_column", "entity_id")

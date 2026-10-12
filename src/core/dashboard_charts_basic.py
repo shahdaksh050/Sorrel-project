@@ -5,6 +5,7 @@ Split out of dashboard.py; `src.core.dashboard` re-exports every name here.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
@@ -683,24 +684,130 @@ def _cluster_chart(cluster_output: dict[str, Any] | None) -> ChartSpec | None:
         return None
     n = cluster_output.get("n_clusters", "?")
     sil = cluster_output.get("silhouette_score", "?")
+
+    # PCA explained variance on axis labels if available
+    exp_var = cluster_output.get("pca_explained_variance")
+    x_title = "PC 1"
+    y_title = "PC 2"
+    if isinstance(exp_var, (list, tuple)) and len(exp_var) >= 2:
+        try:
+            x_title = f"PC 1 ({float(exp_var[0]) * 100:.0f}% var)"
+            y_title = f"PC 2 ({float(exp_var[1]) * 100:.0f}% var)"
+        except (ValueError, TypeError):
+            pass
+
+    # Ensure clean, human-readable labels for each cluster
+    label_map = dict(cluster_output.get("cluster_labels") or {})
+    short_map = dict(cluster_output.get("cluster_short_labels") or {})
+    if not label_map:
+        sizes = cluster_output.get("cluster_sizes") or {}
+        total = sum(sizes.values()) if sizes else len(points)
+        for p in points:
+            cid = str(p.get("cluster", ""))
+            if cid and cid not in label_map:
+                m = re.search(r"\d+", cid)
+                c_num = int(m.group()) + 1 if m else 1
+                c_cnt = sizes.get(cid)
+                sh_str = f", {c_cnt / total * 100:.0f}%" if c_cnt and total else ""
+                n_str = f" (n={c_cnt:,}{sh_str})" if c_cnt else ""
+                label_map[cid] = f"Cluster {c_num}{n_str}"
+                short_map[cid] = f"Cluster {c_num}"
+
+    clean_points = []
+    for p in points:
+        pt = dict(p)
+        cid = str(pt.get("cluster", ""))
+        pt["cluster_label"] = pt.get("cluster_label") or label_map.get(cid) or f"Cluster {cid}"
+        pt["cluster_short_label"] = pt.get("cluster_short_label") or short_map.get(cid) or f"Cluster {cid}"
+        clean_points.append(pt)
+
     return ChartSpec(
         chart_id="cluster_scatter",
         title=f"Segments — {n} clusters (silhouette {sil})",
-        description="Rows projected to 2-D (PCA), colored by discovered cluster. "
+        description="Rows projected to 2-D (PCA), colored and labeled by discovered cluster. "
                     "Tight, well-separated colors mean meaningful segments.",
         spec={
-            "data": {"values": points},
-            "mark": {"type": "circle", "opacity": 0.6, "size": 40},
+            "data": {"values": clean_points},
             "height": 300,
-            "encoding": {
-                "x": {"field": "x", "type": "quantitative", "title": "PC 1",
-                      "scale": {"zero": False}},
-                "y": {"field": "y", "type": "quantitative", "title": "PC 2",
-                      "scale": {"zero": False}},
-                "color": {"field": "cluster", "type": "nominal",
-                          "legend": {"orient": "top", "title": None}},
-                "tooltip": [{"field": "cluster"}],
-            },
+            "layer": [
+                {
+                    "mark": {"type": "circle", "opacity": 0.55, "size": 45},
+                    "encoding": {
+                        "x": {
+                            "field": "x",
+                            "type": "quantitative",
+                            "title": x_title,
+                            "scale": {"zero": False},
+                        },
+                        "y": {
+                            "field": "y",
+                            "type": "quantitative",
+                            "title": y_title,
+                            "scale": {"zero": False},
+                        },
+                        "color": {
+                            "field": "cluster_label",
+                            "type": "nominal",
+                            "legend": {
+                                "orient": "top",
+                                "title": "Discovered Segments",
+                                "labelLimit": 340,
+                            },
+                        },
+                        "tooltip": [
+                            {"field": "cluster_label", "title": "Segment"},
+                            {"field": "cluster", "title": "Cluster ID"},
+                            {"field": "x", "title": "PC 1", "format": ".2f"},
+                            {"field": "y", "title": "PC 2", "format": ".2f"},
+                        ],
+                    },
+                },
+                {
+                    "transform": [
+                        {
+                            "aggregate": [
+                                {"op": "mean", "field": "x", "as": "cx"},
+                                {"op": "mean", "field": "y", "as": "cy"},
+                            ],
+                            "groupby": ["cluster_label", "cluster_short_label"],
+                        }
+                    ],
+                    "mark": {
+                        "type": "point",
+                        "size": 130,
+                        "shape": "cross",
+                        "strokeWidth": 2.5,
+                    },
+                    "encoding": {
+                        "x": {"field": "cx", "type": "quantitative"},
+                        "y": {"field": "cy", "type": "quantitative"},
+                        "color": {"field": "cluster_label", "type": "nominal", "legend": None},
+                    },
+                },
+                {
+                    "transform": [
+                        {
+                            "aggregate": [
+                                {"op": "mean", "field": "x", "as": "cx"},
+                                {"op": "mean", "field": "y", "as": "cy"},
+                            ],
+                            "groupby": ["cluster_label", "cluster_short_label"],
+                        }
+                    ],
+                    "mark": {
+                        "type": "text",
+                        "fontWeight": "bold",
+                        "fontSize": 12,
+                        "dy": -12,
+                    },
+                    "encoding": {
+                        "x": {"field": "cx", "type": "quantitative"},
+                        "y": {"field": "cy", "type": "quantitative"},
+                        "text": {"field": "cluster_short_label", "type": "nominal"},
+                        "color": {"field": "cluster_label", "type": "nominal", "legend": None},
+                    },
+                },
+            ],
         },
     )
 

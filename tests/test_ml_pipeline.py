@@ -7,7 +7,22 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.core.memory import DatasetMetadata, MemorySystem
 from src.tools.ml_pipeline import EvaluateModelTool, TrainModelTool
+
+
+def _memory_with_dataset(path: str = "x.csv") -> MemorySystem:
+    memory = MemorySystem()
+    memory.dataset_metadata = DatasetMetadata(
+        file_path=path,
+        row_count=1,
+        column_count=1,
+        columns={"label": "int64"},
+        missing_values={"label": 0},
+        numerical_cols=["label"],
+        categorical_cols=[],
+    )
+    return memory
 
 
 @pytest.fixture
@@ -155,8 +170,6 @@ class TestEvaluateModelTool:
         # execute() unpickles model_path unsandboxed — a planner-supplied
         # path that exists but sits outside the run's output_root must be
         # replaced with the trusted best_model_path, never used as-is.
-        from src.core.memory import MemorySystem
-
         output_root = tmp_path / "run"
         trusted = output_root / "models" / "trusted.pkl"
         trusted.parent.mkdir(parents=True)
@@ -164,7 +177,7 @@ class TestEvaluateModelTool:
         outside = tmp_path / "outside.pkl"
         outside.write_bytes(b"not a real pickle")
 
-        memory = MemorySystem()
+        memory = _memory_with_dataset()
         memory.set_context("best_model_path", str(trusted))
         params = EvaluateModelTool().prepare_params(
             {"model_path": str(outside), "file_path": "x.csv", "target_column": "label"},
@@ -174,13 +187,11 @@ class TestEvaluateModelTool:
         assert params["model_path"] == str(trusted)
 
     def test_model_path_outside_output_root_with_no_fallback_is_blanked(self, tmp_path: pytest.TempPathFactory) -> None:
-        from src.core.memory import MemorySystem
-
         output_root = tmp_path / "run"
         outside = tmp_path / "outside.pkl"
         outside.write_bytes(b"not a real pickle")
 
-        memory = MemorySystem()
+        memory = _memory_with_dataset()
         params = EvaluateModelTool().prepare_params(
             {"model_path": str(outside), "file_path": "x.csv", "target_column": "label"},
             memory,

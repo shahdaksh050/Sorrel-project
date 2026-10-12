@@ -49,6 +49,11 @@ def show_landing_page() -> bool:
     """
     import streamlit as st
 
+    from src.core.origin_config import sync_discovery_assets_to_static
+
+    # Ensure /robots.txt, /sitemap.xml, /llms.txt are available at HTTP root
+    sync_discovery_assets_to_static()
+
     # Day is the console's default theme (app.py _DEFAULTS); the landing runs before those defaults
     theme = "night" if st.session_state.get("theme", "day") in ("night", "dark") else "day"
     # Matches the console's --stock token for each theme (app.py _inject_theme_css)

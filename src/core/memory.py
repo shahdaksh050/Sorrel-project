@@ -1,8 +1,7 @@
 """
 Memory System for the Agentic Data Analysis System.
 
-Maintains persistent state across all reasoning-execution cycles.
-Implements the 'external environment' (REPL state) from the RLM paradigm:
+Maintains persistent state across all reasoning-execution cycles:
   - Full dataset metadata lives here, NOT in the LLM context window.
   - Only compact, token-efficient summaries are passed to the LLM.
   - All tool results and analysis steps are accumulated and queryable.
@@ -374,12 +373,12 @@ class AnalysisStep:
 
 class MemorySystem:
     """
-    Central state store — the RLM 'external environment'.
+    Central state store for the analysis workflow.
 
     Design principles:
       1. Context offloading: full data stays here; LLM gets summaries only.
-      2. Persistent REPL state: survives across all reasoning iterations.
-      3. Generic context store: supports arbitrary RLM sub-call variables.
+      2. Persistent workflow state: survives across reasoning iterations.
+      3. Generic context store: supports typed and auxiliary analysis state.
     """
 
     def __init__(self, persist_path: str | None = None) -> None:
@@ -617,7 +616,7 @@ class MemorySystem:
         return list(self.generated_tools)
 
     # ------------------------------------------------------------------
-    # Generic context store — RLM sub-call environments (Stage 6)
+    # Generic context store — workflow state shared across reasoning cycles
     # ------------------------------------------------------------------
 
     def set_context(self, key: str, value: Any) -> None:

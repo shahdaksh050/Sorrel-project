@@ -188,16 +188,11 @@ review forks (one per phase-cluster, disjoint files) plus the lead handling
   groupby is already C-level; `dsa.query_sql` exists for LLM-authored code,
   not as a mandate to rewrite existing tools. Only take this up once D4's
   bench stages point at a specific hot spot DuckDB would actually help.
-- **D6 — `relational_joiner.py` vs `joins.py`: one system, not two.**
-  `joins.py` (Round 9) is already wired end-to-end (`controller.py`'s
-  `_join_related_files`, the UI's join-review step). `relational_joiner.py`
-  (Phase 11) is a second, unconnected foreign-key-discovery/star-schema
-  implementation that duplicates it. The actual gap Phase 11 was meant to
-  close — `ReadReport.extra_tables` (extra sheets in a multi-tab Excel
-  upload) is silently dropped, never reaching `joins.py` either — should be
-  closed by routing `extra_tables` through the *existing* wired system, not
-  by wiring the second one. Deleting `relational_joiner.py` is Ask-First
-  (AGENTS.md: deleting existing source files).
+- **D6 — [RESOLVED 2026-10-09] `relational_joiner.py` vs `joins.py`: one system, not two.**
+  `joins.py` is the canonical, fully-wired join system. Per user instruction on
+  2026-10-09, the redundant duplicate `relational_joiner.py` and its test were
+  deleted, eliminating architectural drift and preserving `joins.py` as the single
+  relational source of truth.
 - **D7 — Bench noise from background load is a real operational risk, not
   just today's bad luck.** A session that installs anything (`pip install`,
   a skill package, even a large `git checkout`) right before running
@@ -272,14 +267,12 @@ review forks (one per phase-cluster, disjoint files) plus the lead handling
   and only uses it to pick a model *name*; have the tool that reads that
   recommendation raise the interrupt instead of silently switching models
   when the inflation is severe, matching FutureScope's own example.
-- **10.7 Wire `question_router.py`'s output.** `route_question()` is called
-  and stored (`self.question_routing` / `memory.set_context`) but nothing
-  reads it back — confirmed distinct from `agenda.py` (agenda answers "what
-  should we ask of this *data*", the router answers "what is the user's
-  objective *asking for*" and recommends tools) and from
-  `ground_objective_column` (grounds a column name, not a tool list) — not
-  redundant, genuinely unwired. Let `recommended_tools` influence the
-  deterministic fallback plan's step ordering.
+- **10.7 [COMPLETED 2026-10-09] Wire `question_router.py`'s output.** `route_question()`
+  output (`self.question_routing.recommended_tools`) is now wired directly into
+  `_build_fallback_plan()` in `controller_planning.py`. Candidate tools matching
+  the user objective intent (forecast, detect, compare, etc.) are prioritized at
+  the head of the deterministic fallback plan with intent-matched step rationales.
+  Verified with `tests/test_question_router.py`.
 - **10.8 Wire the discarded CLR transform.** `variable_methods.py` computes
   a correct compositional centered-log-ratio transform and then only reads
   the resulting column *names*, never the transformed values — no

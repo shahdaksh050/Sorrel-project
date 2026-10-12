@@ -54,10 +54,19 @@ class TestDynamicCodeExecutionTool:
         assert schema["code"]["required"] is True
 
     def test_prepare_params_extracts_prior_results(self) -> None:
-        from src.core.memory import MemorySystem, ToolResult
+        from src.core.memory import DatasetMetadata, MemorySystem, ToolResult
 
         tool = DynamicCodeExecutionTool()
         memory = MemorySystem()
+        memory.dataset_metadata = DatasetMetadata(
+            file_path="dummy.csv",
+            row_count=1,
+            column_count=1,
+            columns={"value": "float64"},
+            missing_values={"value": 0},
+            numerical_cols=["value"],
+            categorical_cols=[],
+        )
         memory.append_tool_result(
             ToolResult(
                 tool_name="select_statistical_test",

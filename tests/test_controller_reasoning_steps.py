@@ -214,8 +214,8 @@ def test_reasoning_contracts_ground_domain_and_causal_roles(
 
     domain = agent.memory.get_context("domain_analysis")
     causal = agent.memory.get_context("causal_design")
-    assert domain["key_measures"] == ["outcome"]
-    assert domain["key_dimensions"] == ["region"]
+    assert list(domain["key_measures"]) == ["outcome"]
+    assert list(domain["key_dimensions"]) == ["region"]
     assert domain["custom_execution_policy"] == "sandbox_only"
     assert causal["status"] == "partially_identified"
     assert causal["execution_route"] == "built_in:causal_analysis"
@@ -262,7 +262,9 @@ def test_validated_observational_design_adds_guarded_estimator(
         "pre_treatment_confounders": ["age"],
     })
 
-    steps = agent._ensure_causal_analysis_step([AnalysisStep(1, "clean_data")])
+    steps = agent._ensure_causal_analysis_step([
+        AnalysisStep(step_number=1, tool_name="clean_data", parameters={}, rationale="")
+    ])
 
     assert [step.tool_name for step in steps] == ["clean_data", "causal_analysis"]
     assert steps[-1].parameters == {
@@ -286,7 +288,9 @@ def test_validated_panel_did_design_adds_difference_in_differences_estimator(
         "pre_treatment_confounders": ["assets"],
     })
 
-    steps = agent._ensure_causal_analysis_step([AnalysisStep(1, "clean_data")])
+    steps = agent._ensure_causal_analysis_step([
+        AnalysisStep(step_number=1, tool_name="clean_data", parameters={}, rationale="")
+    ])
 
     assert [step.tool_name for step in steps] == ["clean_data", "difference_in_differences"]
     assert steps[-1].parameters == {
@@ -309,7 +313,7 @@ def test_adversarial_causal_review_attaches_caveats_and_warnings(
         "treatment": "treatment",
         "outcome": "outcome",
     })
-    agent.memory.append_finding(
+    agent.memory.add_findings([
         Finding(
             finding_id="causal_outcome_treatment",
             kind="test",
@@ -317,7 +321,7 @@ def test_adversarial_causal_review_attaches_caveats_and_warnings(
             source_tool="causal_analysis",
             caveats=[],
         )
-    )
+    ])
 
     final_result: dict[str, Any] = {}
     agent._run_adversarial_causal_review(final_result)
@@ -328,4 +332,106 @@ def test_adversarial_causal_review_attaches_caveats_and_warnings(
     assert causal["warnings"]
     finding = agent.memory.findings[0]
     assert any("unmeasured" in c.lower() or "observational" in c.lower() for c in finding.caveats)
+
+
+def test_extract_groupby_columns() -> None:
+    code1 = "g = df.groupby('platform')['price'].agg(['count', 'mean']).reset_index()"
+    dim1, measure1 = AgentController._extract_groupby_columns(code1)
+    assert dim1 == "platform"
+    assert measure1 == ["price"]
+
+    code2 = "res = df.groupby(['category'])['sales'].mean()"
+    dim2, measure2 = AgentController._extract_groupby_columns(code2)
+    assert dim2 == "category"
+    assert measure2 == ["sales"]
+
+    code3 = "df['ratio'] = df['a'] / df['b']"
+    dim3, measure3 = AgentController._extract_groupby_columns(code3)
+    assert dim3 is None
+    assert measure3 == []
+
+    code4 = "agg = df.groupby('brand').agg({'rating': ['count', 'mean'], 'price': 'mean', 'memory_gb': 'mean'}).reset()"
+    dim4, measure4 = AgentController._extract_groupby_columns(code4)
+    assert dim4 == "brand"
+    assert measure4 == ["rating", "price", "memory_gb"]
+
+
+def test_dynamic_code_fallback_direct_groupby(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.core.controller_common import _PreparedStep
+
+    csv_file = tmp_path / "products.csv"
+    brands = [f"Brand_{i}" for i in range(25)]
+    data = {
+        "brand": [brands[i % 25] for i in range(100)],
+        "price": [10.0 + i * 2.0 for i in range(100)],
+    }
+    df = pd.DataFrame(data)
+    df.to_csv(csv_file, index=False)
+
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path / "out"))
+    agent = AgentController(min_iterations=1, max_iterations=2, enable_rlm=False, use_llm=False)
+    agent.load_dataset(str(csv_file))
+
+    code = "agg = df.groupby('brand').agg({'price': 'mean'}).reset()"
+    step = AnalysisStep(
+        step_number=1,
+        tool_name="execute_dynamic_code",
+        parameters={"code": code},
+        rationale="group aggregation",
+    )
+    tool = agent.tool_registry.get("execute_dynamic_code")
+    params = {"code": code, "file_path": str(csv_file)}
+    prepared = _PreparedStep(
+        idx=1,
+        step=step,
+        tool=tool,
+        params=params,
+        dropped_note="",
+        cache_key="key",
+        cached=None,
+    )
+    failed_result = ToolResult(
+        tool_name="execute_dynamic_code",
+        status="error",
+        output={},
+        error_message="AttributeError: 'DataFrame' object has no attribute 'reset'",
+    )
+
+    fallback = agent._try_dynamic_code_fallback(prepared, failed_result)
+    assert fallback is not None
+    _new_prepared, healed_result = fallback
+    assert healed_result.status == "success"
+    assert "[Self-healed from dynamic code fallback]" in str(healed_result.output.get("summary", ""))
+    assert "groups" in healed_result.output
+    assert len(agent.memory.findings) == 1
+    assert agent.memory.findings[0].kind == "segment_lift"
+
+
+def test_deterministic_recommendations_from_ranked_findings(agent: AgentController) -> None:
+    from src.core.findings import Finding
+
+    f1 = Finding(
+        finding_id="f1",
+        kind="segment_lift",
+        headline="iOS devices 3.37x higher price than Android",
+        measure="price",
+        dimension="platform",
+        level="iOS",
+        effect=2.37,
+        confidence=0.8,
+    )
+    f2 = Finding(
+        finding_id="f2",
+        kind="driver",
+        headline="RAM is primary driver of performance",
+        measure="performance",
+        dimension="ram_gb",
+        confidence=0.75,
+    )
+    agent.memory.add_findings([f1, f2])
+
+    result = agent._deterministic_final()
+    recs = result.get("recommendations", [])
+    assert any("platform='iOS'" in r and "price" in r for r in recs)
+    assert any("ram_gb" in r and "driver" in r for r in recs)
 

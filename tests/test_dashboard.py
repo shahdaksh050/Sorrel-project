@@ -145,6 +145,9 @@ class TestChartSelection:
         assert "cluster_scatter" in ids
         spec = next(c for c in charts if c.chart_id == "cluster_scatter").spec
         assert len(spec["data"]["values"]) == 30
+        assert "layer" in spec
+        assert spec["layer"][0]["encoding"]["color"]["field"] == "cluster_label"
+        assert any(layer.get("mark") == {"type": "text", "fontWeight": "bold", "fontSize": 12, "dy": -12} for layer in spec["layer"])
 
     def test_cluster_chart_skipped_without_points(self, churn_df: pd.DataFrame) -> None:
         cluster_result = {

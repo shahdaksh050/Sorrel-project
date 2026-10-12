@@ -31,7 +31,7 @@ from raw rows.
   - [System context](#system-context)
   - [Layers and rules](#layers-and-rules)
   - [Data flow](#data-flow)
-  - [The seven-stage workflow](#the-seven-stage-workflow)
+  - [The five-stage workflow](#the-five-stage-workflow)
   - [Sequence diagrams](#sequence-diagrams)
   - [Class diagrams](#class-diagrams)
 - [The workspace](#the-workspace)
@@ -67,7 +67,7 @@ from raw rows.
    HTML and dashboard artefacts, each with its caveats and degradation notes.
 
 It works with no LLM (`--no-llm`), with no model fitting (`--no-ml`), without
-recursive decomposition (`--no-rlm`), and fully offline with a local model.
+LLM-assisted planning, and fully offline with a local model.
 
 ## Quick start
 
@@ -135,8 +135,8 @@ flowchart TB
         reg["ToolRegistry<br/>34 tools"]
     end
 
-    subgraph rlm["Recursive layer: src/rlm"]
-        engine["RLMEngine<br/>recursive calls, REPL state, trace"]
+    subgraph rlm["Inference layer: src/rlm"]
+        engine["RLMEngine<br/>provider calls, usage, trace"]
     end
 
     subgraph exec["Execution layer: src/tools"]
@@ -170,7 +170,7 @@ flowchart TB
 | Interface | `app.py`, `ui/`, `main.py` | Collect inputs, run the analysis on a worker thread, show progress and results. |
 | Reasoning | `src/core/controller*.py`, `prompt_manager.py` | Plan, validate, orchestrate, audit and write up the analysis. |
 | State | `src/core/memory.py`, `findings.py`, `profiler.py` | The external environment the LLM reads summaries of: metadata, results, findings, context. |
-| Recursion | `src/rlm/engine.py` | Recursive LLM invocation with an external REPL-style environment and a trace. |
+| Inference | `src/rlm/engine.py` | Provider invocation with token/cost accounting and a reasoning trace. |
 | Execution | `src/tools/` | Deterministic tools behind the `BaseTool` contract. |
 | Governance | `src/core/governance.py`, `sandbox.py`, `security.py`, `privacy.py` | Upload checks, code sandbox, audit logs, LLM and PII controls. |
 
@@ -225,7 +225,7 @@ flowchart TB
 
     target --> memstore[("MemorySystem<br/>metadata and context")]
 
-    subgraph loop["Stages 2 to 6: reasoning loop"]
+    subgraph loop["Stages 2 to 4: reasoning loop"]
         plan["Plan: LLM or deterministic"]
         validate["Step validation<br/>columns, schemas, budgets"]
         run["BaseTool.run"]
@@ -237,7 +237,7 @@ flowchart TB
     run -. "code tools only" .-> gov["CodeGovernor and sandbox"]
     gov --> run
 
-    bus --> audits["Stage 7 audits<br/>claim check, leakage, fragility,<br/>dependence, causal wording"]
+    bus --> audits["Stage 5 audits<br/>claim check, leakage, fragility,<br/>dependence, causal wording"]
     audits --> artefacts
 
     subgraph artefacts["Artefacts in output/"]
@@ -255,22 +255,19 @@ What reaches an LLM prompt is metadata, the data profile, tool summaries and
 ranked findings, with dataset-derived text sanitised and personal-data columns
 masked. Raw rows and full data frames do not.
 
-### The seven-stage workflow
+### The five-stage workflow
 
 | Stage | Name | Where it happens |
 | :---: | --- | --- |
-| 1 | Dataset ingestion | `AgentController.load_dataset`, `io.py`, `coercion.py`, `profiler.py` |
-| 2 | Initial reasoning | First `RLMEngine.invoke` call, or the deterministic fallback plan |
-| 3 | Tool selection and execution | `StepMixin._execute_steps`, `tools/*` |
-| 4 | Result interpretation | Second and later `RLMEngine.invoke` calls |
-| 5 | Iterative refinement | The `for iteration` loop in `_reasoning_loop` |
-| 6 | RLM decomposition | `_run_rlm_decomposition`, once per run, when enabled and the data is wide enough |
-| 7 | Report generation | `_finalize_analysis`: audits, report, dashboard, HTML, run summary |
+| 1 | Dataset ingestion & profiling | `AgentController.load_dataset`, `io.py`, `coercion.py`, `profiler.py` |
+| 2 | Hypothesis & action plan generation | First `RLMEngine.invoke` call, or the deterministic fallback plan |
+| 3 | Tool execution & sandbox verification | `StepMixin._execute_steps`, `tools/*`, `sandbox.py` |
+| 4 | Iterative refinement & adversarial review | Later `RLMEngine.invoke` calls and review passes |
+| 5 | Synthesis, post-hoc audits & dossier generation | `_finalize_analysis`: dashboard, audits, reports, HTML, run summary |
 
-Stages 4 and 5 are one LLM call per later iteration: it reads the results so far
-and returns the next plan or signals completion. Stage 6 runs inside the loop,
-after the first plan has executed, not after the loop ends. The loop has several
-exits, and every one of them reaches stage 7:
+Stage 4 uses one LLM call per later iteration: it reads the results so far and
+returns the next plan or signals completion. The loop has several exits, and
+every one of them reaches stage 5:
 
 ```mermaid
 flowchart TD
@@ -296,17 +293,14 @@ flowchart TD
     conv -- no --> exec["Stage 3: execute steps"]
     exec --> stop2{"Stop requested?"}
     stop2 -- yes --> detfinal
-    stop2 -- no --> decq{"RLM enabled, not yet run,<br/>and worth decomposing?"}
-    decq -- yes --> decomp["Stage 6: decompose once"]
-    decq -- no --> maxq
-    decomp --> maxq{"i below max_iterations?"}
+    stop2 -- no --> maxq{"i below max_iterations?"}
     maxq -- yes --> start
     maxq -- no --> synth
     detfinal --> fin
     detcycle --> fin
     llmfinal --> fin
     synth --> fin
-    fin["Stage 7: metadata, post-hoc audits,<br/>report, dashboard, HTML, summary"]
+    fin["Stage 5: metadata, dashboard, post-hoc audits,<br/>report, HTML, summary"]
 ```
 
 ### Sequence diagrams
@@ -520,14 +514,8 @@ classDiagram
     }
     class RLMEngine {
         +invoke(prompt, depth, stage) dict
-        +decompose_and_invoke() dict
         +set_iteration(iteration)
         +usage_summary() dict
-    }
-    class REPLEnvironment {
-        +set(key, value)
-        +get(key) object
-        +summary() str
     }
     class LLMClient {
         +provider str
@@ -540,7 +528,6 @@ classDiagram
     AgentController *-- PromptManager
     AgentController *-- RLMEngine
     AgentController *-- LLMClient
-    RLMEngine *-- REPLEnvironment
     PromptManager --> MemorySystem : reads summaries
 
     class ToolRegistry {
@@ -599,7 +586,6 @@ classDiagram
         +target str
         +min_iterations int
         +max_iterations int
-        +enable_rlm bool
         +use_llm bool
         +use_ml bool
         +is_sample bool
@@ -718,7 +704,7 @@ than a list of tools.
 | Area | What it provides |
 | --- | --- |
 | Landing | A scroll-driven introduction (`ui/landing_component/`) with a pinned, four-stage 3D explanation of the pipeline. The 3D is optional polish with a plain-text equivalent. |
-| Sidebar | File upload, the bundled sample, provider and model, analysis switches (LLM, ML, recursive decomposition, iterations) and the safety settings, which a shared-server operator controls. |
+| Sidebar | File upload, the bundled sample, provider and model, analysis switches (LLM, ML, iterations) and the safety settings, which a shared-server operator controls. |
 | Header band | The run's state and file, the seven steps with what each reported, and the workflow plate. Only one step reads "Working" at a time. |
 | Run | Analysis on a worker thread with live step notes, "found so far" findings, a cooperative Stop, and a partial report when stopped. |
 | Answers | The question as the heading, a verdict ("N of M checked findings held up"), ranked findings with their audit check marks, caveats, recommendations, and a search over findings. |
@@ -878,8 +864,6 @@ lists the common settings. The table below is built from what the code reads.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `MIN_ITERATIONS`, `MAX_ITERATIONS` | `1`, `15` | Bound the reasoning cycles. |
-| `ENABLE_RLM_INFERENCE` | `true` | Allow recursive decomposition. |
-| `RLM_DECOMPOSE` | `auto` | Decomposition policy. |
 | `RLM_MAX_DEPTH` | `5` | Maximum recursion depth. |
 | `ENABLE_LLM`, `ENABLE_ML` | `true` | Defaults for the LLM and model-fitting switches. |
 | `CHART_DESIGN` | on | Set `false` to skip the LLM chart-design pass. |
@@ -925,7 +909,6 @@ lists the common settings. The table below is built from what the code reads.
 | `--target` | Target-column hint. |
 | `--objective` | The question, in plain language. |
 | `--min-iterations`, `--max-iterations` | Bound the loop (default maximum 15). |
-| `--no-rlm` | Disable recursive decomposition. |
 | `--no-llm` | Fully deterministic: no LLM calls at all. |
 | `--no-ml` | Skip every model-fitting tool. |
 | `--output-dir` | Output root other than `output/`. |
@@ -976,7 +959,7 @@ with Python 3.13, and on Ubuntu with Python 3.11, the declared minimum:
 Conventions for contributors and AI agents are in [AGENTS.md](AGENTS.md): type
 hints everywhere, the `BaseTool` contract (a `summary` key, `ToolExecutionError`
 for expected failures, seeded randomness, a test), and approval before changing
-the RLM engine, task decomposition, the `MemorySystem` schema, or deleting
+the inference manager, planning loop, the `MemorySystem` schema, or deleting
 source files.
 
 ## Repository structure
@@ -999,7 +982,7 @@ source files.
 │   │   ├── dashboard*.py, chart_*.py, html_report.py
 │   │   ├── run_config.py, run_view.py, design_tokens.py
 │   │   └── ...                 domains, integrity, hypothesis, joins, statistics helpers
-│   ├── rlm/engine.py           RLMEngine and REPLEnvironment
+│   ├── rlm/engine.py           Inference tracing and token/cost accounting
 │   └── tools/                  34 BaseTool subclasses and shared helpers
 ├── ui/
 │   ├── run.py                  ActiveRun, RunSpec, RunOutcome (worker thread)

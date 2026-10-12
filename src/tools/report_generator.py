@@ -1,7 +1,7 @@
 """
 Report Generator Tool — Execution Layer.
 
-Stage 7: Report Generation.
+Stage 5: Dossier Generation.
 
 Compiles all tool results, LLM insights, and metric summaries into:
   - A structured Markdown report  (output/reports/analysis_report.md)
@@ -596,7 +596,7 @@ class GenerateReportTool(BaseTool):
 
     def applies_to(self, profile: Any, metadata: Any) -> float:
         # AgentController._generate_final_report calls this tool directly
-        # and unconditionally after the reasoning loop ends (Stage 7) — it
+        # and unconditionally after the reasoning loop ends (Stage 5) — it
         # is never something the planner itself needs to schedule.
         return 0.0
 

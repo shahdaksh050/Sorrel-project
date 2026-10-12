@@ -60,7 +60,7 @@ def test_cinematic_state_structure() -> None:
     assert state["theme"] == "night"
     assert "dataset" in state
     assert "stages" in state
-    assert len(state["stages"]) == 7
+    assert len(state["stages"]) == 5
     assert "statistics" in state
     assert "ml" in state
     assert "synthesis" in state
@@ -111,7 +111,7 @@ def test_extract_cinematic_state_with_nones() -> None:
     })
     assert state["theme"] == "day"
     assert state["dataset"]["name"] == "sample_dataset.csv"
-    assert len(state["stages"]) == 7
+    assert len(state["stages"]) == 5
     assert state["ml"]["best_model"] == "GradientBoosting"
     assert "findings" in state["synthesis"]
 

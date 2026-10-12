@@ -868,7 +868,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     border-radius: var(--radius); overflow: hidden;
 }}
 
-/* ── The seven steps: a vertical list beside the 3D plate ──
+/* ── The five steps: a vertical list beside the 3D plate ──
    A numbered dot, the step's name and a status word with a shape. A hairline rail runs down through the
    dots and is filled behind each finished or skipped step, so progress reads at a glance. */
 .stepper {{

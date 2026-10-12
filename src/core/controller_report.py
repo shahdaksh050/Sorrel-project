@@ -1,5 +1,5 @@
 """
-AgentController mixin: Stage 7 — final synthesis, dashboard, HTML/JSON report and claim verification.
+AgentController mixin: Stage 5 — final synthesis, dashboard, HTML/JSON report and claim verification.
 
 Split out of controller.py; `AgentController` inherits it, so the methods keep
 their `self.*` state. Shared constants live in controller_common.
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 class ReportMixin(ControllerState):
-    """Stage 7 — final synthesis, dashboard, HTML/JSON report and claim verification."""
+    """Stage 5 — final synthesis, dashboard, HTML/JSON report and claim verification."""
 
     def _final_synthesis(self, stage: str) -> dict[str, Any]:
         """One LLM call for the final interpretation of everything found so
@@ -245,6 +245,22 @@ class ReportMixin(ControllerState):
         insights = [f.headline for f in ranked[:12]]
         if not insights:
             insights.append("Analysis produced no tool results to synthesise.")
+
+        for f in ranked[:4]:
+            if f.kind == "segment_lift" and f.measure and f.dimension and f.level:
+                pct = f"{abs(f.effect) * 100:.1f}%" if f.effect is not None else ""
+                direction = "higher" if (f.effect or 0) > 0 else "lower"
+                recommendations.append(
+                    f"Prioritize {f.dimension}='{f.level}' segment: observed {pct} {direction} {f.measure} than baseline."
+                )
+            elif f.kind == "driver" and f.measure and f.dimension:
+                recommendations.append(
+                    f"Monitor and manage '{f.dimension}' as a primary driver of '{f.measure}'."
+                )
+            elif f.kind == "correlation" and f.measure and f.dimension:
+                recommendations.append(
+                    f"Account for the strong association between '{f.measure}' and '{f.dimension}' in operational planning."
+                )
         # Chosen deterministic mode and a mid-run LLM failure produce the same
         # findings but are not the same event, and saying so matters: telling
         # someone to "re-run with a reachable provider" when they deliberately
@@ -435,7 +451,7 @@ class ReportMixin(ControllerState):
 
     def _generate_final_report(self, llm_final: dict[str, Any]) -> None:
         """
-        Stage 7: Invoke GenerateReportTool to produce the Markdown/JSON report.
+        Stage 5: Invoke GenerateReportTool to produce the Markdown/JSON report.
 
         The report tool is called with the serialised tool results and the
         LLM's final interpretation so it can produce a complete document.
@@ -470,7 +486,7 @@ class ReportMixin(ControllerState):
         if result.status == "success":
             console.print(
                 Panel(
-                    f"[bold green]Stage 7 — Report Generated[/]\n"
+                    f"[bold green]Stage 5 — Report Generated[/]\n"
                     f"Markdown: {result.output.get('markdown_path')}\n"
                     f"JSON:     {result.output.get('json_path')}",
                     border_style="green",

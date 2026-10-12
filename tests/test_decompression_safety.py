@@ -4,12 +4,14 @@ Protects against zip-bombs, nested archive inflation, and excessive memory alloc
 """
 from __future__ import annotations
 
+import gzip
 import io
 import zipfile
 
 import pandas as pd
 import pytest
 
+from src.core.io import DatasetReadError, _decompress
 from src.core.security import (
     UploadValidationError,
     _check_decompression_safety,
@@ -95,3 +97,33 @@ def test_parquet_oversize_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     if len(parquet_bytes) > 1 * 1024 * 1024:
         with pytest.raises(UploadValidationError, match="exceeding the 1 MB limit"):
             validate_upload("large.parquet", parquet_bytes)
+
+
+@pytest.mark.parametrize("compression", ["gzip", "zip"])
+def test_reader_streaming_decompression_enforces_output_cap(
+    monkeypatch: pytest.MonkeyPatch, compression: str
+) -> None:
+    monkeypatch.setenv("MAX_UNCOMPRESSED_MB", "1")
+    expanded = b"a,b\n" + b"1,2\n" * 300_000
+    if compression == "gzip":
+        raw = gzip.compress(expanded)
+        name = "large.csv.gz"
+    else:
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("large.csv", expanded)
+        raw = archive.getvalue()
+        name = "large.csv.zip"
+
+    with pytest.raises(DatasetReadError, match=r"expands beyond.*1 MB"):
+        _decompress(raw, compression, name)
+
+
+def test_compressed_uploads_are_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_COMPRESSION_RATIO", "10000")
+    payload = gzip.compress(b"a,b\n1,2\n")
+    assert validate_upload("table.csv.gz", payload) == "table.csv.gz"
+    with pytest.raises(UploadValidationError, match="gzip-compressed"):
+        validate_upload("table.csv.gz", b"not gzip")
+    with pytest.raises(UploadValidationError, match="must be named"):
+        validate_upload("table.gz", payload)

@@ -1,5 +1,5 @@
 """
-The plate: the seven-stage RLM workflow drawn as a live technical drawing, in the Sorrel inks.
+The plate: the five-stage analysis workflow drawn as a live technical drawing, in the Sorrel inks.
 
 The scene itself lives in ``assets/pipeline_3d.js`` (Three.js + GSAP); this
 module is the seam between it and Streamlit. It owns the state contract —

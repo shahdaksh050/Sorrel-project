@@ -244,7 +244,7 @@ class PlanMixin(ControllerState):
     #: Nature-driven tools included in the fallback plan when applies_to()
     #: scores them at full confidence (1.0) — same tools, same gating logic
     #: the LLM planner sees, so there's one source of truth for "what suits
-    #: this data" (controller._should_decompose folds in the same way).
+    #: this data" (dimensionality analysis uses the same profile signal).
     #: Tools the deterministic plan sequences explicitly (or never runs from
     #: the profile sweep): pipeline control, the supervised branch decided
     #: below on the target, and code execution, which needs an LLM to write
@@ -457,6 +457,28 @@ class PlanMixin(ControllerState):
                     }
                     steps.append(test_step)
                 test_step["parameters"]["group_column"] = arm
+
+        # High-value question agenda pre-seeding: if the agenda recommends
+        # segment_comparison (e.g. key measure broken out by prominent dimension),
+        # ensure it is present in the draft plan rather than relying on chance.
+        if self.tool_registry.has("segment_comparison") and not any(s["tool_name"] == "segment_comparison" for s in steps):
+            agenda = self.memory.get_context("question_agenda") or []
+            for q in agenda:
+                if isinstance(q, dict) and q.get("suggested_tool") == "segment_comparison":
+                    cols = q.get("columns") or []
+                    if len(cols) >= 2:
+                        steps.append({
+                            "step_number": len(steps) + 1,
+                            "tool_name": "segment_comparison",
+                            "parameters": {
+                                "file_path": fp,
+                                "measure_column": cols[0],
+                                "dimension_column": cols[1],
+                            },
+                            "rationale": f"Fallback plan: test primary agenda question — {str(q.get('text', ''))[:80]}",
+                        })
+                        already.add("segment_comparison")
+                        break
 
         if not self.use_ml:
             # No model-fitting branch at all: no supervised training and no

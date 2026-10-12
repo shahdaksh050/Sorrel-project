@@ -747,12 +747,15 @@ class DatasetProfile:
         return ", ".join(facts)
 
     def _level_shares(self, c: ColumnProfile, _sp: Any) -> str:
-        """"N levels: a 50%, b 30%, c 12%" from a column's top values."""
+        """"N levels: [a 50% (n=120), b 30% (n=70)]" from a column's top values."""
         present = max(1, self.row_count - c.missing_count)
+        limit = 6 if c.nunique <= 8 else 4
+        items = list(c.top_values.items())[:limit]
         top = ", ".join(
-            f"{_sp(k, max_len=30)} {v / present:.0%}" for k, v in list(c.top_values.items())[:3]
+            f"{_sp(k, max_len=30)} {v / present:.0%} (n={v:,})" for k, v in items
         )
-        return f"{c.nunique:,} levels: {top}"
+        more = f", ...+{c.nunique - len(items)} more" if c.nunique > len(items) else ""
+        return f"{c.nunique:,} levels: [{top}{more}]"
 
 
 def _num(value: float) -> str:
@@ -941,7 +944,7 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
                     flags.append("severe_skew")
     else:
         kind = "categorical"
-        counts = series.dropna().astype(str).value_counts().head(5)
+        counts = series.dropna().astype(str).value_counts().head(8)
         top_values = {str(k): int(v) for k, v in counts.items()}
         if nunique > HIGH_CARDINALITY_THRESHOLD:
             flags.append("high_cardinality")

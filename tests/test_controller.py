@@ -1,4 +1,4 @@
-"""Integration tests for the Agent Controller — full 7-stage workflow with a mock LLM."""
+"""Integration tests for the Agent Controller's five-stage workflow."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -150,7 +150,7 @@ class TestAnalyzeWorkflow:
         assert agent.memory.get_context("cleaned_file_path")
 
         report_dir = Path(agent._output_dir) / "reports"
-        assert list(report_dir.glob("*.md")), "Stage 7 must write a Markdown report"
+        assert list(report_dir.glob("*.md")), "Stage 5 must write a Markdown report"
 
     def test_llm_failure_triggers_fallback_and_deterministic_final(
         self, agent: AgentController, sample_csv: str
@@ -414,6 +414,26 @@ class TestObjectiveAndProfile:
         charts = json.loads(Path(dash_path).read_text(encoding="utf-8"))
         assert charts, "dashboard must contain at least one chart"
         assert all("spec" in c for c in charts)
+
+    def test_contract_audit_runs_after_dashboard_generation(
+        self, agent: AgentController, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events: list[str] = []
+        monkeypatch.setattr(agent, "_attach_run_metadata", lambda result: None)
+        monkeypatch.setattr(agent, "_run_post_hoc_audits", lambda result: None)
+        monkeypatch.setattr(agent, "_generate_dashboard", lambda: events.append("dashboard"))
+        monkeypatch.setattr(
+            agent,
+            "_audit_contract",
+            lambda result, audit_df: events.append("contract"),
+        )
+        monkeypatch.setattr(agent, "_generate_final_report", lambda result: None)
+        monkeypatch.setattr(agent, "_generate_html_report", lambda result: None)
+        monkeypatch.setattr(agent, "_write_run_summary", lambda: None)
+
+        agent._finalize_analysis({})
+
+        assert events == ["dashboard", "contract"]
 
 
 # ---------------------------------------------------------------------------

@@ -87,6 +87,29 @@ class TestStaticCheck:
         assert error_type == "static_check"
         assert "open" in hint
 
+    @pytest.mark.parametrize("attribute", ["eval", "query", "pipe"])
+    def test_pandas_expression_evaluators_are_blocked(self, attribute: str) -> None:
+        result = sandbox._static_check(f"RESULT = df.{attribute}('value > 1')\n")
+        assert result is not None
+        assert result[0] == "static_check"
+        assert f".{attribute}" in result[1]
+
+    def test_read_csv_is_normalized_and_passes_static_check(self) -> None:
+        code = "import pandas as pd\ndf = pd.read_csv('test.csv')\nRESULT = df.shape\n"
+        assert sandbox._static_check(code) is None
+
+    def test_from_pandas_import_read_csv_passes_static_check(self) -> None:
+        code = "from pandas import read_csv\ndata = read_csv('data.csv')\nRESULT = len(data)\n"
+        assert sandbox._static_check(code) is None
+
+    def test_chained_read_csv_passes_static_check(self) -> None:
+        code = "res = pd.read_csv('x.csv').dropna()\nRESULT = len(res)\n"
+        assert sandbox._static_check(code) is None
+
+    def test_read_csv_inside_function_passes_static_check(self) -> None:
+        code = "def calc():\n    df = pd.read_csv('x.csv')\n    return len(df)\nRESULT = calc()\n"
+        assert sandbox._static_check(code) is None
+
 
 class TestValidateExtraGlobals:
     """Round 8 — parameters reach generated-tool code as data, never as
@@ -234,6 +257,17 @@ class TestRunSandboxed:
         assert result.status == "ok"
         assert result.finding is None
 
+    def test_run_sandboxed_with_read_csv_executes_on_preloaded_df(self, tmp_path: Path) -> None:
+        dataset = single_column(tmp_path)
+        code = (
+            "import pandas as pd\n"
+            "df = pd.read_csv('any_file_name.csv')\n"
+            "RESULT = len(df)\n"
+        )
+        result = sandbox.run_sandboxed(code, str(dataset))
+        assert result.status == "ok"
+        assert result.result == 50
+
     def test_result_assigned_only_inside_branch_now_executes(self, tmp_path: Path) -> None:
         # Round 8 relaxation, end to end: a genuinely reachable branch
         # assignment is no longer rejected by the static pre-check.
@@ -306,3 +340,72 @@ class TestWorkerCrashDiagnostics:
         result = sandbox.run_sandboxed("RESULT = 1\n", str(single_column(tmp_path)), timeout_s=20)
         assert result.status == "error"
         assert "stderr" in (result.hint or "")
+
+
+class TestSandboxedCodeSelfHealing:
+    def test_normalize_pandas_hallucinated_methods(self) -> None:
+        raw_code = (
+            "agg = df.groupby('brand').agg({'rating': ['count', 'mean']}).reset()\n"
+            "s = df['price'].to_dataframe()\n"
+            "d1 = df.drop_column('rating')\n"
+            "d2 = df.rename_column({'price': 'cost'})\n"
+            "sorted_df = df.sort('price')\n"
+        )
+        norm = sandbox._normalize_sandboxed_code(raw_code)
+        assert ".reset_index()" in norm
+        assert ".to_frame()" in norm
+        assert "drop(columns=" in norm
+        assert "rename(columns=" in norm
+        assert "sort_values(by=" in norm
+        assert "RESULT = sorted_df" in norm
+
+    def test_multiindex_groupby_reset_executes_cleanly(self, tmp_path: Path) -> None:
+        import pandas as pd
+        csv_path = tmp_path / "brands.csv"
+        df = pd.DataFrame({
+            "brand": ["Apple", "Apple", "Samsung", "Samsung"],
+            "rating": [4.5, 4.8, 4.2, 4.4],
+            "price": [1000.0, 1200.0, 800.0, 900.0],
+            "memory_gb": [128, 256, 128, 256],
+        })
+        df.to_csv(csv_path, index=False)
+
+        # Code using .reset() and omitting explicit RESULT = ...
+        code = (
+            "agg = df.groupby('brand').agg({'rating': ['count', 'mean'], 'price': 'mean', 'memory_gb': 'mean'}).reset()\n"
+        )
+        res = sandbox.run_sandboxed(code=code, dataset_ref=str(csv_path))
+        assert res.status == "ok"
+        assert isinstance(res.result, list)
+        assert len(res.result) == 2
+        # Verify MultiIndex columns were flattened into strings
+        first_row = res.result[0]
+        assert "brand" in first_row
+        assert "rating_count" in first_row
+        assert "rating_mean" in first_row
+        assert "price_mean" in first_row
+        assert "memory_gb_mean" in first_row
+
+    def test_keyerror_case_mismatch_auto_healed(self, tmp_path: Path) -> None:
+        import pandas as pd
+        csv_path = tmp_path / "data.csv"
+        df = pd.DataFrame({"target_metric": [10, 20, 30]})
+        df.to_csv(csv_path, index=False)
+
+        # Code with case mismatch in column name: 'Target_Metric' instead of 'target_metric'
+        code = "res = float(df['Target_Metric'].mean())\n"
+        res = sandbox.run_sandboxed(code=code, dataset_ref=str(csv_path))
+        assert res.status == "ok"
+        assert res.result == 20.0
+
+    def test_preloaded_modules_usable_without_explicit_import(self, tmp_path: Path) -> None:
+        dataset = single_column(tmp_path)
+        # re and json are pre-loaded in restricted globals
+        code = (
+            "pattern = re.compile(r'\\d+')\n"
+            "res = json.loads('{\"mean\": 42}')\n"
+            "RESULT = res['mean']\n"
+        )
+        res = sandbox.run_sandboxed(code=code, dataset_ref=str(dataset))
+        assert res.status == "ok"
+        assert res.result == 42

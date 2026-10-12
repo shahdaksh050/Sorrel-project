@@ -226,14 +226,3 @@ def render_details_tab(
             render_handoff_stream(st.session_state.get("progress_lines", []), tool_results),
             unsafe_allow_html=True,
         )
-
-        sub_results = report.get("rlm_sub_results")
-        if sub_results:
-            st.markdown("#### How hard questions were split up")
-            st.caption("Big questions got broken into smaller ones so nothing got lost.")
-            for s_idx, sub in enumerate(sub_results, 1):
-                with st.expander(
-                    f"Part {s_idx:02d}: {sub.get('task_name', 'Smaller Question')}",
-                    expanded=False,
-                ):
-                    st.json(sub)

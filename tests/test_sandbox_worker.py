@@ -15,6 +15,9 @@ from tests.fixtures import single_column
 
 
 class TestExecute:
+    def test_ctypes_call_function_audit_event_is_denied(self) -> None:
+        assert "ctypes.call_function" in worker._DENIED_EVENTS
+
     def test_scalar_result(self, tmp_path: Path) -> None:
         dataset = single_column(tmp_path)
         payload = worker._execute("RESULT = float(df['value'].mean())\n", str(dataset))

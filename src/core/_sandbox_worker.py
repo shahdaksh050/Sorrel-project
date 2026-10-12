@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import traceback
+import types
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,6 @@ from scipy import stats
 
 from src.core.chart_spec import validate_chart_spec
 from src.core.io import read_any
-from src.core.profiler import profile_dataframe
 from src.core.sandbox import (
     ALLOWED_MODULES_TEXT,
     BLOCKED_BUILTIN_NAMES,
@@ -71,24 +71,102 @@ def _cap(text: str) -> str:
     return text[:STDOUT_CAP_CHARS] + f"\n...[truncated, {hidden} more characters]"
 
 
+# ---- Pandas LLM Compatibility Aliases ----
+def _safe_reset_index(self: pd.DataFrame, *args: Any, **kwargs: Any) -> pd.DataFrame:
+    res = self.reset_index(*args, **kwargs)
+    if isinstance(res.columns, pd.MultiIndex):
+        flat_cols = []
+        for col in res.columns.values:
+            parts = [str(p).strip() for p in col if str(p).strip() != ""]
+            flat_cols.append("_".join(parts) if parts else "col")
+        res.columns = pd.Index(flat_cols)
+    return res
+
+
+def _df_append(self: pd.DataFrame, other: Any, ignore_index: bool = False, **kwargs: Any) -> pd.DataFrame:
+    if isinstance(other, dict):
+        other = pd.DataFrame([other])
+    elif isinstance(other, list):
+        other = pd.DataFrame(other)
+    elif isinstance(other, pd.Series):
+        other = other.to_frame().T
+    return pd.concat([self, other], ignore_index=ignore_index)
+
+
+_PANDAS_COMPAT_ALIASES: list[tuple[type, str, Any]] = [
+    (pd.DataFrame, "reset", _safe_reset_index),
+    (pd.Series, "reset", pd.Series.reset_index),
+    (pd.DataFrame, "to_dataframe", lambda self, *a, **k: self),
+    (pd.Series, "to_dataframe", pd.Series.to_frame),
+    (pd.DataFrame, "drop_column", lambda self, col, **k: self.drop(columns=[col] if isinstance(col, str) else col, **k)),
+    (pd.DataFrame, "drop_columns", lambda self, cols, **k: self.drop(columns=cols, **k)),
+    (pd.DataFrame, "rename_column", lambda self, mapping, **k: self.rename(columns=mapping, **k)),
+    (pd.DataFrame, "rename_columns", lambda self, mapping, **k: self.rename(columns=mapping, **k)),
+    (
+        pd.DataFrame,
+        "sort",
+        lambda self, *a, **k: self.sort_values(*a, **k) if not a or isinstance(a[0], (str, list)) else self.sort_index(*a, **k),
+    ),
+    (pd.Series, "sort", pd.Series.sort_values),
+    (pd.DataFrame, "append", _df_append),
+]
+
+for _cls, _attr_name, _impl in _PANDAS_COMPAT_ALIASES:
+    if not hasattr(_cls, _attr_name):
+        setattr(_cls, _attr_name, _impl)
+
+
 def _build_schema(df: pd.DataFrame) -> dict[str, str]:
-    profile = profile_dataframe(df)
-    return {col.name: col.kind for col in profile.columns}
+    kinds: dict[str, str] = {}
+    for col, dtype in df.dtypes.items():
+        name = str(col)
+        if pd.api.types.is_bool_dtype(dtype):
+            kinds[name] = "boolean"
+        elif pd.api.types.is_numeric_dtype(dtype):
+            kinds[name] = "numeric"
+        elif pd.api.types.is_datetime64_any_dtype(dtype):
+            kinds[name] = "datetime"
+        else:
+            kinds[name] = "categorical"
+    return kinds
+
+
+def _clean_column_name(col: Any) -> str:
+    if isinstance(col, tuple):
+        parts = [str(p).strip() for p in col if str(p).strip() != ""]
+        return "_".join(parts) if parts else "col"
+    return str(col)
+
+
+def _clean_dict_keys(val: Any) -> Any:
+    if isinstance(val, dict):
+        return {_clean_column_name(k): _clean_dict_keys(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_clean_dict_keys(item) for item in val]
+    return val
 
 
 def _convert_result(value: Any) -> Any:
     if isinstance(value, pd.DataFrame):
-        truncated = len(value) > RESULT_ROW_CAP
-        head = value.head(RESULT_ROW_CAP)
+        df_copy = value.copy()
+        if isinstance(df_copy.columns, pd.MultiIndex):
+            df_copy.columns = pd.Index([_clean_column_name(c) for c in df_copy.columns])
+        truncated = len(df_copy) > RESULT_ROW_CAP
+        head = df_copy.head(RESULT_ROW_CAP)
         if not isinstance(head.index, pd.RangeIndex):
             # A groupby/value_counts result keeps its keys in the index.
             head = head.reset_index(allow_duplicates=True)
+            if isinstance(head.columns, pd.MultiIndex):
+                head.columns = pd.Index([_clean_column_name(c) for c in head.columns])
         records = head.to_dict(orient="records")
-        return {"__truncated__": True, "rows": records} if truncated else records
+        clean_records = _clean_dict_keys(records)
+        return {"__truncated__": True, "rows": clean_records} if truncated else clean_records
     if isinstance(value, pd.Series):
         return _convert_result(value.to_frame())
     if isinstance(value, np.ndarray):
         return value.tolist()
+    if isinstance(value, (dict, list)):
+        return _clean_dict_keys(value)
     return value
 
 
@@ -152,7 +230,7 @@ _DENIED_EVENTS: frozenset[str] = frozenset({
     "socket.connect", "socket.bind", "socket.getaddrinfo", "socket.gethostbyname",
     "socket.gethostbyaddr", "socket.sendto", "socket.sendmsg", "urllib.Request",
     "webbrowser.open", "ctypes.cdata", "ctypes.cdata/buffer", "ctypes.string_at",
-    "ctypes.wstring_at",
+    "ctypes.wstring_at", "ctypes.call_function",
 })
 # Not denied, deliberately: sys._getframe (pandas warnings, namedtuple),
 # object.__setattr__ (lazy library imports patch classes) and ctypes.dlopen
@@ -212,14 +290,20 @@ def _install_runtime_policy() -> None:
     for prefix in {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}:
         read_roots.add(Path(prefix).resolve())
 
+    _resolved_cache: dict[Any, Path | None] = {}
+
     def _within(raw: Any, roots: set[Path]) -> bool:
         if isinstance(raw, int):
             return True  # an already-open descriptor; opening it was checked
-        try:
-            path = Path(os.fsdecode(raw))
-            path = (path if path.is_absolute() else _policy_scratch / path).resolve()
-        except (TypeError, ValueError, OSError):
-            return False
+        path = _resolved_cache.get(raw)
+        if path is None:
+            try:
+                p = Path(os.fsdecode(raw))
+                path = (p if p.is_absolute() else _policy_scratch / p).resolve()
+                if len(_resolved_cache) < 2048:
+                    _resolved_cache[raw] = path
+            except (TypeError, ValueError, OSError):
+                return False
         return any(path == root or root in path.parents for root in roots)
 
     busy = threading.local()
@@ -284,6 +368,9 @@ def _build_restricted_globals(
         "scipy": scipy,
         "stats": stats,
         "math": math,
+        "re": re,
+        "json": json,
+        "datetime": datetime,
         "SCHEMA": schema,
         "PRIOR_RESULTS": prior_results if prior_results is not None else {},
     }
@@ -459,42 +546,93 @@ def _run_restricted(
     policy, which also covers serialising objects the code produced."""
     stdout_buf = io.StringIO()
 
-    try:
-        compiled = compile(code, "<sandboxed_code>", "exec")
-        with contextlib.redirect_stdout(stdout_buf):
-            exec(compiled, restricted_globals)
-    except ImportError as exc:
-        return _error_payload(
-            "import_blocked", traceback.format_exc(), str(exc), t0, stdout_buf.getvalue()
-        )
-    except SyntaxError as exc:
-        return _error_payload(
-            "syntax",
-            traceback.format_exc(),
-            f"Code has a syntax error: {exc.msg} (line {exc.lineno}).",
-            t0,
-            stdout_buf.getvalue(),
-        )
-    except Exception as exc:
-        # Every failure should carry an actionable hint, not just a raw
-        # traceback — lightweight models are markedly worse at
-        # self-diagnosing tracebacks unassisted.
+    def _try_exec(exec_code: str) -> tuple[BaseException | None, str]:
+        buf = io.StringIO()
+        try:
+            compiled = compile(exec_code, "<sandboxed_code>", "exec")
+            with contextlib.redirect_stdout(buf):
+                exec(compiled, restricted_globals)
+            return None, buf.getvalue()
+        except BaseException as exc:
+            return exc, buf.getvalue()
+
+    err, out_text = _try_exec(code)
+    stdout_buf.write(out_text)
+
+    # Self-heal on runtime error if possible
+    if err is not None:
+        healed_code: str | None = None
+        # 1. KeyError auto-heal: try matching close column in df
+        if isinstance(err, KeyError) and err.args:
+            key_name = str(err.args[0]).removeprefix("Column not found: ").strip()
+            df_cols = [str(c) for c in df.columns]
+            matches = [c for c in df_cols if c.lower() == key_name.lower()] or difflib.get_close_matches(key_name, df_cols, n=1, cutoff=0.6)
+            if matches:
+                target_col = matches[0]
+                healed_code = re.sub(rf"(['\"]){re.escape(key_name)}\1", rf"\1{target_col}\1", code)
+        # 2. AttributeError on .reset():
+        elif isinstance(err, AttributeError) and "reset" in str(err):
+            healed_code = code.replace(".reset()", ".reset_index()")
+        # 3. NameError on standard modules:
+        elif isinstance(err, NameError) and getattr(err, "name", None) in ("re", "json", "datetime", "math"):
+            mod_name = str(err.name)
+            restricted_globals[mod_name] = __import__(mod_name)
+            healed_code = code
+
+        if healed_code and healed_code != code:
+            retry_err, retry_out = _try_exec(healed_code)
+            if retry_err is None:
+                err = None
+                code = healed_code
+                stdout_buf.truncate(0)
+                stdout_buf.seek(0)
+                stdout_buf.write(retry_out)
+
+    if err is not None:
+        tb_str = "".join(traceback.format_exception(err))
+        if isinstance(err, ImportError):
+            return _error_payload(
+                "import_blocked", tb_str, str(err), t0, stdout_buf.getvalue()
+            )
+        if isinstance(err, SyntaxError):
+            return _error_payload(
+                "syntax",
+                tb_str,
+                f"Code has a syntax error: {err.msg} (line {err.lineno}).",
+                t0,
+                stdout_buf.getvalue(),
+            )
+        if not isinstance(err, Exception):
+            return _error_payload(
+                "runtime",
+                tb_str,
+                f"{type(err).__name__} is not allowed; assign the answer to RESULT instead.",
+                t0,
+                stdout_buf.getvalue(),
+            )
         return _error_payload(
             "runtime",
-            traceback.format_exc(),
-            _runtime_hint(exc, code, df),
+            tb_str,
+            _runtime_hint(err, code, df),
             t0,
             stdout_buf.getvalue(),
         )
-    except BaseException as exc:
-        # SystemExit and friends must not skip the worker's own result write.
-        return _error_payload(
-            "runtime",
-            traceback.format_exc(),
-            f"{type(exc).__name__} is not allowed; assign the answer to RESULT instead.",
-            t0,
-            stdout_buf.getvalue(),
-        )
+
+    # Auto-resolve RESULT if omitted
+    if RESULT_VAR_NAME not in restricted_globals:
+        for cand in (
+            "result", "res", "output", "summary", "agg", "table", "ans",
+            "answer", "df_out", "findings", "finding", "metrics", "data", "report",
+        ):
+            val = restricted_globals.get(cand)
+            if val is not None and not isinstance(val, (types.ModuleType, Toolkit)):
+                restricted_globals[RESULT_VAR_NAME] = val
+                break
+        else:
+            if FINDING_VAR_NAME in restricted_globals or CHART_VAR_NAME in restricted_globals:
+                restricted_globals[RESULT_VAR_NAME] = {"status": "ok", "message": "Analysis completed."}
+            elif stdout_buf.getvalue().strip():
+                restricted_globals[RESULT_VAR_NAME] = {"stdout": stdout_buf.getvalue().strip()}
 
     if RESULT_VAR_NAME not in restricted_globals:
         return _error_payload(

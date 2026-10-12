@@ -1,4 +1,4 @@
-"""Unit tests for the Report Generator Tool — Stage 7."""
+"""Unit tests for the Report Generator Tool — Stage 5."""
 from __future__ import annotations
 
 import json

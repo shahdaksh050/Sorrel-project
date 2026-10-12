@@ -1,0 +1,5 @@
+Contact: mailto:security@sorrel.ai
+Expires: 2027-10-12T00:00:00.000Z
+Canonical: http://localhost:8501/.well-known/security.txt
+Policy: http://localhost:8501/docs/safety.md
+Preferred-Languages: en

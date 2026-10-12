@@ -23,7 +23,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.core.io import SUPPORTED_EXTENSIONS
+from src.core.io import (
+    DEFAULT_MAX_UNCOMPRESSED_MB as IO_DEFAULT_MAX_UNCOMPRESSED_MB,
+)
+from src.core.io import (
+    SUPPORTED_EXTENSIONS,
+    get_max_uncompressed_bytes,
+)
 
 #: File extensions the pipeline knows how to ingest. Single source of truth
 #: is src.core.io.SUPPORTED_EXTENSIONS — read_any's own dispatch table —
@@ -36,7 +42,7 @@ ALLOWED_EXTENSIONS: frozenset[str] = SUPPORTED_EXTENSIONS
 DEFAULT_MAX_UPLOAD_MB = 200
 
 #: Default uncompressed container size ceiling in megabytes (override with MAX_UNCOMPRESSED_MB).
-DEFAULT_MAX_UNCOMPRESSED_MB = 500
+DEFAULT_MAX_UNCOMPRESSED_MB = IO_DEFAULT_MAX_UNCOMPRESSED_MB
 
 #: Default maximum compression ratio for archives before flagging as a potential bomb.
 DEFAULT_MAX_COMPRESSION_RATIO = 100.0
@@ -83,11 +89,7 @@ def max_upload_bytes() -> int:
 
 def max_uncompressed_bytes() -> int:
     """Return the configured uncompressed container size ceiling in bytes."""
-    try:
-        mb = int(os.getenv("MAX_UNCOMPRESSED_MB", str(DEFAULT_MAX_UNCOMPRESSED_MB)))
-    except ValueError:
-        mb = DEFAULT_MAX_UNCOMPRESSED_MB
-    return max(1, mb) * 1024 * 1024
+    return get_max_uncompressed_bytes()
 
 
 def max_compression_ratio() -> float:
@@ -175,6 +177,16 @@ def validate_upload(filename: str, raw_bytes: bytes) -> str:
             raise UploadValidationError(
                 "File claims to be CSV but contains null bytes (binary data)."
             )
+    elif suffix in (".gz", ".zip"):
+        inner_suffix = Path(safe_name).with_suffix("").suffix.lower()
+        if inner_suffix not in (".csv", ".tsv"):
+            raise UploadValidationError(
+                "Compressed uploads must be named like 'data.csv.gz' or 'data.csv.zip' "
+                "(.tsv is also supported)."
+            )
+        if suffix == ".gz" and not head.startswith(b"\x1f\x8b"):
+            raise UploadValidationError("File claims to be gzip-compressed but has an invalid header.")
+        _check_decompression_safety(raw_bytes, suffix)
     elif suffix == ".xlsx":
         if not head.startswith(_XLSX_SIGNATURE):
             raise UploadValidationError("File claims to be .xlsx but is not a valid Excel container.")
@@ -196,19 +208,21 @@ def _check_decompression_safety(raw_bytes: bytes, suffix: str) -> None:
     max_uncompressed = max_uncompressed_bytes()
     max_ratio = max_compression_ratio()
 
-    if suffix == ".xlsx":
+    if suffix in (".xlsx", ".zip"):
         try:
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
                 infolist = zf.infolist()
+                label = "Excel archive" if suffix == ".xlsx" else "Archive"
                 if len(infolist) > DEFAULT_MAX_ZIP_ENTRIES:
                     raise UploadValidationError(
-                        f"Excel archive contains {len(infolist)} entries, exceeding the "
+                        f"{label} contains {len(infolist)} entries, exceeding the "
                         f"safety limit of {DEFAULT_MAX_ZIP_ENTRIES}."
                     )
                 total_uncompressed = sum(info.file_size for info in infolist)
                 if total_uncompressed > max_uncompressed:
                     raise UploadValidationError(
-                        f"Uncompressed Excel content is {total_uncompressed / 1_048_576:.1f} MB, "
+                        f"Uncompressed {label.lower().replace(' archive', '')} content is "
+                        f"{total_uncompressed / 1_048_576:.1f} MB, "
                         f"exceeding the {max_uncompressed // 1_048_576} MB limit."
                     )
                 ratio = total_uncompressed / max(1, len(raw_bytes))
@@ -218,7 +232,30 @@ def _check_decompression_safety(raw_bytes: bytes, suffix: str) -> None:
                         "File rejected as a potential decompression bomb."
                     )
         except zipfile.BadZipFile as err:
-            raise UploadValidationError(f"Malformed or corrupted Excel archive: {err}") from err
+            kind = "Excel archive" if suffix == ".xlsx" else "zip archive"
+            raise UploadValidationError(f"Malformed or corrupted {kind}: {err}") from err
+
+    elif suffix == ".gz":
+        import gzip
+
+        total = 0
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(raw_bytes)) as stream:
+                while chunk := stream.read(min(1024 * 1024, max_uncompressed - total + 1)):
+                    total += len(chunk)
+                    if total > max_uncompressed:
+                        raise UploadValidationError(
+                            f"Uncompressed gzip content exceeds the "
+                            f"{max_uncompressed // 1_048_576} MB limit."
+                        )
+        except (OSError, EOFError) as err:
+            raise UploadValidationError(f"Malformed or corrupted gzip archive: {err}") from err
+        ratio = total / max(1, len(raw_bytes))
+        if ratio > max_ratio:
+            raise UploadValidationError(
+                f"Suspicious compression ratio ({ratio:.1f}:1 > {max_ratio:.0f}:1). "
+                "File rejected as a potential decompression bomb."
+            )
 
     elif suffix == ".parquet":
         try:

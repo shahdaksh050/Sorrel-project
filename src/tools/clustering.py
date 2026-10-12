@@ -21,6 +21,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import numpy as np
 import pandas as pd
 
 from src.core.findings import Finding
@@ -54,6 +55,31 @@ _NON_FEATURE_NAME_TOKENS = frozenset({
     "lat", "latitude", "lon", "lng", "long", "longitude",
     "year", "yr", "month", "day", "week", "hour", "quarter", "zip", "zipcode",
 })
+
+
+def _format_metric_value(val: float | int | None) -> str:
+    """Format a numeric value for audience-facing headlines without scientific notation.
+
+    - Numbers >= 100 or <= -100: comma-formatted with 0 decimals if near-integer, else 1 decimal.
+    - Numbers between 0.01 and 100: 2 decimal places.
+    - Small fractions (< 0.01 and > -0.01, != 0): up to 4 decimal places.
+    - Never emits raw 'e+' / 'e-' scientific notation.
+    """
+    if val is None:
+        return "n/a"
+    v = float(val)
+    if not np.isfinite(v):
+        return str(v)
+    abs_v = abs(v)
+    if abs_v >= 100:
+        if abs(v - round(v)) < 1e-6:
+            return f"{round(v):,}"
+        return f"{v:,.1f}"
+    if abs_v >= 0.01:
+        return f"{v:.2f}"
+    if abs_v > 1e-6:
+        return f"{v:.4f}"
+    return "0"
 
 
 def _select_cluster_features(
@@ -253,7 +279,45 @@ class ClusterDataTool(BaseTool):
                 str(col): round(float(group[col].mean()), 4) for col in profile_cols
             }
 
-        # ---- 2-D PCA coordinates for the dashboard scatter ----
+        # ---- 2-D PCA coordinates and cluster labels for dashboard scatter ----
+        total_units = len(labels)
+        overall_mean = {str(col): float(filled[col].mean()) for col in profile_cols}
+        cluster_labels: dict[str, str] = {}
+        cluster_short_labels: dict[str, str] = {}
+        cluster_names: dict[str, str] = {}
+
+        for c_idx in range(best_k):
+            c_key = f"cluster_{c_idx}"
+            c_size = cluster_sizes.get(c_key, 0)
+            c_share = (c_size / total_units * 100.0) if total_units > 0 else 0.0
+            prof = cluster_profiles.get(c_key, {})
+
+            deviations = []
+            for col in profile_cols:
+                c_val = prof.get(str(col), 0.0)
+                o_val = overall_mean.get(str(col), 0.0)
+                denom = abs(o_val) if abs(o_val) > 1e-9 else 1.0
+                rel = (c_val - o_val) / denom
+                deviations.append((str(col), rel, c_val, o_val))
+            deviations.sort(key=lambda item: abs(item[1]), reverse=True)
+
+            traits = []
+            for col_name, rel, _c_val, _o_val in deviations[:2]:
+                if abs(rel) >= 0.08:
+                    dir_str = "High" if rel > 0 else "Low"
+                    traits.append(f"{dir_str} {col_name}")
+
+            if traits:
+                descriptor = ", ".join(traits)
+                short_desc = traits[0]
+            else:
+                descriptor = "Balanced / Average"
+                short_desc = "Balanced"
+
+            cluster_names[c_key] = descriptor
+            cluster_short_labels[c_key] = f"Cluster {c_idx + 1} ({short_desc})"
+            cluster_labels[c_key] = f"Cluster {c_idx + 1}: {descriptor} (n={c_size:,}, {c_share:.0f}%)"
+
         pca = PCA(n_components=2, random_state=42)
         coords = pca.fit_transform(X)
         point_idx = (
@@ -266,6 +330,8 @@ class ClusterDataTool(BaseTool):
                 "x": round(float(coords[i, 0]), 4),
                 "y": round(float(coords[i, 1]), 4),
                 "cluster": f"cluster_{int(labels[i])}",
+                "cluster_label": cluster_labels.get(f"cluster_{int(labels[i])}", f"Cluster {int(labels[i]) + 1}"),
+                "cluster_short_label": cluster_short_labels.get(f"cluster_{int(labels[i])}", f"Cluster {int(labels[i]) + 1}"),
             }
             for i in point_idx
         ]
@@ -299,6 +365,9 @@ class ClusterDataTool(BaseTool):
             "k_scores": k_scores,
             "cluster_sizes": cluster_sizes,
             "cluster_profiles": cluster_profiles,
+            "cluster_labels": cluster_labels,
+            "cluster_short_labels": cluster_short_labels,
+            "cluster_names": cluster_names,
             "features_used": list(features.columns),
             "log1p_features": log_features,
             "pca_points": pca_points,
@@ -329,12 +398,16 @@ class ClusterDataTool(BaseTool):
                         "clusters would be artificial"
                     ),
                     detail="KMeans over the numeric features found no real cluster structure.",
-                    evidence={"n_clusters": n_clusters, "silhouette_score": silhouette},
+                    evidence={
+                        "n_clusters": n_clusters,
+                        "silhouette_score": silhouette,
+                        "separation_quality": "none",
+                    },
                     source_tool=self.name,
                     measure="silhouette_score",
                     effect=round(silhouette, 4),
-                    effect_kind="r",
-                    confidence=0.35,
+                    effect_kind="silhouette",
+                    confidence=0.20,
                     surprise=0.1,
                     layer="appendix",
                 )
@@ -367,9 +440,9 @@ class ClusterDataTool(BaseTool):
                     source_tool=self.name,
                     measure="silhouette_score",
                     effect=round(silhouette, 4),
-                    effect_kind="r",
-                    confidence=0.6 if quality != "weak" else 0.35,
-                    surprise=0.3,
+                    effect_kind="silhouette",
+                    confidence=0.6 if quality in ("strong", "reasonable") else 0.25,
+                    surprise=0.3 if quality in ("strong", "reasonable") else 0.1,
                     layer="exec" if quality in ("strong", "reasonable") else "analyst",
                 )
             )
@@ -400,28 +473,17 @@ class ClusterDataTool(BaseTool):
                 if deviation > 0.15:
                     total_rows = sum(sizes.values())
                     share = sizes[largest_name] / total_rows if total_rows else 0.0
-                    # This finding rides on the same cluster geometry as the
-                    # "segments" finding above, so it can't be more trustworthy
-                    # than its parent: cap its confidence at the parent's
-                    # (0.6 if separation isn't weak, else 0.35), and within
-                    # that ceiling scale down with the actual silhouette
-                    # rather than a flat constant. A weak silhouette (e.g.
-                    # 0.087) now lands at/near the floor instead of a
-                    # hard-coded 0.55 that ignored cluster quality entirely.
-                    parent_confidence = 0.6 if quality != "weak" else 0.35
                     sil = float(silhouette) if silhouette is not None else 0.0
-                    profile_confidence = round(min(parent_confidence, max(0.2, sil)), 3)
-                    # `surprise` is gated the same way as confidence: a
-                    # profile deviation drawn from weakly-separated clusters
-                    # is not a noteworthy discovery the way the same
-                    # deviation would be inside genuinely distinct groups,
-                    # so it shouldn't get the sibling finding's full 0.3-0.4
-                    # surprise weight in the ranking.
-                    profile_surprise = 0.4 if quality != "weak" else 0.15
+                    is_weak = quality in ("weak", "none") or sil < 0.35
+                    parent_confidence = 0.6 if not is_weak else 0.25
+                    profile_confidence = round(min(parent_confidence, max(0.12, sil * (1.0 if not is_weak else 0.55))), 3)
+                    profile_surprise = 0.4 if not is_weak else 0.10
+                    effective_deviation = deviation if not is_weak else deviation * (max(sil, 0.0) / 0.5)
+
                     unit = output.get("unit_of_analysis", "row")
                     unit_noun = "rows" if unit == "row" else f"'{unit}' entities"
                     profile_caveats: list[str] = []
-                    if quality == "weak":
+                    if is_weak:
                         profile_caveats.append(
                             f"Cluster separation is weak (silhouette={sil:.3f}) — this "
                             "segment profile may not reflect a genuinely distinct group "
@@ -434,8 +496,8 @@ class ClusterDataTool(BaseTool):
                             headline=(
                                 f"Largest segment ({largest_name}, {sizes[largest_name]:,} {unit_noun}, "
                                 f"{share * 100:.1f}% of data) stands out on '{defining_feature}' "
-                                f"(mean {largest_profile[defining_feature]:.3g} vs "
-                                f"{overall_mean[defining_feature]:.3g} overall)"
+                                f"(mean {_format_metric_value(largest_profile[defining_feature])} vs "
+                                f"{_format_metric_value(overall_mean[defining_feature])} overall)"
                             ),
                             evidence={
                                 "cluster": largest_name,
@@ -450,10 +512,11 @@ class ClusterDataTool(BaseTool):
                             measure=defining_feature,
                             dimension="cluster",
                             level=largest_name,
-                            effect=round(min(deviation, 2.0), 4),
+                            effect=round(min(effective_deviation, 2.0), 4),
                             effect_kind="pct",
                             confidence=profile_confidence,
                             surprise=profile_surprise,
+                            layer="exec" if (quality in ("strong", "reasonable") and sil >= 0.5) else "analyst",
                             caveats=profile_caveats,
                         )
                     )

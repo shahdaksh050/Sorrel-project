@@ -9,7 +9,7 @@ constraints for AI agents interacting with this repository.
 
 You are a **Type-Safe Python Data Science Developer** and **Autonomous Systems
 Architect**. Your expertise lies in building robust, modular, and scalable
-agentic systems using a recursive task-decomposition paradigm.
+agentic systems using a typed, iterative planning-and-execution paradigm.
 
 ---
 
@@ -40,17 +40,17 @@ agentic systems using a recursive task-decomposition paradigm.
 src/
 ├── core/
 │   ├── controller.py     ← REASONING LAYER: planning, orchestration, workflow stages
-│   ├── memory.py         ← STATE LAYER: external REPL environment (RLM paradigm)
+│   ├── memory.py         ← STATE LAYER: persistent analysis context
 │   └── prompt_manager.py ← PROMPT LAYER: all LLM prompt templates
 ├── rlm/
-│   └── engine.py         ← RLM LAYER: recursive invocation, REPL env, trace logging
+│   └── engine.py         ← INFERENCE LAYER: provider invocation, usage, trace logging
 └── tools/
     ├── base.py                 ← EXECUTION LAYER: abstract base, timing, error wrapping
     ├── data_processing.py      ← Stage 1 & 3 tools
     ├── statistical_analysis.py ← Stage 3 tool
     ├── ml_pipeline.py          ← Stage 3 tool (train + evaluate)
     ├── visualization.py        ← Stage 3 tool (charts)
-    └── report_generator.py     ← Stage 7 tool
+    └── report_generator.py     ← Stage 5 tool
 ```
 
 ### Layer Rules
@@ -58,7 +58,7 @@ src/
 | Layer | Allowed dependencies | Forbidden dependencies |
 | :--- | :--- | :--- |
 | `controller.py` | `memory`, `prompt_manager`, `rlm/engine`, `ToolRegistry` | Direct tool imports, raw LLM SDK calls |
-| `engine.py` | LLM callable (injected), `REPLEnvironment` | `memory`, `tools`, `controller` |
+| `engine.py` | LLM callable (injected) | `memory`, `tools`, `controller` |
 | `tools/*` | `base.py`, `memory` **types only** (`MemorySystem`, `ToolResult`, `DatasetMetadata` as type hints / return values — never engine or controller behaviour), `findings` (`Finding`), `profiler` (`DatasetProfile`), stdlib, data libs (pandas, sklearn…) | `engine`, `controller`, importing `memory`/`profiler` for their *behaviour* (e.g. calling `MemorySystem.save()` from a tool) |
 | `memory.py` | stdlib, `rich`, `findings` (`Finding`, `rank_findings`) | Any tool or engine import |
 
@@ -66,17 +66,15 @@ src/
 
 ---
 
-## 7-Stage Workflow — Agent Must Follow This Order
+## 5-Stage Workflow — Agent Must Follow This Order
 
 | Stage | Name | File(s) | Entry Point |
 | :---: | :--- | :--- | :--- |
-| 1 | Dataset Ingestion | `controller.py`, `data_processing.py` | `AgentController.load_dataset()` |
-| 2 | Initial Reasoning | `controller.py`, `engine.py`, `prompt_manager.py` | First `RLMEngine.invoke()` call |
-| 3 | Tool Selection & Execution | `controller.py`, `tools/*` | `AgentController._execute_steps()` |
-| 4 | Result Interpretation | `controller.py`, `engine.py` | Second+ `RLMEngine.invoke()` call |
-| 5 | Iterative Refinement | `controller.py` | Main `for iteration` loop |
-| 6 | RLM Workflow Management | `engine.py`, `controller.py` | `AgentController._run_rlm_decomposition()` |
-| 7 | Report Generation | `controller.py`, `report_generator.py` | `AgentController._generate_final_report()` |
+| 1 | Dataset Ingestion & Profiling | `controller.py`, `data_processing.py`, `profiler.py` | `AgentController.load_dataset()` |
+| 2 | Hypothesis & Action Plan Generation | `controller.py`, `engine.py`, `prompt_manager.py` | First `RLMEngine.invoke()` call |
+| 3 | Tool Execution & Sandbox Verification | `controller.py`, `tools/*`, `sandbox.py` | `AgentController._execute_steps()` |
+| 4 | Iterative Refinement & Adversarial Review | `controller.py`, `engine.py`, `causal_design.py` | Main reasoning loop and review passes |
+| 5 | Synthesis, Post-Hoc Audits & Dossier Generation | `controller.py`, `controller_report.py`, `report_generator.py` | `AgentController._finalize_analysis()` |
 
 ---
 
@@ -141,7 +139,7 @@ Operator controls (environment):
 
 Every execution and refusal is appended to `<output_dir>/audit/code_executions.jsonl` (full code, SHA-256, outcome, backend), every LLM call to `<output_dir>/audit/llm_calls.jsonl`; a run summary is in `final_result["governance"]` and shown in the app's Details tab.
 
-Core module map after the controller split: `controller.py` (AgentController — init, dataset loading, the `_analyze` loop, RLM decomposition), `controller_planning.py` / `controller_steps.py` / `controller_report.py` (`PlanMixin` / `StepMixin` / `ReportMixin`: plan parsing and fallback plan, step validation and execution, final synthesis and report — `AgentController` inherits all three; `controller_common.py` holds their shared constants and the `ControllerState` type declarations), `llm_client.py` (provider calls, JSON repair, local-only), `tool_registry.py`, `step_validation.py` (pre-execution plan checks), `claim_verification.py` (verbatim-number guard), `governance.py`, `dashboard.py` (+ `dashboard_common.py`, `dashboard_charts_basic/model/domain.py` — chart builders, re-exported from `dashboard`), `ml_pipeline.py` (TrainModelTool; shared helpers in `src/tools/ml_common.py`, EvaluateModelTool in `src/tools/ml_evaluate.py`, both re-exported), `stats_utils.py` (shared statistics: entity aggregation, Mann-Kendall, aggregation choice), `multiple_testing.py` (run-level BH). `analysis_io.py` (the coercing dataset reader the controller and tools share — the controller never imports `src/tools/`), `model_io.py` (HMAC-signed model pickles: `save_model`/`load_model` are the only way to persist or load a model file; an unsigned pickle is never unpickled). Moved names stay importable from `src.core.controller`.
+Core module map after the controller split: `controller.py` (AgentController — init, dataset loading, and the `_analyze` loop), `controller_planning.py` / `controller_steps.py` / `controller_report.py` (`PlanMixin` / `StepMixin` / `ReportMixin`: plan parsing and fallback plan, step validation and execution, final synthesis and report — `AgentController` inherits all three; `controller_common.py` holds their shared constants and the `ControllerState` type declarations), `domain_reasoning.py` (domain hypothesis validation), `causal_design.py` (causal proposal validation & adversarial review), `llm_client.py` (provider calls, JSON repair, local-only), `tool_registry.py`, `step_validation.py` (pre-execution plan checks), `claim_verification.py` (verbatim-number guard), `governance.py`, `dashboard.py` (+ `dashboard_common.py`, `dashboard_charts_basic/model/domain.py` — chart builders, re-exported from `dashboard`), `ml_pipeline.py` (TrainModelTool; shared helpers in `src/tools/ml_common.py`, EvaluateModelTool in `src/tools/ml_evaluate.py`, both re-exported), `causal_analysis.py` (CausalAnalysisTool & DifferenceInDifferencesTool), `structured_features.py` (ExtractStructuredFeaturesTool), `stats_utils.py` (shared statistics: entity aggregation, Mann-Kendall, aggregation choice), `multiple_testing.py` (run-level BH). `analysis_io.py` (the coercing dataset reader the controller and tools share — the controller never imports `src/tools/`), `model_io.py` (HMAC-signed model pickles: `save_model`/`load_model` are the only way to persist or load a model file; an unsigned pickle is never unpickled). Moved names stay importable from `src.core.controller`.
 
 ---
 
@@ -152,7 +150,7 @@ Each agent task must satisfy all of the following before marking complete:
 1. `ruff check .` passes with zero violations.
 2. `mypy src/` passes with zero type errors.
 3. All unit tests in `tests/` pass (`pytest tests/ -v`).
-4. The 7-stage workflow executes end-to-end without uncaught exceptions on a sample CSV.
+4. The 5-stage workflow executes end-to-end without uncaught exceptions on a sample CSV.
 5. The `output/reports/` directory contains a populated Markdown report after a run.
 6. No API keys appear anywhere in tracked files.
 

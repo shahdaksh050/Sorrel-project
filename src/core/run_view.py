@@ -122,6 +122,7 @@ class HowWeGotHere:
     untraced_total: int = 0
     deliverables: Deliverables | None = None
     hypotheses: tuple[Hypothesis, ...] = ()
+    hypotheses_all: tuple[Hypothesis, ...] = ()
     #: (status, count) for every tested status present, over all hypotheses.
     hypothesis_counts: tuple[tuple[str, int], ...] = ()
     usage: Usage | None = None
@@ -243,13 +244,15 @@ def _build_deliverables(raw: Any) -> Deliverables | None:
     return out if (out.delivered or out.missing or out.repaired) else None
 
 
-def _build_hypotheses(raw: Any) -> tuple[tuple[Hypothesis, ...], tuple[tuple[str, int], ...]]:
-    """Tested hypotheses (capped, refuted first) and true per-status counts."""
+def _build_hypotheses(
+    raw: Any,
+) -> tuple[tuple[Hypothesis, ...], tuple[Hypothesis, ...], tuple[tuple[str, int], ...]]:
+    """Tested hypotheses (capped, refuted first), all hypotheses, and true per-status counts."""
     if not isinstance(raw, Mapping):
-        return (), ()
+        return (), (), ()
     nodes = raw.get("nodes")
     if not isinstance(nodes, Mapping):
-        return (), ()
+        return (), (), ()
     tested: list[Hypothesis] = []
     for node in nodes.values():
         if not isinstance(node, Mapping):
@@ -262,7 +265,7 @@ def _build_hypotheses(raw: Any) -> tuple[tuple[Hypothesis, ...], tuple[tuple[str
         (s, n) for s in _TESTED_STATUSES if (n := sum(1 for h in tested if h.status == s))
     )
     ordered = sorted(tested, key=lambda h: _TESTED_STATUSES.index(h.status))
-    return tuple(ordered[:MAX_HYPOTHESES]), counts
+    return tuple(ordered[:MAX_HYPOTHESES]), tuple(ordered), counts
 
 
 def _build_usage(raw: Any) -> Usage | None:
@@ -283,7 +286,7 @@ def _build_usage(raw: Any) -> Usage | None:
 def _build_how(context: Mapping[str, Any], *, no_ai: bool) -> HowWeGotHere:
     fallbacks_all = _str_tuple(context.get("degradations"))
     untraced_all = _str_tuple(context.get("unverified_claims"))
-    hypotheses, counts = _build_hypotheses(context.get("hypothesis_tree"))
+    hypotheses, hypotheses_all, counts = _build_hypotheses(context.get("hypothesis_tree"))
     usage = _build_usage(context.get("llm_usage"))
     return HowWeGotHere(
         decision=_build_decision(context.get("analysis_decision")),
@@ -293,6 +296,7 @@ def _build_how(context: Mapping[str, Any], *, no_ai: bool) -> HowWeGotHere:
         untraced_total=len(untraced_all),
         deliverables=_build_deliverables(context.get("deliverable_audit")),
         hypotheses=hypotheses,
+        hypotheses_all=hypotheses_all,
         hypothesis_counts=counts,
         usage=usage,
         no_ai=no_ai,

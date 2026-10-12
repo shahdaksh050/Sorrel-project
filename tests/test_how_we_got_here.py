@@ -168,3 +168,21 @@ def test_a_capped_hypothesis_list_says_how_many_were_tested() -> None:
     assert "Showing" not in build_how_html(
         HowWeGotHere(hypotheses=shown[:3], hypothesis_counts=(("supported", 3),))
     )
+
+
+def test_hypotheses_collapsible_shows_all_when_more_than_capped() -> None:
+    all_hypotheses = tuple(Hypothesis(f"idea {i}", "supported", 0.7) for i in range(11))
+    how = HowWeGotHere(
+        hypotheses=all_hypotheses[:8],
+        hypotheses_all=all_hypotheses,
+        hypothesis_counts=(("supported", 11),),
+    )
+    out = build_how_html(how)
+    assert "Showing 8 of 11." in out
+    assert "<details class=\"how-more-details\">" in out
+    assert "<summary class=\"how-more\">Showing 8 of 11. Show all 11.</summary>" in out
+    # Verify ideas beyond the 8th (e.g. idea 8, 9, 10) are included in the expanded details
+    assert "idea 8" in out
+    assert "idea 9" in out
+    assert "idea 10" in out
+

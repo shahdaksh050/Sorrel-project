@@ -1061,6 +1061,10 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .how-sub {{ font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--graphite); margin: .6rem 0 .2rem; }}
 .how-list {{ margin: 0 0 .4rem; padding-left: 1.1rem; font-size: var(--text-sm); line-height: 1.55; color: var(--ink-2); overflow-wrap: anywhere; }}
 .how-more {{ font-size: var(--text-xs); color: var(--graphite); margin: 0; }}
+.how-more-details {{ margin-top: .4rem; }}
+.how-more-details summary {{ cursor: pointer; user-select: none; }}
+.how-more-details summary:hover {{ color: var(--ink); text-decoration: underline; }}
+.how-more-details[open] summary {{ margin-bottom: .4rem; }}
 /* A chip: a glyph and a word, tinted by status. A refuted idea "does not hold", so it is the brick one. */
 .how-tag {{ display: inline-block; padding: 1px 8px; margin-right: 6px; border: 1px solid currentColor; border-radius: var(--radius-pill);
     font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;

@@ -144,11 +144,27 @@ def _ideas(how: HowWeGotHere) -> str:
         for h in how.hypotheses
     )
     tested = sum(n for _, n in how.hypothesis_counts)
-    more = (
-        f'<p class="how-more">Showing {len(how.hypotheses)} of {tested}.</p>'
-        if tested > len(how.hypotheses)
-        else ""
-    )
+    all_hypo = how.hypotheses_all or how.hypotheses
+    extra = all_hypo[len(how.hypotheses):]
+    if extra:
+        extra_rows = "".join(
+            f'<li><span class="how-tag {_e(h.status)}">'
+            f'<span aria-hidden="true">{_e(_STATUS_GLYPHS.get(h.status, "○"))}</span> '
+            f'{_e(_STATUS_LABELS.get(h.status, h.status))}'
+            f"</span> {_e(plainify(h.statement))}</li>"
+            for h in extra
+        )
+        more = (
+            f'<details class="how-more-details">'
+            f'<summary class="how-more">Showing {len(how.hypotheses)} of {tested}. Show all {tested}.</summary>'
+            f'<ul class="how-list how-ideas">{extra_rows}</ul>'
+            f'</details>'
+        )
+    elif tested > len(how.hypotheses):
+        more = f'<p class="how-more">Showing {len(how.hypotheses)} of {tested}.</p>'
+    else:
+        more = ""
+
     body = (f'<p class="how-lead">{_e(counts)}.</p>' if counts else "") + (
         f'<ul class="how-list how-ideas">{rows}</ul>{more}'
     )

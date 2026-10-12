@@ -33,12 +33,13 @@ from src.core.profiler import ColumnProfile, DatasetProfile
 SCATTER_MAX_POINTS = 350
 
 
-#: How many numeric histograms / categorical bars to show at most — and only
-#: for columns a finding actually references (strict curation).
-MAX_HISTOGRAMS = 2
+#: How many numeric histograms / categorical bars to show at most — balanced
+#: curation: finding-referenced columns plus top continuous/categorical features.
+MAX_HISTOGRAMS = 4
 
 
-MAX_CATEGORY_CHARTS = 3
+MAX_CATEGORY_CHARTS = 4
+
 
 
 #: Correlation heatmap: fewest chartable numeric columns worth a matrix, the

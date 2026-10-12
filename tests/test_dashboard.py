@@ -285,3 +285,66 @@ class TestSpecQuality:
         df = pd.DataFrame({"a": pd.Series(dtype="float64")})
         profile = profile_dataframe(df)
         assert build_dashboard(df, profile) == []
+
+
+class TestVisualDensityAndHierarchy:
+    def test_baseline_context_includes_top_features_without_findings(self) -> None:
+        # A dataset with continuous and categorical features but 0 findings
+        df = pd.DataFrame({
+            "revenue": [100.0, 200.0, 150.0, 300.0, 250.0, 180.0, 220.0, 290.0] * 5,
+            "cost": [50.0, 100.0, 75.0, 150.0, 125.0, 90.0, 110.0, 145.0] * 5,
+            "region": ["North", "North", "South", "East", "West", "North", "East", "South"] * 5,
+            "plan": ["Basic", "Pro", "Basic", "Enterprise", "Pro", "Basic", "Enterprise", "Pro"] * 5,
+        })
+        profile = profile_dataframe(df)
+        charts = build_dashboard(df, profile, task_type="eda")
+        ids = [c.chart_id for c in charts]
+        # Should have histogram for continuous and bar for categorical
+        assert any(i.startswith("hist_") for i in ids)
+        assert any(i.startswith("cat_") for i in ids)
+
+    def test_merge_designed_safeguards_baseline_charts_when_designed_empty(self) -> None:
+        from src.core.dashboard import merge_designed
+        dummy_chart = ChartSpec(
+            chart_id="hist_revenue",
+            title="Revenue Distribution",
+            description="...",
+            spec={"data": {"values": [{"bin_start": 0, "bin_end": 10, "count": 5}]}},
+        )
+        # LLM requested dropping hist_revenue, but produced no valid replacement charts
+        result = merge_designed([dummy_chart], designed=[], drop_ids={"hist_revenue"})
+        assert len(result) == 1
+        assert result[0].chart_id == "hist_revenue"
+
+    def test_interaction_synergy_chart_built(self) -> None:
+        df = pd.DataFrame({
+            "churn": [0, 1, 0, 1, 0, 1, 0, 1],
+            "contract": ["M2M", "M2M", "1Yr", "1Yr", "M2M", "1Yr", "M2M", "1Yr"],
+            "tech_support": ["No", "No", "Yes", "Yes", "No", "Yes", "No", "Yes"],
+        })
+        profile = profile_dataframe(df, target_column="churn")
+        finding = {
+            "finding_id": "interaction_0_churn_contract_tech_support",
+            "kind": "interaction_synergy",
+            "headline": "Subgroup synergy detected",
+            "source_tool": "segment_comparison",
+            "evidence": {
+                "measure": "churn",
+                "dimension_a": "contract",
+                "level_a": "M2M",
+                "lift_a": 0.25,
+                "dimension_b": "tech_support",
+                "level_b": "No",
+                "lift_b": 0.30,
+                "joint_level": "M2M + No",
+                "joint_lift": 0.70,
+                "expected_additive_lift": 0.55,
+                "synergy_diff": 0.15,
+                "interaction_type": "synergy",
+                "n": 500,
+            },
+        }
+        charts = build_dashboard(df, profile, target_column="churn", findings=[finding])
+        ids = [c.chart_id for c in charts]
+        assert any(i.startswith("interaction_churn_contract_tech_support") for i in ids)
+

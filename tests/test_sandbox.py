@@ -409,3 +409,123 @@ class TestSandboxedCodeSelfHealing:
         res = sandbox.run_sandboxed(code=code, dataset_ref=str(dataset))
         assert res.status == "ok"
         assert res.result == 42
+
+    def test_value_counts_bar_chart_auto_healed(self, tmp_path: Path) -> None:
+        import pandas as pd
+        csv_path = tmp_path / "titles.csv"
+        df = pd.DataFrame({
+            "country": ["United States"] * 10 + ["India"] * 6 + ["United Kingdom"] * 4,
+            "title": [f"Title {i}" for i in range(20)],
+        })
+        df.to_csv(csv_path, index=False)
+
+        # The exact pattern from the user's incident:
+        code = (
+            "country_counts = df['country'].value_counts().head(10)\n"
+            "CHART = dsa.chart.bar(data=country_counts.reset_index(), x='index', y='country', "
+            "title='Top 10 Countries by Title Count', caption='United States and India lead')\n"
+            "RESULT = country_counts.to_dict()\n"
+        )
+        res = sandbox.run_sandboxed(code=code, dataset_ref=str(csv_path))
+        assert res.status == "ok"
+        assert res.chart is not None
+        assert res.chart["type"] == "bar"
+        assert res.chart["x"] == "country"
+        assert res.chart["y"] == "count"
+
+    def test_missing_columns_multi_indexing_and_isnull_executes_cleanly(self, tmp_path: Path) -> None:
+        import pandas as pd
+        csv_path = tmp_path / "smartphones.csv"
+        df = pd.DataFrame({
+            "model": ["Phone A", "Phone B"],
+            "price": [199.99, 499.99],
+            "camera": ["12MP", "50MP"],
+        })
+        df.to_csv(csv_path, index=False)
+
+        # Exact user pattern that previously triggered KeyError: "['card', 'os'] not in index"
+        code = (
+            "missing_cols = ['card', 'os']\n"
+            "df_raw = df.copy()\n"
+            "df_raw['missing_any'] = df_raw[missing_cols].isnull().any(axis=1)\n"
+            "RESULT = {'has_missing': bool(df_raw['missing_any'].all()), 'columns': list(df_raw.columns)}\n"
+        )
+        res = sandbox.run_sandboxed(code=code, dataset_ref=str(csv_path))
+        assert res.status == "ok"
+        assert isinstance(res.result, dict)
+        assert res.result["has_missing"] is True
+        assert "missing_any" in res.result["columns"]
+
+    def test_missing_columns_drop_and_loc_executes_cleanly(self, tmp_path: Path) -> None:
+        import pandas as pd
+        csv_path = tmp_path / "data.csv"
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        df.to_csv(csv_path, index=False)
+
+        code = (
+            "dropped = df.drop(columns=['non_existent_1', 'non_existent_2'])\n"
+            "loc_slice = df.loc[:, ['non_existent_3']]\n"
+            "RESULT = {'dropped_cols': list(dropped.columns), 'loc_is_nan': bool(loc_slice.isna().all().iloc[0])}\n"
+        )
+        res = sandbox.run_sandboxed(code=code, dataset_ref=str(csv_path))
+        assert res.status == "ok"
+        assert isinstance(res.result, dict)
+        assert res.result["dropped_cols"] == ["a", "b"]
+        assert res.result["loc_is_nan"] is True
+
+    def test_case_insensitive_and_fuzzy_column_access(self, tmp_path: Path) -> None:
+        import pandas as pd
+        csv_path = tmp_path / "phones.csv"
+        df = pd.DataFrame({"processor": ["Snapdragon", "Bionic"], "Price": [300, 800]})
+        df.to_csv(csv_path, index=False)
+
+        code = (
+            "p_mean = df['price'].mean()\n"
+            "proc = df['Processor'].tolist()\n"
+            "RESULT = {'price_mean': float(p_mean), 'processors': proc}\n"
+        )
+        res = sandbox.run_sandboxed(code=code, dataset_ref=str(csv_path))
+        assert res.status == "ok"
+        assert isinstance(res.result, dict)
+        assert res.result["price_mean"] == 550.0
+        assert res.result["processors"] == ["Snapdragon", "Bionic"]
+
+    def test_globals_and_locals_safely_normalized_and_executed(self, tmp_path: Path) -> None:
+        import pandas as pd
+        csv_path = tmp_path / "data.csv"
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        df.to_csv(csv_path, index=False)
+
+        # Pattern from user incident: checking globals()
+        code = (
+            "df_clean = dsa.run('clean_data', file_path='dummy')['output'] if 'clean_data' in globals() else df\n"
+            "RESULT = {'cleaned': 'clean_data' in globals(), 'has_df': 'df' in globals()}\n"
+        )
+        res = sandbox.run_sandboxed(code=code, dataset_ref=str(csv_path))
+        assert res.status == "ok"
+        assert isinstance(res.result, dict)
+        assert res.result["cleaned"] is False
+        assert res.result["has_df"] is True
+
+    def test_degenerate_single_category_bar_chart_does_not_crash_script(self, tmp_path: Path) -> None:
+        import pandas as pd
+        csv_path = tmp_path / "data.csv"
+        df = pd.DataFrame({"price": [100.0, 200.0]})
+        df.to_csv(csv_path, index=False)
+
+        # Pattern from user incident: bar chart of 1 category ('unknown')
+        code = (
+            "df_agg = pd.DataFrame({'card': ['unknown'], 'price': [150.0]})\n"
+            "CHART = dsa.chart.bar(df_agg, x='card', y='price', title='Average Price')\n"
+            "RESULT = {'mean_price': 150.0}\n"
+            "FINDING = {'headline': 'Computed mean price', 'evidence': {'price': 150.0}}\n"
+        )
+        res = sandbox.run_sandboxed(code=code, dataset_ref=str(csv_path))
+        assert res.status == "ok"
+        assert isinstance(res.result, dict)
+        assert res.result["mean_price"] == 150.0
+        assert res.finding is not None
+        assert res.chart is None
+        assert res.chart_error is not None
+        assert "compares nothing" in res.chart_error
+

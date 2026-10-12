@@ -360,9 +360,9 @@ def test_dynamic_code_fallback_direct_groupby(tmp_path: Any, monkeypatch: pytest
     from src.core.controller_common import _PreparedStep
 
     csv_file = tmp_path / "products.csv"
-    brands = [f"Brand_{i}" for i in range(25)]
+    brands = [f"Brand_{i}" for i in range(5)]
     data = {
-        "brand": [brands[i % 25] for i in range(100)],
+        "brand": [brands[i % 5] for i in range(100)],
         "price": [10.0 + i * 2.0 for i in range(100)],
     }
     df = pd.DataFrame(data)
@@ -399,12 +399,12 @@ def test_dynamic_code_fallback_direct_groupby(tmp_path: Any, monkeypatch: pytest
 
     fallback = agent._try_dynamic_code_fallback(prepared, failed_result)
     assert fallback is not None
-    _new_prepared, healed_result = fallback
+    new_prepared, healed_result = fallback
     assert healed_result.status == "success"
+    assert new_prepared.step.tool_name == "segment_comparison"
     assert "[Self-healed from dynamic code fallback]" in str(healed_result.output.get("summary", ""))
-    assert "groups" in healed_result.output
-    assert len(agent.memory.findings) == 1
-    assert agent.memory.findings[0].kind == "segment_lift"
+    assert "comparisons" in healed_result.output
+
 
 
 def test_deterministic_recommendations_from_ranked_findings(agent: AgentController) -> None:

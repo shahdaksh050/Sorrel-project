@@ -89,6 +89,7 @@ from src.core.dashboard_charts_domain import (
     _cohort_rfm_chart,
     _financial_charts,
     _group_ci_chart,
+    _interaction_chart,
     _lorenz_chart,
     _merge_small_bins,
     _segment_lift_chart,
@@ -191,7 +192,9 @@ __all__ = [
     "_histogram_bins",
     "_histogram_charts",
     "_importance_bounds",
+    "_interaction_chart",
     "_is_near_uniform",
+
     "_llm_chart",
     "_llm_charts",
     "_lorenz_chart",
@@ -232,9 +235,10 @@ __all__ = [
 MAX_FINDING_PANELS = 30
 
 
-#: At most this many segment-lift / group-test panels (each is one
-#: measure x dimension pairing; more would crowd out every other kind).
-MAX_PANELS_PER_KIND = 3
+#: At most this many panels per finding kind (each is one measure x dimension pairing;
+#: bumped to 6 to give full visual evidence across discovered dimensions).
+MAX_PANELS_PER_KIND = 6
+
 
 
 #: Findings of these kinds are caveats, not discoveries (src.core.findings.
@@ -411,6 +415,8 @@ def _finding_charts(
         source = finding.get("source_tool")
         if source == "segment_comparison" and kind == "segment_lift":
             chart = _safe(_segment_lift_chart, finding, results, col_by_name)
+        elif source == "segment_comparison" and kind == "interaction_synergy":
+            chart = _safe(_interaction_chart, finding, col_by_name)
         elif source == "concentration_analysis" and kind == "concentration":
             chart = _safe(_lorenz_chart, df, finding)
         elif source == "change_analysis" and kind == "change":
@@ -420,6 +426,7 @@ def _finding_charts(
             and (finding.get("measure"), finding.get("dimension")) not in skip_pairs
         ):
             chart = _safe(_group_ci_chart, df, finding, col_by_name)
+
         if chart is None or any(c.chart_id == chart.chart_id for c in charts):
             continue
         per_kind[kind] = per_kind.get(kind, 0) + 1
@@ -514,12 +521,16 @@ def designed_chart(raw: dict[str, Any], index: int, findings: list[dict[str, Any
 def merge_designed(
     charts: list[ChartSpec], designed: list[ChartSpec], drop_ids: set[str]
 ) -> list[ChartSpec]:
-    """Drop generic charts the designer made redundant, add its charts, re-rank."""
+    """Drop generic charts the designer made redundant, add its charts, re-rank.
+    Safe against empty replacements: only drops baseline charts if at least one
+    designed chart was actually validated and produced data."""
+    valid_designed = [c for c in designed if _has_data(c)]
+    effective_drops = drop_ids if valid_designed else set()
     kept = [
         c for c in charts
-        if not (c.chart_id in drop_ids and c.finding_id is None and not c.chart_id.startswith("llm_"))
+        if not (c.chart_id in effective_drops and c.finding_id is None and not c.chart_id.startswith("llm_"))
     ]
-    merged = [c for c in kept + designed if _has_data(c)]
+    merged = [c for c in kept + valid_designed if _has_data(c)]
     merged.sort(key=lambda c: (
         0 if c.finding_id
         else 2 if (c.priority == 0 and not c.chart_id.startswith("llm_"))
@@ -530,7 +541,8 @@ def merge_designed(
 
 
 #: Sandbox runs whose RESULT table gets a chart although the code declared none.
-MAX_AUTO_RESULT_CHARTS = 2
+MAX_AUTO_RESULT_CHARTS = 4
+
 
 
 _DATE_LABEL_RE = re.compile(r"\d{4}-\d{2}(-\d{2})?")
@@ -681,18 +693,31 @@ def build_dashboard(
     charts.extend(_safe(_cohort_charts, df, cohort_out, default=[]))
     charts.extend(_safe(_workforce_charts, df, workforce_out, default=[]))
 
-    # Strict curation: distributions and category counts only for columns a
-    # finding refers to; the generic box/scatter candidates rank last.
+    # Balanced curation: distributions and category counts for columns a
+    # finding refers to, plus top continuous and categorical columns for baseline context.
     referenced = _finding_columns(findings, set(df.columns.astype(str)))
+    baseline_referenced = set(referenced)
+    if target_column and target_column in df.columns:
+        baseline_referenced.add(str(target_column))
+    for c in continuous[:MAX_HISTOGRAMS]:
+        baseline_referenced.add(c)
+    cat_names = [
+        c.name for c in profile.columns_of_kind("categorical", "boolean")
+        if c.name != target_column and "high_cardinality" not in c.flags
+    ]
+    for c in cat_names[:MAX_CATEGORY_CHARTS]:
+        baseline_referenced.add(c)
+
     eda: list[ChartSpec] = []
     class_balance = _safe(_class_balance_chart, df, target_column, task_type)
     if class_balance is not None:
         eda.append(class_balance)
-    eda.extend(_safe(_histogram_charts, df, ranked, col_by_name, referenced, default=[]))
+    eda.extend(_safe(_histogram_charts, df, ranked, col_by_name, baseline_referenced, default=[]))
     cat_charts, trivial_cat_charts = _safe(
-        _category_charts, df, profile, target_column, referenced, default=([], [])
+        _category_charts, df, profile, target_column, baseline_referenced, default=([], [])
     )
     eda.extend(cat_charts)
+
     eda_candidates: list[ChartSpec | None] = [
         _safe(_box_plot_chart, df, continuous, target_column, task_type, col_by_name),
         _safe(_scatter_chart, df, continuous, target_column, task_type, corr_out, col_by_name),

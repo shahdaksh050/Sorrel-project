@@ -69,6 +69,39 @@ class TestBuildHtmlReport:
         assert "<h1>What we found in empty</h1>" in doc
         assert "The charts" not in doc  # no charts, no section
 
+    def test_boilerplate_summary_uses_findings_and_separates_hygiene(self) -> None:
+        findings = [
+            {
+                "finding_id": "integrity_1", "kind": "outlier_scan",
+                "headline": "Sensor flatline in release_year", "source_tool": "integrity_audit",
+                "confidence": 0.8,
+            },
+            {
+                "finding_id": "lift_1", "kind": "segment_lift",
+                "headline": "Enterprise revenue is 45% above other segments",
+                "source_tool": "segment_comparison", "effect": 0.45,
+                "confidence": 0.85, "dimension": "tier", "level": "Enterprise",
+            },
+        ]
+        doc = build_html_report(
+            "ds",
+            {
+                "reasoning": (
+                    "User objective: reduce churn. Deterministic run: the LLM was disabled, "
+                    "so the plan came from the dataset profile."
+                ),
+                "insights": [],
+            },
+            [],
+            [],
+            findings=findings,
+        )
+
+        assert "Enterprise revenue is 45%" in doc
+        assert "Deterministic run" not in doc
+        assert "Data integrity &amp; hygiene" in doc
+        assert doc.count("Sensor flatline in release_year") == 1
+
     def test_new_params_default_to_none_without_error(self) -> None:
         """Back-compat: the original call signature must keep working."""
         doc = build_html_report("ds", {}, [], [])

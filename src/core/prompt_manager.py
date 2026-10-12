@@ -108,7 +108,8 @@ Optional on any chart: `caption` (one plain sentence with the takeaway, <=200 ch
 `annotations=[{"y": n, "label": s}]` (<=3 reference lines), `size="wide"|"half"|"tall"`, \
 `priority` 0-10, `facet=<column>` (<=12 panels). Scaling, sorting and top-N grouping are handled for you. \
 Escape hatch: `CHART = {"vega_lite": {...}}` — inline `data.values` only, no url/params/calculate/lookup; \
-every encoded field must exist in the rows.
+every encoded field must exist in the rows. \
+For counts (e.g. value_counts()), modern pandas produces columns [col, 'count'] (not ['index', col]), so pass x=col, y='count' or pass the Series directly to dsa.chart.bar(series).
 Pick the chart from the question, not the data shape: change over time -> line/area; ranking or \
 comparison -> sorted bar (dot_ci with intervals); parts of a whole -> stacked_bar/pareto; before vs after -> \
 slope/bullet; spread or outliers -> boxplot/histogram; two-variable relationship -> scatter; \
@@ -126,10 +127,14 @@ it states goes in `evidence`. When it is about specific columns, also set `"meas
 and `"dimension"` to their exact names so the question it answers is credited. Set `"effect"` \
 (the size of the difference, as a fraction: 0.18 = 18%) with `"effect_kind"` ("pct" | "share" | "r" | "lift" | "cohens_d") \
 and `"p_value"` when you tested it — findings without them rank below every tool finding.
-- `CHART = dsa.chart.bar(...)` (optional) — aggregate first, at most 500 rows.
+- `CHART = dsa.chart.bar(...)` (optional) — aggregate first, at most 500 rows. When using dsa.chart.bar, the category field (x) must have >= 2 distinct categories (df[x].nunique() >= 2). A single category cannot be compared in a bar chart.
 - `DF_OUT = frame` plus parameter `"save_as": "name"` (optional) — saves a \
 derived dataset; later steps can pass its path as `file_path` to any tool.
 Limits: ~60 s, no file or network access, imports only from: <<MODULES>>.
+Rules:
+- Never use `globals()` or `locals()` — they are blocked by sandbox isolation. Check column presence with `'col' in df.columns`.
+- `df` is already cleaned and loaded from Stage 1 — never call `clean_data` or data ingestion inside dynamic code.
+- Only reference column names listed in `SCHEMA` or `df.columns`.
 DO NOT use `execute_dynamic_code` for simple group breakdowns (e.g. df.groupby) — ALWAYS use `segment_comparison(measure_column=..., dimension_column=...)` instead (faster, computes Welch's t-test/ANOVA, lift %, 95% CIs, and creates charts automatically). Reserve `execute_dynamic_code` strictly for novel calculations that no built-in tool supports.
 Example:
 {"step_number": 3, "tool_name": "execute_dynamic_code", "parameters": {"code": "df['ratio'] = df['metric_a'] / (df['metric_b'] + 1)\\nRESULT = float(df['ratio'].median())\\nFINDING = {'headline': f'Median metric ratio is {RESULT:.2f}', 'evidence': {'median_ratio': round(RESULT, 2)}}"}, "rationale": "Compute custom compound metric ratio."}
@@ -203,8 +208,9 @@ Top-level names:
 - `RESULT = ...` (required): a number, small dict or aggregated DataFrame.
 - `FINDING = {"headline": ..., "evidence": {...}, "measure": <col>, "dimension": <col>}` (optional): \
 headline = one plain sentence with the number and unit; every number in it goes in `evidence`.
-- `CHART = dsa.chart.bar(...)` (optional).
+- `CHART = dsa.chart.bar(...)` (optional; for value_counts(), use x=col, y='count' or pass series directly; x must have >= 2 distinct categories).
 Limits: ~60 s, no file or network access, imports only from: <<MODULES>>.
+Rules: Never use `globals()` or `locals()` (use `'col' in df.columns`); never call `clean_data` in dynamic code (`df` is pre-loaded); only use existing columns.
 For an unfamiliar method, executable code is allowed only inside
 `execute_dynamic_code` or `define_analysis_tool`; those are sandboxed. A group
 or treatment column alone never proves random assignment. Use the cycle-1

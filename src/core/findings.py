@@ -34,6 +34,14 @@ _W_OBJECTIVE_FIT = 0.20
 #: shown, but never ranked against real insights.
 CAVEAT_FINDING_KINDS = ("method_fit", "coverage_gap")
 LLM_FINDING_KINDS = ("custom_analysis", "generated_tool")
+HYGIENE_FINDING_KINDS = frozenset({
+    "data_quality", "integrity", "flatline", "constraint", "metadata", "dimension_check",
+})
+HYGIENE_SOURCE_TOOLS = frozenset({"integrity_audit", "clean_data", "ingest_dataset"})
+HYGIENE_HEADLINE_PREFIXES = (
+    "sensor flatline", "constraint violation", "dataset contains",
+    "systematic missingness", "missing values in", "duplicate rows",
+)
 
 #: effect_kind -> the effect magnitude that counts as "large" by convention
 #: (Cohen's d 0.8, r 0.5, eta-squared 0.14, Cramer's V 0.3 ...), so effects
@@ -208,6 +216,32 @@ class Finding:
             "chart_hint": self.chart_hint,
             "layer": self.layer,
         }
+
+
+def is_data_hygiene_finding(item: Finding | dict[str, Any]) -> bool:
+    """Return whether a finding describes dataset hygiene rather than a business lever.
+
+    Integrity-audit findings currently use the broad ``outlier_scan`` kind, so
+    source and headline checks are intentionally part of this shared predicate.
+    Keeping the rule here prevents the action matrix and report projections from
+    drifting apart.
+    """
+    if isinstance(item, Finding):
+        kind = item.kind
+        headline = item.headline
+        source_tool = item.source_tool
+    else:
+        kind = str(item.get("kind", ""))
+        headline = str(item.get("headline", ""))
+        source_tool = str(item.get("source_tool", ""))
+    if kind in HYGIENE_FINDING_KINDS or source_tool in HYGIENE_SOURCE_TOOLS:
+        return True
+    # Headline prefix check only applies to audit/hygiene tools or generic scans,
+    # preventing analytical discoveries (e.g. "Missing values in income predict churn")
+    # from being incorrectly classified as data hygiene.
+    if kind in ("outlier_scan", "data_quality", "integrity", "") or not source_tool:
+        return headline.lower().strip().startswith(HYGIENE_HEADLINE_PREFIXES)
+    return False
 
 
 def attach_finding_checks(
@@ -497,6 +531,11 @@ def classify_action_matrix(
         has_paradox = checks.get("paradox_free") is False
         is_fragile = checks.get("robust") is False
         is_caveat_kind = kind in CAVEAT_FINDING_KINDS
+
+        # Data hygiene belongs in the dedicated integrity section, never in
+        # a strategic or operational action quadrant.
+        if is_data_hygiene_finding(item):
+            continue
 
         lever = headline
         if dimension and level:

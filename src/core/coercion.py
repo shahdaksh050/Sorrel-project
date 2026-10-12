@@ -331,6 +331,11 @@ def _try_censored_numeric(values: pd.Series, decimal_comma: bool) -> _CensoredRe
     unit = ex["unit"].str.lower()
     has_unit = unit.notna().to_numpy(dtype=bool)
     units = sorted({str(u) for u in unit.dropna().unique()})
+    # Treat ordinary singular/plural labels alike (minute/minutes) without
+    # conflating short scientific symbols such as m and ms.
+    canonical_units = sorted({u[:-1] if len(u) > 2 and u.endswith("s") else u for u in units})
+    if len(canonical_units) > 1:
+        return None
     if len(units) > _MAX_DISTINCT_UNITS:
         # Too many distinct suffixes to be one measurement unit ("3rd", "12ab").
         val[has_unit] = np.nan

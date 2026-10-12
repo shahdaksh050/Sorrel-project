@@ -30,7 +30,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.core.chart_spec import MAX_CHART_ROWS, validate_chart_spec
+from src.core.chart_spec import _NUMERIC_Y_TYPES, MAX_CHART_ROWS, validate_chart_spec
 from src.core.profiler import profile_dataframe
 from src.core.security import pii_redaction_enabled
 
@@ -203,13 +203,20 @@ def _eval_arith(node: ast.AST, env: dict[str, pd.Series]) -> Any:
 
 # ---- chart builders (dsa.chart.*) ------------------------------------------
 
-def _records(data: Any, x: str | None) -> list[Any]:
+def _is_number_val(v: Any) -> bool:
+    if v is None or isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float)):
+        return math.isfinite(v)
+    return False
+
+
+def _records(data: Any, x: str | None = None) -> list[Any]:
     if isinstance(data, pd.Series):
         data = data.reset_index()
     if isinstance(data, pd.DataFrame):
         if x is not None and x not in data.columns:
             data = data.reset_index()
-        # One row past the cap so validate_chart_spec still flags truncation.
         records: list[Any] = json.loads(
             data.head(MAX_CHART_ROWS + 1).to_json(orient="records", date_format="iso")
         )
@@ -217,6 +224,130 @@ def _records(data: Any, x: str | None) -> list[Any]:
     if isinstance(data, list):
         return data
     raise ValueError("Chart data must be a DataFrame, a Series, or a list of record dicts.")
+
+
+
+def _prepare_chart_data_and_axes(
+    chart_type: str,
+    data: Any,
+    x: str,
+    y: str | None,
+) -> tuple[list[dict[str, Any]], str, str | None, str | None]:
+    """Normalize data into JSON records and intelligently heal common LLM axis
+    naming and orientation mistakes:
+    1. Pandas 1.x vs 2.x `value_counts().reset_index()` naming mismatch:
+       In pandas 1.x, columns were ['index', col_name]. In pandas 2.x, columns are
+       [col_name, 'count']. When models write x='index', y=col_name, map to
+       x=col_name, y='count'.
+    2. Inverted / swapped axes:
+       For numeric-y charts (bar, line, area, etc.), if y is non-numeric but x is
+       numeric, swap x and y.
+    3. Missing metric column:
+       If y is non-numeric, but the data has a numeric metric column (e.g. 'count',
+       'counts', 'value', 'total', etc.), map y to that metric.
+    4. Series input:
+       Automatically reset index and assign x to category and y to values.
+    5. Index level name mapping:
+       If x names an index level of the DataFrame, automatically bring it into columns.
+    """
+    healing_note: str | None = None
+
+    if isinstance(data, pd.Series):
+        s_name = str(data.name) if data.name is not None and str(data.name) != "None" else "value"
+        df = data.reset_index()
+        # In pandas 2.0+, value_counts().reset_index() yields [original_name, 'count']
+        if s_name != "count" and "count" in df.columns:
+            if x in ("index", "level_0", s_name):
+                x = s_name
+                y = "count"
+                healing_note = f"Auto-mapped Series value_counts: x='{x}', y='{y}'"
+    elif isinstance(data, pd.DataFrame):
+        df = data.copy()
+    elif isinstance(data, list):
+        records = data
+        if records and isinstance(records[0], dict):
+            fields = list(records[0].keys())
+            num_fields = [
+                f for f in fields if any(_is_number_val(r.get(f)) for r in records)
+                and all(_is_number_val(r.get(f)) for r in records if r.get(f) is not None)
+            ]
+            non_num_fields = [f for f in fields if f not in num_fields]
+
+            if chart_type in _NUMERIC_Y_TYPES and y is not None:
+                # Pandas 1.x legacy value_counts: x='index', y=col
+                if x in ("index", "level_0") and x not in fields and y in non_num_fields:
+                    cnt = next((f for f in ("count", "counts", "n", "frequency", "total") if f in num_fields), num_fields[0] if num_fields else None)
+                    if cnt:
+                        healing_note = f"Auto-mapped value_counts: x='{y}', y='{cnt}'"
+                        x, y = y, cnt
+                # Swapped axes
+                elif x in num_fields and y in non_num_fields:
+                    healing_note = f"Auto-swapped axes: x='{y}', y='{x}'"
+                    x, y = y, x
+                # y is non-numeric, but numeric columns exist
+                elif y in non_num_fields and num_fields:
+                    metric = next((f for f in ("count", "counts", "value", "values", "total") if f in num_fields), num_fields[0])
+                    if metric != x:
+                        healing_note = f"Auto-selected metric: y='{metric}'"
+                        y = metric
+        return records, x, y, healing_note
+    else:
+        raise ValueError("Chart data must be a DataFrame, a Series, or a list of record dicts.")
+
+    # Flatten MultiIndex columns if present
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = pd.Index(["_".join(str(c) for c in col if str(c)).strip("_") for col in df.columns])
+
+    cols = [str(c) for c in df.columns]
+    df.columns = cols
+
+    # Bring named index into columns if caller requested it
+    if x not in cols and (df.index.name == x or x in getattr(df.index, "names", [])):
+        df = df.reset_index()
+        cols = [str(c) for c in df.columns]
+        df.columns = cols
+
+    num_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
+    non_num_cols = [c for c in cols if c not in num_cols]
+
+    if chart_type in _NUMERIC_Y_TYPES and y is not None:
+        # Healing 1: Pandas 1.x vs 2.x value_counts legacy pattern
+        if x in ("index", "level_0") and x not in cols and y in non_num_cols:
+            cnt = next((c for c in ("count", "counts", "n", "frequency", "total") if c in num_cols), num_cols[0] if num_cols else None)
+            if cnt:
+                healing_note = f"Auto-mapped value_counts: x='{y}', y='{cnt}'"
+                x, y = y, cnt
+        # Healing 2: Inverted axes (x is numeric metric, y is categorical)
+        elif x in num_cols and y in non_num_cols:
+            healing_note = f"Auto-swapped axes: x='{y}', y='{x}'"
+            x, y = y, x
+        # Healing 3: y is non-numeric, but dataframe has a clear numeric metric
+        elif y in non_num_cols and num_cols:
+            metric = next((c for c in ("count", "counts", "value", "values", "total") if c in num_cols), num_cols[0])
+            if metric != x:
+                healing_note = f"Auto-selected metric: y='{metric}'"
+                y = metric
+
+    # If x is still missing and exactly one categorical column exists, use it
+    if x not in df.columns:
+        if len(non_num_cols) == 1:
+            x = non_num_cols[0]
+        elif not isinstance(df.index, pd.RangeIndex):
+            df = df.reset_index()
+            cols = [str(c) for c in df.columns]
+            df.columns = cols
+            if x in ("index", "level_0") and "index" in cols:
+                x = "index"
+
+    # If y is missing and exactly one numeric column exists, use it
+    if y is not None and y not in df.columns and chart_type in _NUMERIC_Y_TYPES:
+        if num_cols:
+            y = num_cols[0]
+
+    records = json.loads(
+        df.head(MAX_CHART_ROWS + 1).to_json(orient="records", date_format="iso")
+    )
+    return records, x, y, healing_note
 
 
 #: Options the chart validator reads; any other keyword is dropped (and noted).
@@ -265,14 +396,59 @@ def _lenient(fn: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]
 
 def _chart(chart_type: str, data: Any, x: str, y: str | None, opts: dict[str, Any]) -> dict[str, Any]:
     dropped = sorted(k for k in opts if k not in _CHART_OPTS)
-    spec = {**{k: v for k, v in opts.items() if k in _CHART_OPTS}, "type": chart_type, "data": _records(data, x), "x": x}
+    records, x, y, auto_note = _prepare_chart_data_and_axes(chart_type, data, x, y)
+    spec: dict[str, Any] = {
+        **{k: v for k, v in opts.items() if k in _CHART_OPTS},
+        "type": chart_type,
+        "data": records,
+        "x": x,
+    }
     if y is not None:
         spec["y"] = y
     clean, error = validate_chart_spec(spec)
+
+    # Multi-pass fallback: if primary validation failed, attempt candidate axis permutations
+    if clean is None and records and isinstance(records[0], dict):
+        fields = list(records[0].keys())
+        # Try swapped axes
+        if y is not None and x in fields and y in fields:
+            alt_spec = {**spec, "x": y, "y": x}
+            alt_clean, _ = validate_chart_spec(alt_spec)
+            if alt_clean is not None:
+                clean = alt_clean
+                auto_note = f"Auto-swapped axes: x='{y}', y='{x}'"
+
+        # Try alternative field pairs if still failing
+        if clean is None and chart_type in _NUMERIC_Y_TYPES:
+            nums = [f for f in fields if any(_is_number_val(r.get(f)) for r in records)]
+            noms = [f for f in fields if f not in nums]
+            for c_x in noms:
+                for c_y in nums:
+                    alt_spec = {**spec, "x": c_x, "y": c_y}
+                    alt_clean, _ = validate_chart_spec(alt_spec)
+                    if alt_clean is not None:
+                        clean = alt_clean
+                        auto_note = f"Auto-adjusted fields: x='{c_x}', y='{c_y}'"
+                        break
+                if clean is not None:
+                    break
+
     if clean is None:
-        raise ValueError(error)
+        return {
+            **{k: v for k, v in opts.items() if k in _CHART_OPTS},
+            "type": chart_type,
+            "data": records,
+            "x": x,
+            "y": y,
+            "error": error,
+            "invalid": True,
+            "note": f"Rejected: {error}"[:200],
+        }
+
+    notes = [clean.get("note"), auto_note]
     if dropped:
-        clean["note"] = " ".join(filter(None, [clean.get("note"), f"ignored: {', '.join(dropped)}"]))[:200]
+        notes.append(f"ignored: {', '.join(dropped)}")
+    clean["note"] = " ".join(filter(None, notes))[:200]
     return clean
 
 

@@ -15,8 +15,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 from src.core.controller_common import (
     MAX_CODE_STEP_RETRIES,
     MAX_STEP_RETRIES,
@@ -345,112 +343,7 @@ class StepMixin(ControllerState):
                     )
                     return new_prepared, seg_result
 
-        # ---- Attempt 2: Direct grouped analysis on df ----
-        try:
-            from src.core.findings import Finding
-            from src.core.io import read_any
-
-            df, _ = read_any(file_path)
-            if df.empty or not dim_col or dim_col not in df.columns:
-                return None
-
-            numeric_measures: list[str] = []
-            for m in (valid_measures or [c for c in df.columns if c != dim_col]):
-                if m in df.columns:
-                    if pd.api.types.is_numeric_dtype(df[m]):
-                        numeric_measures.append(m)
-                    else:
-                        coerced = pd.to_numeric(df[m], errors="coerce")
-                        if coerced.notna().sum() > 0:
-                            df[m] = coerced
-                            numeric_measures.append(m)
-
-            if not numeric_measures:
-                return None
-
-            primary_m = numeric_measures[0]
-            grouped = (
-                df.groupby(dim_col, observed=True)[primary_m]
-                .agg(["count", "mean"])
-                .reset_index()
-            )
-            grouped.columns = pd.Index([dim_col, "sample_count", "mean_value"])
-            grouped = grouped.dropna().sort_values(by="sample_count", ascending=False)
-            if grouped.empty:
-                return None
-
-            overall_mean = float(df[primary_m].mean())
-            top_row = grouped.iloc[0]
-            top_lvl = str(top_row[dim_col])
-            top_mean = float(top_row["mean_value"])
-            top_n = int(top_row["sample_count"])
-            lift = (
-                ((top_mean - overall_mean) / overall_mean)
-                if overall_mean != 0
-                else 0.0
-            )
-            lift_pct = lift * 100
-
-            headline = (
-                f"{top_lvl} ({dim_col}) averages {top_mean:.2f} {primary_m} vs "
-                f"{overall_mean:.2f} baseline ({lift_pct:+.1f}% lift, n={top_n:,})."
-            )
-            evidence: dict[str, Any] = {
-                "dimension": dim_col,
-                "measure": primary_m,
-                "top_level": top_lvl,
-                "top_mean": round(top_mean, 4),
-                "baseline_mean": round(overall_mean, 4),
-                "lift": round(lift, 4),
-                "sample_size": top_n,
-                "groups_evaluated": len(grouped),
-            }
-            finding = Finding(
-                finding_id=f"direct_group_{dim_col}_{top_lvl}_{primary_m}",
-                kind="segment_lift",
-                headline=headline,
-                detail=(
-                    f"Direct group aggregation of {primary_m} across {len(grouped)} "
-                    f"{dim_col} segments."
-                ),
-                evidence=evidence,
-                source_tool="execute_dynamic_code",
-                measure=primary_m,
-                dimension=dim_col,
-                level=top_lvl,
-                effect=round(lift, 4),
-                effect_kind="lift",
-                confidence=0.85,
-            )
-            self.memory.add_findings([finding])
-            self._notify_findings([finding])
-
-            console.print(
-                f"  [cyan]⚡ Self-healing:[/] execute_dynamic_code failed ({err_preview}). "
-                f"Directly executed group aggregation for {dim_col} -> {primary_m}."
-            )
-            output: dict[str, Any] = {
-                "status": "ok",
-                "summary": f"[Self-healed from dynamic code fallback] {headline}",
-                "result": grouped.head(20).to_dict(orient="records"),
-                "groups": grouped.head(20).to_dict(orient="records"),
-                "evidence": evidence,
-                "finding_payload": {
-                    "headline": headline,
-                    "detail": finding.detail,
-                    "evidence": evidence,
-                },
-            }
-            healed_result = ToolResult(
-                tool_name="execute_dynamic_code",
-                status="success",
-                output=output,
-                execution_time_ms=failed_result.execution_time_ms + 15.0,
-            )
-            return prepared, healed_result
-        except Exception as exc:
-            logger.debug("direct groupby fallback failed: %s", exc)
-            return None
+        return None
 
     def _resolve_file_path(self, tool: Any, params: dict[str, Any]) -> dict[str, Any]:
         """

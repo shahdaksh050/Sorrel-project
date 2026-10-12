@@ -17,8 +17,10 @@ from src.core.controller import AgentController
 from src.core.llm_client import LLMClient
 from src.core.sandbox_toolkit import (
     Toolkit,
+    bar,
     dot_ci,
     dual_axis,
+    line,
     lorenz,
     waterfall,
 )
@@ -192,3 +194,91 @@ class TestGroqLLMProvider:
         client = LLMClient()
         assert client.provider == "groq"
         assert client.model == "llama-3.3-70b-versatile"
+
+
+class TestChartAutoHealing:
+    def test_bar_chart_heals_pandas2_value_counts_reset_index(self) -> None:
+        # In pandas 2.0+, country_counts.reset_index() produces columns: ['country', 'count']
+        # The LLM erroneously supplied x='index', y='country'.
+        df_counts = pd.DataFrame({"country": ["USA", "India", "UK"], "count": [50, 30, 20]})
+        spec = bar(
+            data=df_counts,
+            x="index",
+            y="country",
+            title="Top Countries by Count",
+            caption="USA leads",
+        )
+        assert spec is not None
+        assert spec["type"] == "bar"
+        assert spec["x"] == "country"
+        assert spec["y"] == "count"
+        clean, err = validate_chart_spec(spec)
+        assert err is None
+        assert clean is not None
+        assert "Auto-mapped" in spec.get("note", "")
+
+    def test_bar_chart_heals_swapped_axes(self) -> None:
+        # Swapped: x='count' (numeric), y='country' (categorical)
+        df_counts = pd.DataFrame({"country": ["USA", "India", "UK"], "count": [50, 30, 20]})
+        spec = bar(
+            data=df_counts,
+            x="count",
+            y="country",
+            title="Top Countries by Count",
+        )
+        assert spec is not None
+        assert spec["type"] == "bar"
+        assert spec["x"] == "country"
+        assert spec["y"] == "count"
+        clean, err = validate_chart_spec(spec)
+        assert err is None
+        assert clean is not None
+        assert "Auto-swapped" in spec.get("note", "")
+
+    def test_bar_chart_heals_from_series_value_counts(self) -> None:
+        # Passing Series directly
+        s = pd.Series([50, 30, 20], index=["USA", "India", "UK"], name="count")
+        spec = bar(
+            data=s,
+            x="index",
+            y="country",
+            title="Top Countries",
+        )
+        assert spec is not None
+        assert spec["type"] == "bar"
+        clean, err = validate_chart_spec(spec)
+        assert err is None
+        assert clean is not None
+
+    def test_bar_chart_heals_list_records(self) -> None:
+        # Passing list of dict records with x='index', y='country'
+        records = [
+            {"country": "USA", "count": 50},
+            {"country": "India", "count": 30},
+        ]
+        spec = bar(
+            data=records,
+            x="index",
+            y="country",
+            title="Top Countries",
+        )
+        assert spec is not None
+        assert spec["x"] == "country"
+        assert spec["y"] == "count"
+        clean, err = validate_chart_spec(spec)
+        assert err is None
+        assert clean is not None
+
+    def test_line_chart_heals_swapped_axes(self) -> None:
+        df = pd.DataFrame({
+            "date": ["2026-01-01", "2026-01-02", "2026-01-03"],
+            "price": [100.5, 102.0, 101.2],
+        })
+        spec = line(data=df, x="price", y="date", title="Price Trend")
+        assert spec is not None
+        assert spec["x"] == "date"
+        assert spec["y"] == "price"
+        clean, err = validate_chart_spec(spec)
+        assert err is None
+        assert clean is not None
+

@@ -45,6 +45,25 @@ class TestGenerateVisualizationsTool:
         assert result.status == "success"
         assert "charts" in result.output and len(result.output["charts"]) == 4  # f1, f2, f3 and the 2-value label (a bar of counts)
 
+    def test_heatmap_request_falls_back_for_single_numeric_column(
+        self, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        path = tmp_path / "single_measure.csv"
+        pd.DataFrame({
+            "duration": np.arange(30, dtype=float),
+            "category": ["movie", "show"] * 15,
+        }).to_csv(path, index=False)
+
+        result = GenerateVisualizationsTool().run(
+            file_path=str(path),
+            chart_type="correlation_heatmap",
+            output_dir=str(tmp_path / "charts"),
+        )
+
+        assert result.status == "success"
+        assert result.output["chart_type"] == "distributions"
+        assert len(result.output["charts"]) == 1
+
     def test_unknown_chart_type_errors(self, numeric_csv: str) -> None:
         result = GenerateVisualizationsTool().run(
             file_path=numeric_csv, chart_type="pie_of_doom"

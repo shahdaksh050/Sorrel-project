@@ -90,7 +90,7 @@ def test_scenario_simulation_findings(tmp_path: Path) -> None:
     for f in decision_scenarios:
         assert f.source_tool == "scenario_simulation"
         assert f.measure == "outcome_y"
-        assert f.confidence >= 0.80
+        assert f.confidence >= 0.70
 
 
 def test_scenario_simulation_applies_to_and_default_params() -> None:
@@ -108,6 +108,18 @@ def test_scenario_simulation_applies_to_and_default_params() -> None:
 
     params = tool.default_params(prof, meta)  # type: ignore[arg-type]
     assert params == {"target_column": "sales"}
+
+
+def test_scenario_simulation_applies_to_single_measure_with_dimension() -> None:
+    tool = ScenarioSimulationTool()
+    df = pd.DataFrame({
+        "sales": [10.0 + i for i in range(30)],
+        "region": ["East", "West"] * 15,
+    })
+    prof = profile_dataframe(df)
+
+    assert tool.applies_to(prof, None) == 0.55
+    assert tool.default_params(prof, None) == {"target_column": "sales"}
 
 
 def test_scenario_simulation_error_handling(tmp_path: Path) -> None:

@@ -123,3 +123,36 @@ def test_action_matrix_report_renderers() -> None:
     assert "Action Prioritization Matrix (2x2)" in html
     assert "⚡ Quick Wins" in html
     assert "⚠️ Guardrails & Watch" in html
+
+
+def test_classify_action_matrix_filters_hygiene_alarms() -> None:
+    f_flatline = Finding(
+        finding_id="f_flat",
+        kind="flatline",
+        headline="Sensor flatline in 'release_year': identical value 2018 repeated for 19 consecutive periods.",
+        source_tool="integrity_audit",
+        effect=0.0,
+        confidence=0.5,
+    )
+    f_constraint = Finding(
+        finding_id="f_cons",
+        kind="outlier_scan",
+        headline="Constraint violation: 'Transaction ID >= Quantity' violated by 1 rows",
+        source_tool="integrity_audit",
+        effect=0.001,
+        confidence=0.5,
+    )
+    f_shape = Finding(
+        finding_id="f_shape",
+        kind="metadata",
+        headline="Dataset contains 1020 rows and 24 columns.",
+        source_tool="execute_dynamic_code",
+        effect=None,
+        confidence=0.5,
+    )
+
+    matrix = classify_action_matrix([f_flatline, f_constraint, f_shape])
+    assert len(matrix["quick_wins"]) == 0
+    assert len(matrix["strategic_bets"]) == 0
+    assert len(matrix["incremental"]) == 0
+    assert len(matrix["watch_caveats"]) == 0

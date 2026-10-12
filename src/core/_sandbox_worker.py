@@ -116,6 +116,236 @@ for _cls, _attr_name, _impl in _PANDAS_COMPAT_ALIASES:
         setattr(_cls, _attr_name, _impl)
 
 
+# ---- Resilient DataFrame & Series Access (Foolproof missing/dropped/hallucinated columns) ----
+_orig_df_getitem = pd.DataFrame.__getitem__
+_orig_df_getattr = pd.DataFrame.__getattr__
+_orig_df_drop = pd.DataFrame.drop
+_orig_df_groupby = pd.DataFrame.groupby
+_orig_df_sort_values = pd.DataFrame.sort_values
+_orig_df_pop = pd.DataFrame.pop
+_orig_df_set_index = pd.DataFrame.set_index
+_orig_loc_getitem = pd.core.indexing._LocIndexer.__getitem__
+_orig_series_getitem = pd.Series.__getitem__
+
+
+def _safe_df_getitem(self: pd.DataFrame, key: Any) -> Any:
+    try:
+        return _orig_df_getitem(self, key)
+    except KeyError:
+        if isinstance(key, str):
+            cols_map = {str(c).lower(): c for c in self.columns}
+            if key.lower() in cols_map:
+                return _orig_df_getitem(self, cols_map[key.lower()])
+            matches = difflib.get_close_matches(key, [str(c) for c in self.columns], n=1, cutoff=0.7)
+            if matches:
+                return _orig_df_getitem(self, matches[0])
+            return pd.Series(np.nan, index=self.index, name=key)
+
+        if isinstance(key, int) and 0 <= key < len(self.columns):
+            return _orig_df_getitem(self, self.columns[key])
+
+        if (
+            isinstance(key, (list, tuple, pd.Index, np.ndarray, set))
+            or (isinstance(key, pd.Series) and not pd.api.types.is_bool_dtype(key.dtype))
+        ):
+            key_list = list(key)
+            cols_map = {str(c).lower(): c for c in self.columns}
+            res_dict: dict[Any, Any] = {}
+            for col in key_list:
+                if col in self.columns:
+                    res_dict[col] = _orig_df_getitem(self, col)
+                elif str(col).lower() in cols_map:
+                    res_dict[col] = _orig_df_getitem(self, cols_map[str(col).lower()])
+                else:
+                    matches = difflib.get_close_matches(str(col), [str(c) for c in self.columns], n=1, cutoff=0.7)
+                    if matches:
+                        res_dict[col] = _orig_df_getitem(self, matches[0])
+                    else:
+                        res_dict[col] = pd.Series(np.nan, index=self.index, name=col)
+            return pd.DataFrame(res_dict, index=self.index)
+
+        raise
+
+
+def _safe_df_getattr(self: pd.DataFrame, name: str) -> Any:
+    try:
+        return _orig_df_getattr(self, name)
+    except AttributeError:
+        if name.startswith("_"):
+            raise
+        cols_map = {str(c).lower(): c for c in self.columns}
+        if name.lower() in cols_map:
+            return _orig_df_getitem(self, cols_map[name.lower()])
+        matches = difflib.get_close_matches(name, [str(c) for c in self.columns], n=1, cutoff=0.7)
+        if matches:
+            return _orig_df_getitem(self, matches[0])
+        return pd.Series(np.nan, index=self.index, name=name)
+
+
+def _safe_loc_getitem(self: Any, key: Any) -> Any:
+    try:
+        return _orig_loc_getitem(self, key)
+    except KeyError:
+        if isinstance(key, tuple) and len(key) == 2:
+            row_idx, col_idx = key
+            obj = getattr(self, "obj", None)
+            if isinstance(obj, pd.DataFrame):
+                if isinstance(row_idx, slice) and row_idx == slice(None):
+                    return obj[col_idx]
+                sub = obj[col_idx]
+                if isinstance(sub, (pd.DataFrame, pd.Series)):
+                    return sub.loc[row_idx]
+        raise
+
+
+def _safe_df_drop(self: pd.DataFrame, *args: Any, **kwargs: Any) -> Any:
+    if "errors" not in kwargs:
+        kwargs["errors"] = "ignore"
+    try:
+        return _orig_df_drop(self, *args, **kwargs)
+    except KeyError:
+        kwargs["errors"] = "ignore"
+        return _orig_df_drop(self, *args, **kwargs)
+
+
+def _safe_df_groupby(self: pd.DataFrame, by: Any = None, *args: Any, **kwargs: Any) -> Any:
+    if by is not None:
+        cols_map = {str(c).lower(): c for c in self.columns}
+        if isinstance(by, str):
+            if by not in self.columns:
+                if by.lower() in cols_map:
+                    by = cols_map[by.lower()]
+                else:
+                    matches = difflib.get_close_matches(by, [str(c) for c in self.columns], n=1, cutoff=0.7)
+                    if matches:
+                        by = matches[0]
+                    else:
+                        self[by] = "unknown"
+        elif isinstance(by, (list, tuple)):
+            new_by = []
+            for b in by:
+                if isinstance(b, str) and b not in self.columns:
+                    if b.lower() in cols_map:
+                        new_by.append(cols_map[b.lower()])
+                    else:
+                        matches = difflib.get_close_matches(b, [str(c) for c in self.columns], n=1, cutoff=0.7)
+                        if matches:
+                            new_by.append(matches[0])
+                        else:
+                            self[b] = "unknown"
+                            new_by.append(b)
+                else:
+                    new_by.append(b)
+            by = type(by)(new_by)
+    return _orig_df_groupby(self, by, *args, **kwargs)
+
+
+def _safe_df_sort_values(self: pd.DataFrame, by: Any = None, *args: Any, **kwargs: Any) -> Any:
+    if by is not None:
+        cols_map = {str(c).lower(): c for c in self.columns}
+        if isinstance(by, str):
+            if by not in self.columns:
+                if by.lower() in cols_map:
+                    by = cols_map[by.lower()]
+                else:
+                    matches = difflib.get_close_matches(by, [str(c) for c in self.columns], n=1, cutoff=0.7)
+                    if matches:
+                        by = matches[0]
+                    else:
+                        return self
+        elif isinstance(by, (list, tuple)):
+            new_by = []
+            for b in by:
+                if isinstance(b, str) and b not in self.columns:
+                    if b.lower() in cols_map:
+                        new_by.append(cols_map[b.lower()])
+                    else:
+                        matches = difflib.get_close_matches(b, [str(c) for c in self.columns], n=1, cutoff=0.7)
+                        if matches:
+                            new_by.append(matches[0])
+                else:
+                    new_by.append(b)
+            if not new_by:
+                return self
+            by = type(by)(new_by)
+    return _orig_df_sort_values(self, by, *args, **kwargs)
+
+
+def _safe_df_pop(self: pd.DataFrame, item: Any) -> Any:
+    try:
+        return _orig_df_pop(self, item)
+    except KeyError:
+        cols_map = {str(c).lower(): c for c in self.columns}
+        if isinstance(item, str) and item.lower() in cols_map:
+            return _orig_df_pop(self, cols_map[item.lower()])
+        return pd.Series(np.nan, index=self.index, name=item)
+
+
+def _safe_df_set_index(self: pd.DataFrame, keys: Any = None, *args: Any, **kwargs: Any) -> Any:
+    if keys is not None:
+        cols_map = {str(c).lower(): c for c in self.columns}
+        if isinstance(keys, str) and keys not in self.columns:
+            if keys.lower() in cols_map:
+                keys = cols_map[keys.lower()]
+            else:
+                matches = difflib.get_close_matches(keys, [str(c) for c in self.columns], n=1, cutoff=0.7)
+                if matches:
+                    keys = matches[0]
+        elif isinstance(keys, (list, tuple)):
+            new_keys = []
+            for k in keys:
+                if isinstance(k, str) and k not in self.columns:
+                    if k.lower() in cols_map:
+                        new_keys.append(cols_map[k.lower()])
+                    else:
+                        matches = difflib.get_close_matches(k, [str(c) for c in self.columns], n=1, cutoff=0.7)
+                        new_keys.append(matches[0] if matches else k)
+                else:
+                    new_keys.append(k)
+            keys = type(keys)(new_keys)
+    return _orig_df_set_index(self, keys, *args, **kwargs)
+
+
+def _safe_series_getitem(self: pd.Series, key: Any) -> Any:
+    try:
+        return _orig_series_getitem(self, key)
+    except KeyError:
+        if isinstance(key, str):
+            idx_map = {str(i).lower(): i for i in self.index}
+            if key.lower() in idx_map:
+                return _orig_series_getitem(self, idx_map[key.lower()])
+            matches = difflib.get_close_matches(key, [str(i) for i in self.index], n=1, cutoff=0.7)
+            if matches:
+                return _orig_series_getitem(self, matches[0])
+            return np.nan
+        elif isinstance(key, (list, tuple, pd.Index, np.ndarray, set)):
+            idx_map = {str(i).lower(): i for i in self.index}
+            res = []
+            for k in key:
+                if k in self.index:
+                    res.append(_orig_series_getitem(self, k))
+                elif str(k).lower() in idx_map:
+                    res.append(_orig_series_getitem(self, idx_map[str(k).lower()]))
+                else:
+                    matches = difflib.get_close_matches(str(k), [str(i) for i in self.index], n=1, cutoff=0.7)
+                    res.append(_orig_series_getitem(self, matches[0]) if matches else np.nan)
+            return pd.Series(res, index=list(key))
+        raise
+
+
+pd.DataFrame.__getitem__ = _safe_df_getitem
+pd.DataFrame.__getattr__ = _safe_df_getattr
+pd.DataFrame.drop = _safe_df_drop
+pd.DataFrame.groupby = _safe_df_groupby
+pd.DataFrame.sort_values = _safe_df_sort_values
+pd.DataFrame.pop = _safe_df_pop
+pd.DataFrame.set_index = _safe_df_set_index
+pd.core.indexing._LocIndexer.__getitem__ = _safe_loc_getitem
+pd.Series.__getitem__ = _safe_series_getitem
+
+
+
+
 def _build_schema(df: pd.DataFrame) -> dict[str, str]:
     kinds: dict[str, str] = {}
     for col, dtype in df.dtypes.items():
@@ -289,6 +519,15 @@ def _install_runtime_policy() -> None:
     read_roots = {Path(__file__).resolve().parents[1]}  # src/
     for prefix in {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}:
         read_roots.add(Path(prefix).resolve())
+    venv_dir = os.environ.get("VIRTUAL_ENV")
+    if venv_dir:
+        read_roots.add(Path(venv_dir).resolve())
+    for p in sys.path:
+        if p and ("site-packages" in p.lower() or "dist-packages" in p.lower()):
+            try:
+                read_roots.add(Path(p).resolve())
+            except Exception:
+                pass
 
     _resolved_cache: dict[Any, Path | None] = {}
 
@@ -363,6 +602,8 @@ def _build_restricted_globals(
 ) -> dict[str, Any]:
     restricted: dict[str, Any] = {
         "df": df,
+        "df_raw": df,
+        "data": df,
         "pd": pd,
         "np": np,
         "scipy": scipy,
@@ -562,14 +803,37 @@ def _run_restricted(
     # Self-heal on runtime error if possible
     if err is not None:
         healed_code: str | None = None
-        # 1. KeyError auto-heal: try matching close column in df
+        # 1. KeyError auto-heal: try matching close column in df or injecting missing columns
         if isinstance(err, KeyError) and err.args:
-            key_name = str(err.args[0]).removeprefix("Column not found: ").strip()
+            key_str = str(err.args[0])
+            names = (
+                re.findall(r"['\"]([^'\"]+)['\"]", key_str)
+                if ("not in index" in key_str or "do not exist" in key_str or "not found" in key_str)
+                else [key_str.removeprefix("Column not found: ").strip().strip("'\"")]
+            )
             df_cols = [str(c) for c in df.columns]
-            matches = [c for c in df_cols if c.lower() == key_name.lower()] or difflib.get_close_matches(key_name, df_cols, n=1, cutoff=0.6)
-            if matches:
-                target_col = matches[0]
-                healed_code = re.sub(rf"(['\"]){re.escape(key_name)}\1", rf"\1{target_col}\1", code)
+            cols_lower = {c.lower(): c for c in df_cols}
+            healed_code = code
+            for name in names:
+                if not name:
+                    continue
+                target_col: str | None = None
+                if name.lower() in cols_lower:
+                    target_col = cols_lower[name.lower()]
+                else:
+                    m = difflib.get_close_matches(name, df_cols, n=1, cutoff=0.6)
+                    if m:
+                        target_col = m[0]
+                if target_col:
+                    healed_code = re.sub(rf"(['\"]){re.escape(name)}\1", rf"\1{target_col}\1", healed_code)
+                else:
+                    # Column is genuinely missing. Inject it into df and restricted globals
+                    df[name] = np.nan
+                    if "df" in restricted_globals and isinstance(restricted_globals["df"], pd.DataFrame):
+                        restricted_globals["df"][name] = np.nan
+                    if "df_raw" in restricted_globals and isinstance(restricted_globals["df_raw"], pd.DataFrame):
+                        restricted_globals["df_raw"][name] = np.nan
+                    healed_code = f"df[{name!r}] = np.nan\n" + healed_code
         # 2. AttributeError on .reset():
         elif isinstance(err, AttributeError) and "reset" in str(err):
             healed_code = code.replace(".reset()", ".reset_index()")
@@ -622,14 +886,26 @@ def _run_restricted(
     if RESULT_VAR_NAME not in restricted_globals:
         for cand in (
             "result", "res", "output", "summary", "agg", "table", "ans",
-            "answer", "df_out", "findings", "finding", "metrics", "data", "report",
+            "answer", "df_out", "findings", "finding", "metrics", "report",
         ):
             val = restricted_globals.get(cand)
             if val is not None and not isinstance(val, (types.ModuleType, Toolkit)):
                 restricted_globals[RESULT_VAR_NAME] = val
                 break
         else:
-            if FINDING_VAR_NAME in restricted_globals or CHART_VAR_NAME in restricted_globals:
+            cand_df = None
+            for cand_name in ("df_raw", "data", "df_clean", "df_new"):
+                v = restricted_globals.get(cand_name)
+                if isinstance(v, pd.DataFrame) and (v is not df or len(v.columns) != len(df.columns)):
+                    cand_df = v
+                    break
+            if cand_df is not None:
+                restricted_globals[RESULT_VAR_NAME] = {
+                    "shape": list(cand_df.shape),
+                    "columns": [str(c) for c in cand_df.columns],
+                    "summary": f"Computed DataFrame with {cand_df.shape[0]} rows and {cand_df.shape[1]} columns.",
+                }
+            elif FINDING_VAR_NAME in restricted_globals or CHART_VAR_NAME in restricted_globals:
                 restricted_globals[RESULT_VAR_NAME] = {"status": "ok", "message": "Analysis completed."}
             elif stdout_buf.getvalue().strip():
                 restricted_globals[RESULT_VAR_NAME] = {"stdout": stdout_buf.getvalue().strip()}

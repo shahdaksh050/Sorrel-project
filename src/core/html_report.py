@@ -24,6 +24,7 @@ from typing import Any
 from src.core.audited_entry import GLYPH, audited_checks
 from src.core.chart_theme import vega_config
 from src.core.design_tokens import css_root_block
+from src.core.findings import classify_action_matrix, is_data_hygiene_finding
 from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.plain_language import describe_uncertainty, format_p, plainify
 from src.core.report_assets import report_assets
@@ -40,29 +41,61 @@ _JARGON_RE = re.compile(
     r"\biter(ation)? \d|\brlm\b|\bsub-analys|\bform [12]\b|\btool results\b", re.IGNORECASE
 )
 
+_BOILERPLATE_RE = re.compile(
+    r"(?:autonomous|automated)\s+(?:exploratory\s+)?data\s+analysis|"
+    r"deterministic\s+run|"
+    r"llm\s+was\s+(?:switched\s+off|disabled)|"
+    r"plan\s+came\s+from\s+the\s+dataset\s+profile|"
+    r"successfully\s+investigated|"
+    r"analysis\s+(?:is\s+)?complete|"
+    r"we\s+have\s+(?:successfully\s+)?(?:investigated|completed|analyzed)",
+    re.IGNORECASE,
+)
+
 
 def _strip_jargon_sentences(text: str) -> str:
-    """Drop any sentence containing internal-plumbing jargon. Splits on
-    sentence-ending punctuation — approximate, but the text here is prose
-    the LLM itself wrote, not something requiring a real parser."""
+    """Drop any sentence containing internal-plumbing jargon or process boilerplate.
+    Splits on sentence-ending punctuation so substantive sentences are preserved."""
     if not text:
         return text
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-    kept = [s for s in sentences if not _JARGON_RE.search(s)]
+    kept = [s for s in sentences if not _JARGON_RE.search(s) and not _BOILERPLATE_RE.search(s)]
     return " ".join(kept).strip()
 
 
-def _build_executive_summary(llm_insights: dict[str, Any]) -> str:
+def _build_executive_summary(
+    llm_insights: dict[str, Any],
+    findings: list[dict[str, Any]] | None = None,
+) -> str:
     """Build the executive summary from `reasoning` (with internal-plumbing jargon
-    stripped). If `reasoning` is empty or only contained jargon, fall back to
-    joining the top `insights`."""
+    and process boilerplate stripped sentence-by-sentence). Replace process commentary
+    with the strongest actionable findings if no substantive reasoning remains."""
     clean_reasoning = _strip_jargon_sentences(str(llm_insights.get("reasoning", "") or ""))
+    grounded = ""
+    if findings:
+        matrix = classify_action_matrix(findings)
+        actionable = matrix["strategic_bets"] + matrix["quick_wins"]
+        if actionable:
+            grounded = " ".join(
+                plainify(str(f["headline"]).strip().rstrip(".")) + "."
+                for f in actionable[:2]
+            )
+
     if clean_reasoning:
+        if grounded and (
+            re.match(r"^user\s+objective:\s*[^.]+\.?$", clean_reasoning.strip(), re.I)
+            or ("objective" in clean_reasoning.lower() and not any(w in clean_reasoning.lower() for w in ("correlat", "differs", "higher", "lower", "averages", "predicts", "lift", "rate")))
+        ):
+            return f"{clean_reasoning} {grounded}".strip()
         return plainify(clean_reasoning)
+    if grounded:
+        return grounded
     insights = llm_insights.get("insights") or []
     if insights:
         text = " ".join(str(i).strip().rstrip(".") + "." for i in insights[:4] if str(i).strip())
-        return plainify(_strip_jargon_sentences(text))
+        clean_insights = _strip_jargon_sentences(text)
+        if clean_insights:
+            return plainify(clean_insights)
     return ""
 
 
@@ -214,7 +247,10 @@ _MAX_EVIDENCE_FINDINGS = 15
 
 
 def _headline_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    candidates = [f for f in findings if f.get("kind") not in _CAVEAT_FINDING_KINDS]
+    candidates = [
+        f for f in findings
+        if f.get("kind") not in _CAVEAT_FINDING_KINDS and not is_data_hygiene_finding(f)
+    ]
     preferred = [f for f in candidates if f.get("layer") in ("exec", "analyst")]
     pool = preferred if preferred else candidates
     pool = list(pool)  # keep rank_findings() order (source-diversity pass), no re-sort
@@ -224,14 +260,35 @@ def _headline_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _evidence_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     pool = [
         f for f in findings
-        if f.get("layer") == "analyst" and f.get("kind") not in _CAVEAT_FINDING_KINDS
+        if f.get("layer") == "analyst"
+        and f.get("kind") not in _CAVEAT_FINDING_KINDS
+        and not is_data_hygiene_finding(f)
     ]
     pool = list(pool)  # keep rank_findings() order (source-diversity pass), no re-sort
     return pool[:_MAX_EVIDENCE_FINDINGS]
 
 
 def _caveat_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [f for f in findings if f.get("kind") in _CAVEAT_FINDING_KINDS]
+    return [
+        f for f in findings
+        if f.get("kind") in _CAVEAT_FINDING_KINDS and not is_data_hygiene_finding(f)
+    ]
+
+
+def _data_integrity_html(findings: list[dict[str, Any]]) -> str:
+    """Render hygiene findings separately from analytical conclusions."""
+    hygiene = [f for f in findings if is_data_hygiene_finding(f)]
+    if not hygiene:
+        return ""
+    rows = "".join(
+        f"<tr><td>{_esc(plainify(str(f.get('headline', ''))))}</td>"
+        f"<td>{_esc(f.get('source_tool') or 'data audit')}</td></tr>"
+        for f in hygiene
+    )
+    return (
+        "<h2>Data integrity &amp; hygiene</h2>"
+        "<table><tr><th>Issue</th><th>Source</th></tr>" + rows + "</table>"
+    )
 
 
 #: FrontendPlan.md section 5, "Design rules" — same state->CSS-class mapping
@@ -635,6 +692,7 @@ def build_html_report(
     """
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     sections: list[str] = []
+    findings = findings or []
 
     # ---- header + badges ----
     badges = ""
@@ -668,7 +726,7 @@ def build_html_report(
     # 3a — prefer `insights` over the LLM's raw `reasoning` scratch text,
     # which has leaked internal plumbing into shipped reports; strip any
     # jargon sentences from whichever source ends up used.
-    executive_summary = _build_executive_summary(llm_insights)
+    executive_summary = _build_executive_summary(llm_insights, findings)
     if executive_summary:
         sections.append(
             f"<h2>The short version</h2><div class='card exec'>{_esc(executive_summary)}</div>"
@@ -679,7 +737,6 @@ def build_html_report(
     # ui/tabs/answers_tab.py's `card_findings` (layer in exec/analyst, no
     # caveat kinds, capped at 5), so the report and the console verdict
     # agree on M, not just on the wording. ----
-    findings = findings or []
     top_findings = _headline_findings(findings)
 
     # ---- 3.5 run-level verdict — mirrors ui/tabs/answers_tab.py's "N of M
@@ -709,6 +766,9 @@ def build_html_report(
             for i, f in enumerate(top_findings)
         )
         sections.append("<h2>Top findings</h2>" + headline_cards)
+
+    if integrity_html := _data_integrity_html(findings):
+        sections.append(integrity_html)
 
     # ---- insights & recommendations ----
     insights = llm_insights.get("insights") or []

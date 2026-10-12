@@ -324,6 +324,8 @@ def validate_chart_spec(spec: Any) -> tuple[dict[str, Any] | None, str | None]:
     """Return (clean_spec, None) or (None, reason). Never raises."""
     if not isinstance(spec, dict):
         return None, "CHART must be a dict."
+    if spec.get("invalid") or spec.get("error"):
+        return None, str(spec.get("error") or "Chart specification is invalid.")
     chart_type = spec.get("type")
     if chart_type == "vega_lite" or (chart_type is None and "vega_lite" in spec):
         return _validate_vega_lite(spec)

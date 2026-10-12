@@ -188,6 +188,50 @@ class TestGenerateReportTool:
         assert result.status == "success"
         assert "Most frequent words: camera, battery" in content
 
+    def test_boilerplate_summary_is_replaced_and_hygiene_is_separate(
+        self, report_dir: str
+    ) -> None:
+        findings = [
+            {
+                "finding_id": "integrity_1",
+                "kind": "outlier_scan",
+                "headline": "Constraint violation: order_id >= quantity failed once",
+                "source_tool": "integrity_audit",
+                "confidence": 0.8,
+            },
+            {
+                "finding_id": "lift_1",
+                "kind": "segment_lift",
+                "headline": "Enterprise revenue is 45% above the remaining segments",
+                "source_tool": "segment_comparison",
+                "effect": 0.45,
+                "confidence": 0.85,
+                "dimension": "tier",
+                "level": "Enterprise",
+            },
+        ]
+        result = GenerateReportTool().run(
+            dataset_name="grounded",
+            tool_results_json="[]",
+            llm_insights={
+                "reasoning": (
+                    "User objective: reduce churn. Deterministic run: the LLM was switched off, "
+                    "so the plan came from the dataset profile."
+                ),
+                "insights": [],
+            },
+            output_dir=report_dir,
+            findings=findings,
+        )
+
+        content = Path(result.output["markdown_path"]).read_text(encoding="utf-8")
+        summary = content.split("## Executive Summary", 1)[1].split("##", 1)[0]
+        matrix = content.split("## Action Prioritization Matrix", 1)[1]
+        assert "Enterprise revenue is 45%" in summary
+        assert "Deterministic run" not in summary
+        assert "## Data Integrity & Hygiene" in content
+        assert "Constraint violation" not in matrix
+
     def test_old_four_params_still_succeed_without_new_sections(self, report_dir: str) -> None:
         """Back-compat: scripts/validate.py and other direct callers only
         ever pass the original four params — must keep working, and the

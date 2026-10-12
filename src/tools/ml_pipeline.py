@@ -15,6 +15,7 @@ Anti-overfitting measures built in:
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
@@ -624,25 +625,39 @@ class TrainModelTool(BaseTool):
         cv_std = best.get("cv_std")
         baseline = output.get("baseline_cv_mean")
         lift = output.get("lift_over_baseline")
+        has_leakage = bool(output.get("is_leaked") or output.get("leakage_warnings"))
 
         if best_model and best_model != "none" and isinstance(cv_mean, (int, float)):
             scoring_label = "F1 (weighted)" if task_type == "classification" else "R2"
             # Lift below this over a no-skill predictor is not a result.
             weak = isinstance(lift, (int, float)) and lift < 0.05
+            if has_leakage:
+                headline = (
+                    f"Model training on '{target_column or 'the target'}' gated due to suspected target leakage "
+                    f"— cross-validated {scoring_label} = {cv_mean:.3f} reflects potential identity or data leak, not learnable pattern"
+                )
+            else:
+                headline = (
+                    f"{best_model} best predicts {target_column or 'the target'} "
+                    f"— cross-validated {scoring_label} = {cv_mean:.3f}"
+                    + (f" (+/- {cv_std:.3f})" if isinstance(cv_std, (int, float)) else "")
+                    + (
+                        f", {lift:+.3f} over a no-skill baseline ({baseline:.3f})"
+                        if isinstance(lift, (int, float)) and isinstance(baseline, (int, float))
+                        else ""
+                    )
+                )
+
+            caveats = list(output.get("leakage_warnings") or [])
+            if weak:
+                caveats.append("Model barely beats a no-skill baseline — not a usable predictor.")
+
+            confidence = 0.1 if has_leakage else (0.3 if weak else 0.7)
             found.append(
                 Finding(
                     finding_id=f"{self.name}_best_model",
-                    kind="model_performance",
-                    headline=(
-                        f"{best_model} best predicts {target_column or 'the target'} "
-                        f"— cross-validated {scoring_label} = {cv_mean:.3f}"
-                        + (f" (+/- {cv_std:.3f})" if isinstance(cv_std, (int, float)) else "")
-                        + (
-                            f", {lift:+.3f} over a no-skill baseline ({baseline:.3f})"
-                            if isinstance(lift, (int, float)) and isinstance(baseline, (int, float))
-                            else ""
-                        )
-                    ),
+                    kind="method_fit" if has_leakage else "model_performance",
+                    headline=headline,
                     detail=(
                         f"Selected from {len(models_trained)} candidate model(s) trained on a "
                         f"'{output.get('split_strategy', 'random')}' split "
@@ -655,17 +670,15 @@ class TrainModelTool(BaseTool):
                         "best_model": best_model,
                         "baseline_cv_mean": baseline,
                         "lift_over_baseline": lift,
+                        "leakage_detected": has_leakage,
+                        "leakage_warnings": output.get("leakage_warnings") or [],
                     },
                     source_tool=self.name,
                     measure=target_column,
                     effect=round(float(cv_mean), 4),
                     effect_kind="share",
-                    caveats=(
-                        ["Model barely beats a no-skill baseline — not a usable predictor."]
-                        if weak
-                        else []
-                    ),
-                    confidence=0.3 if weak else 0.7,
+                    caveats=caveats,
+                    confidence=confidence,
                     layer="analyst",
                 )
             )
@@ -740,6 +753,22 @@ class TrainModelTool(BaseTool):
         leakage_warnings = _detect_target_leakage(X, y, task_type)
         leakage_warnings += _detect_formula_leakage(df, target_column, list(X.columns))
 
+        suspect_features: set[str] = set()
+        for w in leakage_warnings:
+            suspect_features.update(re.findall(r"'([^']+)'", w))
+        suspect_features = {c for c in suspect_features if c in X.columns}
+
+        remaining_features = [c for c in X.columns if c not in suspect_features]
+        if suspect_features and remaining_features:
+            treatments.append(
+                f"Gated suspected target leakage: dropped suspect column(s) {sorted(suspect_features)} "
+                "and trained models on clean features."
+            )
+            X = X[remaining_features]
+            # Re-check leakage on remaining features
+            leakage_warnings = _detect_target_leakage(X, y, task_type)
+            leakage_warnings += _detect_formula_leakage(df, target_column, list(X.columns))
+
         # Encode non-numeric classification targets (XGBoost requires
         # numeric labels; roc_auc_score requires {0,1} for binary tasks)
         class_labels: list[str] = []
@@ -800,6 +829,22 @@ class TrainModelTool(BaseTool):
                 f"check, not a result."
             )
 
+        is_leaked = bool(leakage_warnings)
+        if is_leaked:
+            # Hard-gate persistence and promotion for leaked models: remove serialized weights
+            for m_res in results.values():
+                m_path = m_res.get("model_path")
+                if m_path and Path(m_path).exists():
+                    try:
+                        Path(m_path).unlink()
+                        sig_path = Path(f"{m_path}.sig")
+                        if sig_path.exists():
+                            sig_path.unlink()
+                    except OSError:
+                        pass
+                m_res["model_path"] = None
+                m_res["unpromoted_due_to_leakage"] = True
+
         # A near-perfect score is a red flag, not a headline. Say so in the
         # summary itself, because the summary is what reaches the report and
         # the LLM synthesis — a caveat buried in a sibling key gets read as
@@ -831,6 +876,7 @@ class TrainModelTool(BaseTool):
             "class_labels": class_labels,
             "overfit_warnings": overfit_warnings,
             "leakage_warnings": leakage_warnings,
+            "is_leaked": is_leaked,
             "treatments_applied": treatments,
             "hyperparameter_tuning": do_tune,
             "test_size": test_size,

@@ -322,6 +322,29 @@ class _SandboxedCodeTransformer(ast.NodeTransformer):
                     by_arg = node.args.pop(0)
                     node.keywords.append(ast.keyword(arg="by", value=by_arg))
                 self.transformed = True
+        elif isinstance(node.func, ast.Name) and node.func.id in ("globals", "locals"):
+            self.transformed = True
+            return ast.copy_location(
+                ast.Dict(
+                    keys=[
+                        ast.Constant(value="df"),
+                        ast.Constant(value="df_raw"),
+                        ast.Constant(value="data"),
+                        ast.Constant(value="dsa"),
+                        ast.Constant(value="pd"),
+                        ast.Constant(value="np"),
+                    ],
+                    values=[
+                        ast.Name(id="df", ctx=ast.Load()),
+                        ast.Name(id="df", ctx=ast.Load()),
+                        ast.Name(id="df", ctx=ast.Load()),
+                        ast.Name(id="dsa", ctx=ast.Load()),
+                        ast.Name(id="pd", ctx=ast.Load()),
+                        ast.Name(id="np", ctx=ast.Load()),
+                    ],
+                ),
+                node,
+            )
         elif isinstance(node.func, ast.Name) and (
             node.func.id in _READER_ATTR_NAMES or node.func.id.startswith("read_")
         ):
@@ -331,6 +354,32 @@ class _SandboxedCodeTransformer(ast.NodeTransformer):
             self.transformed = True
             return ast.copy_location(ast.Name(id="df", ctx=ast.Load()), node)
 
+        return self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> Any:
+        if isinstance(node.ctx, ast.Load) and node.id in ("globals", "locals"):
+            self.transformed = True
+            return ast.copy_location(
+                ast.Dict(
+                    keys=[
+                        ast.Constant(value="df"),
+                        ast.Constant(value="df_raw"),
+                        ast.Constant(value="data"),
+                        ast.Constant(value="dsa"),
+                        ast.Constant(value="pd"),
+                        ast.Constant(value="np"),
+                    ],
+                    values=[
+                        ast.Name(id="df", ctx=ast.Load()),
+                        ast.Name(id="df", ctx=ast.Load()),
+                        ast.Name(id="df", ctx=ast.Load()),
+                        ast.Name(id="dsa", ctx=ast.Load()),
+                        ast.Name(id="pd", ctx=ast.Load()),
+                        ast.Name(id="np", ctx=ast.Load()),
+                    ],
+                ),
+                node,
+            )
         return self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> Any:
@@ -564,14 +613,44 @@ _ENV_ALLOWLIST: tuple[str, ...] = (
 )
 
 
+def _worker_python_executable() -> str:
+    """Resolve the Python executable to run the worker subprocess.
+    If the current process is in a virtualenv (or sys.prefix has Scripts/bin),
+    prefer the virtualenv's python binary so sys.path automatically includes
+    the virtualenv's site-packages even when cwd is a temp scratch dir."""
+    if sys.prefix:
+        prefix_path = Path(sys.prefix)
+        # Windows
+        win_exe = prefix_path / "Scripts" / "python.exe"
+        if win_exe.is_file():
+            return str(win_exe)
+        # Unix
+        posix_exe = prefix_path / "bin" / "python"
+        if posix_exe.is_file():
+            return str(posix_exe)
+    return sys.executable
+
+
 def _worker_env(scratch_dir: str) -> dict[str, str]:
     """Minimal child environment: allowlisted host variables, the repo root
-    on PYTHONPATH (so `src.core.io` imports from a scratch cwd), TEMP pointed
+    and active site-packages on PYTHONPATH (so `src.core.io` imports from a scratch cwd
+    and installed libraries like numpy/pandas resolve even with -s), TEMP pointed
     at the scratch dir, one thread per numeric library (so the RSS cap and
     timeout bound the real work), and no bytecode writes."""
     env = {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
+    if sys.prefix and "VIRTUAL_ENV" not in env:
+        env["VIRTUAL_ENV"] = sys.prefix
+
+    # Build PYTHONPATH: repo root first, followed by active site-packages / dist-packages
+    # from the current environment so the worker subprocess can import numpy, pandas, etc.
+    pythonpath_entries = [str(_REPO_ROOT)]
+    for p in sys.path:
+        if p and ("site-packages" in p.lower() or "dist-packages" in p.lower()):
+            if p not in pythonpath_entries and os.path.isdir(p):
+                pythonpath_entries.append(p)
+
     env.update({
-        "PYTHONPATH": str(_REPO_ROOT),
+        "PYTHONPATH": os.pathsep.join(pythonpath_entries),
         "PYTHONIOENCODING": "utf-8",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
@@ -809,7 +888,7 @@ class SubprocessSandbox(SandboxBackend):
                 proc = subprocess.Popen(
                     # -s: no user site-packages. Not -I, which would also drop the
                     # PYTHONPATH the worker needs to import src.*.
-                    [sys.executable, "-s", str(_WORKER_SCRIPT), str(input_path), str(result_path)],
+                    [_worker_python_executable(), "-s", str(_WORKER_SCRIPT), str(input_path), str(result_path)],
                     cwd=scratch_dir,
                     env=_worker_env(scratch_dir),
                     stdout=subprocess.DEVNULL,

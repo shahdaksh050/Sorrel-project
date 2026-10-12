@@ -24,6 +24,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_PROTECTED_ATTRIBUTES: frozenset[str] = frozenset({
+    "gender", "sex", "race", "ethnicity", "religion", "disability", "sexual_orientation",
+})
+
+
 def _slug(text: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in str(text)).strip("_").lower() or "na"
 
@@ -44,6 +49,14 @@ class ScenarioSimulationTool(BaseTool):
         measures = profile.measures()
         if len(measures) >= 2:
             return 0.85
+        # Single-measure datasets can still use segment equalization mode
+        # if there is at least one discrete categorical dimension with 2-8 levels.
+        has_segment_dim = any(
+            c.kind in ("categorical", "string") and 2 <= c.nunique <= 8
+            for c in profile.columns
+        )
+        if len(measures) == 1 and has_segment_dim:
+            return 0.55
         return 0.0
 
     def default_params(
@@ -158,14 +171,17 @@ class ScenarioSimulationTool(BaseTool):
                             "projected_total_impact": round(tot_impact, 2),
                         })
 
-        # Segment equalization opportunity
+        # Segment equalization opportunity (skips demographic/protected attributes)
         segment_opportunity: dict[str, Any] | None = None
         cat_candidates = [
             c for c in df.columns
-            if c != target_column and 2 <= df[c].nunique(dropna=True) <= 8 and not pd.api.types.is_numeric_dtype(df[c])
+            if c != target_column
+            and 2 <= df[c].nunique(dropna=True) <= 8
+            and not pd.api.types.is_numeric_dtype(df[c])
+            and str(c).lower().strip() not in _PROTECTED_ATTRIBUTES
         ]
         seg_col = segment_column or (cat_candidates[0] if cat_candidates else None)
-        if seg_col and seg_col in df.columns:
+        if seg_col and seg_col in df.columns and str(seg_col).lower().strip() not in _PROTECTED_ATTRIBUTES:
             seg_work = df[[seg_col, target_column]].dropna()
             group_stats = seg_work.groupby(seg_col)[target_column].agg(["count", "mean"])
             if len(group_stats) >= 2:
@@ -192,7 +208,7 @@ class ScenarioSimulationTool(BaseTool):
 
         # Build Markdown decision table
         lines = [
-            f"| Intervention / Lever | Target Group | Projected Impact (Unit) | 95% Confidence Interval | Projected Total Impact ({n_pop:,} units) |",
+            f"| Sensitivity Benchmark / Lever | Reference Cohort | Statistical Shift (Unadjusted) | 95% Confidence Interval | Linear Extrapolation ({n_pop:,} units) |",
             "| :--- | :--- | :--- | :--- | :--- |",
         ]
         for s in scenarios:
@@ -202,9 +218,9 @@ class ScenarioSimulationTool(BaseTool):
             )
         if segment_opportunity:
             lines.append(
-                f"| Close gap for '{segment_opportunity['segment']}' to average | {segment_opportunity['segment']} (n={segment_opportunity['segment_n']:,}) | "
+                f"| Benchmark '{segment_opportunity['segment']}' to average | {segment_opportunity['segment']} (n={segment_opportunity['segment_n']:,}) | "
                 f"+{segment_opportunity['gap_per_unit']:0.2f} (+{segment_opportunity['gap_pct']:0.1f}%) | [Audited baseline gap] | "
-                f"+{segment_opportunity['recoverable_total']:,.2f} (Recoverable) |"
+                f"+{segment_opportunity['recoverable_total']:,.2f} (Cohort difference) |"
             )
         decision_table = "\n".join(lines)
 
@@ -213,15 +229,15 @@ class ScenarioSimulationTool(BaseTool):
         if scenarios:
             top_s = next((s for s in scenarios if s["shift_pct"] == 10.0), scenarios[0])
             summary_parts.append(
-                f"A {top_s['shift_pct']:+0.0f}% intervention in '{top_s['driver']}' is projected to shift "
-                f"'{target_column}' by {top_s['relative_change_pct']:+0.1f}% ({top_s['delta_target']:+0.2f} per unit, "
-                f"95% CI: [{top_s['ci_lower']:+0.2f}, {top_s['ci_upper']:+0.2f}]), yielding a total impact of "
-                f"{top_s['projected_total_impact']:+,.2f} across {n_pop:,} records."
+                f"A {top_s['shift_pct']:+0.0f}% shift in '{top_s['driver']}' corresponds to an unadjusted linear change in "
+                f"'{target_column}' of {top_s['relative_change_pct']:+0.1f}% ({top_s['delta_target']:+0.2f} per unit, "
+                f"95% CI: [{top_s['ci_lower']:+0.2f}, {top_s['ci_upper']:+0.2f}]), extrapolating to "
+                f"{top_s['projected_total_impact']:+,.2f} across {n_pop:,} records [descriptive sensitivity benchmark; unadjusted for confounding]."
             )
         if segment_opportunity:
             summary_parts.append(
-                f"Closing the performance gap for segment '{segment_opportunity['segment']}' in '{segment_opportunity['dimension']}' "
-                f"represents an estimated recoverable opportunity of +{segment_opportunity['recoverable_total']:,.2f}."
+                f"The observed performance gap for cohort '{segment_opportunity['segment']}' in '{segment_opportunity['dimension']}' "
+                f"represents an unadjusted cohort difference of +{segment_opportunity['recoverable_total']:,.2f}."
             )
 
         summary = " ".join(summary_parts) if summary_parts else f"Baseline scenario analysis complete for '{target_column}' across {n_pop:,} records."
@@ -250,7 +266,7 @@ class ScenarioSimulationTool(BaseTool):
         for i, s in enumerate(scenarios):
             if s.get("shift_pct") in (10.0, -10.0, 25.0):
                 headline = (
-                    f"What-If Projection: {s['shift_pct']:+0.0f}% shift in '{s['driver']}' yields "
+                    f"Sensitivity Projection: {s['shift_pct']:+0.0f}% shift in '{s['driver']}' associates with a "
                     f"{s['relative_change_pct']:+0.1f}% change in '{target}' ({s['delta_target']:+0.2f} per unit, "
                     f"95% CI: [{s['ci_lower']:+0.2f}, {s['ci_upper']:+0.2f}])."
                 )
@@ -259,7 +275,7 @@ class ScenarioSimulationTool(BaseTool):
                     kind="decision_scenario",
                     headline=headline,
                     detail=(
-                        f"Projected total population impact: {s['projected_total_impact']:+,.2f}; "
+                        f"Linear extrapolation across population: {s['projected_total_impact']:+,.2f}; "
                         f"baseline mean: {output.get('baseline_mean')}; population n={output.get('population_size')}."
                     ),
                     evidence=s,
@@ -268,16 +284,17 @@ class ScenarioSimulationTool(BaseTool):
                     dimension=s["driver"],
                     effect=s["relative_change_pct"] / 100.0,
                     effect_kind="lift",
-                    confidence=0.85,
-                    surprise=0.4,
+                    confidence=0.75,
+                    surprise=0.3,
+                    caveats=["Observational linear extrapolation unadjusted for unmeasured confounding."],
                 ))
 
         seg_opp = output.get("segment_opportunity")
         if seg_opp:
             headline = (
-                f"Recoverable Gap: Segment '{seg_opp['segment']}' in '{seg_opp['dimension']}' trails by "
-                f"{seg_opp['gap_per_unit']:0.2f} per unit ({seg_opp['gap_pct']:0.1f}%), representing "
-                f"+{seg_opp['recoverable_total']:,.2f} in recoverable opportunity."
+                f"Cohort Benchmark: Segment '{seg_opp['segment']}' in '{seg_opp['dimension']}' trails baseline by "
+                f"{seg_opp['gap_per_unit']:0.2f} per unit ({seg_opp['gap_pct']:0.1f}%), an aggregate gap of "
+                f"+{seg_opp['recoverable_total']:,.2f}."
             )
             results.append(Finding(
                 finding_id=f"recoverable_gap_{_slug(target)}_{_slug(seg_opp['dimension'])}_{_slug(seg_opp['segment'])}",
@@ -291,8 +308,9 @@ class ScenarioSimulationTool(BaseTool):
                 level=seg_opp["segment"],
                 effect=seg_opp["gap_pct"] / 100.0,
                 effect_kind="lift",
-                confidence=0.80,
-                surprise=0.5,
+                confidence=0.70,
+                surprise=0.4,
+                caveats=["Observational cohort difference; unadjusted for confounding or selection effects."],
             ))
         return results
 

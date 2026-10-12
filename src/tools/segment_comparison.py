@@ -610,8 +610,13 @@ class SegmentComparisonTool(BaseTool):
         measure_column: str | None = None,
         dimension_column: str | None = None,
         stratify_by: str | None = None,
-        **_: Any,
+        **kwargs: Any,
     ) -> dict[str, Any]:
+        if dimension_column is None:
+            dimension_column = kwargs.get("dimension") or kwargs.get("group_column")
+        if measure_column is None:
+            measure_column = kwargs.get("measure") or kwargs.get("feature_column")
+
         df = _read_df(file_path)
         if df.empty:
             raise ToolExecutionError("Dataset has no rows.")

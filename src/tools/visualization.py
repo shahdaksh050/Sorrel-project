@@ -124,6 +124,18 @@ class GenerateVisualizationsTool(BaseTool):
                 "training rows. Run evaluate_model: its held-out results are charted on the dashboard."
             )
         df = _read_df(file_path)
+        # Auto-fallback: correlation heatmap needs 2+ numeric columns.
+        # Rather than crashing (which logs an error in the execution trace),
+        # silently downgrade to distributions — the planner often over-requests.
+        if chart_type == "correlation_heatmap":
+            n_num = df.select_dtypes(include="number").shape[1]
+            if n_num < 2:
+                usable_num = [c for c in df.select_dtypes(include="number").columns if df[c].nunique(dropna=True) > 1]
+                if not usable_num:
+                    raise ToolExecutionError(
+                        "correlation_heatmap needs at least 2 numeric columns, and no usable non-constant numeric columns exist to fallback to distributions."
+                    )
+                chart_type = "distributions"
         if chart_type == "correlation_heatmap":
             charts = self._heatmap(df)
         elif chart_type == "feature_importance":

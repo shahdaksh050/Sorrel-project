@@ -779,3 +779,63 @@ def _group_ci_chart(
             ],
         },
     )
+
+
+def _interaction_chart(
+    finding: dict[str, Any], col_by_name: dict[str, ColumnProfile] | None = None
+) -> ChartSpec | None:
+    """Grouped comparison of a 2-way categorical interaction finding:
+    shows individual factor lifts vs expected additive lift vs actual joint lift."""
+    ev = finding.get("evidence") or {}
+    measure = ev.get("measure")
+    dim_a, dim_b = ev.get("dimension_a"), ev.get("dimension_b")
+    lvl_a, lvl_b = ev.get("level_a"), ev.get("level_b")
+    if not (measure and dim_a and dim_b and lvl_a and lvl_b):
+        return None
+    lift_a = _num(ev.get("lift_a"))
+    lift_b = _num(ev.get("lift_b"))
+    joint_lift = _num(ev.get("joint_lift"))
+    expected = _num(ev.get("expected_additive_lift"))
+    if joint_lift is None:
+        return None
+
+    values = [
+        {"factor": f"{humanize_label(str(dim_a))}: {lvl_a}", "lift": lift_a or 0.0, "type": "individual"},
+        {"factor": f"{humanize_label(str(dim_b))}: {lvl_b}", "lift": lift_b or 0.0, "type": "individual"},
+        {"factor": "Expected (Additive)", "lift": expected or 0.0, "type": "baseline"},
+        {"factor": f"Joint ({lvl_a} + {lvl_b})", "lift": joint_lift, "type": "actual"},
+    ]
+    inter_type = str(ev.get("interaction_type") or "Interaction").title()
+    dim_title = f"{humanize_label(str(dim_a))} × {humanize_label(str(dim_b))}"
+    title = f"{inter_type} — {dim_title} on {humanize_label(str(measure))}"
+    synergy = _num(ev.get("synergy_diff")) or 0.0
+    syn_str = f"{synergy:+.1%}"
+    n_count = ev.get("n")
+    n_str = f", n={n_count:,}" if n_count else ""
+    desc = f"Joint effect vs individual factors: actual joint lift is {joint_lift:+.1%} ({syn_str} beyond additive expectations{n_str})."
+
+    return ChartSpec(
+        chart_id=f"interaction_{_slug(str(measure))}_{_slug(str(dim_a))}_{_slug(str(dim_b))}",
+        title=title,
+        description=desc,
+        spec={
+            "data": {"values": values},
+            "height": 220,
+            "mark": {"type": "bar"},
+            "encoding": {
+                "y": {"field": "factor", "type": "nominal", "sort": None, "title": None, "axis": {"labelLimit": 280}},
+                "x": {"field": "lift", "type": "quantitative", "title": "Lift vs Baseline", "axis": {"format": "+.0%"}},
+                "color": {
+                    "field": "type",
+                    "type": "nominal",
+                    "scale": {"domain": ["individual", "baseline", "actual"]},
+                    "legend": None,
+                },
+                "tooltip": [
+                    {"field": "factor", "title": "Factor"},
+                    {"field": "lift", "title": "Lift", "format": "+.1%"},
+                ],
+            },
+        },
+    )
+

@@ -289,3 +289,62 @@ def test_train_model_clustering_branch(tmp_path: Path) -> None:
     assert out["baseline_cv_mean"] is None and out["split_strategy"] == "n/a"
     assert out["train_samples"] == out["test_samples"] == 60
     assert (tmp_path / "models" / "kmeans.pkl.sig").exists()
+
+
+def test_target_leakage_dropped_and_retrained_on_clean_features(tmp_path: Path) -> None:
+    """When a single feature leaks the target, it is dropped and training proceeds on clean features."""
+    rng = np.random.default_rng(42)
+    n = 100
+    clean_feat = rng.normal(size=n)
+    target = (clean_feat > 0).astype(int)
+    # Leaking feature identical or perfectly predicting target
+    leaked_feat = target.copy()
+
+    df = pd.DataFrame({"clean": clean_feat, "leak": leaked_feat, "target": target})
+    csv_path = tmp_path / "leak_data.csv"
+    df.to_csv(csv_path, index=False)
+
+    tool = TrainModelTool()
+    out = tool.execute(
+        file_path=str(csv_path),
+        target_column="target",
+        task_type="classification",
+        models=["logistic_regression"],
+        output_dir=str(tmp_path / "models"),
+    )
+    assert any("dropped suspect column(s) ['leak']" in t for t in out["treatments_applied"])
+    assert out["is_leaked"] is False
+
+
+def test_unresolved_target_leakage_gates_model_and_attaches_caveats(tmp_path: Path) -> None:
+    """When all features leak or score is near-perfect, persistence is gated and confidence is discounted."""
+    rng = np.random.default_rng(42)
+    n = 100
+    target = rng.integers(0, 2, n)
+    # Sole feature is identical to target
+    df = pd.DataFrame({"leak": target, "target": target})
+    csv_path = tmp_path / "all_leak.csv"
+    df.to_csv(csv_path, index=False)
+
+    tool = TrainModelTool()
+    out = tool.execute(
+        file_path=str(csv_path),
+        target_column="target",
+        task_type="classification",
+        models=["logistic_regression"],
+        output_dir=str(tmp_path / "models"),
+    )
+    assert out["is_leaked"] is True
+    # Model persistence gated: model_path should be None
+    assert out["models_trained"]["logistic_regression"]["model_path"] is None
+    assert out["models_trained"]["logistic_regression"]["unpromoted_due_to_leakage"] is True
+
+    # Finding attached caveats and gated headline
+    findings = tool.findings(out, profile=None, metadata=None)
+    model_finding = next((f for f in findings if f.finding_id == f"{tool.name}_best_model"), None)
+    assert model_finding is not None
+    assert model_finding.kind == "method_fit"
+    assert "gated due to suspected target leakage" in model_finding.headline
+    assert model_finding.confidence == 0.1
+    assert len(model_finding.caveats) > 0
+

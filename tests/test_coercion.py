@@ -32,6 +32,28 @@ class TestPercent:
         assert coercions[0].rule == "percent"
 
 
+class TestMixedMeasurementUnits:
+    def test_incompatible_units_remain_text(self) -> None:
+        values = (["90 min", "120 minutes", "2 seasons", "1 season"] * 10)
+        out, coercions = coerce_types(pd.DataFrame({"duration": values}))
+        assert not pd.api.types.is_numeric_dtype(out["duration"])
+        assert out["duration"].tolist() == values
+        assert not [c for c in coercions if c.column == "duration"]
+
+    def test_singular_and_plural_same_unit_are_numeric(self) -> None:
+        values = (["1 minute", "2 minutes"] * 10)
+        out, coercions = coerce_types(pd.DataFrame({"duration": values}))
+        assert pd.api.types.is_numeric_dtype(out["duration"])
+        assert out["duration"].iloc[:2].tolist() == [1.0, 2.0]
+        assert any(c.column == "duration" for c in coercions)
+
+    def test_short_scientific_symbols_are_not_singularized(self) -> None:
+        values = (["1 m", "2 ms"] * 10)
+        out, coercions = coerce_types(pd.DataFrame({"latency": values}))
+        assert not pd.api.types.is_numeric_dtype(out["latency"])
+        assert not [c for c in coercions if c.column == "latency"]
+
+
 class TestBoolean:
     def test_yes_no_becomes_bool(self) -> None:
         df = pd.DataFrame({"active": (["Y", "N"] * 10)})

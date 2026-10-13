@@ -144,6 +144,8 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
 | BE-8 | Antigravity (Gemini) | Complete | Restored 7-stage workflow and RLM feature-group decomposition (RLMEngine.decompose_and_invoke, REPLEnvironment, prompt_manager subtask templates, controller Stage 6, 7-stage UI stepper & Detail Handler agent card, and unit tests). |
 | BE-9 | Antigravity (Gemini) | Complete | Senior quantitative pipeline upgrades: Simpson's paradox & confounder auditing, 2-way categorical interaction screening, ScenarioSimulationTool for what-if driver interventions & gap closing, and 2x2 Action Prioritization Matrix in Markdown and HTML reports. |
 | BE-10 | Antigravity (Gemini) | Complete | Autonomous unprompted investigation engine: semantic North Star inference, lead hypothesis promotion from Question Agenda, autonomous mission prompt injection, and What-If scenario pre-seeding. |
+| BE-11 | Antigravity (Gemini) | Complete | Deterministic inference envelope & agenda anchoring: LLM_TEMPERATURE=0.0 default, LLM_SEED=42 passed in create_kwargs with retry recovery, deterministic multi-key finding tie-breaking in rank_findings(), and _ensure_agenda_anchor_steps() guaranteeing lead agenda coverage in Cycle 1. |
+| BE-12 | Antigravity (Gemini) | Complete | Penetration & logical security pipeline remediation: SEC-01 (.tsv binary/null sniffing), LOGIC-01 (preventing fabricated unknown groupby columns in sandbox worker), LOGIC-02 & SEC-02 (n<=2 degenerate statistical division & NaN JSON serialization immunity), SEC-03 (small-integer unit/multiplier claim verification bypass closure), LOGIC-03 (transitive join column ownership tracking), DOS-01 (2h stale run dir lifetime & 2GB aggregate storage quota eviction). |
 
 ### I. Sandbox Optimization & Group Comparison Steering (2026-10-09) [Task BE-3]
 - **Worker Subprocess Lightening** ([`src/core/_sandbox_worker.py`](file:///d:/(Dev2)DSA_AGENT/src/core/_sandbox_worker.py)): Replaced heavy `profile_dataframe(df)` in `_build_schema` with a lightweight, direct pandas dtype classifier, dropping the costly profiling pass and regex scans inside the child process.
@@ -278,3 +280,21 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
   - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 107 source files).
 
 
+
+### R. Deterministic Inference Envelope, Effect-Size Finding Ranking & Agenda Anchoring (2026-10-13) [Task BE-11]
+- **Deterministic Inference Envelope** ([`src/core/llm_client.py`](file:///d:/(Dev2)DSA_AGENT/src/core/llm_client.py)):
+  - Defaulted `self.temperature` to `0.0` (configurable via `LLM_TEMPERATURE`).
+  - Added `self.seed = int(os.getenv("LLM_SEED", "42"))`.
+  - Wired `"seed": self.seed` into `create_kwargs` for all OpenAI-compatible endpoints (OpenAI, Gemini, Groq, OpenRouter, local/Ollama).
+  - Wired `"temperature": self.temperature` into Anthropic calls.
+  - Added automatic fallback in API retry loop (`_create`) to pop `"seed"` if an atypical endpoint rejects it.
+- **Deterministic Finding Tie-Breaking & Effect-Size Prioritization** ([`src/core/findings.py`](file:///d:/(Dev2)DSA_AGENT/src/core/findings.py)):
+  - Updated `rank_findings()` sorting key to: `(not _is_weak_cluster(f), round(f.importance, 4), round(abs(f.effect), 4) if f.effect is not None else 0.0, round(f.effective_confidence(), 4), f.kind or "", f.measure or "", f.dimension or "", f.headline or "")`.
+  - Eliminates insertion-order and tool execution sequence sensitivity; findings with larger real-world effect sizes and statistical confidence take priority when importance ties occur.
+- **Agenda-First Plan Anchoring** ([`src/core/controller_planning.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller_planning.py), [`src/core/controller.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller.py)):
+  - Implemented `_ensure_agenda_anchor_steps()` in `PlanMixin` and wired it into Stage 2 plan processing in `AgentController._analyze()`.
+  - In Cycle 1, if the LLM planner omits the primary group comparison identified by `question_agenda`, the system automatically anchors it so foundational statistical truth is never missed.
+- **Verification & Tests**:
+  - Unit tests added in [`tests/test_controller_reasoning_steps.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_controller_reasoning_steps.py): `test_llm_client_deterministic_envelope`, `test_rank_findings_deterministic_tie_breaking`, and `test_agenda_anchor_ensures_lead_segment_comparison_in_cycle_one`.
+  - Suite passing: 93/93 unit tests passed across controller reasoning, null data, architecture, clustering, and sandbox.
+  - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 107 source files).

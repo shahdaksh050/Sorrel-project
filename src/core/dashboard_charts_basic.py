@@ -1084,3 +1084,159 @@ def _correlation_chart(
             "encoding": encoding,
         },
     )
+
+
+def _parity_chart(
+    df: pd.DataFrame,
+    obs_col: str,
+    exp_col: str,
+    col_by_name: dict[str, ColumnProfile] | None = None,
+    stem: str | None = None,
+) -> ChartSpec | None:
+    """Parity Plot comparing observed values against expected benchmark baseline with y = x reference line."""
+    if obs_col not in df.columns or exp_col not in df.columns:
+        return None
+    valid = df[[obs_col, exp_col]].dropna()
+    if len(valid) < 10:
+        return None
+
+    sub = valid.sample(n=min(len(valid), SCATTER_MAX_POINTS), random_state=42)
+    obs_vals = sub[obs_col].to_numpy(dtype=float)
+    exp_vals = sub[exp_col].to_numpy(dtype=float)
+
+    min_val = float(min(obs_vals.min(), exp_vals.min()))
+    max_val = float(max(obs_vals.max(), exp_vals.max()))
+
+    records: list[dict[str, Any]] = []
+    for o, e in zip(obs_vals, exp_vals, strict=False):
+        delta = o - e
+        records.append({
+            "expected": round(float(e), 4),
+            "observed": round(float(o), 4),
+            "delta": round(float(delta), 4),
+            "status": "Outperforming" if delta > 0 else ("Underperforming" if delta < 0 else "On Target"),
+        })
+
+    col_by_name = col_by_name or {}
+    unit_hint = col_by_name[obs_col].unit_hint if col_by_name.get(obs_col) else None
+    fmt = axis_format(unit_hint)
+    title_obs = humanize_axis_title(obs_col, unit_hint)
+    title_exp = humanize_axis_title(exp_col, unit_hint)
+    stem_label = humanize_label(stem or obs_col)
+
+    line_data = [{"x": min_val, "y": min_val}, {"x": max_val, "y": max_val}]
+
+    spec: dict[str, Any] = {
+        "data": {"values": records},
+        "height": 260,
+        "layer": [
+            {
+                "data": {"values": line_data},
+                "mark": {"type": "line", "color": "#888888", "strokeDash": [4, 4], "strokeWidth": 1.5},
+                "encoding": {
+                    "x": {"field": "x", "type": "quantitative"},
+                    "y": {"field": "y", "type": "quantitative"},
+                },
+            },
+            {
+                "mark": {"type": "circle", "size": 55, "opacity": 0.75},
+                "encoding": {
+                    "x": {"field": "expected", "type": "quantitative", "title": f"Expected / Target ({title_exp})"},
+                    "y": {"field": "observed", "type": "quantitative", "title": f"Observed / Actual ({title_obs})"},
+                    "color": {
+                        "field": "status",
+                        "type": "nominal",
+                        "scale": {
+                            "domain": ["Outperforming", "On Target", "Underperforming"],
+                            "range": ["#2ecc71", "#95a5a6", "#e74c3c"],
+                        },
+                        "title": "Performance",
+                    },
+                    "tooltip": [
+                        {"field": "observed", "title": "Observed", **fmt},
+                        {"field": "expected", "title": "Expected", **fmt},
+                        {"field": "delta", "title": "Delta", **fmt},
+                        {"field": "status", "title": "Status"},
+                    ],
+                },
+            },
+        ],
+    }
+
+    return ChartSpec(
+        chart_id=f"parity_{stem or obs_col}",
+        title=f"Performance Benchmark — {stem_label} (Observed vs Expected)",
+        description=f"Parity plot of '{obs_col}' against expected '{exp_col}'. Points above dashed line outperform target.",
+        spec=spec,
+        caption=f"Observed vs Expected comparison for {stem_label}. Points above y=x represent positive outperformance.",
+    )
+
+
+def _driver_tornado_chart(
+    finding: dict[str, Any],
+    results: list[dict[str, Any]],
+    col_by_name: dict[str, ColumnProfile] | None = None,
+) -> ChartSpec | None:
+    """Driver Sensitivity Tornado Chart showing standardized coefficients or effect sizes centered at 0."""
+    drivers_data: list[dict[str, Any]] = []
+
+    for r in results:
+        if isinstance(r, dict) and r.get("tool_name") in ("regression_analysis", "train_model") and r.get("status") == "success":
+            out = r.get("output", {})
+            coeffs = out.get("coefficients") or out.get("feature_importance") or {}
+            if isinstance(coeffs, dict) and coeffs:
+                for feat, val in coeffs.items():
+                    if isinstance(val, (int, float)) and not np.isnan(val):
+                        drivers_data.append({"feature": str(feat), "effect": round(float(val), 4)})
+                if drivers_data:
+                    break
+
+    if not drivers_data:
+        ev = finding.get("evidence") or {}
+        if isinstance(ev, dict) and ev.get("coefficients"):
+            for feat, val in ev["coefficients"].items():
+                if isinstance(val, (int, float)):
+                    drivers_data.append({"feature": str(feat), "effect": round(float(val), 4)})
+        elif finding.get("dimension") and finding.get("effect") is not None:
+            eff = finding.get("effect")
+            if isinstance(eff, (int, float)):
+                drivers_data.append({"feature": str(finding["dimension"]), "effect": round(float(eff), 4)})
+
+    if not drivers_data:
+        return None
+
+    drivers_data.sort(key=lambda d: abs(d["effect"]), reverse=True)
+    drivers_data = drivers_data[:10]
+    for d in drivers_data:
+        d["direction"] = "Positive Impact" if d["effect"] >= 0 else "Negative Impact"
+        d["abs_effect"] = abs(d["effect"])
+
+    measure = finding.get("measure") or "Target Outcome"
+    spec: dict[str, Any] = {
+        "data": {"values": drivers_data},
+        "height": max(180, len(drivers_data) * 26),
+        "mark": {"type": "bar"},
+        "encoding": {
+            "y": {"field": "feature", "type": "nominal", "sort": "-x", "title": "Driver Feature"},
+            "x": {"field": "effect", "type": "quantitative", "title": "Standardized Effect / Coefficient"},
+            "color": {
+                "field": "direction",
+                "type": "nominal",
+                "scale": {"domain": ["Positive Impact", "Negative Impact"], "range": ["#27ae60", "#c0392b"]},
+                "title": "Impact",
+            },
+            "tooltip": [
+                {"field": "feature", "title": "Feature"},
+                {"field": "effect", "title": "Effect", "format": "+,.3f"},
+                {"field": "direction", "title": "Impact"},
+            ],
+        },
+    }
+
+    return ChartSpec(
+        chart_id="driver_sensitivity_tornado",
+        title=f"Driver Sensitivity Analysis — Top Levers on {humanize_label(str(measure))}",
+        description=f"Standardized impact of key drivers on '{measure}'. Sorted by effect magnitude.",
+        spec=spec,
+        caption="Forest/tornado ranking of outcome drivers. Green indicates positive lift; red indicates drag.",
+    )

@@ -409,12 +409,12 @@ def _segment_lift_chart(
 
     values: list[dict[str, Any]] = [
         {
-            "segment": str(c.get("level")),
+            "segment": str(c.get("level_label") or c.get("level")),
             "value": _num(c.get("level_value")),
             "ci_lower": _num(c.get("ci_lower")),
             "ci_upper": _num(c.get("ci_upper")),
             "n": _to_primitive(c.get("n")),
-            "focus": str(c.get("level")) == level,
+            "focus": str(c.get("level")) == level or (bool(ev.get("level_label")) and str(c.get("level_label")) == str(ev.get("level_label"))),
         }
         for c in (siblings or [ev])
     ]

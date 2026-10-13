@@ -378,6 +378,7 @@ ITERATION_PROMPT = """\
    - a follow-up on a strong finding: does it hold within another \
 dimension (Simpson's paradox), with the median instead of the mean, in \
 the most recent period? What drives it?
+   - in predictive and decision cycles, schedule unsupervised archetype clustering (`cluster_data`) and What-If parametric simulations (`scenario_simulation`) on top drivers before synthesizing;
    - a custom calculation or chart via execute_dynamic_code.
 3. Reply Form 2 when the open questions are answered or cannot be answered \
 with this data, and strong findings have been checked. Otherwise Form 1. \

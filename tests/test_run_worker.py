@@ -242,6 +242,33 @@ def test_sweep_removes_only_old_prefixed_dirs_under_the_temp_root(
     assert fresh.exists() and other.exists()
 
 
+def test_sweep_evicts_oldest_when_aggregate_bytes_exceeds_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from ui.run import sweep_stale_run_dirs
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    dir1 = tmp_path / f"{RUN_DIR_PREFIX}run1"
+    dir2 = tmp_path / f"{RUN_DIR_PREFIX}run2"
+    dir1.mkdir()
+    dir2.mkdir()
+    (dir1 / "file.bin").write_bytes(b"x" * 1000)
+    (dir2 / "file.bin").write_bytes(b"x" * 1000)
+
+    # Both are fresh (< 2 hours), but dir1 is slightly older than dir2
+    now = time.time()
+    os.utime(dir1, (now - 100, now - 100))
+    os.utime(dir2, (now - 10, now - 10))
+
+    # Total bytes is 2000. Cap at 1500 -> oldest dir (dir1) should be evicted
+    removed = sweep_stale_run_dirs(max_age_s=7200, now=now, max_total_bytes=1500)
+    assert removed == 1
+    assert not dir1.exists()
+    assert dir2.exists()
+
+
 def test_a_run_waits_for_a_free_slot_and_can_be_stopped_while_waiting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

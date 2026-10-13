@@ -73,11 +73,19 @@ def build_agenda(
         for column in profile.dimensions()
         if column.name not in excluded and 2 <= column.nunique <= 20
     ]
+    def _is_id_like_name(col_name: str) -> bool:
+        norm = re.sub(r"[^a-z0-9]", "", col_name.lower())
+        return (
+            norm.endswith(("id", "key", "code", "index", "guid", "uuid"))
+            or norm in ("id", "key", "code", "index", "guid", "uuid", "pk", "fk")
+        )
+
     # Column order is an ingestion accident. Prefer complete, compact
-    # dimensions, otherwise a useful segment appended by deterministic
-    # feature extraction can be crowded out by the first four raw columns.
+    # dimensions, and penalize surrogate numeric IDs so semantic text
+    # categories (e.g. brand, category, league_name) sort ahead of IDs.
     dimensions.sort(
         key=lambda column: (
+            1 if _is_id_like_name(column.name) else 0,
             column.missing_pct,
             abs(column.nunique - 5),
             column.name.lower(),
@@ -85,7 +93,13 @@ def build_agenda(
     )
     # Ordinal scales (satisfaction 1-5) are compared by their mean across
     # segments just like a measure, but never summed or trended as totals.
-    segment_measures = [*measures[:3], *profile.columns_of_role(SEMANTIC_ORDINAL)[:2]]
+    # Prioritize derived performance deltas (actual vs expected) as primary comparative measures.
+    delta_measures = [
+        column for column in measures
+        if any(column.name.lower().endswith(s) for s in ("_delta", "_diff", "_gap", "_ratio", "_outperformance"))
+    ]
+    std_measures = [column for column in measures if column not in delta_measures]
+    segment_measures = [*delta_measures[:2], *std_measures[:3], *profile.columns_of_role(SEMANTIC_ORDINAL)[:2]]
     # An experiment's arm is compared by a significance test (see
     # _archetype_questions), not by a descriptive segment question.
     arm = (
@@ -108,13 +122,17 @@ def build_agenda(
             dim_lower = dim.name.lower()
             if any(term in dim_lower for term in ("brand", "platform", "category", "type", "segment", "tier", "region", "group")):
                 base_val += 0.05
+            if measure in delta_measures:
+                base_val += 0.15
             value = round(min(0.95, base_val), 2)
+            if measure in delta_measures:
+                q_text = f"Does performance delta '{measure.name}' (observed vs expected) differ meaningfully by '{dim.name}'?"
+            elif measure.aggregation == "sum":
+                q_text = f"Does '{measure.name}' (total and per-row average) differ meaningfully by '{dim.name}'?"
+            else:
+                q_text = f"Does average '{measure.name}' differ meaningfully by '{dim.name}'?"
             questions.append(Question(
-                text=(
-                    f"Does '{measure.name}' (total and per-row average) differ meaningfully by '{dim.name}'?"
-                    if measure.aggregation == "sum"
-                    else f"Does average '{measure.name}' differ meaningfully by '{dim.name}'?"
-                ),
+                text=q_text,
                 kind="segment",
                 columns=[measure.name, dim.name],
                 expected_value=value,

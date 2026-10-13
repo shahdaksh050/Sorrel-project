@@ -1016,6 +1016,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                 # ---- Parse plan steps (tolerant of malformed entries) ----
                 steps = self._parse_steps(llm_response, cap=not llm_response.get("deterministic"))
                 steps = self._ensure_preprocessing_steps(steps)
+                steps = self._ensure_agenda_anchor_steps(steps)
                 steps = self._ensure_causal_analysis_step(steps)
                 if not steps:
                     console.print(

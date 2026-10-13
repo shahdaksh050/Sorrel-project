@@ -223,6 +223,74 @@ def _consolidate_rows(
     return values, [source_names[index] for index in sorted(used_indexes)]
 
 
+
+def _find_benchmark_pairs(columns: Sequence[str]) -> list[tuple[str, str, str]]:
+    """Scan columns for paired observed vs expected / actual vs target benchmarks.
+    Returns list of (observed_col, expected_col, base_stem)."""
+    col_lower_map = {c.lower(): c for c in columns}
+    pairs: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    # 1. Prefix pairs: actual_X vs target_X / expected_X / budget_X
+    prefix_obs = ("actual_", "observed_")
+    prefix_exp = ("target_", "expected_", "budget_", "predicted_")
+    for c in columns:
+        c_low = c.lower()
+        for p_obs in prefix_obs:
+            if c_low.startswith(p_obs):
+                stem = c_low[len(p_obs):]
+                for p_exp in prefix_exp:
+                    cand_exp = p_exp + stem
+                    if cand_exp in col_lower_map:
+                        obs = c
+                        exp = col_lower_map[cand_exp]
+                        if (obs, exp) not in seen and obs != exp:
+                            seen.add((obs, exp))
+                            pairs.append((obs, exp, stem))
+
+    # 2. Suffix pairs: X_actual vs X_target / X_expected / X_budget
+    suffix_obs = ("_actual", "_observed", "_obs")
+    suffix_exp = ("_target", "_expected", "_budget", "_predicted", "_exp")
+    for c in columns:
+        c_low = c.lower()
+        for s_obs in suffix_obs:
+            if c_low.endswith(s_obs):
+                stem = c_low[:-len(s_obs)]
+                for s_exp in suffix_exp:
+                    cand_exp = stem + s_exp
+                    if cand_exp in col_lower_map:
+                        obs = c
+                        exp = col_lower_map[cand_exp]
+                        if (obs, exp) not in seen and obs != exp:
+                            seen.add((obs, exp))
+                            pairs.append((obs, exp, stem))
+
+    # 3. Canonical domain equivalents
+    known_pairs = [
+        ("goals", "xgoals", "goals"),
+        ("goals", "xg", "goals"),
+        ("home_goals", "home_xg", "home_goals"),
+        ("home_goals", "home_xgoals", "home_goals"),
+        ("away_goals", "away_xg", "away_goals"),
+        ("away_goals", "away_xgoals", "away_goals"),
+        ("duration", "eta", "duration"),
+        ("revenue", "quota", "revenue"),
+        ("sales", "budget", "sales"),
+        ("cost", "budget", "cost"),
+        ("actual", "target", "target"),
+        ("actual", "budget", "budget"),
+        ("observed", "expected", "expected"),
+    ]
+    for obs_name, exp_name, stem in known_pairs:
+        if obs_name in col_lower_map and exp_name in col_lower_map:
+            obs = col_lower_map[obs_name]
+            exp = col_lower_map[exp_name]
+            if (obs, exp) not in seen and obs != exp:
+                seen.add((obs, exp))
+                pairs.append((obs, exp, stem))
+
+    return pairs
+
 class StructuredFeatureExtractionTool(BaseTool):
     """Add deterministic typed features parsed from common units and concepts."""
 
@@ -235,9 +303,11 @@ class StructuredFeatureExtractionTool(BaseTool):
     output_subdir = "derived"
 
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
-        """Gate on composite/textual candidates to avoid copying clean numeric data."""
+        """Gate on composite/textual candidates or benchmark actual vs target pairs."""
         if profile is None:
             return 0.0
+        if _find_benchmark_pairs([c.name for c in profile.columns]):
+            return 0.95
         if profile.text_cols:
             return 1.0
         name_hints = re.compile(
@@ -332,6 +402,42 @@ class StructuredFeatureExtractionTool(BaseTool):
             )
             if item is not None:
                 provenance.append(item)
+
+        # Universal Target Benchmarking & Performance Delta Synthesis
+        import numpy as np
+        benchmark_pairs = _find_benchmark_pairs(list(df.columns))
+        for obs_col, exp_col, stem in benchmark_pairs:
+            obs_s = pd.to_numeric(df[obs_col], errors="coerce")
+            exp_s = pd.to_numeric(df[exp_col], errors="coerce")
+            if obs_s.notna().sum() >= 5 and exp_s.notna().sum() >= 5:
+                delta_col = f"{stem}_delta"
+                ratio_col = f"{stem}_ratio"
+                if delta_col not in output.columns:
+                    output[delta_col] = (obs_s - exp_s).round(6)
+                    provenance.append({
+                        "target_column": delta_col,
+                        "source_column": f"{obs_col} - {exp_col}",
+                        "source_columns": [obs_col, exp_col],
+                        "semantic_type": "numeric",
+                        "parser": "benchmark_performance_delta",
+                        "unit": None,
+                        "coverage_pct": round(float(output[delta_col].notna().mean() * 100), 1),
+                        "sample_values": [],
+                    })
+                if ratio_col not in output.columns:
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        ratio_vals = np.where(exp_s > 0, obs_s / np.maximum(exp_s, 1e-6), np.nan)
+                    output[ratio_col] = pd.Series(ratio_vals, index=df.index).round(4)
+                    provenance.append({
+                        "target_column": ratio_col,
+                        "source_column": f"{obs_col} / {exp_col}",
+                        "source_columns": [obs_col, exp_col],
+                        "semantic_type": "numeric",
+                        "parser": "benchmark_efficiency_ratio",
+                        "unit": None,
+                        "coverage_pct": round(float(output[ratio_col].notna().mean() * 100), 1),
+                        "sample_values": [],
+                    })
 
         quarantined_columns: list[dict[str, Any]] = []
         for assessment in readiness["per_column"]:

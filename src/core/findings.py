@@ -457,7 +457,16 @@ def rank_findings(
         f.compute_importance()
     ranked = sorted(
         findings,
-        key=lambda f: (not _is_weak_cluster(f), f.importance),
+        key=lambda f: (
+            not _is_weak_cluster(f),
+            round(f.importance, 4),
+            round(abs(f.effect), 4) if f.effect is not None else 0.0,
+            round(f.effective_confidence(), 4),
+            f.kind or "",
+            f.measure or "",
+            f.dimension or "",
+            f.headline or "",
+        ),
         reverse=True,
     )
     if suppress_trivial:
@@ -471,6 +480,29 @@ def rank_findings(
         [f for f in result if f.kind not in CAVEAT_FINDING_KINDS]
         + [f for f in result if f.kind in CAVEAT_FINDING_KINDS]
     )
+
+
+def _is_actionable_feature(col: str | None) -> bool:
+    """Determine if a column is a controllable business/system lever rather than
+    an external market quote, surrogate key, system timestamp, or weather condition."""
+    if not col or not isinstance(col, str):
+        return False
+    norm = re.sub(r"[^a-z0-9]", "", col.lower())
+    # External market odds, betting quotes, tickers, fx rates
+    if any(norm.startswith(p) for p in ("b365", "bw", "iw", "lb", "ps", "wh", "vc", "bet", "odds", "quote", "ticker", "fx")):
+        return False
+    if "odds" in norm or "prob" in norm or "exchange" in norm:
+        return False
+    # Surrogate IDs and keys
+    if norm.endswith(("id", "key", "code", "guid", "uuid", "pk", "fk", "index")) or norm in ("id", "key", "code", "guid", "uuid", "pk", "fk"):
+        return False
+    # System timestamps / temporal parts
+    if any(t in norm for t in ("timestamp", "date", "time", "year", "month", "day", "hour", "minute", "second", "createdat", "updatedat")):
+        return False
+    # Environmental / weather conditions
+    if any(w in norm for w in ("weather", "temperature", "humidity", "rainfall", "wind", "precipitation", "celsius", "fahrenheit")):
+        return False
+    return True
 
 
 def classify_action_matrix(
@@ -532,14 +564,24 @@ def classify_action_matrix(
         is_fragile = checks.get("robust") is False
         is_caveat_kind = kind in CAVEAT_FINDING_KINDS
 
-        # Data hygiene belongs in the dedicated integrity section, never in
+                # Data hygiene belongs in the dedicated integrity section, never in
         # a strategic or operational action quadrant.
         if is_data_hygiene_finding(item):
             continue
 
+        layer = getattr(item, "layer", None) or (item.get("layer") if isinstance(item, dict) else "")
+        is_appendix = str(layer).lower() == "appendix"
+
+        target_feature = dimension or measure
+        is_controllable = _is_actionable_feature(target_feature)
+
+        level_label = evidence.get("level_label") if isinstance(evidence, dict) else None
         lever = headline
         if dimension and level:
-            lever = f"Target {dimension}='{level}'"
+            if level_label and str(level_label) != str(level):
+                lever = f"Target '{level_label}' ({dimension}='{level}')"
+            else:
+                lever = f"Target {dimension}='{level}'"
         elif dimension:
             lever = f"Leverage {dimension}"
         elif measure:
@@ -557,8 +599,10 @@ def classify_action_matrix(
         }
 
         # 1. Watch / Caveat items
-        if is_caveat_kind or has_paradox or is_fragile or len(caveats) > 0 or conf < 0.45:
+        if is_caveat_kind or has_paradox or is_fragile or len(caveats) > 0 or conf < 0.45 or (not is_controllable and not is_appendix):
             reason = []
+            if not is_controllable:
+                reason.append(f"External non-controllable factor ('{target_feature}') — monitor as risk/context, not direct lever")
             if has_paradox:
                 reason.append("Subgroup reversal detected (Simpson's paradox)")
             if is_fragile:
@@ -569,6 +613,9 @@ def classify_action_matrix(
                 reason.append("Low statistical confidence or caveat kind")
             entry["rationale"] = "; ".join(reason)
             matrix["watch_caveats"].append(entry)
+            continue
+
+        if is_appendix or not is_controllable:
             continue
 
         # 2. Impact evaluation

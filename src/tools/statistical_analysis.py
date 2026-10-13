@@ -115,6 +115,8 @@ def _seeded_sample(values: np.ndarray, max_n: int = 5000) -> np.ndarray:
 def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
     """Pooled-SD Cohen's d — for the equal-variance (Independent T-Test) case."""
     n1, n2 = len(a), len(b)
+    if n1 + n2 <= 2:
+        return 0.0
     v1, v2 = float(np.var(a, ddof=1)), float(np.var(b, ddof=1))
     pooled_sd = (((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2)) ** 0.5
     if pooled_sd == 0:
@@ -127,6 +129,8 @@ def _hedges_g(a: np.ndarray, b: np.ndarray) -> float:
     with the unpooled average-variance denominator (appropriate when
     variances differ), then bias-corrected for small samples."""
     n1, n2 = len(a), len(b)
+    if n1 + n2 <= 2 or 4 * (n1 + n2) <= 9:
+        return 0.0
     v1, v2 = float(np.var(a, ddof=1)), float(np.var(b, ddof=1))
     avg_sd = ((v1 + v2) / 2) ** 0.5
     if avg_sd == 0:
@@ -141,6 +145,8 @@ def _mean_diff_ci(a: np.ndarray, b: np.ndarray, equal_var: bool, alpha: float) -
     variances are unequal."""
     n1, n2 = len(a), len(b)
     diff = float(np.mean(a)) - float(np.mean(b))
+    if n1 <= 1 or n2 <= 1:
+        return (diff, diff)
     v1, v2 = float(np.var(a, ddof=1)), float(np.var(b, ddof=1))
     if equal_var:
         pooled_var = ((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2)
@@ -180,6 +186,8 @@ def _epsilon_squared(h_stat: float, n: int) -> float:
 
 def _p_text(p: float) -> str:
     """`p<0.001` below 0.001, else `p=0.043`. An exact p of 0 does not exist, so it is never printed."""
+    if np.isnan(p):
+        return "p=N/A"
     return "p<0.001" if p < 0.001 else f"p={p:.3f}"
 
 
@@ -741,10 +749,10 @@ class SelectStatisticalTestTool(BaseTool):
         sample_size_note = _sample_size_note(group_sizes, significant, practical)
 
         result: dict[str, Any] = {
-            "summary": f"{test_name}: stat={stat:.4f}, {_p_text(p_val)}. {interpretation}",
+            "summary": f"{test_name}: {'stat=N/A' if np.isnan(stat) else f'stat={stat:.4f}'}, {_p_text(p_val)}. {interpretation}",
             "test_name": test_name,
-            "statistic": round(float(stat), 6),
-            "p_value": round(float(p_val), 6),
+            "statistic": None if np.isnan(stat) else round(float(stat), 6),
+            "p_value": None if np.isnan(p_val) else round(float(p_val), 6),
             "alpha": alpha,
             "significant": significant,
             "n_groups": n_groups,

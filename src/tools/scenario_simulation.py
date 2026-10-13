@@ -265,6 +265,8 @@ class ScenarioSimulationTool(BaseTool):
         scenarios = output.get("scenarios") or []
         for i, s in enumerate(scenarios):
             if s.get("shift_pct") in (10.0, -10.0, 25.0):
+                if abs(s.get("relative_change_pct", 0.0)) / 100.0 < 0.02:
+                    continue
                 headline = (
                     f"Sensitivity Projection: {s['shift_pct']:+0.0f}% shift in '{s['driver']}' associates with a "
                     f"{s['relative_change_pct']:+0.1f}% change in '{target}' ({s['delta_target']:+0.2f} per unit, "

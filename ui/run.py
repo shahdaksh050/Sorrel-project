@@ -28,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from src.core.findings import Finding
+from src.core.findings import Finding, is_trivial
 from src.core.run_config import RunConfig
 from src.core.run_view import (
     RUN_VIEW_CONTEXT_KEYS,
@@ -97,34 +97,78 @@ def remove_run_dir(path: str | None) -> None:
 
 
 #: Run directories older than this are leftovers from a closed tab or a crashed process.
-STALE_RUN_DIR_AGE_S = 24 * 3600
+try:
+    STALE_RUN_DIR_AGE_S = float(os.getenv("STALE_RUN_DIR_AGE_S", str(2 * 3600)))
+except ValueError:
+    STALE_RUN_DIR_AGE_S = 2.0 * 3600
+
+try:
+    MAX_TOTAL_RUN_BYTES = int(os.getenv("MAX_TOTAL_RUN_BYTES", str(2 * 1024 * 1024 * 1024)))
+except ValueError:
+    MAX_TOTAL_RUN_BYTES = 2 * 1024 * 1024 * 1024
 
 
-def sweep_stale_run_dirs(max_age_s: float = STALE_RUN_DIR_AGE_S, now: float | None = None) -> int:
+def sweep_stale_run_dirs(
+    max_age_s: float = STALE_RUN_DIR_AGE_S,
+    now: float | None = None,
+    max_total_bytes: int = MAX_TOTAL_RUN_BYTES,
+) -> int:
     """Delete run directories nobody can still be using; returns how many were removed.
 
-    A run directory is removed only when it carries `RUN_DIR_PREFIX`, sits directly under
-    the system temp root, and has not been modified for `max_age_s`.
+    A run directory is removed when it carries `RUN_DIR_PREFIX`, sits directly under
+    the system temp root, and:
+    1. Has not been modified for `max_age_s`, OR
+    2. Aggregate storage exceeds `max_total_bytes` (oldest removed first).
     """
     root = Path(tempfile.gettempdir()).resolve()
-    cutoff = (time.time() if now is None else now) - max_age_s
+    current_time = time.time() if now is None else now
+    cutoff = current_time - max_age_s
     removed = 0
     try:
         entries = list(root.iterdir())
     except OSError:
         return 0
+
+    valid_dirs: list[tuple[Path, float]] = []
     for entry in entries:
         try:
             if (
                 entry.name.startswith(RUN_DIR_PREFIX)
                 and entry.is_dir()
                 and not entry.is_symlink()
-                and entry.stat().st_mtime < cutoff
             ):
-                shutil.rmtree(entry, ignore_errors=True)
-                removed += 1
+                mtime = entry.stat().st_mtime
+                if mtime < cutoff:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    removed += 1
+                else:
+                    valid_dirs.append((entry, mtime))
         except OSError:
             continue
+
+    if max_total_bytes > 0 and valid_dirs:
+        valid_dirs.sort(key=lambda x: x[1])
+        total_bytes = 0
+        dir_sizes: list[tuple[Path, int]] = []
+        for d, _ in valid_dirs:
+            sz = 0
+            try:
+                for p in d.rglob("*"):
+                    if p.is_file() and not p.is_symlink():
+                        sz += p.stat().st_size
+            except OSError:
+                pass
+            dir_sizes.append((d, sz))
+            total_bytes += sz
+
+        idx = 0
+        while total_bytes > max_total_bytes and idx < len(dir_sizes):
+            d, sz = dir_sizes[idx]
+            shutil.rmtree(d, ignore_errors=True)
+            total_bytes -= sz
+            removed += 1
+            idx += 1
+
     return removed
 
 
@@ -319,7 +363,7 @@ class ActiveRun:
 
     def add_finding(self, finding: Finding) -> None:
         """Record a new finding as provisional, if it would be a headline candidate."""
-        if not is_headline_finding(finding.layer, finding.kind):
+        if not is_headline_finding(finding.layer, finding.kind) or is_trivial(finding):
             return
         with self._lock:
             self._provisional.append(

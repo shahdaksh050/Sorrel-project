@@ -220,7 +220,7 @@ def _safe_df_groupby(self: pd.DataFrame, by: Any = None, *args: Any, **kwargs: A
                     if matches:
                         by = matches[0]
                     else:
-                        self[by] = "unknown"
+                        raise KeyError(f"Grouping column '{by}' not found in DataFrame.")
         elif isinstance(by, (list, tuple)):
             new_by = []
             for b in by:
@@ -232,8 +232,7 @@ def _safe_df_groupby(self: pd.DataFrame, by: Any = None, *args: Any, **kwargs: A
                         if matches:
                             new_by.append(matches[0])
                         else:
-                            self[b] = "unknown"
-                            new_by.append(b)
+                            raise KeyError(f"Grouping column '{b}' not found in DataFrame.")
                 else:
                     new_by.append(b)
             by = type(by)(new_by)

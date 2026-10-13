@@ -435,3 +435,76 @@ def test_deterministic_recommendations_from_ranked_findings(agent: AgentControll
     assert any("platform='iOS'" in r and "price" in r for r in recs)
     assert any("ram_gb" in r and "driver" in r for r in recs)
 
+
+def test_llm_client_deterministic_envelope() -> None:
+    from src.core.llm_client import LLMClient
+
+    client = LLMClient()
+    assert client.temperature == 0.0
+    assert client.seed == 42
+
+
+def test_rank_findings_deterministic_tie_breaking() -> None:
+    from src.core.findings import Finding, rank_findings
+
+    # Two findings with same importance, but f_big has higher effect
+    f_small = Finding(
+        finding_id="f_small",
+        kind="segment_lift",
+        headline="Small lift",
+        measure="price",
+        dimension="dim_a",
+        effect=0.10,
+        confidence=0.8,
+    )
+    f_big = Finding(
+        finding_id="f_big",
+        kind="segment_lift",
+        headline="Big lift",
+        measure="price",
+        dimension="dim_b",
+        effect=0.50,
+        confidence=0.8,
+    )
+
+    # Regardless of insertion order, f_big must rank before f_small
+    order1 = rank_findings([f_small, f_big], suppress_trivial=False)
+    order2 = rank_findings([f_big, f_small], suppress_trivial=False)
+    assert order1[0].finding_id == "f_big"
+    assert order2[0].finding_id == "f_big"
+
+
+def test_agenda_anchor_ensures_lead_segment_comparison_in_cycle_one(agent: AgentController) -> None:
+    agent.memory.store_dataset_metadata(
+        DatasetMetadata(
+            file_path="catalog.csv",
+            row_count=100,
+            column_count=2,
+            columns={"price": "float", "platform": "str"},
+            missing_values={"price": 0, "platform": 0},
+            numerical_cols=["price"],
+            categorical_cols=["platform"],
+        )
+    )
+    agent.memory.iteration_count = 1
+    agent.memory.set_context("question_agenda", [
+        {
+            "text": "How does price differ across platform?",
+            "kind": "segment",
+            "columns": ["price", "platform"],
+            "expected_value": 0.85,
+            "suggested_tool": "segment_comparison",
+        }
+    ])
+    # LLM plan with only clean_data and correlation
+    steps = [
+        AnalysisStep(step_number=1, tool_name="correlation_analysis", parameters={}, rationale="corr"),
+    ]
+    anchored = agent._ensure_agenda_anchor_steps(steps)
+    tools = [s.tool_name for s in anchored]
+    assert "segment_comparison" in tools
+    seg_step = next(s for s in anchored if s.tool_name == "segment_comparison")
+    assert seg_step.parameters["measure_column"] == "price"
+    assert seg_step.parameters["dimension_column"] == "platform"
+
+

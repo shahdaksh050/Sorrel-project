@@ -308,6 +308,16 @@ class TestVerbatimMetricValidation:
         flagged = agent._flag_unverified_claims(final)
         assert flagged == []
 
+    def test_small_integer_with_percentage_or_multiplier_is_flagged_when_unverified(
+        self, agent: AgentController
+    ) -> None:
+        """Single-digit integers followed by % or x are cited metrics, not structural counts."""
+        final = {"insights": ["Conversion lifted by 8% and churn dropped 5x."], "recommendations": []}
+        flagged = agent._flag_unverified_claims(final)
+        assert len(flagged) == 1
+        assert "8" in flagged[0] and "5" in flagged[0]
+        assert "[unverified:" in final["insights"][0]
+
     def test_unverified_key_metric_is_flagged(self, agent: AgentController) -> None:
         final = {"insights": [], "recommendations": [], "key_metrics": {"cv_mean": "0.9999"}}
         flagged = agent._flag_unverified_claims(final)

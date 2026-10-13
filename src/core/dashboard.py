@@ -66,10 +66,12 @@ from src.core.dashboard_charts_basic import (
     _class_balance_chart,
     _cluster_chart,
     _correlation_chart,
+    _driver_tornado_chart,
     _five_number_summary,
     _geospatial_chart,
     _histogram_charts,
     _is_near_uniform,
+    _parity_chart,
     _pick_measure_column,
     _records,
     _scatter_chart,
@@ -176,6 +178,7 @@ __all__ = [
     "_confusion_matrix_chart",
     "_correlation_chart",
     "_covers_pair",
+    "_driver_tornado_chart",
     "_drivers_chart",
     "_eligible_numeric",
     "_eta_squared",
@@ -194,7 +197,6 @@ __all__ = [
     "_importance_bounds",
     "_interaction_chart",
     "_is_near_uniform",
-
     "_llm_chart",
     "_llm_charts",
     "_lorenz_chart",
@@ -202,6 +204,7 @@ __all__ = [
     "_merge_small_bins",
     "_model_comparison_chart",
     "_num",
+    "_parity_chart",
     "_pick_measure_column",
     "_rank_numeric_features",
     "_records",
@@ -417,6 +420,8 @@ def _finding_charts(
             chart = _safe(_segment_lift_chart, finding, results, col_by_name)
         elif source == "segment_comparison" and kind == "interaction_synergy":
             chart = _safe(_interaction_chart, finding, col_by_name)
+        elif (source in ("regression_analysis", "train_model") or kind == "driver") and chart is None:
+            chart = _safe(_driver_tornado_chart, finding, results, col_by_name)
         elif source == "concentration_analysis" and kind == "concentration":
             chart = _safe(_lorenz_chart, df, finding)
         elif source == "change_analysis" and kind == "change":
@@ -689,6 +694,13 @@ def build_dashboard(
     ]
     charts: list[ChartSpec] = _safe(_llm_charts, results, findings, default=[])
     charts.extend(c for c in candidates if c is not None)
+
+    # Universal Benchmark Parity Plots (Observed vs Expected)
+    from src.tools.structured_features import _find_benchmark_pairs
+    for obs_col, exp_col, stem in _find_benchmark_pairs(list(df.columns.astype(str)))[:2]:
+        parity = _safe(_parity_chart, df, obs_col, exp_col, col_by_name, stem)
+        if parity is not None:
+            charts.append(parity)
     charts.extend(_safe(_financial_charts, df, financial_out, default=[]))
     charts.extend(_safe(_cohort_charts, df, cohort_out, default=[]))
     charts.extend(_safe(_workforce_charts, df, workforce_out, default=[]))

@@ -246,12 +246,21 @@ class ReportMixin(ControllerState):
         if not insights:
             insights.append("Analysis produced no tool results to synthesise.")
 
-        for f in ranked[:4]:
+        from src.core.findings import _is_actionable_feature
+
+        for f in ranked[:8]:
+            if len(recommendations) >= 4:
+                break
+            lever_col = f.dimension or f.measure
+            if not _is_actionable_feature(lever_col):
+                continue
+            level_label = f.evidence.get("level_label") if isinstance(f.evidence, dict) else None
+            level_name = f"'{level_label}' ({f.dimension}='{f.level}')" if (level_label and str(level_label) != str(f.level)) else f"{f.dimension}='{f.level}'"
             if f.kind == "segment_lift" and f.measure and f.dimension and f.level:
                 pct = f"{abs(f.effect) * 100:.1f}%" if f.effect is not None else ""
                 direction = "higher" if (f.effect or 0) > 0 else "lower"
                 recommendations.append(
-                    f"Prioritize {f.dimension}='{f.level}' segment: observed {pct} {direction} {f.measure} than baseline."
+                    f"Prioritize {level_name} segment: observed {pct} {direction} {f.measure} than baseline."
                 )
             elif f.kind == "driver" and f.measure and f.dimension:
                 recommendations.append(

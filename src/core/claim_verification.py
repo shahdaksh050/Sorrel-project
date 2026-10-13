@@ -221,13 +221,16 @@ def flag_unverified_claims(memory: MemorySystem, final_result: dict[str, Any]) -
         for i, item in enumerate(items):
             if not isinstance(item, str):
                 continue
-            claimed = [
-                m.group() for m in _NUMBER_RE.finditer(item)
-                if not (
-                    "." not in m.group()
-                    and abs(int(m.group().replace(",", ""))) <= _UNVERIFIABLE_SKIP_ABS_INT
-                )
-            ]
+            claimed = []
+            for m in _NUMBER_RE.finditer(item):
+                val_str = m.group()
+                end_pos = m.end()
+                after = item[end_pos : end_pos + 10].lstrip().lower()
+                is_metric_unit = after.startswith(("%", "percent", "pct", "x", "×", "bp", "bps"))
+                is_small_int = "." not in val_str and abs(int(val_str.replace(",", ""))) <= _UNVERIFIABLE_SKIP_ABS_INT
+                if is_small_int and not is_metric_unit:
+                    continue
+                claimed.append(val_str)
             if not claimed:
                 continue
 

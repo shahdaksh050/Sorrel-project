@@ -241,6 +241,104 @@ class PlanMixin(ControllerState):
             step.step_number = number
         return ordered
 
+    def _ensure_agenda_anchor_steps(self, steps: list[AnalysisStep]) -> list[AnalysisStep]:
+        """Guarantee that top-priority Question Agenda discoveries and the 4-Pillar
+        Autonomous Cadence are executed reproducibly across reasoning cycles.
+
+        Cycle 1 anchors lead Question Agenda segment comparisons.
+        Cycle 2 anchors Archetype Discovery (cluster_data) and What-If Simulations (scenario_simulation)
+        when they fit the data and have not run yet.
+        """
+        meta = self.memory.dataset_metadata
+        if meta is None:
+            return steps
+
+        fp = str(self.memory.get_context("cleaned_file_path") or meta.file_path)
+        completed = {
+            result.tool_name for result in self.memory.tool_results if result.status == "success"
+        }
+        planned = {s.tool_name for s in steps}
+
+        if self.memory.iteration_count == 1:
+            if not self.tool_registry.has("segment_comparison"):
+                return steps
+            if "segment_comparison" in completed or "segment_comparison" in planned:
+                return steps
+
+            agenda = self.memory.get_context("question_agenda") or []
+            for q in agenda:
+                if isinstance(q, dict) and q.get("suggested_tool") == "segment_comparison":
+                    cols = q.get("columns") or []
+                    if len(cols) >= 2:
+                        steps.append(
+                            AnalysisStep(
+                                step_number=len(steps) + 1,
+                                tool_name="segment_comparison",
+                                parameters={
+                                    "file_path": fp,
+                                    "measure_column": cols[0],
+                                    "dimension_column": cols[1],
+                                },
+                                rationale=f"Anchor pass: test lead agenda question — {str(q.get('text', ''))[:80]}",
+                            )
+                        )
+                        break
+
+        elif self.memory.iteration_count >= 2:
+            profile = self.last_profile
+            # Pillar 3: Unsupervised Archetype Discovery
+            if (
+                self.tool_registry.has("cluster_data")
+                and "cluster_data" not in completed
+                and "cluster_data" not in planned
+                and self.use_ml
+            ):
+                tool = self.tool_registry.get("cluster_data")
+                if tool.applies_to(profile, meta) >= 0.4:
+                    num_cols = len(profile.columns_of_kind("numeric")) if profile else 0
+                    if num_cols >= 2 and (profile.row_count if profile else 0) >= 30:
+                        steps.append(
+                            AnalysisStep(
+                                step_number=len(steps) + 1,
+                                tool_name="cluster_data",
+                                parameters={"file_path": fp},
+                                rationale="Autonomous cadence: discover natural behavioral archetypes and segment clusters.",
+                            )
+                        )
+                        planned.add("cluster_data")
+
+            # Pillar 4: Parametric What-If Simulation
+            if (
+                self.tool_registry.has("scenario_simulation")
+                and "scenario_simulation" not in completed
+                and "scenario_simulation" not in planned
+            ):
+                sim_tool = self.tool_registry.get("scenario_simulation")
+                if sim_tool.applies_to(profile, meta) > 0.0:
+                    sim_params: dict[str, Any] = {"file_path": fp}
+                    try:
+                        sim_params.update(sim_tool.default_params(profile, meta) or {})
+                    except Exception:
+                        pass
+                    drivers = [f for f in self.memory.findings if f.kind == "driver" and f.dimension]
+                    if drivers and "driver_column" not in sim_params:
+                        sim_params["driver_column"] = drivers[0].dimension
+                        if drivers[0].measure:
+                            sim_params["target_column"] = drivers[0].measure
+                    steps.append(
+                        AnalysisStep(
+                            step_number=len(steps) + 1,
+                            tool_name="scenario_simulation",
+                            parameters=sim_params,
+                            rationale="Autonomous cadence: quantify What-If driver interventions and gap closing.",
+                        )
+                    )
+                    planned.add("scenario_simulation")
+
+        for number, step in enumerate(steps, 1):
+            step.step_number = number
+        return steps
+
     #: Nature-driven tools included in the fallback plan when applies_to()
     #: scores them at full confidence (1.0) — same tools, same gating logic
     #: the LLM planner sees, so there's one source of truth for "what suits

@@ -167,15 +167,15 @@ def validate_upload(filename: str, raw_bytes: bytes) -> str:
         )
 
     head = raw_bytes[:8]
-    if suffix == ".csv":
+    if suffix in (".csv", ".tsv"):
         for sig in (*_BINARY_SIGNATURES, _XLSX_SIGNATURE, _XLS_SIGNATURE):
             if head.startswith(sig):
                 raise UploadValidationError(
-                    "File claims to be CSV but contains binary content."
+                    f"File claims to be {suffix[1:].upper()} but contains binary content."
                 )
         if b"\x00" in raw_bytes[:4096]:
             raise UploadValidationError(
-                "File claims to be CSV but contains null bytes (binary data)."
+                f"File claims to be {suffix[1:].upper()} but contains null bytes (binary data)."
             )
     elif suffix in (".gz", ".zip"):
         inner_suffix = Path(safe_name).with_suffix("").suffix.lower()

@@ -285,20 +285,55 @@ def check_missingness_mechanism(
     return results
 
 
+def _is_id_like_col(col_name: str) -> bool:
+    norm = re.sub(r"[^a-z0-9]", "", col_name.lower())
+    return (
+        norm.endswith(("id", "key", "code", "index", "guid", "uuid"))
+        or norm in ("id", "key", "code", "index", "guid", "uuid", "pk", "fk")
+    )
+
+
 def check_value_continuity_and_flatlines(
     df: pd.DataFrame,
     max_consecutive_identical: int = 10,
 ) -> list[dict[str, Any]]:
     """
     Detect stuck sensors / flatlines and impossible negative values.
+    Excludes foreign keys, partitions, and discrete low-cardinality columns
+    to avoid false positives on relational joined data.
     """
     issues: list[dict[str, Any]] = []
     num_cols = list(df.select_dtypes(include=[np.number]).columns)
 
     for col in num_cols:
         series = df[col].dropna()
-        if len(series) < max_consecutive_identical * 2:
+        n = len(series)
+        if n < max_consecutive_identical * 2:
             continue
+
+        # 1. Check for negative values in naturally positive variables (any cardinality)
+        if re.search(r"\b(age|price|cost|revenue|count|visits|quantity|sales|spend)\b", col, re.I):
+            negs = series[series < 0]
+            if not negs.empty:
+                issues.append({
+                    "type": "negative_values",
+                    "column": col,
+                    "negative_count": len(negs),
+                    "min_value": float(negs.min()),
+                    "description": f"Impossible negative values in '{col}' ({len(negs)} observations < 0, min={negs.min()}).",
+                })
+
+        # 2. Skip flatline checks for identifier columns
+        if _is_id_like_col(col):
+            continue
+
+        # Skip discrete / low-cardinality columns (e.g. status flags, season, year, grades)
+        nunique = series.nunique()
+        if nunique < 30 or (nunique / n < 0.02 and nunique < 100):
+            continue
+
+        # Adaptive threshold: on large datasets, 10 consecutive identical values can happen by chance
+        threshold = max(max_consecutive_identical, int(n * 0.01))
 
         # Check for flatlines (runs of identical non-zero values)
         vals = series.values
@@ -315,26 +350,18 @@ def check_value_continuity_and_flatlines(
             else:
                 curr_run = 1
 
-        if longest_run >= max_consecutive_identical:
+        if longest_run >= threshold:
+            # Exclude common baseline/modal values (e.g., 0.0 or -1.0) when they are naturally frequent
+            if stuck_val is not None:
+                if stuck_val in (0, 0.0, -1, -1.0) and float((series == stuck_val).mean()) > 0.05:
+                    continue
             issues.append({
                 "type": "flatline",
                 "column": col,
                 "stuck_value": float(stuck_val) if stuck_val is not None else None,
                 "run_length": longest_run,
-                "description": f"Sensor flatline in '{col}': identical value {stuck_val} repeated for {longest_run} consecutive periods.",
+                "description": f"Repetitive constant run in '{col}': identical value {stuck_val} repeated for {longest_run} consecutive observations.",
             })
-
-        # Check for negative values in naturally positive variables
-        if re.search(r"\b(age|price|cost|revenue|count|visits|quantity|sales|spend)\b", col, re.I):
-            negs = series[series < 0]
-            if not negs.empty:
-                issues.append({
-                    "type": "negative_values",
-                    "column": col,
-                    "negative_count": len(negs),
-                    "min_value": float(negs.min()),
-                    "description": f"Impossible negative values in '{col}' ({len(negs)} observations < 0, min={negs.min()}).",
-                })
 
     return issues
 

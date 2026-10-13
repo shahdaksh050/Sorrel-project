@@ -111,7 +111,8 @@ class LLMClient:
         self.model: str = (
             self._cfg.model or os.getenv("LLM_MODEL") or _DEFAULT_MODELS.get(self.provider, "gpt-4o")
         )
-        self.temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
+        self.temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.0"))
+        self.seed: int = int(os.getenv("LLM_SEED", "42"))
         local = self.provider in LOCAL_PROVIDERS
         #: True when LLM_MAX_TOKENS is set: it then beats the per-stage defaults.
         self._max_tokens_env = bool(os.getenv("LLM_MAX_TOKENS", "").strip())
@@ -411,6 +412,8 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
         }
+        if self.seed >= 0:
+            create_kwargs["seed"] = self.seed
         if self._json_mode:
             # Constrained output: the OpenAI JSON-mode contract, which
             # OpenAI, Gemini, OpenRouter, NVIDIA NIM and Ollama accept. An
@@ -604,6 +607,9 @@ class LLMClient:
                 if "stream_options" in create_kwargs and "stream_options" in msg:
                     create_kwargs.pop("stream_options")
                     continue
+                if "seed" in create_kwargs and "seed" in msg:
+                    create_kwargs.pop("seed")
+                    continue
                 # Google (or any endpoint) rejecting reasoning_effort for this model.
                 if "reasoning_effort" in create_kwargs and "reasoning_effort" in msg:
                     create_kwargs.pop("reasoning_effort")
@@ -645,6 +651,7 @@ class LLMClient:
         # billed once instead of on every iteration.
         create_kwargs: dict[str, Any] = {
             "model": self.model,
+            "temperature": self.temperature,
             "max_tokens": self._call_max_tokens(),
             "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
             "messages": [{"role": "user", "content": user_prompt}],

@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 _SAMPLE_UNIQUES = 5_000
@@ -26,13 +27,26 @@ _IDLIKE = ("id", "key", "code")
 _GENERIC_KEYS = frozenset({"id", "index", "code", "key"})   # bare names any table may have
 _GENERIC_MIN_CONTAINMENT = 0.9
 
+_SYNONYMS = {
+    "cust": "customer",
+    "prod": "product",
+    "acc": "account",
+    "usr": "user",
+    "org": "organization",
+    "emp": "employee",
+    "cat": "category",
+    "gm": "game",
+    "tm": "team",
+    "ply": "player",
+}
+
 
 @dataclass
 class JoinPlan:
     left_key: str
     right_key: str
     how: str = "left"
-    cardinality: str = "many_to_one"   # one_to_one | many_to_one | many_to_many
+    cardinality: str = "many_to_one"   # one_to_one | many_to_one | one_to_many | many_to_many
     coverage: float = 0.0              # share of left rows whose key exists in the right table
     left_name: str = ""
     right_name: str = ""
@@ -47,24 +61,79 @@ def _stem(name: str) -> str:
     return n[:-3] + "y" if n.endswith("ies") else n.removesuffix("s")
 
 
+def _canonical_stem(stem: str) -> str:
+    return _SYNONYMS.get(stem, stem)
+
+
+def _is_id_like_col(col_name: str) -> bool:
+    norm = _norm(col_name)
+    return (
+        norm.endswith(("id", "key", "code", "index", "guid", "uuid"))
+        or norm in ("id", "key", "code", "index", "guid", "uuid", "pk", "fk")
+    )
+
+
+def _is_integer_valued(s: pd.Series) -> bool:
+    """True if series contains integer values (including float64 with NaNs from CSV reading)."""
+    if pd.api.types.is_integer_dtype(s):
+        return True
+    if pd.api.types.is_float_dtype(s):
+        valid = s.dropna()
+        if valid.empty:
+            return False
+        sample = valid if len(valid) <= 1000 else valid.sample(1000, random_state=0)
+        arr = sample.to_numpy()
+        return bool(np.all(np.floor(arr) == arr))
+    return False
+
+
 def _eligible(s: pd.Series) -> bool:
-    """Float, boolean, datetime and near-constant columns are never join keys."""
-    if (pd.api.types.is_float_dtype(s) or pd.api.types.is_bool_dtype(s)
-            or pd.api.types.is_datetime64_any_dtype(s)):
+    """Boolean, datetime, continuous float or near-constant columns are never join keys."""
+    if pd.api.types.is_bool_dtype(s) or pd.api.types.is_datetime64_any_dtype(s):
         return False
-    s = s.dropna()
-    if len(s) > 100_000:
-        s = s.sample(100_000, random_state=0)
-    if s.nunique() < 2:
+    if pd.api.types.is_float_dtype(s) and not _is_integer_valued(s):
         return False
-    return float(s.value_counts().iloc[0]) / len(s) <= _NEAR_CONSTANT
+    s_valid = s.dropna()
+    if len(s_valid) < 2:
+        return False
+    if len(s_valid) > 100_000:
+        s_valid = s_valid.sample(100_000, random_state=0)
+    if s_valid.nunique() < 2:
+        return False
+    return float(s_valid.value_counts().iloc[0]) / len(s_valid) <= _NEAR_CONSTANT
+
+
+def _format_key_series(s: pd.Series) -> pd.Series:
+    """Format key series to comparable string values, mapping 101.0 -> '101'."""
+    if pd.api.types.is_integer_dtype(s):
+        return s.astype("string").str.strip()
+    if pd.api.types.is_float_dtype(s) and _is_integer_valued(s):
+        valid = s.dropna()
+        res = valid.astype(np.int64).astype("string").str.strip()
+        out = pd.Series(index=s.index, dtype="string")
+        out.loc[res.index] = res
+        return out
+    return s.astype("string").str.strip()
 
 
 def _aligned(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
-    """Same comparable type on both sides (an int id vs a text id would not merge)."""
+    """Same comparable type on both sides with fallback to case-normalization if helpful."""
     if pd.api.types.is_integer_dtype(a) and pd.api.types.is_integer_dtype(b):
         return a, b
-    return a.astype("string").str.strip(), b.astype("string").str.strip()
+    fa = _format_key_series(a)
+    fb = _format_key_series(b)
+    va = fa.dropna()
+    vb = fb.dropna()
+    if not va.empty and not vb.empty:
+        sa = va if len(va) <= 1000 else va.sample(1000, random_state=0)
+        sb_set = set(vb if len(vb) <= 5000 else vb.sample(5000, random_state=0))
+        exact_match = sa.isin(sb_set).mean()
+        if exact_match < 0.5:
+            sa_low = sa.str.lower()
+            sb_low_set = {x.lower() for x in sb_set if isinstance(x, str)}
+            if sa_low.isin(sb_low_set).mean() >= 0.6:
+                return fa.str.lower(), fb.str.lower()
+    return fa, fb
 
 
 def _evaluate(
@@ -83,57 +152,143 @@ def _evaluate(
     if len(lu) > _SAMPLE_UNIQUES:
         lu = lu.sample(_SAMPLE_UNIQUES, random_state=0)
     containment = float(lu.isin(rset).mean())
+
+    left_unique = (lvals.nunique() / len(lvals)) >= _MIN_RIGHT_UNIQUE
+    right_unique = (len(rset) / len(rvals)) >= _MIN_RIGHT_UNIQUE
+
+    if left_unique and right_unique:
+        card = "one_to_one"
+    elif not left_unique and right_unique:
+        card = "many_to_one"
+    elif left_unique and not right_unique:
+        card = "one_to_many"
+    else:
+        card = "many_to_many"
+
     if strict:
         bare = _norm(lc) in _GENERIC_KEYS and _norm(rc) in _GENERIC_KEYS
-        if containment < (_GENERIC_MIN_CONTAINMENT if bare else _MIN_CONTAINMENT):
-            return None
-    if len(rset) / len(rvals) >= _MIN_RIGHT_UNIQUE:
-        one = lvals.nunique() / len(lvals) >= _MIN_RIGHT_UNIQUE
-        card = "one_to_one" if one else "many_to_one"
-    else:
-        grown = float(ls.map(rvals.value_counts()).fillna(1).clip(lower=1).sum())
-        if strict and grown > _MAX_MANY_TO_MANY_GROWTH * len(left):
-            return None
-        card = "many_to_many"
-    return containment, JoinPlan(lc, rc, "left", card, float(ls.isin(rset).mean()))
+        if card == "one_to_many":
+            ru = pd.Series(rset)
+            if len(ru) > _SAMPLE_UNIQUES:
+                ru = ru.sample(_SAMPLE_UNIQUES, random_state=0)
+            fk_validity = float(ru.isin(pd.unique(lvals)).mean())
+            effective_containment = max(containment, fk_validity)
+            if effective_containment < (_GENERIC_MIN_CONTAINMENT if bare else _MIN_CONTAINMENT):
+                return None
+            containment = effective_containment
+        else:
+            if containment < (_GENERIC_MIN_CONTAINMENT if bare else _MIN_CONTAINMENT):
+                return None
+
+    coverage = float(ls.isin(rset).mean())
+    return containment, JoinPlan(lc, rc, "left", card, coverage)
 
 
 def suggest_join(left: pd.DataFrame, right: pd.DataFrame, left_name: str, right_name: str) -> JoinPlan | None:
     """Best confident key pair for joining `right` onto `left`, or None."""
     if left.empty or right.empty:
         return None
-    stem = _stem(right_name)
+    stem_r = _stem(right_name)
+    canon_r = _canonical_stem(stem_r)
+    stem_l = _stem(left_name)
+    canon_l = _canonical_stem(stem_l)
+
     rcols: dict[str, str] = {}
     for c in right.columns:
         rcols.setdefault(_norm(c), c)
-    best: tuple[tuple[bool, float], JoinPlan] | None = None
+
+    best: tuple[tuple[int, float], JoinPlan] | None = None
     for lc in left.columns:
-        n = _norm(lc)
-        if not n:
+        nl = _norm(lc)
+        if not nl:
             continue
-        rc = rcols.get(n) if n != "id" else None
-        if rc is None and "id" in rcols and n in (stem + "id", stem + "key"):
-            rc = rcols["id"]   # orders.customer_id <-> customers.id
-        if rc is None:
-            continue
-        hit = _evaluate(left, right, str(lc), str(rc))
-        if hit is None:
-            continue
-        rank = (n.endswith(_IDLIKE), hit[0])
-        if best is None or rank > best[0]:
-            best = (rank, hit[1])
+        candidates: list[tuple[str, int]] = []
+        if nl in rcols:
+            candidates.append((rcols[nl], 3 if nl in _GENERIC_KEYS else 10))
+        if nl in (f"{stem_r}id", f"{stem_r}key", f"{stem_r}code", f"{canon_r}id", f"{canon_r}key"):
+            for id_name in ("id", "key", "code"):
+                if id_name in rcols:
+                    candidates.append((rcols[id_name], 9))
+        if nl in ("id", "key", "code"):
+            for cand_r in (f"{stem_l}id", f"{stem_l}key", f"{canon_l}id", f"{canon_l}key"):
+                if cand_r in rcols:
+                    candidates.append((rcols[cand_r], 9))
+        for nr, rc_name in rcols.items():
+            if nr.endswith("id") and nl.endswith(nr) and len(nl) > len(nr):
+                candidates.append((rc_name, 7))
+            elif nl.endswith("id") and nr.endswith(nl) and len(nr) > len(nl):
+                candidates.append((rc_name, 7))
+
+        for rc, priority in candidates:
+            hit = _evaluate(left, right, str(lc), str(rc))
+            if hit is None:
+                continue
+            containment, plan = hit
+            score = (priority, containment)
+            if best is None or score > best[0]:
+                best = (score, plan)
+
     if best is None:
         return None
     return replace(best[1], left_name=left_name, right_name=right_name)
 
 
+def _aggregate_table_to_key(df: pd.DataFrame, key_col: str, prefix: str) -> pd.DataFrame:
+    """Aggregate a child/fact table by key_col so it rolls up to 1 row per key."""
+    grouped = df.groupby(key_col, dropna=False)
+    count_series = grouped.size()
+    count_series.name = f"{prefix}_count"
+    res_dfs = [count_series.to_frame()]
+
+    for c in df.columns:
+        if c == key_col:
+            continue
+        col_s = df[c]
+        if _is_id_like_col(c):
+            agg_df = grouped[c].agg(nunique="nunique").rename(columns={"nunique": f"{prefix}_{c}_nunique"})
+            res_dfs.append(agg_df)
+        elif pd.api.types.is_bool_dtype(col_s):
+            agg_df = grouped[c].agg(share="mean").rename(columns={"share": f"{prefix}_{c}_share"})
+            res_dfs.append(agg_df)
+        elif pd.api.types.is_numeric_dtype(col_s):
+            agg_dict = {f"{prefix}_{c}_mean": "mean"}
+            if not any(k in c.lower() for k in ("minute", "hour", "year", "season", "age", "pct", "rate", "ratio", "prob", "rank")):
+                agg_dict[f"{prefix}_{c}_sum"] = "sum"
+            agg_df = grouped[c].agg(**agg_dict)
+            res_dfs.append(agg_df)
+        else:
+            agg_df = grouped[c].agg(nunique="nunique").rename(columns={"nunique": f"{prefix}_{c}_nunique"})
+            res_dfs.append(agg_df)
+
+    out = pd.concat(res_dfs, axis=1).reset_index()
+    return out
+
+
 def join_frames(left: pd.DataFrame, right: pd.DataFrame, plan: JoinPlan, max_rows: int) -> tuple[pd.DataFrame, list[str]]:
     """Merge `right` onto `left` per `plan`; returns (frame, notes)."""
     name = Path(plan.right_name).stem or "related"
-    lkey, rkey = _aligned(left[plan.left_key], right[plan.right_key])
-    r = right.drop(columns=[plan.right_key]).assign(**{_TMP_KEY: rkey.to_numpy()})
+    card_label = plan.cardinality.replace("_", "-")
+    was_aggregated = False
+    r_to_merge = right
+
+    should_aggregate = (
+        plan.cardinality == "many_to_many"
+        or (
+            plan.cardinality == "one_to_many"
+            and (
+                len(right) > 20_000
+                or (len(left) > 0 and len(right) / len(left) > 5.0 and len(right) > 5_000)
+            )
+        )
+    )
+    if should_aggregate:
+        r_to_merge = _aggregate_table_to_key(right, plan.right_key, name)
+        was_aggregated = True
+
+    lkey, rkey = _aligned(left[plan.left_key], r_to_merge[plan.right_key])
+    r = r_to_merge.drop(columns=[plan.right_key]).assign(**{_TMP_KEY: rkey.to_numpy()})
     r = r[rkey.notna().to_numpy()]
-    if plan.cardinality != "many_to_many":
+    if plan.cardinality in ("many_to_one", "one_to_one") or was_aggregated:
         r = r.drop_duplicates(_TMP_KEY)
     taken = set(left.columns)
     rename: dict[str, str] = {}
@@ -147,10 +302,17 @@ def join_frames(left: pd.DataFrame, right: pd.DataFrame, plan: JoinPlan, max_row
         r.rename(columns=rename), on=_TMP_KEY, how=plan.how
     ).drop(columns=[_TMP_KEY])
     on = plan.left_key if plan.left_key == plan.right_key else f"{plan.left_key} = {plan.right_key}"
-    notes = [
-        f"Joined {name} to {Path(plan.left_name).stem or 'the main table'} on {on} "
-        f"({plan.cardinality.replace('_', '-')}, {plan.coverage:.0%} of rows matched)."
-    ]
+    left_stem_name = Path(plan.left_name).stem or "the main table"
+    if was_aggregated:
+        notes = [
+            f"Joined {name} to {left_stem_name} on {on} "
+            f"(aggregated child table to avoid Cartesian fan-out, {len(right):,} records rolled up to {len(r_to_merge):,} entities, {plan.coverage:.0%} of keys matched)."
+        ]
+    else:
+        notes = [
+            f"Joined {name} to {left_stem_name} on {on} "
+            f"({card_label}, {plan.coverage:.0%} of rows matched)."
+        ]
     if len(out) > max_rows:
         out = out.sample(n=max_rows, random_state=0).sort_index()
         notes.append(f"Joined table exceeded {max_rows:,} rows; a random sample was kept.")
@@ -204,9 +366,11 @@ def join_related(
             if plan is None:
                 continue
             plan.left_name = next((n for n, cols in owners.items() if plan.left_key in cols), base_name)
+            prev_cols = set(map(str, joined.columns))
             joined, jn = join_frames(joined, df, plan, max_rows)
             notes += jn
-            owners[name] = set(map(str, df.columns)) - {plan.right_key}
+            new_cols = set(map(str, joined.columns)) - prev_cols
+            owners[name] = new_cols | (set(map(str, df.columns)) - {plan.right_key})
             pending.remove(item)
             progress = True
     notes += [f"Skipped {n}: no confident join key found." for n, _ in pending]

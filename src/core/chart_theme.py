@@ -116,7 +116,7 @@ CHART_PEN_NIGHT = "#34d399"
 CHART_PEN_DAY = "#2e7d57"
 #: Night gridlines. `RULE_NIGHT` is a hairline for the page; on the lighter Night chart surface it is
 #: only ~1.1:1 and the grid vanishes. This is ~1.4:1, the ratio Day's grid has on its surface.
-CHART_GRID_NIGHT = "#262626"
+CHART_GRID_NIGHT = "#2e2e2e"
 CATEGORY_RANGE_DAY: list[str] = [
     CHART_PEN_DAY,  # 1. Forest green, chart-mark variant (not PEN_DAY)
     "#2f86d6",   # 2. Ink blue

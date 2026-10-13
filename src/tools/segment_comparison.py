@@ -141,12 +141,58 @@ def _pick_measure_columns(profile: DatasetProfile) -> list[ColumnProfile]:
     return sorted(measures, key=lambda c: (c.unit_hint != "currency", c.name))
 
 
+def _is_id_like_dim(col_name: str) -> bool:
+    norm = re.sub(r"[^a-z0-9]", "", str(col_name).lower())
+    return (
+        norm.endswith(("id", "key", "code", "index", "guid", "uuid"))
+        or norm in ("id", "key", "code", "index", "guid", "uuid", "pk", "fk")
+    )
+
+
+def _find_entity_name_map(df: pd.DataFrame, id_col: str) -> dict[Any, str] | None:
+    """Detect if an identifier-like column maps 1-to-1 to a descriptive text column."""
+    if id_col not in df.columns:
+        return None
+    stem = re.sub(r"(_?id|_?key|_?code|_?index)$", "", id_col, flags=re.IGNORECASE).lower()
+    candidate_cols = [
+        c for c in df.columns
+        if c != id_col and (df[c].dtype == object or pd.api.types.is_string_dtype(df[c]))
+    ]
+    if not candidate_cols:
+        return None
+
+    best_cand: str | None = None
+    for cand in candidate_cols:
+        c_low = cand.lower()
+        if (stem and stem in c_low) or c_low in ("name", "title", "label", "description"):
+            best_cand = cand
+            break
+
+    if best_cand is None:
+        for cand in candidate_cols:
+            if 2 <= df[cand].nunique(dropna=True) <= 50:
+                mapping_ratio = df.groupby(id_col)[cand].nunique().max()
+                if mapping_ratio == 1:
+                    best_cand = cand
+                    break
+
+    if best_cand is None:
+        return None
+
+    try:
+        sub = df[[id_col, best_cand]].dropna().drop_duplicates(subset=[id_col])
+        return dict(zip(sub[id_col], sub[best_cand].astype(str), strict=False))
+    except Exception:
+        return None
+
+
 def _pick_dimension_columns(profile: DatasetProfile) -> list[ColumnProfile]:
     dims = [
         c for c in profile.columns_of_role("dimension", "flag")
         if _MIN_DIM_CARD <= c.nunique <= _MAX_DIM_CARD
     ]
-    return sorted(dims, key=lambda c: c.nunique)
+    # Penalize surrogate numeric IDs so semantic text categories sort first
+    return sorted(dims, key=lambda c: (1 if _is_id_like_dim(c.name) else 0, c.nunique, c.name))
 
 
 def _is_rate_measure(df: pd.DataFrame, measure_column: str, profile: DatasetProfile) -> bool:
@@ -440,6 +486,7 @@ class SegmentComparisonTool(BaseTool):
             else _row_level_values(work, measure_column, dimension_column, levels)
         )
 
+        entity_map = _find_entity_name_map(df, dimension_column)
         out: list[dict[str, Any]] = []
         for level in levels:
             level_vals, rest_vals = level_values[level]
@@ -510,10 +557,18 @@ class SegmentComparisonTool(BaseTool):
                     else:
                         ci_lo, ci_hi = level_mean, level_mean
 
+            level_str = str(level)
+            level_label: str | None = None
+            if entity_map:
+                level_label = entity_map.get(level) or entity_map.get(level_str)
+                if level_label is None and isinstance(level, (int, float)):
+                    level_label = entity_map.get(int(level))
+
             out.append({
                 "measure": measure_column,
                 "dimension": dimension_column,
-                "level": str(level),
+                "level": level_str,
+                "level_label": str(level_label) if level_label else None,
                 "is_rate": is_rate,
                 "unit_hint": unit_hint,
                 "level_value": round(level_mean, 6),
@@ -841,8 +896,11 @@ class SegmentComparisonTool(BaseTool):
             comparison = f"difference {c['difference']:+,.2f}, d={c['effect']:.2f}"
         else:
             comparison = f"{c['ratio']:.2f}x"
+        level_disp = redact_small_level(c['level'], c.get('n'))
+        if c.get("level_label") and str(c["level_label"]).strip() and str(c["level_label"]).strip() != str(c["level"]).strip():
+            level_disp = f"'{c['level_label']}' ({c['dimension']} {c['level']})"
         return (
-            f"{redact_small_level(c['level'], c.get('n'))} {c['dimension']} {row_noun} {middle} vs {baseline_str} "
+            f"{level_disp} {row_noun} {middle} vs {baseline_str} "
             f"for everyone else ({comparison}, n={c['n']:,} vs {c['n_rest']:,})."
         )
 

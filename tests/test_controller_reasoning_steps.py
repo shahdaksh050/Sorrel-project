@@ -508,3 +508,45 @@ def test_agenda_anchor_ensures_lead_segment_comparison_in_cycle_one(agent: Agent
     assert seg_step.parameters["dimension_column"] == "platform"
 
 
+def test_build_fallback_plan_handles_all_registered_tools(agent: AgentController, tmp_path: Any) -> None:
+    df = pd.DataFrame({
+        "sales": [100.0, 150.0, 200.0, 120.0, 180.0, 210.0] * 10,
+        "region": ["North", "South", "East", "West", "North", "South"] * 10,
+        "lead_time": [5.0, 10.0, 15.0, 8.0, 12.0, 14.0] * 10,
+    })
+    csv_file = tmp_path / "sales_data.csv"
+    df.to_csv(csv_file, index=False)
+    agent.load_dataset(str(csv_file), interactive=False)
+
+    plan = agent._build_fallback_plan()
+    assert plan.get("status") == "in_progress"
+    assert len(plan.get("steps", [])) >= 2
+    tool_names = [s["tool_name"] for s in plan["steps"]]
+    assert "clean_data" in tool_names
+
+
+def test_request_plan_recovers_gracefully_when_llm_fails_twice(agent: AgentController, tmp_path: Any) -> None:
+    df = pd.DataFrame({
+        "x": list(range(50)),
+        "y": [v * 2.0 for v in range(50)],
+    })
+    csv_file = tmp_path / "sample.csv"
+    df.to_csv(csv_file, index=False)
+    agent.load_dataset(str(csv_file), interactive=False)
+
+    # Simulate LLM blowing budget on hidden reasoning on initial attempt and retry
+    _with_engine(agent, [
+        ValueError("openrouter model 'test' used the whole max_tokens=4096 budget"),
+        ValueError("openrouter model 'test' used the whole max_tokens=4096 budget"),
+    ])
+
+    plan, final = agent._request_plan(1, "prompt", "stage2:initial_plan")
+    assert final is None
+    assert plan.get("status") == "in_progress"
+    assert len(plan.get("steps", [])) >= 1
+    # Check that degradation was recorded
+    degradations = agent.memory.get_context("degradations") or []
+    assert any("LLM planning call failed on the first reasoning cycle" in d for d in degradations)
+
+
+

@@ -85,10 +85,11 @@ under its name, every run as `tool_name#1`, `#2`, ...).
 - `pd`, `np`, `scipy`, `stats`, `math` — pre-imported and available directly (no import statements needed).
 - `dsa.run(tool_name, df=frame, **params)` — run one of the tools in `dsa.tools()` on \
 a frame you built; returns {"output": ..., "findings": [...]}. `dsa.tools()` lists every analysis tool, \
-including special-purpose ones not shown above (survival_analysis, curve_fit_analysis, mixed_model_analysis, \
-forecast_analysis, basket_analysis, price_elasticity_analysis, equity_analysis): when the data fits one, run it \
-with explicit column parameters even if the column names look unusual.
-- `dsa.compare_groups(frame, measure, by)`, `dsa.summarize(series)`, \
+including special-purpose ones not shown above (threshold_analysis, multi_seasonal_analysis, ranking_dynamics, \
+survival_analysis, curve_fit_analysis, mixed_model_analysis, forecast_analysis, basket_analysis, price_elasticity_analysis, \
+equity_analysis): when the data fits one, run it with explicit column parameters even if the column names look unusual.
+- `dsa.query_sql(sql, **tables)` (in-memory multi-table SQL queries), `dsa.unpivot_temporal(df)` (melts wide time headers), \
+`dsa.strip_summary_rows(df)` (removes subtotal/total rows), `dsa.compare_groups(frame, measure, by)`, `dsa.summarize(series)`, \
 `dsa.effect_size(a, b)`, `dsa.cramers_v(frame, col1, col2)`, `dsa.crosstab_shares(frame, col1, col2)`, \
 `dsa.baseline_accuracy(frame, target_col)`, `dsa.profile(frame)`.
 - `dsa.relations(frame)` (formula-linked columns: kind/target/terms/expr/exact/r2), \
@@ -949,6 +950,46 @@ class PromptManager:
             return ""
         return "\n## Feature-group sub-analyses\n" + "\n".join(lines) + "\n"
 
+    def _nba_guidance_block(self) -> str:
+        """Empirical Next-Best-Action (NBA) guidance derived from discovered patterns."""
+        findings = self.memory.ranked_findings()
+        tools_run = {r.tool_name for r in self.memory.tool_results if r.status == "success"}
+        advice: list[str] = []
+
+        # Check 1: Strong bivariate correlations without multivariate regression
+        has_corr = any(f.kind == "correlation" and (f.effect or 0.0) >= 0.50 for f in findings)
+        if has_corr and "regression_analysis" not in tools_run:
+            advice.append("High bivariate correlations discovered → schedule 'regression_analysis' to check for multicollinearity (VIF) and isolate controlled partial effects.")
+
+        # Check 2: Strong continuous drivers without tipping-point / threshold test
+        has_drivers = any(f.kind in ("driver", "correlation") and (f.effect or 0.0) >= 0.35 for f in findings)
+        if has_drivers and "threshold_analysis" not in tools_run:
+            advice.append("Prominent continuous drivers identified → schedule 'threshold_analysis' to check for non-linear tipping points and structural breakpoints.")
+
+        # Check 3: Drivers identified without scenario simulation
+        if has_drivers and "scenario_simulation" not in tools_run:
+            advice.append("Key drivers identified → schedule 'scenario_simulation' (with joint_optimization=True) to project multi-driver What-If interventions.")
+
+        # Check 4: Time series without multi-seasonal FFT decomposition
+        has_trend = any(f.kind in ("trend", "seasonality") for f in findings)
+        if has_trend and "multi_seasonal_analysis" not in tools_run:
+            advice.append("Temporal patterns present → schedule 'multi_seasonal_analysis' to uncover overlapping daily/weekly/annual periodic cycles via FFT.")
+
+        # Check 5: Competitive/contestant structure without ranking dynamics
+        meta = self.memory.dataset_metadata
+        if meta and any(any(k in c.lower() for k in ("team", "player", "contestant", "opponent", "home", "away")) for c in meta.columns):
+            if "ranking_dynamics" not in tools_run:
+                advice.append("Contestant/team structure detected → schedule 'ranking_dynamics' for Bradley-Terry latent strength and home-advantage modeling.")
+
+        # Check 6: Weak cluster silhouette warnings
+        weak_clusters = any(f.kind == "cluster" and (f.confidence or 1.0) < 0.4 for f in findings)
+        if weak_clusters:
+            advice.append("Weak clustering silhouette (< 0.35) detected → avoid forcing cluster segments; prioritize 'segment_comparison' on observed categorical dimensions.")
+
+        if not advice:
+            return ""
+        return "\n## Empirical Next-Best-Action Guidance (Statistical Heuristics)\n" + "\n".join(f"- {a}" for a in advice[:3]) + "\n"
+
     def _failed_steps(self) -> str:
         # Error text carries tracebacks, dataset values and LLM-authored code
         # lines — flattened and capped so it can't fake a prompt section.
@@ -1004,6 +1045,7 @@ class PromptManager:
                 + self._hypotheses_block()
                 + self._domain_analysis_block()
                 + self._causal_design_block()
+                + self._nba_guidance_block()
             )
             if level < 3:
                 extras += self._rlm_block()

@@ -577,13 +577,21 @@ def classify_action_matrix(
 
         level_label = evidence.get("level_label") if isinstance(evidence, dict) else None
         lever = headline
-        if dimension and level:
+        if kind == "driver" and dimension and level:
+            lever = f"Target {dimension}='{level}'"
+        elif kind == "decision_scenario" and dimension:
+            lever = f"Simulate {dimension} intervention"
+        elif kind == "interaction_synergy" and dimension and level:
+            lever = f"Target synergy: {dimension}='{level}'"
+        elif kind == "correlation":
+            lever = f"Co-movement: {measure} & {dimension}" if (measure and dimension) else f"Association: {measure or dimension}"
+        elif dimension and level:
             if level_label and str(level_label) != str(level):
                 lever = f"Target '{level_label}' ({dimension}='{level}')"
             else:
                 lever = f"Target {dimension}='{level}'"
         elif dimension:
-            lever = f"Leverage {dimension}"
+            lever = f"Target {dimension} segment" if kind == "segment_lift" else f"Monitor {dimension}"
         elif measure:
             lever = f"Optimize {measure}"
 
@@ -598,8 +606,22 @@ def classify_action_matrix(
             "caveats": caveats,
         }
 
-        # 1. Watch / Caveat items
-        if is_caveat_kind or has_paradox or is_fragile or len(caveats) > 0 or conf < 0.45 or (not is_controllable and not is_appendix):
+        # 1. Watch / Caveat items: filter out benign statistical provenance/disclaimer notes
+        _disclaimer_substrings = (
+            "effects are adjusted associations",
+            "observational linear extrapolation",
+            "observational cohort difference",
+            "counts are per",
+            "assumes censoring",
+            "imputed (median/mode)",
+            "assumes independent additive driver interventions",
+            "linear optimization",
+        )
+        material_caveats = [
+            c for c in caveats
+            if not any(sub in str(c).lower() for sub in _disclaimer_substrings)
+        ]
+        if is_caveat_kind or has_paradox or is_fragile or len(material_caveats) > 0 or conf < 0.45 or (not is_controllable and not is_appendix):
             reason = []
             if not is_controllable:
                 reason.append(f"External non-controllable factor ('{target_feature}') — monitor as risk/context, not direct lever")
@@ -607,8 +629,8 @@ def classify_action_matrix(
                 reason.append("Subgroup reversal detected (Simpson's paradox)")
             if is_fragile:
                 reason.append("Sensitive to outlier trimming")
-            if caveats:
-                reason.extend(caveats)
+            if material_caveats:
+                reason.extend(material_caveats)
             if not reason:
                 reason.append("Low statistical confidence or caveat kind")
             entry["rationale"] = "; ".join(reason)
@@ -623,13 +645,13 @@ def classify_action_matrix(
             norm_eff >= 0.18
             or (isinstance(effect, (int, float)) and abs(effect) >= 0.15)
             or imp >= 0.45
-            or kind in ("decision_scenario", "interaction_synergy")
+            or kind in ("decision_scenario", "interaction_synergy", "driver")
         )
 
         # 3. Feasibility evaluation
         is_high_feasibility = (
             conf >= 0.65
-            and kind in ("segment_lift", "concentration", "correlation", "decision_scenario")
+            and kind in ("segment_lift", "driver", "concentration", "decision_scenario", "interaction_synergy")
         )
 
         if is_high_impact and is_high_feasibility:

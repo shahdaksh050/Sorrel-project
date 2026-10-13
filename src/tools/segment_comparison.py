@@ -803,14 +803,17 @@ class SegmentComparisonTool(BaseTool):
         entity_col: str | None,
     ) -> list[dict[str, Any]]:
         """Screen for 2-way categorical interaction synergies."""
-        dims = [
-            col.name for col in _pick_dimension_columns(profile)
-            if col.name != entity_col and 2 <= col.nunique <= 6
-        ]
-        if len(dims) < 2 or not pairs:
+        if not pairs:
             return []
 
         primary_measure = pairs[0][0]
+        dims = [
+            col.name for col in _pick_dimension_columns(profile)
+            if col.name != entity_col and col.name != primary_measure and 2 <= col.nunique <= 6
+        ]
+        if len(dims) < 2:
+            return []
+
         dim_a, dim_b = dims[0], dims[1]
 
         # Map marginal lifts
@@ -819,7 +822,8 @@ class SegmentComparisonTool(BaseTool):
             if c.get("measure") == primary_measure and c.get("effect_kind") == "lift":
                 marginal_lifts[(c["dimension"], str(c["level"]))] = float(c["effect"])
 
-        valid = df[[dim_a, dim_b, primary_measure]].dropna().copy()
+        cols_to_select = list(dict.fromkeys([dim_a, dim_b, primary_measure]))
+        valid = df[cols_to_select].dropna().copy()
         valid[primary_measure] = pd.to_numeric(valid[primary_measure], errors="coerce")
         valid = valid.dropna()
         if len(valid) < 40:

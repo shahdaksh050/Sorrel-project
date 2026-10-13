@@ -507,16 +507,34 @@ class PlanMixin(ControllerState):
             # entries are filled from memory, so only genuinely unfilled
             # required parameters disqualify a tool.
             try:
-                schema = tool.get_schema()
+                raw_schema = tool.get_schema()
             except Exception:
-                schema = {}
+                raw_schema = {}
+            schema: dict[str, Any] = {}
+            if isinstance(raw_schema, dict):
+                if "properties" in raw_schema and isinstance(raw_schema["properties"], dict):
+                    req_list = raw_schema.get("required")
+                    req_set = set(req_list) if isinstance(req_list, (list, tuple)) else set()
+                    for k, v in raw_schema["properties"].items():
+                        if isinstance(v, dict):
+                            schema[k] = {**v, "required": bool(k in req_set or v.get("required", False))}
+                        else:
+                            schema[k] = {"type": "string", "required": bool(k in req_set)}
+                else:
+                    for k, v in raw_schema.items():
+                        if isinstance(v, dict):
+                            schema[k] = v
+                        else:
+                            schema[k] = {"type": str(v), "required": False}
+
             injected = {"file_path", "output_dir"} | set(
                 getattr(tool, "requires_context", {}).values()
             )
             unfilled = [
                 key
                 for key, spec in schema.items()
-                if spec.get("required")
+                if isinstance(spec, dict)
+                and spec.get("required")
                 and key not in tool_params
                 and key not in injected
             ]

@@ -1117,7 +1117,20 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     "was chosen by the deterministic profile-driven fallback."
                 )
                 self.memory.set_context("degradations", degradations)
-                llm_response = self._build_fallback_plan()
+                try:
+                    llm_response = self._build_fallback_plan()
+                except Exception as fb_exc:
+                    logger.error("Fallback plan build failed: %s", fb_exc, exc_info=True)
+                    meta = self.memory.dataset_metadata
+                    fp = str(self.memory.get_context("cleaned_file_path") or (meta.file_path if meta else ""))
+                    llm_response = {
+                        "status": "in_progress",
+                        "reasoning": "Executing baseline exploratory analysis after planning recovery.",
+                        "steps": [
+                            {"step_number": 1, "tool_name": "clean_data", "parameters": {"file_path": fp}, "rationale": "Clean dataset."},
+                            {"step_number": 2, "tool_name": "correlation_analysis", "parameters": {"file_path": fp}, "rationale": "Explore correlations."},
+                        ],
+                    }
             else:
                 console.print("[yellow]  → Synthesising final report from results.[/]")
                 return {}, self._deterministic_final()

@@ -146,6 +146,9 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
 | BE-10 | Antigravity (Gemini) | Complete | Autonomous unprompted investigation engine: semantic North Star inference, lead hypothesis promotion from Question Agenda, autonomous mission prompt injection, and What-If scenario pre-seeding. |
 | BE-11 | Antigravity (Gemini) | Complete | Deterministic inference envelope & agenda anchoring: LLM_TEMPERATURE=0.0 default, LLM_SEED=42 passed in create_kwargs with retry recovery, deterministic multi-key finding tie-breaking in rank_findings(), and _ensure_agenda_anchor_steps() guaranteeing lead agenda coverage in Cycle 1. |
 | BE-12 | Antigravity (Gemini) | Complete | Penetration & logical security pipeline remediation: SEC-01 (.tsv binary/null sniffing), LOGIC-01 (preventing fabricated unknown groupby columns in sandbox worker), LOGIC-02 & SEC-02 (n<=2 degenerate statistical division & NaN JSON serialization immunity), SEC-03 (small-integer unit/multiplier claim verification bypass closure), LOGIC-03 (transitive join column ownership tracking), DOS-01 (2h stale run dir lifetime & 2GB aggregate storage quota eviction). |
+| BE-13 | Antigravity (Gemini) | Complete | Expectations vs Reality Output Audit & Pipeline Remediation: Fixed segment_comparison 2-way interaction crash on binary targets (eliminated duplicate column DataFrame selection in pd.to_numeric), fixed Action Prioritization Matrix classification and lever naming (filtered out benign statistical provenance/disclaimer notes, added multivariate regression drivers to Quick Wins with explicit 'Target feature=level' levers, stopped bivariate correlation noise from dominating Quick Wins), and enriched driver/scenario recommendations in controller_report without violating verbatim-number claim verification. |
+| BE-14 | Antigravity (Gemini) | Complete | Dynamic data analysis upgrades & quantitative domain expansion: ThresholdAnalysisTool (non-linear tipping points & breakpoints), MultiSeasonalAnalysisTool (FFT multi-periodicity decomposition), RankingDynamicsTool (Bradley-Terry latent strength & home advantage), Prescriptive Multi-Driver Joint Optimization in ScenarioSimulationTool, Empirical Next-Best-Action guidance in prompt_manager, Reshaping & Ingestion Normalization in reshaping.py & DSAToolkit, with 0 lint violations and 0 mypy errors across 111 source files. |
+| BE-15 | Antigravity (Gemini) | Complete | Fix Analysis Crash (LLM Token Blowout & Fallback Schema AttributeError): converted tool schemas to canonical flat dict format, made _build_fallback_plan schema inspection defensive, wrapped _build_fallback_plan in emergency recovery, calibrated OpenRouter reasoning effort to 'low' and 'minimal' on retry, expanded retry token headroom to 8192, and added reasoning text extraction fallback. |
 
 ### I. Sandbox Optimization & Group Comparison Steering (2026-10-09) [Task BE-3]
 - **Worker Subprocess Lightening** ([`src/core/_sandbox_worker.py`](file:///d:/(Dev2)DSA_AGENT/src/core/_sandbox_worker.py)): Replaced heavy `profile_dataframe(df)` in `_build_schema` with a lightweight, direct pandas dtype classifier, dropping the costly profiling pass and regex scans inside the child process.
@@ -298,3 +301,61 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
   - Unit tests added in [`tests/test_controller_reasoning_steps.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_controller_reasoning_steps.py): `test_llm_client_deterministic_envelope`, `test_rank_findings_deterministic_tie_breaking`, and `test_agenda_anchor_ensures_lead_segment_comparison_in_cycle_one`.
   - Suite passing: 93/93 unit tests passed across controller reasoning, null data, architecture, clustering, and sandbox.
   - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 107 source files).
+
+### S. Quantitative Domain Expansion, Prescriptive Multi-Driver Optimization & Next-Best-Action Guidance (2026-10-14) [Task BE-14]
+- **Piecewise Threshold & Tipping Point Analysis** ([`src/tools/threshold_analysis.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/threshold_analysis.py)):
+  - Implemented segmented two-phase regression (Y = beta_0 + beta_1 X + beta_2 (X - c)^+) scanning candidate threshold values across the 10th to 90th percentiles.
+  - Computes exact tipping point value c*, pre- and post-break slopes, percentage slope acceleration/deceleration, and an F-test vs a linear baseline.
+  - Emits structured `Finding` with kind `"threshold"` and scatter chart hint.
+- **Multi-Seasonal FFT Spectral Decomposition** ([`src/tools/multi_seasonal_analysis.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/multi_seasonal_analysis.py)):
+  - Implemented Fast Fourier Transform (FFT) power spectral density peak identification for regular/high-frequency time series (electricity grid load, IoT sensors, server concurrency).
+  - Isolates dominant harmonic periods (T = 1/f), amplitudes, and periodic variance explained percentages (1 - Var(R)/Var(Y)).
+  - Emits structured `Finding` with kind `"periodicity"` and line chart hint.
+- **Pairwise Ranking Dynamics & Bradley-Terry Modeling** ([`src/tools/ranking_dynamics.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/ranking_dynamics.py)):
+  - Implemented regularized Bradley-Terry logistic modeling (P(A > B) = logit^-1(lambda_A - lambda_B + gamma)) for pairwise matchups (football matches, esports, game duels, tournament fixtures).
+  - Estimates latent participant strength ratings (lambda), home-field advantage odds ratio (gamma), predictive match accuracy, and top tournament upsets.
+  - Emits structured `Finding` with kind `"ranking"` and bar chart hint.
+- **Prescriptive Multi-Driver Joint Optimization** ([`src/tools/scenario_simulation.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/scenario_simulation.py)):
+  - Implemented multivariate OLS optimization solving for coordinated multi-feature interventions subject to bounded budget limits (e.g. +/- 20%).
+  - Computes cumulative outcome movement (Delta Y_opt), individual feature contribution breakdowns, updated population totals, and decision table entries.
+  - Emits structured `Finding` with kind `"decision_scenario"` and optimization attribution.
+- **Empirical Next-Best-Action (NBA) Guidance** ([`src/core/prompt_manager.py`](file:///d:/(Dev2)DSA_AGENT/src/core/prompt_manager.py)):
+  - Injected `_nba_guidance_block()` into `ITERATION_PROMPT` extras, dynamically advising the planner based on discovered findings:
+    - High correlations -> suggest `regression_analysis` for VIF/multicollinearity control.
+    - Continuous drivers -> suggest `threshold_analysis` for tipping points.
+    - Key drivers -> suggest `scenario_simulation` with joint optimization.
+    - Temporal patterns -> suggest `multi_seasonal_analysis` for overlapping cycles.
+    - Contestant/team structure -> suggest `ranking_dynamics`.
+    - Weak cluster silhouette -> warn against forced cluster profiling and steer to `segment_comparison`.
+- **Reshaping & Ingestion Normalization** ([`src/core/reshaping.py`](file:///d:/(Dev2)DSA_AGENT/src/core/reshaping.py), [`src/tools/data_processing.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/data_processing.py), [`src/core/sandbox_toolkit.py`](file:///d:/(Dev2)DSA_AGENT/src/core/sandbox_toolkit.py)):
+  - Implemented `detect_wide_temporal_columns` and `unpivot_temporal_frame` for melting wide "time-in-header" tables (years, months, quarters).
+  - Implemented `detect_and_strip_summary_rows` in `CleanDataTool` to automatically quarantine subtotal/total rows that distort distributions.
+  - Exposed via `dsa.unpivot_temporal(df)` and `dsa.strip_summary_rows(df)` in `DSAToolkit`.
+- **Registry, Sandbox & Claim Verification Integration**:
+  - Registered in `src/core/tool_registry.py` and `src/core/sandbox_toolkit.py` (`_TOOL_CLASSES`).
+  - Added keywords (`breakpoint`, `tipping point`, `periodic`, `harmonic`, `fft`, `ranking`, `home advantage`, `simulation`, `what-if`) to `_KEYWORD_TOOL_MAP` in [`src/core/claim_verification.py`](file:///d:/(Dev2)DSA_AGENT/src/core/claim_verification.py).
+  - Added optimization disclaimers to `_disclaimer_substrings` in [`src/core/findings.py`](file:///d:/(Dev2)DSA_AGENT/src/core/findings.py).
+- **Verification & Tests**:
+  - Unit tests added in [`tests/test_threshold_analysis.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_threshold_analysis.py), [`tests/test_multi_seasonal_analysis.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_multi_seasonal_analysis.py), [`tests/test_ranking_dynamics.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_ranking_dynamics.py), [`tests/test_reshaping.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_reshaping.py).
+  - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 111 source files).
+
+### T. LLM Token Exhaustion Calibration & Fallback Schema Defense (2026-10-14) [Task BE-15]
+- **Root Cause Analysis**:
+  1. *OpenRouter Hidden Reasoning Token Blowout*: `cohere/north-mini-code:free` via OpenRouter exhausted its entire 4096-token budget on hidden reasoning because `_is_reasoning_model()` treated all OpenRouter models as reasoning and injected `reasoning: {"effort": "medium"}` during Stage 2 planning (`heavy = True`). The retry kept `heavy = True`, repeating the failure.
+  2. *Fallback Plan Schema Crash*: When the controller attempted fallback to `_build_fallback_plan()`, line 519 iterated over all registered tools and inspected `spec.get("required")`. The recently added tools returned JSON-Schema-style dicts (`{"type": "object", "properties": {...}}`), where `spec = "object"`, throwing `AttributeError: 'str' object has no attribute 'get'`.
+- **Tool Schema Format Harmonization** ([`src/tools/threshold_analysis.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/threshold_analysis.py), [`src/tools/multi_seasonal_analysis.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/multi_seasonal_analysis.py), [`src/tools/ranking_dynamics.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/ranking_dynamics.py)):
+  - Converted `get_schema()` from nested JSON-Schema format to the canonical flat dictionary format expected by the codebase: `{param_name: {"type": ..., "description": ..., "required": ...}}`.
+  - Verified across the entire registry that 100% of registered tools adhere to this format.
+- **Defensive Fallback Planning** ([`src/core/controller_planning.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller_planning.py)):
+  - Normalized schema inspection in `_build_fallback_plan`: unwraps `"properties"` if present, safely tests `isinstance(spec, dict)`, and handles string/list `"required"` constraints defensibly.
+- **Emergency Controller Recovery Firewall** ([`src/core/controller.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller.py)):
+  - Wrapped `_build_fallback_plan()` in `_request_plan` with a fail-safe fallback to an emergency minimal plan (`clean_data` + `correlation_analysis`), guaranteeing that `_request_plan` can never crash the Streamlit UI with an uncaught exception.
+- **OpenRouter Reasoning Effort Calibration & Headroom Expansion** ([`src/core/llm_client.py`](file:///d:/(Dev2)DSA_AGENT/src/core/llm_client.py)):
+  - OpenRouter models now default adaptive reasoning effort to `"low"` rather than `"medium"`, leaving sufficient tokens for generation on compact/free tier models.
+  - When `stage` contains `"retry"`, reasoning effort is automatically stepped down to `"minimal"`.
+  - In `_call_max_tokens()`, reasoning models on retry receive up to 8192 tokens of headroom.
+  - In `_call_openai_compat()`, added extraction fallback: if `message.content` is empty but `message.reasoning` or `message.reasoning_content` contains JSON, the response is salvaged rather than failing.
+- **Verification & Tests**:
+  - Added unit tests in [`tests/test_controller_reasoning_steps.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_controller_reasoning_steps.py) covering all registered tool schemas in `_build_fallback_plan` and multi-failure recovery in `_request_plan`.
+  - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 111 source files).
+

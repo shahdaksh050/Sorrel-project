@@ -73,7 +73,7 @@ _KEYWORD_TOOL_MAP: dict[str, tuple[str, ...]] = {
     r"p-?value": (
         "select_statistical_test", "segment_comparison", "experiment_analysis", "regression_analysis",
         "survival_analysis", "mixed_model_analysis", "price_elasticity_analysis", "equity_analysis",
-        "curve_fit_analysis",
+        "curve_fit_analysis", "threshold_analysis",
     ),
     r"hazard": ("survival_analysis",),
     r"survival": ("survival_analysis",),
@@ -85,6 +85,15 @@ _KEYWORD_TOOL_MAP: dict[str, tuple[str, ...]] = {
     r"chi-?squared?\b": ("select_statistical_test",),
     r"mann-whitney": ("select_statistical_test",),
     r"kruskal": ("select_statistical_test",),
+    r"breakpoint": ("threshold_analysis",),
+    r"tipping point": ("threshold_analysis",),
+    r"periodic": ("multi_seasonal_analysis", "time_series_analysis"),
+    r"harmonic": ("multi_seasonal_analysis",),
+    r"fft\b": ("multi_seasonal_analysis",),
+    r"ranking": ("ranking_dynamics",),
+    r"home advantage": ("ranking_dynamics",),
+    r"simulation": ("scenario_simulation",),
+    r"what-if": ("scenario_simulation",),
 }
 _KEYWORD_TOOL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = tuple(
     (re.compile(r"\b" + kw), tools) for kw, tools in _KEYWORD_TOOL_MAP.items()

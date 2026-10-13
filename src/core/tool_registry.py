@@ -65,6 +65,8 @@ class ToolRegistry:
         from src.tools.graph_analysis import GraphAnalysisTool
         from src.tools.mixed_model import MixedModelAnalysisTool
         from src.tools.ml_pipeline import EvaluateModelTool, TrainModelTool
+        from src.tools.multi_seasonal_analysis import MultiSeasonalAnalysisTool
+        from src.tools.ranking_dynamics import RankingDynamicsTool
         from src.tools.regression import RegressionAnalysisTool
         from src.tools.report_generator import GenerateReportTool
         from src.tools.scenario_simulation import ScenarioSimulationTool
@@ -73,6 +75,7 @@ class ToolRegistry:
         from src.tools.structured_features import StructuredFeatureExtractionTool
         from src.tools.survival import SurvivalAnalysisTool
         from src.tools.text_analysis import TextAnalysisTool
+        from src.tools.threshold_analysis import ThresholdAnalysisTool
         from src.tools.time_series import TimeSeriesAnalysisTool
         from src.tools.variable_methods import VariableScaleAnalysisTool
         from src.tools.visualization import GenerateVisualizationsTool
@@ -134,6 +137,10 @@ class ToolRegistry:
             GraphAnalysisTool(),
             # Decision intelligence: What-If scenario simulation
             ScenarioSimulationTool(),
+            # Domain-adaptive advanced analytics
+            ThresholdAnalysisTool(),
+            MultiSeasonalAnalysisTool(),
+            RankingDynamicsTool(),
         ):
             self.register(tool)
 

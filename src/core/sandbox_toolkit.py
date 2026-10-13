@@ -61,6 +61,10 @@ _TOOL_CLASSES: dict[str, tuple[str, str]] = {
     "geospatial_analysis": ("src.tools.geospatial", "GeospatialAnalysisTool"),
     "financial_analysis": ("src.tools.financial_analysis", "FinancialAnalysisTool"),
     "workforce_analysis": ("src.tools.workforce_analysis", "WorkforceAnalysisTool"),
+    "scenario_simulation": ("src.tools.scenario_simulation", "ScenarioSimulationTool"),
+    "threshold_analysis": ("src.tools.threshold_analysis", "ThresholdAnalysisTool"),
+    "multi_seasonal_analysis": ("src.tools.multi_seasonal_analysis", "MultiSeasonalAnalysisTool"),
+    "ranking_dynamics": ("src.tools.ranking_dynamics", "RankingDynamicsTool"),
 }
 
 #: compare_groups tests at most this many levels (the most frequent ones).
@@ -1078,4 +1082,22 @@ class Toolkit:
         """
         from src.core.duckdb_engine import query_dataframe
         return query_dataframe(sql, tables)
+
+    @staticmethod
+    def unpivot_temporal(
+        df: pd.DataFrame,
+        temporal_columns: list[str] | None = None,
+        var_name: str = "period",
+        value_name: str = "value",
+    ) -> pd.DataFrame:
+        """Unpivot wide temporal columns (years, months, quarters) into a tidy longitudinal frame."""
+        from src.core.reshaping import unpivot_temporal_frame
+        return unpivot_temporal_frame(df, temporal_columns, var_name, value_name)
+
+    @staticmethod
+    def strip_summary_rows(df: pd.DataFrame) -> pd.DataFrame:
+        """Detect and remove subtotal / total rows that distort statistical distributions."""
+        from src.core.reshaping import detect_and_strip_summary_rows
+        cleaned, _ = detect_and_strip_summary_rows(df)
+        return cleaned
 

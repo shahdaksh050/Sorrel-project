@@ -342,6 +342,9 @@ class CleanDataTool(BaseTool):
             raise ToolExecutionError("Dataset has no rows — nothing to clean.")
         if strategy == "drop":
             strategy = "drop_rows"
+
+        from src.core.reshaping import detect_and_strip_summary_rows
+        df, summary_notes = detect_and_strip_summary_rows(df)
         original_shape = df.shape
         n_rows = len(df)
         # One bulk pass over the whole frame, reused for both the total and
@@ -443,7 +446,8 @@ class CleanDataTool(BaseTool):
 
         return {
             "summary": (
-                (
+                (f"Quarantined {len(summary_notes)} summary row(s). " if summary_notes else "")
+                + (
                     f"Left {missing_before} missing values as NaN (no imputation). "
                     if strategy == "none"
                     else f"Cleaned {missing_before - missing_after} missing values using '{strategy}'. "
@@ -461,6 +465,7 @@ class CleanDataTool(BaseTool):
             "duplicate_rows": duplicate_rows,
             "constant_columns": constant_columns,
             "sparse_columns": sparse_columns,
+            "summary_rows_quarantined": summary_notes,
         }
 
     def findings(

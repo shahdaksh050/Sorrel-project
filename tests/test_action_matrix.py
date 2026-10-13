@@ -156,3 +156,27 @@ def test_classify_action_matrix_filters_hygiene_alarms() -> None:
     assert len(matrix["strategic_bets"]) == 0
     assert len(matrix["incremental"]) == 0
     assert len(matrix["watch_caveats"]) == 0
+
+
+def test_disclaimer_caveats_do_not_disqualify_actionable_drivers() -> None:
+    # A regression driver carrying standard statistical disclaimers must reach Quick Wins
+    f_driver = Finding(
+        finding_id="f_driver",
+        kind="driver",
+        headline="Holding the other factors fixed, contract = One year rather than Month-to-month lowers churn by 20.0 percentage points",
+        measure="churn",
+        dimension="contract",
+        level="One year vs Month-to-month",
+        effect=-0.86,
+        confidence=0.90,
+        caveats=[
+            "Effects are adjusted associations between the columns, not proof of cause.",
+            "Imputed (median/mode) columns: total_charges.",
+        ],
+    )
+    matrix = classify_action_matrix([f_driver])
+    assert len(matrix["quick_wins"]) == 1
+    item = matrix["quick_wins"][0]
+    assert item["finding_id"] == "f_driver"
+    assert item["lever"] == "Target contract='One year vs Month-to-month'"
+

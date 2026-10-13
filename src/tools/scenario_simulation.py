@@ -79,6 +79,9 @@ class ScenarioSimulationTool(BaseTool):
         driver_column: str | None = None,
         shifts: list[float] | None = None,
         segment_column: str | None = None,
+        joint_optimization: bool = True,
+        target_goal: str = "maximize",
+        max_shift_pct: float = 20.0,
         **_: Any,
     ) -> dict[str, Any]:
         df = _read_df(file_path)
@@ -171,6 +174,53 @@ class ScenarioSimulationTool(BaseTool):
                             "projected_total_impact": round(tot_impact, 2),
                         })
 
+        # Multi-variable joint optimization across top continuous drivers
+        joint_package: dict[str, Any] | None = None
+        if joint_optimization and len(candidate_drivers) >= 2:
+            top_drivers = candidate_drivers[:4]
+            sub_mv = df[[target_column, *top_drivers]].dropna()
+            if len(sub_mv) >= 25:
+                try:
+                    x_mv = sub_mv[top_drivers].to_numpy(dtype=float)
+                    y_mv = sub_mv[target_column].to_numpy(dtype=float)
+                    x_design = np.column_stack([np.ones(len(x_mv)), x_mv])
+                    coeffs_mv, _, rank_mv, _ = np.linalg.lstsq(x_design, y_mv, rcond=None)
+                    if rank_mv == len(top_drivers) + 1:
+                        slopes_mv = coeffs_mv[1:]
+                        mv_interventions: list[dict[str, Any]] = []
+                        total_mv_delta_y = 0.0
+                        for idx, drv in enumerate(top_drivers):
+                            s_drv = float(slopes_mv[idx])
+                            mean_drv = float(np.mean(sub_mv[drv]))
+                            direction = 1.0 if s_drv >= 0 else -1.0
+                            if target_goal == "minimize":
+                                direction = -direction
+                            shift_applied = direction * abs(max_shift_pct)
+                            dx = mean_drv * (shift_applied / 100.0)
+                            dy_contrib = float(s_drv * dx)
+                            total_mv_delta_y += dy_contrib
+                            mv_interventions.append({
+                                "driver": drv,
+                                "slope": round(s_drv, 4),
+                                "mean": round(mean_drv, 4),
+                                "recommended_shift_pct": shift_applied,
+                                "unit_shift": round(dx, 4),
+                                "target_impact": round(dy_contrib, 4),
+                            })
+
+                        rel_opt_change = (total_mv_delta_y / base_mean * 100.0) if abs(base_mean) > 1e-9 else 0.0
+                        joint_package = {
+                            "target_goal": target_goal,
+                            "drivers_optimized": top_drivers,
+                            "interventions": mv_interventions,
+                            "predicted_delta_target": round(total_mv_delta_y, 4),
+                            "relative_change_pct": round(rel_opt_change, 2),
+                            "projected_mean": round(base_mean + total_mv_delta_y, 4),
+                            "projected_total_impact": round(total_mv_delta_y * n_pop, 2),
+                        }
+                except Exception:
+                    joint_package = None
+
         # Segment equalization opportunity (skips demographic/protected attributes)
         segment_opportunity: dict[str, Any] | None = None
         cat_candidates = [
@@ -211,6 +261,13 @@ class ScenarioSimulationTool(BaseTool):
             f"| Sensitivity Benchmark / Lever | Reference Cohort | Statistical Shift (Unadjusted) | 95% Confidence Interval | Linear Extrapolation ({n_pop:,} units) |",
             "| :--- | :--- | :--- | :--- | :--- |",
         ]
+        if joint_package:
+            interv_summary = ", ".join(f"{it['driver']} {it['recommended_shift_pct']:+0.0f}%" for it in joint_package["interventions"])
+            lines.append(
+                f"| Multi-Driver Optimization ({interv_summary}) | All Population | "
+                f"{joint_package['predicted_delta_target']:+0.2f} ({joint_package['relative_change_pct']:+0.1f}%) | "
+                f"[Joint multivariate model] | {joint_package['projected_total_impact']:+,.2f} |"
+            )
         for s in scenarios:
             lines.append(
                 f"| Shift {s['driver']} {s['shift_pct']:+0.0f}% | All Population | {s['delta_target']:+0.2f} ({s['relative_change_pct']:+0.1f}%) | "
@@ -226,6 +283,12 @@ class ScenarioSimulationTool(BaseTool):
 
         # Build summary
         summary_parts: list[str] = []
+        if joint_package:
+            summary_parts.append(
+                f"Multi-driver joint optimization ({', '.join(joint_package['drivers_optimized'])}) projects a "
+                f"{joint_package['relative_change_pct']:+0.1f}% cumulative shift in '{target_column}' "
+                f"({joint_package['predicted_delta_target']:+0.2f} per unit; total impact: {joint_package['projected_total_impact']:+,.2f})."
+            )
         if scenarios:
             top_s = next((s for s in scenarios if s["shift_pct"] == 10.0), scenarios[0])
             summary_parts.append(
@@ -250,6 +313,7 @@ class ScenarioSimulationTool(BaseTool):
             "baseline_total": round(base_total, 2),
             "driver_model": driver_model,
             "scenarios": scenarios,
+            "joint_package": joint_package,
             "segment_opportunity": segment_opportunity,
             "decision_table": decision_table,
         }
@@ -314,6 +378,35 @@ class ScenarioSimulationTool(BaseTool):
                 surprise=0.4,
                 caveats=["Observational cohort difference; unadjusted for confounding or selection effects."],
             ))
+
+        joint_pkg = output.get("joint_package")
+        if joint_pkg and abs(joint_pkg.get("relative_change_pct", 0.0)) >= 1.0:
+            drvs_str = ", ".join(joint_pkg["drivers_optimized"])
+            headline = (
+                f"Multi-Driver Joint Optimization: Coordinated shift across {len(joint_pkg['drivers_optimized'])} levers ({drvs_str}) "
+                f"projects a {joint_pkg['relative_change_pct']:+0.1f}% cumulative shift in '{target}' "
+                f"({joint_pkg['predicted_delta_target']:+0.2f} per unit, total impact {joint_pkg['projected_total_impact']:+,.2f})."
+            )
+            results.append(Finding(
+                finding_id=f"joint_opt_{_slug(target)}",
+                kind="decision_scenario",
+                headline=headline,
+                detail=(
+                    f"Multivariate optimization identified coordinated interventions across {drvs_str}. "
+                    f"Projected mean moves to {joint_pkg['projected_mean']} across {output.get('population_size')} units."
+                ),
+                evidence=joint_pkg,
+                source_tool=self.name,
+                measure=target,
+                dimension=joint_pkg["drivers_optimized"][0] if joint_pkg["drivers_optimized"] else None,
+                effect=abs(joint_pkg["relative_change_pct"]) / 100.0,
+                effect_kind="lift",
+                confidence=0.80,
+                surprise=0.5,
+                objective_fit=0.90,
+                caveats=["Multivariate linear optimization; assumes independent additive driver interventions."],
+            ))
+
         return results
 
     def get_schema(self) -> dict[str, Any]:

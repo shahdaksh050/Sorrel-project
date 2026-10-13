@@ -188,9 +188,11 @@ class LLMClient:
             return int(explicit)
         if self._max_tokens_env:
             return self.max_tokens
+        stage = (self.stage or "").lower()
+        if "retry" in stage and self._is_reasoning_model():
+            return max(self.max_tokens, 8192)
         if self._is_reasoning_model():
             return max(self.max_tokens, 4096)
-        stage = (self.stage or "").lower()
         return next((v for k, v in _STAGE_MAX_TOKENS if k in stage), self.max_tokens)
 
     def _is_reasoning_model(self) -> bool:
@@ -436,12 +438,22 @@ class LLMClient:
             or (os.getenv(provider_env) if provider_env else None)
             or "adaptive"
         ).strip().lower()
+        stage_str = (self.stage or "").lower()
+        is_retry = "retry" in stage_str
+
         if resolved_effort in ("off", "0"):
             resolved_effort = "none"
         if resolved_effort == "adaptive":
-            stage_str = (self.stage or "").lower()
-            heavy = any(k in stage_str for k in ("stage2", "stage5", "initial", "synthesis", "report"))
-            resolved_effort = "medium" if heavy else "low"
+            if is_retry:
+                resolved_effort = "minimal"
+            elif self.provider == "openrouter":
+                # On OpenRouter (especially free models like cohere/north-mini-code:free),
+                # "medium" effort easily consumes the entire token budget with hidden reasoning.
+                # Default to "low" so completion tokens are guaranteed.
+                resolved_effort = "low"
+            else:
+                heavy = any(k in stage_str for k in ("stage2", "stage5", "initial", "synthesis", "report"))
+                resolved_effort = "medium" if heavy else "low"
 
         model_l = self.model.lower()
         if self.provider == "gemini" and any(k in model_l for k in ("thinking", "2.5", "3.")):
@@ -462,7 +474,7 @@ class LLMClient:
             # or never starts. OpenRouter's unified `reasoning` parameter caps
             # that; models without reasoning ignore it. "none" asks for the
             # least reasoning ("minimal").
-            effort = "minimal" if resolved_effort == "none" else resolved_effort
+            effort = "minimal" if (resolved_effort in ("none", "minimal") or is_retry) else resolved_effort
             if effort not in ("max", "xhigh", "high", "medium", "low", "minimal"):
                 effort = "low"
             create_kwargs.setdefault("extra_body", {})["reasoning"] = {"effort": effort}
@@ -547,20 +559,26 @@ class LLMClient:
                 "provider": self.provider,
             }
         if not content or not str(content).strip():
-            # Reasoning models (many OpenRouter free models) can spend the
-            # whole max_tokens budget on hidden reasoning and return no
-            # visible answer at all — name that case instead of a bare
-            # "None content", since the fix is budget/effort, not the prompt.
-            if finish_reason == "length":
+            msg_obj = resp.choices[0].message
+            raw_reasoning = (
+                getattr(msg_obj, "reasoning", None)
+                or getattr(msg_obj, "reasoning_content", None)
+                or (getattr(msg_obj, "model_extra", None) or {}).get("reasoning")
+                or (getattr(msg_obj, "model_extra", None) or {}).get("reasoning_content")
+            )
+            if raw_reasoning and isinstance(raw_reasoning, str) and ("{" in raw_reasoning and "}" in raw_reasoning):
+                content = raw_reasoning
+            elif finish_reason == "length":
                 raise ValueError(
                     f"{self.provider} model '{self.model}' used the whole "
                     f"max_tokens={self._call_max_tokens()} budget without producing an answer "
                     "(likely hidden reasoning) — raise LLM_MAX_TOKENS or lower "
                     "OPENROUTER_REASONING_EFFORT."
                 )
-            raise ValueError(
-                f"LLM returned empty content (finish_reason={finish_reason!r})."
-            )
+            else:
+                raise ValueError(
+                    f"LLM returned empty content (finish_reason={finish_reason!r})."
+                )
         return str(content)
 
     @staticmethod

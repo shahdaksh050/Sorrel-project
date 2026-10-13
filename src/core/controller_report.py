@@ -263,8 +263,21 @@ class ReportMixin(ControllerState):
                     f"Prioritize {level_name} segment: observed {pct} {direction} {f.measure} than baseline."
                 )
             elif f.kind == "driver" and f.measure and f.dimension:
+                if f.level:
+                    recommendations.append(
+                        f"Target {f.dimension} ('{f.level}') to optimize '{f.measure}'."
+                    )
+                else:
+                    recommendations.append(
+                        f"Optimize '{f.dimension}' as a verified multivariate driver of '{f.measure}'."
+                    )
+            elif f.kind == "decision_scenario" and f.dimension and f.measure:
                 recommendations.append(
-                    f"Monitor and manage '{f.dimension}' as a primary driver of '{f.measure}'."
+                    f"Evaluate intervention on '{f.dimension}': sensitivity simulation projects meaningful operational movement in '{f.measure}'."
+                )
+            elif f.kind == "interaction_synergy" and f.dimension and f.measure:
+                recommendations.append(
+                    f"Capitalize on multi-factor synergy: '{f.dimension}' joint levels amplify expected movement in '{f.measure}'."
                 )
             elif f.kind == "correlation" and f.measure and f.dimension:
                 recommendations.append(

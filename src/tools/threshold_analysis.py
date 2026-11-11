@@ -98,7 +98,6 @@ class ThresholdAnalysisTool(BaseTool):
         target_column: str | None = None,
         feature_column: str | None = None,
         max_candidates: int = 40,
-        **_: Any,
     ) -> dict[str, Any]:
         df = _read_df(file_path)
         if df.empty:
@@ -228,22 +227,29 @@ class ThresholdAnalysisTool(BaseTool):
                 f"statistically significant tipping point or structural break (p={p_val:.3g})."
             )
 
+        threshold = best_c if has_breakpoint else None
+        f_pvalue = round(p_val, 4)
         return {
             "summary": summary,
             "feature_column": feature_column,
             "target_column": target_column,
             "has_breakpoint": has_breakpoint,
-            "breakpoint": best_c if has_breakpoint else None,
-            "pre_breakpoint_slope": pre_slope,
-            "post_breakpoint_slope": post_slope,
+            "threshold": threshold,
+            "pre_slope": pre_slope,
+            "post_slope": post_slope,
             "slope_shift_pct": pct_slope_shift,
             "linear_slope": b_linear,
             "linear_r2": round(r2_linear, 4),
             "piecewise_r2": round(r2_piecewise, 4),
             "r2_gain": round(r2_gain, 4),
             "f_statistic": round(f_stat, 3),
-            "p_value": round(p_val, 4),
+            "f_pvalue": f_pvalue,
             "sample_size": n,
+            # Deprecated compatibility aliases.
+            "breakpoint": threshold,
+            "pre_breakpoint_slope": pre_slope,
+            "post_breakpoint_slope": post_slope,
+            "p_value": f_pvalue,
         }
 
     def findings(
@@ -252,16 +258,17 @@ class ThresholdAnalysisTool(BaseTool):
         profile: DatasetProfile | None = None,
         metadata: DatasetMetadata | None = None,
     ) -> list[Finding]:
-        if not output.get("has_breakpoint") or output.get("breakpoint") is None:
+        threshold = output.get("threshold", output.get("breakpoint"))
+        if not output.get("has_breakpoint") or threshold is None:
             return []
 
         feat = output["feature_column"]
         target = output["target_column"]
-        c = output["breakpoint"]
-        pre_m = output["pre_breakpoint_slope"]
-        post_m = output["post_breakpoint_slope"]
+        c = threshold
+        pre_m = output.get("pre_slope", output.get("pre_breakpoint_slope"))
+        post_m = output.get("post_slope", output.get("post_breakpoint_slope"))
         shift_pct = output.get("slope_shift_pct", 0.0)
-        p_val = output.get("p_value", 0.0)
+        p_val = output.get("f_pvalue", output.get("p_value", 0.0))
         r2_gain = output.get("r2_gain", 0.0)
         n = output.get("sample_size", 0)
 

@@ -12,6 +12,11 @@
 [server]
 # Serves ./static (the self-hosted fonts and the vendored Vega bundles) at /app/static.
 enableStaticServing = true
+# Keep the browser/server channel alive while a separate analysis worker is
+# busy, and retain a detached session long enough for an ordinary refresh or
+# short network interruption to reattach to its durable run record.
+websocketPingInterval = 20
+disconnectedSessionTTL = 600
 
 [theme]
 font = "'Geist', 'Segoe UI', sans-serif"

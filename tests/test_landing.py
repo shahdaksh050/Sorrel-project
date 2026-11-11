@@ -222,6 +222,17 @@ def test_streamlit_bridge_is_intact() -> None:
         assert f'id="{element_id}"' in content
 
 
+def test_streamlit_messages_are_origin_and_source_validated() -> None:
+    content = INDEX_HTML.read_text(encoding="utf-8")
+    assert "new URL(document.referrer).origin" in content
+    assert "event.source !== window.parent" in content
+    assert "event.origin !== parentOrigin" in content
+    assert "window.parent.postMessage(out, parentOrigin)" in content
+    assert "window.parent.postMessage(outData, parentOrigin)" in content
+    assert "postMessage(out, '*')" not in content
+    assert "postMessage(outData, '*')" not in content
+
+
 # ── The page must work with no network and when the 3D scene cannot start ────────────────────
 COMPONENT = INDEX_HTML.parent
 

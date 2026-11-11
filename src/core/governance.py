@@ -235,7 +235,9 @@ class CodeGovernor:
         llm_usage = llm_usage or {}
         llm_audit = Path(self.output_dir) / AUDIT_SUBDIR / LLM_AUDIT_FILENAME
         llm_audit_write_failures = _llm_audit_write_failures.get(str(llm_audit.parent), 0)
-        audit_integrity_ok = not self.audit_write_failures and not llm_audit_write_failures
+        # This reports whether this process successfully appended its audit
+        # records.  It is not evidence of tamper-proof storage or log integrity.
+        audit_write_ok = not self.audit_write_failures and not llm_audit_write_failures
         return {
             "llm_calls": int(llm_usage.get("call_count", 0) or 0),
             "llm_tokens": int(llm_usage.get("total_tokens", 0) or 0),
@@ -249,8 +251,13 @@ class CodeGovernor:
             "code_refusals": self.refusals,
             "execution_budget": max_code_executions(),
             "sandbox_backends": sorted(self.backends),
-            "audit_log": str(self.audit_path) if (self.executions or self.refusals) else None,
+            "audit_log": str(self.audit_path) if self.audit_path.is_file() else None,
+            "audit_event_count": self.executions + self.refusals,
+            "llm_audit_event_count": int(llm_usage.get("call_count", 0) or 0),
             "audit_write_failures": self.audit_write_failures,
             "llm_audit_write_failures": llm_audit_write_failures,
-            "audit_integrity_ok": audit_integrity_ok,
+            "audit_write_ok": audit_write_ok,
+            # Deprecated compatibility alias.  It has the same limited
+            # write-success semantics and must not be read as tamper evidence.
+            "audit_integrity_ok": audit_write_ok,
         }

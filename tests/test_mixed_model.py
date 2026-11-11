@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.core.profiler import profile_dataframe
 from src.tools.mixed_model import MixedModelAnalysisTool
@@ -49,6 +50,28 @@ def test_recovers_low_icc(tmp_path: Path) -> None:
     out = _run(tmp_path, _grouped(np.sqrt(0.3 / 0.7), seed=11), target_column="y")
     assert out["group_column"] == "site" and out["target_column"] == "y"
     assert abs(out["icc"] - 0.3) < 0.08
+    assert out["method"].startswith("mixed")
+
+
+def test_fit_is_isolated_from_formula_namespace_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior formula-user cannot poison the mixed-model fit in-process."""
+    import statsmodels.formula.api as formula_api
+
+    def poisoned(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise AssertionError("formula namespace should not be used")
+
+    monkeypatch.setattr(formula_api, "mixedlm", poisoned)
+    monkeypatch.setattr(formula_api, "ols", poisoned)
+    out = _run(
+        tmp_path,
+        _grouped(3.0),
+        target_column="y",
+        group_column="site",
+        feature_columns=["x"],
+    )
     assert out["method"].startswith("mixed")
 
 

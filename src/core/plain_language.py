@@ -154,11 +154,16 @@ _P_ADJ_RE = re.compile(
 )
 _ADJ_HOLDS = "still so after correcting for the other tests"
 _ADJ_FAILS = "not after correcting for the other tests"
+_ADJ_HOLDS_STANDALONE = (
+    "a result unlikely to be down to chance after correcting for the other tests"
+)
 
 
 def _adjusted_phrase(m: re.Match[str]) -> str:
     holds = _p_phrase(m.group("op"), _f(m.group("val"))) != _P_WEAK
-    phrase = _ADJ_HOLDS if holds else _ADJ_FAILS
+    prior_text = m.string[:m.start()]
+    has_prior_raw_p = _P_RE.search(prior_text) is not None
+    phrase = (_ADJ_HOLDS if has_prior_raw_p else _ADJ_HOLDS_STANDALONE) if holds else _ADJ_FAILS
     return f"{m.group('lead') or ''}{m.group('sep') or ''}{phrase}{m.group('tail') or ''}"
 
 
@@ -169,7 +174,7 @@ _STAT_RE = re.compile(
 )
 _CI_RE = re.compile(
     rf"(?:\b\d{{2}}(?:\.\d+)?\s*%\s*)?\b(?:CI|(?i:confidence interval))\s*(?:of\s*)?[=:]?\s*[\[(]?\s*"
-    rf"(?P<lo>{_NUM})\s*(?:,|;|–|—|\bto\b|-)\s*(?P<hi>{_NUM})\s*[\])]?"
+    rf"(?P<lo>{_NUM})\s*(?:,|;|–|—|\bto\b|-)\s*(?P<hi>{_NUM})(?P<close>\s*[\])])?"
 )
 _N_RE = re.compile(r"(?<![\w.])[nN]\s*=\s*(\d+(?:,\d{3})*)")
 _BIG_RE = re.compile(r"(?<![\w.,])(?P<sign>-?)(?P<cur>[$€£₹]?)(?P<num>\d{1,3}(?:,\d{3}){2,})(?![\d,]|\.\d)")
@@ -226,7 +231,16 @@ def plainify(text: str) -> str:
     if not text:
         return text
     out = text
-    out = _CI_RE.sub(lambda m: f"likely between {m.group('lo')} and {m.group('hi')}", out)
+    def _ci_phrase(match: re.Match[str]) -> str:
+        close = match.group("close") or ""
+        matched = match.group(0)
+        has_inner_open = "[" in matched or bool(
+            re.search(r"(?:CI|interval)\s*(?:of\s*)?[=:]?\s*\(", matched, re.IGNORECASE)
+        )
+        suffix = "" if has_inner_open else close
+        return f"likely between {match.group('lo')} and {match.group('hi')}{suffix}"
+
+    out = _CI_RE.sub(_ci_phrase, out)
     for pattern, noun in _RATIO_RES:
         def _ratio(m: re.Match[str], noun: str = noun) -> str:
             return _ratio_words(noun, _f(m.group("val")))

@@ -42,7 +42,10 @@ def test_unpivot_temporal_frame() -> None:
 
 def test_detect_and_strip_summary_rows() -> None:
     df = pd.DataFrame({
-        "item": ["Widget A", "Widget B", "Widget C", "Widget D", "Widget E", "Widget F", "Grand Total"],
+        "item": pd.Series(
+            ["Widget A", "Widget B", "Widget C", "Widget D", "Widget E", "Widget F", "Grand Total"],
+            dtype="string",
+        ),
         "sales": [10, 20, 30, 40, 50, 60, 210],
     })
     cleaned_df, notes = detect_and_strip_summary_rows(df)

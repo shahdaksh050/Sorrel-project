@@ -203,7 +203,7 @@ def test_dependence_icc_wired_end_to_end(tmp_path: Path) -> None:
     )
     result = controller.analyze(file_path=str(csv_path))
 
-    assert result["status"] == "complete"
+    assert result["status"] in {"succeeded", "succeeded_with_warnings"}
     dep_findings = [
         f for f in result["findings"] if f.get("source_tool") == "dependence_audit"
     ]

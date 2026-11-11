@@ -16,16 +16,21 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
-from dataclasses import dataclass
-from functools import lru_cache
+import warnings
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, OneToOneFeatureMixin, TransformerMixin
 
+from src.core.compute_policy import (
+    BackendDecision,
+    ComputeBackend,
+    ComputePolicy,
+    select_xgboost_backend,
+)
 from src.core.findings import Finding
 from src.core.model_io import save_model
 from src.tools.base import BaseTool, ToolExecutionError
@@ -38,6 +43,7 @@ if TYPE_CHECKING:
     from src.core.profiler import DatasetProfile
 from src.tools.ml_common import (
     OVERFIT_THRESHOLD,
+    _build_cv_policy,
     _cap_train_rows,
     _encode_target,
     _prepare_features,
@@ -119,18 +125,9 @@ _ORDINAL_CARD_MIN = 3
 _ORDINAL_CARD_MAX = 10
 
 
-@lru_cache(maxsize=1)
 def _detect_cuda_gpu() -> bool:
-    """Whether an NVIDIA GPU answers `nvidia-smi` (probed once per process;
-    importing torch just to ask would cost seconds and gigabytes)."""
-    try:
-        res = subprocess.run(
-            ["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            check=False, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return res.returncode == 0
+    """Backward-compatible verified XGBoost CUDA capability check."""
+    return select_xgboost_backend(ComputePolicy(mode="cuda"), 1, 1).backend == "cuda"
 
 
 #: Hyperparameter search never sees more than this many training rows.
@@ -503,6 +500,7 @@ class _TrainContext:
     output_dir: str
     treatments: list[str]
     overfit_warnings: list[str]
+    xgboost_decision: BackendDecision
 
 
 class _TrainRun(NamedTuple):
@@ -514,6 +512,9 @@ class _TrainRun(NamedTuple):
     overfit_warnings: list[str]
     X_train: pd.DataFrame
     X_test: pd.DataFrame
+    cv_folds: int | None
+    cv_scheme: str
+    cv_constraint_rationale: str | None
 
 
 class TrainModelTool(BaseTool):
@@ -548,6 +549,7 @@ class TrainModelTool(BaseTool):
         "ui_test_size": "test_size",
         "ui_n_cv_folds": "n_cv_folds",
         "ui_tune_hyperparameters": "tune_hyperparameters",
+        "ui_compute_backend": "compute_backend",
     }
 
     CLASSIFICATION_MODELS: ClassVar[list[str]] = ["random_forest", "xgboost", "logistic_regression"]
@@ -618,16 +620,19 @@ class TrainModelTool(BaseTool):
         found: list[Finding] = []
         models_trained = output.get("models_trained") or {}
         best_model = output.get("best_model")
-        best = models_trained.get(best_model) or {}
+        has_leakage = bool(output.get("is_leaked") or output.get("leakage_warnings") or output.get("model_training_gated"))
+        score_model = best_model
+        if not score_model and has_leakage and models_trained:
+            score_model = next(iter(models_trained.keys()))
+        best = models_trained.get(score_model) or {}
         task_type = output.get("task_type")
         target_column = metadata.target_column if metadata else None
         cv_mean = best.get("cv_mean")
         cv_std = best.get("cv_std")
         baseline = output.get("baseline_cv_mean")
         lift = output.get("lift_over_baseline")
-        has_leakage = bool(output.get("is_leaked") or output.get("leakage_warnings"))
 
-        if best_model and best_model != "none" and isinstance(cv_mean, (int, float)):
+        if (best_model or (has_leakage and score_model)) and score_model != "none" and isinstance(cv_mean, (int, float)):
             scoring_label = "F1 (weighted)" if task_type == "classification" else "R2"
             # Lift below this over a no-skill predictor is not a result.
             weak = isinstance(lift, (int, float)) and lift < 0.05
@@ -667,7 +672,7 @@ class TrainModelTool(BaseTool):
                         "models_trained": {
                             name: res.get("cv_mean") for name, res in models_trained.items()
                         },
-                        "best_model": best_model,
+                        "best_model": None if has_leakage else best_model,
                         "baseline_cv_mean": baseline,
                         "lift_over_baseline": lift,
                         "leakage_detected": has_leakage,
@@ -732,6 +737,7 @@ class TrainModelTool(BaseTool):
         split_strategy: str = "random",
         time_column: str | None = None,
         group_column: str | None = None,
+        compute_backend: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
 
@@ -796,11 +802,20 @@ class TrainModelTool(BaseTool):
             )
 
         Path(output_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            base_policy = ComputePolicy.from_env()
+            compute_policy = replace(
+                base_policy,
+                mode=cast(ComputeBackend, compute_backend) if compute_backend else base_policy.mode,
+            )
+        except ValueError as exc:
+            raise ToolExecutionError(f"Invalid compute_backend: {compute_backend!r}") from exc
+        xgboost_decision = select_xgboost_backend(compute_policy, len(X), X.shape[1])
 
         if task_type in {"classification", "regression"}:
             run = self._train_supervised(
                 X, y, df, models, task_type, test_size, n_cv_folds, max_depth, split_strategy,
-                group_column, do_tune, balanced, scale_pos_weight, output_dir, treatments,
+                group_column, do_tune, balanced, scale_pos_weight, output_dir, treatments, xgboost_decision,
             )
         else:
             run = self._train_clustering(X, models, task_type, max_depth, output_dir)
@@ -830,6 +845,7 @@ class TrainModelTool(BaseTool):
             )
 
         is_leaked = bool(leakage_warnings)
+        model_training_gated = is_leaked
         if is_leaked:
             # Hard-gate persistence and promotion for leaked models: remove serialized weights
             for m_res in results.values():
@@ -854,11 +870,16 @@ class TrainModelTool(BaseTool):
             if leakage_warnings
             else ""
         )
+        selected_telemetry = results.get(best_model, {}).get(
+            "compute_telemetry",
+            BackendDecision("cpu", "cpu", "selected_model_cpu_only").as_telemetry(),
+        )
+        best_model_display = "None (gated due to leakage)" if is_leaked else best_model
         return {
             "summary": (
                 f"Trained {len(results)} model(s) [{task_type}, "
                 f"split={split_strategy}]. "
-                f"Best: {best_model} | "
+                f"Best: {best_model_display} | "
                 f"CV mean={best_summary.get('cv_mean', 'N/A')} "
                 f"± {best_summary.get('cv_std', 'N/A')}."
                 + (
@@ -870,7 +891,8 @@ class TrainModelTool(BaseTool):
             ),
             "task_type": task_type,
             "models_trained": results,
-            "best_model": best_model,
+            "best_model": None if is_leaked else best_model,
+            "model_training_gated": model_training_gated,
             "baseline_cv_mean": baseline_cv_mean,
             "lift_over_baseline": lift_over_baseline,
             "class_labels": class_labels,
@@ -880,12 +902,17 @@ class TrainModelTool(BaseTool):
             "treatments_applied": treatments,
             "hyperparameter_tuning": do_tune,
             "test_size": test_size,
-            "n_cv_folds": n_cv_folds,
+            "n_cv_folds": run.cv_folds,
+            "requested_n_cv_folds": n_cv_folds,
+            "cv_scheme": run.cv_scheme,
+            "cv_constraint_rationale": run.cv_constraint_rationale,
+            "selected_model_status": best_summary.get("selection_status", "not_selected"),
             "train_samples": len(X_train),
             "test_samples": len(X_test),
             "split_strategy": split_strategy if task_type in {"classification", "regression"} else "n/a",
             "time_column": time_column if split_strategy == "time_series" else None,
             "group_column": group_column if split_strategy == "panel" else None,
+            **selected_telemetry,
         }
 
     @staticmethod
@@ -931,6 +958,7 @@ class TrainModelTool(BaseTool):
     def _fit_and_score(self, model_name: str, estimator: Any, ctx: _TrainContext) -> dict[str, Any]:
         """Fit one model (tuning and a GPU->CPU refit if asked), score it on the
         train, test and CV splits, save it and return its results entry."""
+        from sklearn.exceptions import ConvergenceWarning
         from sklearn.model_selection import cross_val_score
         from sklearn.pipeline import Pipeline
 
@@ -942,14 +970,20 @@ class TrainModelTool(BaseTool):
         best_params: dict[str, Any] = {}
         cv_mean: float | None = None
         cv_std: float | None = None
+        warning_evidence: list[str] = []
+        retry_performed = False
+        gpu_fallback_reason: str | None = None
+        tune_convergence_warning = False
         if ctx.do_tune:
             X_tune, y_tune, groups_tune = _tuning_sample(
                 ctx.X_train, ctx.y_train, ctx.groups_train, ctx.split_strategy, ctx.task_type
             )
-            model, best_params, tune_cv_mean, tune_cv_std = self._tune(
+            model, best_params, tune_cv_mean, tune_cv_std, tune_warnings = self._tune(
                 model, model_name, X_tune, y_tune, ctx.cv, ctx.scoring, ctx.max_depth,
                 groups=groups_tune,
             )
+            warning_evidence.extend(f"tuning: {warning}" for warning in tune_warnings)
+            tune_convergence_warning = any("converg" in warning.lower() for warning in tune_warnings)
             # The search's own CV score is only the model's score when
             # it saw every training row; otherwise cross_val_score below
             # measures the tuned model on the full training set.
@@ -957,17 +991,35 @@ class TrainModelTool(BaseTool):
                 cv_mean, cv_std = tune_cv_mean, tune_cv_std
 
         try:
-            model.fit(ctx.X_train, ctx.y_train)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                model.fit(ctx.X_train, ctx.y_train)
+            warning_evidence.extend(str(item.message) for item in caught)
+            fit_convergence_warning = any(issubclass(item.category, ConvergenceWarning) for item in caught)
+            if fit_convergence_warning and model_name == "logistic_regression":
+                retry_performed = True
+                model.set_params(model__max_iter=2000)
+                with warnings.catch_warnings(record=True) as retry_caught:
+                    warnings.simplefilter("always")
+                    model.fit(ctx.X_train, ctx.y_train)
+                warning_evidence.extend(f"retry: {item.message}" for item in retry_caught)
+                fit_convergence_warning = any(issubclass(item.category, ConvergenceWarning) for item in retry_caught)
         except Exception as fit_exc:
             if any(k in str(fit_exc).lower() for k in ("cuda", "gpu", "out of memory", "device")):
                 ctx.treatments.append(f"{model_name}: GPU fit failed ({fit_exc}); refit on CPU.")
                 estimator = self._build_model(
                     model_name, ctx.task_type, ctx.max_depth, balanced=ctx.balanced,
                     scale_pos_weight=ctx.scale_pos_weight, force_cpu=True,
+                    xgboost_decision=ctx.xgboost_decision,
                 )
+                gpu_fallback_reason = f"xgboost_cuda_fit_failed:{type(fit_exc).__name__}"
                 model = Pipeline([("prep", preprocessor), ("model", estimator)])
                 model.set_params(**{f"model__{k}": v for k, v in best_params.items()})
-                model.fit(ctx.X_train, ctx.y_train)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    model.fit(ctx.X_train, ctx.y_train)
+                warning_evidence.extend(str(item.message) for item in caught)
+                fit_convergence_warning = any(issubclass(item.category, ConvergenceWarning) for item in caught)
             else:
                 raise
 
@@ -980,11 +1032,16 @@ class TrainModelTool(BaseTool):
         # already measured this with the same splitter/scorer, so
         # _tune's cv_mean/cv_std above are reused instead of paying
         # for a second cross_val_score pass.
+        cv_convergence_warning = False
         if cv_mean is None:
-            cv_scores = cross_val_score(
-                model, ctx.X_train, ctx.y_train, groups=ctx.groups_train,
-                cv=ctx.cv, scoring=ctx.scoring, n_jobs=1,
-            )
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                cv_scores = cross_val_score(
+                    model, ctx.X_train, ctx.y_train, groups=ctx.groups_train,
+                    cv=ctx.cv, scoring=ctx.scoring, n_jobs=1,
+                )
+            warning_evidence.extend(f"cv: {item.message}" for item in caught)
+            cv_convergence_warning = any(issubclass(item.category, ConvergenceWarning) for item in caught)
             cv_mean = round(float(cv_scores.mean()), 4)
             cv_std = round(float(cv_scores.std()), 4)
 
@@ -998,10 +1055,27 @@ class TrainModelTool(BaseTool):
                 f"— possible overfitting. Consider reducing ctx.max_depth or adding regularisation."
             )
 
+        unconverged = fit_convergence_warning or cv_convergence_warning or tune_convergence_warning
+        fitted_estimator = model.named_steps.get("model")
+        n_iter_value = getattr(fitted_estimator, "n_iter_", None)
+        if isinstance(n_iter_value, np.ndarray):
+            n_iter: int | list[int] | None = [int(value) for value in n_iter_value.ravel().tolist()]
+        elif n_iter_value is None:
+            n_iter = None
+        else:
+            n_iter = int(n_iter_value)
+
         # Save model
         model_path = Path(ctx.output_dir) / f"{model_name}.pkl"
         save_model(model, model_path)
 
+        telemetry = (
+            BackendDecision("cpu", "cpu", gpu_fallback_reason, ctx.xgboost_decision.estimated_vram_bytes)
+            if gpu_fallback_reason is not None
+            else ctx.xgboost_decision
+            if model_name == "xgboost"
+            else BackendDecision("cpu", "cpu", "model_has_no_cuda_backend")
+        )
         return {
             "train_metrics": train_metrics,
             "test_metrics": test_metrics,
@@ -1010,6 +1084,15 @@ class TrainModelTool(BaseTool):
             "train_test_gap": gap,
             "model_path": str(model_path),
             "best_params": best_params,
+            "converged": not unconverged,
+            "n_iter": n_iter,
+            "fit_warnings": warning_evidence,
+            "retry_performed": retry_performed,
+            "selection_status": "rejected_unconverged" if unconverged else "eligible",
+            "overfit_warnings": [
+                warning for warning in ctx.overfit_warnings if warning.startswith(f"{model_name}:")
+            ],
+            "compute_telemetry": telemetry.as_telemetry(),
         }
 
     def _train_supervised(
@@ -1029,6 +1112,7 @@ class TrainModelTool(BaseTool):
         scale_pos_weight: float,
         output_dir: str,
         treatments: list[str],
+        xgboost_decision: BackendDecision,
     ) -> _TrainRun:
         """Split, train every requested model with CV, pick the best and score a
         no-skill baseline on the same folds."""
@@ -1044,6 +1128,11 @@ class TrainModelTool(BaseTool):
         X_train, y_train, groups_train, orig_train_len = _cap_train_rows(
             X_train, y_train, groups_train, split_strategy, task_type
         )
+        cv, cv_folds, cv_scheme, cv_constraint_rationale = _build_cv_policy(
+            X_train, y_train, groups_train, split_strategy, task_type, n_cv_folds
+        )
+        if cv_constraint_rationale:
+            treatments.append(cv_constraint_rationale)
         if orig_train_len is not None:
             treatments.append(
                 f"Subsampled training set to {len(X_train):,} rows (from {orig_train_len:,}) "
@@ -1069,7 +1158,7 @@ class TrainModelTool(BaseTool):
             X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test,
             groups_train=groups_train, split_strategy=split_strategy, cv=cv,
             scoring=scoring, output_dir=output_dir, treatments=treatments,
-            overfit_warnings=overfit_warnings,
+            overfit_warnings=overfit_warnings, xgboost_decision=xgboost_decision,
         )
 
         for model_name in models:
@@ -1077,6 +1166,7 @@ class TrainModelTool(BaseTool):
                 estimator = self._build_model(
                     model_name, task_type, max_depth,
                     balanced=balanced, scale_pos_weight=scale_pos_weight,
+                    xgboost_decision=xgboost_decision,
                 )
             except Exception as exc:
                 build_errors.append(f"{model_name}: build failed — {exc}")
@@ -1100,6 +1190,11 @@ class TrainModelTool(BaseTool):
             )
 
         best_model = self._pick_best(results)
+        for name, result in results.items():
+            if name == best_model:
+                result["selection_status"] = "selected"
+            elif result.get("selection_status") == "eligible":
+                result["selection_status"] = "rejected_lower_rank"
 
         # A CV score only means something against what a no-skill
         # predictor scores on the same folds — F1 0.82 on an 80%-majority
@@ -1128,7 +1223,10 @@ class TrainModelTool(BaseTool):
         except Exception:
             baseline_cv_mean = None
 
-        return _TrainRun(results, best_model, baseline_cv_mean, overfit_warnings, X_train, X_test)
+        return _TrainRun(
+            results, best_model, baseline_cv_mean, overfit_warnings, X_train, X_test,
+            cv_folds, cv_scheme, cv_constraint_rationale,
+        )
 
     def _train_clustering(
         self, X: pd.DataFrame, models: list[str], task_type: str, max_depth: int, output_dir: str
@@ -1160,7 +1258,7 @@ class TrainModelTool(BaseTool):
                 f"Errors: {'; '.join(build_errors)}"
             )
         best_model = next(iter(results))
-        return _TrainRun(results, best_model, None, [], X_train, X_test)
+        return _TrainRun(results, best_model, None, [], X_train, X_test, None, "n/a", None)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1174,6 +1272,7 @@ class TrainModelTool(BaseTool):
         balanced: bool = False,
         scale_pos_weight: float = 1.0,
         force_cpu: bool = False,
+        xgboost_decision: BackendDecision | None = None,
     ) -> Any:
         from sklearn.cluster import DBSCAN, KMeans
         from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -1214,7 +1313,7 @@ class TrainModelTool(BaseTool):
                 "n_jobs": -1,
                 "tree_method": "hist",
             }
-            if not force_cpu and _detect_cuda_gpu():
+            if not force_cpu and xgboost_decision is not None and xgboost_decision.backend == "cuda":
                 xgb_kwargs["device"] = "cuda"
 
             model_map["xgboost_classification"] = XGBClassifier(
@@ -1262,7 +1361,7 @@ class TrainModelTool(BaseTool):
         scoring: str,
         max_depth: int = 6,
         groups: pd.Series[Any] | None = None,
-    ) -> tuple[Any, dict[str, Any], float | None, float | None]:
+    ) -> tuple[Any, dict[str, Any], float | None, float | None, list[str]]:
         """
         Light randomized hyperparameter search; returns
         (best_model, best_params, cv_mean, cv_std).
@@ -1286,7 +1385,7 @@ class TrainModelTool(BaseTool):
 
         grid = self.TUNING_GRIDS.get(model_name)
         if not grid:
-            return model, {}, None, None
+            return model, {}, None, None, []
         grid = dict(grid)
         if "max_depth" in grid:
             grid["max_depth"] = sorted({max(2, max_depth // 2), max(2, max_depth - 1), max_depth})
@@ -1303,7 +1402,9 @@ class TrainModelTool(BaseTool):
             random_state=42,
             n_jobs=1,
         )
-        search.fit(X_train, y_train, groups=groups)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            search.fit(X_train, y_train, groups=groups)
         cv_mean = round(float(search.best_score_), 4)
         # std_test_score at best_index_, not std(mean_test_score) across all
         # candidates — the latter is spread *between configurations*, not the
@@ -1314,7 +1415,7 @@ class TrainModelTool(BaseTool):
         best_params = {
             k.removeprefix("model__"): v for k, v in search.best_params_.items()
         }
-        return search.best_estimator_, best_params, cv_mean, cv_std
+        return search.best_estimator_, best_params, cv_mean, cv_std, [str(item.message) for item in caught]
 
     def _evaluate(
         self, model: Any, X: pd.DataFrame, y: pd.Series, task_type: str
@@ -1369,6 +1470,10 @@ class TrainModelTool(BaseTool):
         if not results:
             return "none"
 
+        eligible = [name for name, result in results.items() if result.get("selection_status") != "rejected_unconverged"]
+        if not eligible:
+            return "none"
+
         def _score(name: str) -> float:
             r = results[name]
             cv_mean = float(r.get("cv_mean", -float("inf")))
@@ -1376,7 +1481,7 @@ class TrainModelTool(BaseTool):
             penalty = OVERFIT_PENALTY_WEIGHT * max(0.0, gap - OVERFIT_THRESHOLD)
             return cv_mean - penalty
 
-        return max(results, key=_score)
+        return max(eligible, key=_score)
 
     def get_schema(self) -> dict[str, Any]:
         return {
@@ -1421,6 +1526,11 @@ class TrainModelTool(BaseTool):
             "group_column": {
                 "type": "string",
                 "description": "Entity/group column for split_strategy='panel' (e.g. customer_id). Auto-filled from the profile.",
+                "required": False,
+            },
+            "compute_backend": {
+                "type": "string",
+                "description": "auto | cpu | cuda. CUDA is verified and safely falls back to CPU.",
                 "required": False,
             },
         }

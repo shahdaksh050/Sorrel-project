@@ -48,6 +48,7 @@ import pandas as pd
 
 from src.core.chart_spec import chart_has_data, spec_to_vegalite, validate_chart_spec
 from src.core.chart_theme import humanize_label
+from src.core.column_patterns import find_benchmark_pairs
 from src.core.dashboard_charts_basic import (
     _HEATMAP_GROUP_DISTANCE,
     _SAMPLE_SEED,
@@ -124,6 +125,7 @@ from src.core.dashboard_common import (
     _slug,
     _to_primitive,
     dashboard_to_json,
+    validate_chart_linkage,
 )
 from src.core.plain_language import fallback_caption
 from src.core.profiler import ColumnProfile, DatasetProfile
@@ -228,6 +230,7 @@ __all__ = [
     "dashboard_to_json",
     "designed_chart",
     "merge_designed",
+    "validate_chart_linkage",
 ]
 
 
@@ -389,6 +392,7 @@ def _finding_columns(findings: list[dict[str, Any]], known: set[str]) -> set[str
 
 def _tag(chart: ChartSpec, finding: dict[str, Any]) -> ChartSpec:
     chart.finding_id = finding.get("finding_id") or f"{finding.get('kind')}::{finding.get('measure')}"
+    chart.normalise_linkage()
     chart.priority = float(finding.get("importance") or 0.0)
     chart.layer = finding.get("layer") or "analyst"
     chart.caption = fallback_caption(finding) or finding.get("headline")
@@ -480,6 +484,7 @@ def _attach_finding_metadata(charts: list[ChartSpec], findings: list[dict[str, A
             if chart is None or chart.finding_id is not None or not _finding_fits_chart(finding, chart):
                 continue
             chart.finding_id = fid
+            chart.normalise_linkage()
             chart.priority = float(finding.get("importance") or 0.0)
             chart.layer = finding.get("layer") or "analyst"
             chart.caption = fallback_caption(finding) or finding.get("headline")
@@ -536,6 +541,8 @@ def merge_designed(
         if not (c.chart_id in effective_drops and c.finding_id is None and not c.chart_id.startswith("llm_"))
     ]
     merged = [c for c in kept + valid_designed if _has_data(c)]
+    for chart in merged:
+        chart.normalise_linkage()
     merged.sort(key=lambda c: (
         0 if c.finding_id
         else 2 if (c.priority == 0 and not c.chart_id.startswith("llm_"))
@@ -696,8 +703,7 @@ def build_dashboard(
     charts.extend(c for c in candidates if c is not None)
 
     # Universal Benchmark Parity Plots (Observed vs Expected)
-    from src.tools.structured_features import _find_benchmark_pairs
-    for obs_col, exp_col, stem in _find_benchmark_pairs(list(df.columns.astype(str)))[:2]:
+    for obs_col, exp_col, stem in find_benchmark_pairs(list(df.columns.astype(str)))[:2]:
         parity = _safe(_parity_chart, df, obs_col, exp_col, col_by_name, stem)
         if parity is not None:
             charts.append(parity)
@@ -795,4 +801,7 @@ def build_dashboard(
     charts.sort(key=lambda c: (
         0 if c.finding_id or c.chart_id.startswith("llm_") else 1 if id(c) not in eda_ids else 2, -c.priority,
     ))
-    return charts[:MAX_CHARTS]
+    selected = charts[:MAX_CHARTS]
+    for chart in selected:
+        chart.normalise_linkage()
+    return selected

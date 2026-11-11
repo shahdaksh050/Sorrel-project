@@ -7,7 +7,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.core.dashboard import MAX_POINTS, ChartSpec, build_dashboard, dashboard_to_json
+from src.core.dashboard import (
+    MAX_POINTS,
+    ChartSpec,
+    build_dashboard,
+    dashboard_to_json,
+    validate_chart_linkage,
+)
 from src.core.profiler import profile_dataframe
 
 RNG = np.random.default_rng(7)
@@ -260,6 +266,39 @@ class TestSpecQuality:
         parsed = json.loads(dashboard_to_json(charts))
         assert len(parsed) == len(charts)
         assert all("spec" in c and "title" in c for c in parsed)
+
+    def test_every_serialised_chart_has_evidence_or_context_linkage(
+        self, churn_df: pd.DataFrame, train_result: dict  # type: ignore[type-arg]
+    ) -> None:
+        profile = profile_dataframe(churn_df, target_column="churn")
+        payload = json.loads(dashboard_to_json(build_dashboard(
+            churn_df,
+            profile,
+            target_column="churn",
+            task_type="classification",
+            tool_results=[train_result],
+        )))
+        assert payload
+        assert all(validate_chart_linkage(chart) is None for chart in payload)
+        assert all(
+            (chart["chart_role"] == "evidence" and chart["finding_id"])
+            or (chart["chart_role"] == "context" and chart["context_id"])
+            for chart in payload
+        )
+
+    def test_chart_spec_context_identifier_is_stable_and_evidence_wins(self) -> None:
+        chart = ChartSpec(
+            chart_id="baseline_distribution",
+            title="Baseline",
+            description="Baseline context.",
+            spec={"data": {"values": []}},
+        )
+        assert chart.to_dict()["context_id"] == "context:baseline_distribution"
+        chart.finding_id = "finding_1"
+        serialised = chart.to_dict()
+        assert serialised["chart_role"] == "evidence"
+        assert serialised["finding_id"] == "finding_1"
+        assert serialised["context_id"] is None
 
     def test_inline_data_respects_point_cap(self) -> None:
         n = 5000

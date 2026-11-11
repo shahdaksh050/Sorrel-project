@@ -68,7 +68,6 @@ class StepMixin(ControllerState):
         quarantined = output.get("quarantined_columns") or []
         self.memory.set_context("semantic_quarantine", quarantined)
         try:
-            from src.core.agenda import build_agenda
             from src.core.analysis_io import read_analysis_df
             from src.core.domains import infer_domains
             from src.core.profiler import profile_dataframe
@@ -112,7 +111,7 @@ class StepMixin(ControllerState):
                 for item in quarantined
                 if isinstance(item, dict) and item.get("source_column")
             }
-            agenda = build_agenda(profile, decision, self.objective, excluded_columns=excluded)
+            agenda = self._build_question_agenda(profile, decision, excluded_columns=excluded)
             self.memory.set_context("question_agenda", [question.to_dict() for question in agenda])
         except Exception as exc:
             degradations = list(self.memory.get_context("degradations") or [])
@@ -602,6 +601,10 @@ class StepMixin(ControllerState):
             self.memory.increment_retry(step.step_number)
 
         if step.tool_name == "train_model" and result.status == "success":
+            if result.output.get("model_training_gated"):
+                self.memory.set_context("model_training_gated", True)
+                self.memory.set_context("best_model_path", None)
+                self.memory.set_context("best_model_name", None)
             best = result.output.get("best_model", "")
             mt = result.output.get("models_trained", {})
             if best and best in mt:
@@ -694,6 +697,29 @@ class StepMixin(ControllerState):
                 output={"summary": f"Skipped: '{step.tool_name}' needs machine learning, which is turned off (use_ml=False). Do not plan it."},
             ))
             return None
+
+        if step.tool_name in ("evaluate_model", "feature_importance") or (
+            step.tool_name == "generate_visualizations"
+            and str(step.parameters.get("chart_type", "")).strip().lower() == "feature_importance"
+        ):
+            is_gated = bool(self.memory.get_context("model_training_gated"))
+            if not is_gated:
+                for res in self.memory.tool_results:
+                    if res.tool_name == "train_model" and isinstance(res.output, dict):
+                        if res.output.get("model_training_gated") or res.output.get("is_leaked"):
+                            is_gated = True
+                            break
+            if is_gated:
+                console.print(
+                    f"  [yellow]⏭ Step {step.step_number}: {step.tool_name} skipped "
+                    f"(model_training_gated=True due to target leakage).[/]"
+                )
+                self._record_step(step, ToolResult(
+                    tool_name=step.tool_name,
+                    status="skipped",
+                    output={"summary": f"Skipped: '{step.tool_name}' skipped because model training was gated due to target leakage."},
+                ))
+                return None
 
         # Parameter resolution is driven by each tool's own declarations
         # (BaseTool.prepare_params) so this controller never grows a per-tool

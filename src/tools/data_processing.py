@@ -12,13 +12,20 @@ from __future__ import annotations
 
 import os
 import warnings
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
 import pandas as pd
 
 from src.core.analysis_io import read_analysis_df
+from src.core.compute_policy import (
+    BackendDecision,
+    ComputeBackend,
+    ComputePolicy,
+    select_array_backend,
+)
 from src.core.findings import Finding
 from src.core.io import (
     DatasetReadError,
@@ -51,6 +58,8 @@ _CORR_FINDING_THRESHOLD = 0.3
 
 #: Cap on how many top correlation pairs become Findings per run.
 _CORR_TOP_N = 3
+_CORR_PVALUE_ROWS = 200_000
+_CORR_MAX_REPORTED_PAIRS = 25
 
 #: Columns linked by |r| >= this form a "group" (one shared driver reported
 #: once) when three or more are connected; a lone strong pair stays a pair.
@@ -108,6 +117,78 @@ def analysis_sample_rows() -> int:
         return 200_000
 
 
+def correlation_work_budget() -> int:
+    """Maximum exploratory correlation work, measured as row-pairs.
+
+    The default corresponds to roughly 20,000 rows across 64 columns.  It is
+    deliberately independent of ``DSA_ANALYSIS_SAMPLE_ROWS``: a narrow frame
+    can safely retain more rows, while a wide frame must be bounded sooner.
+    """
+    try:
+        return max(1_000, int(os.environ.get("DSA_CORR_WORK_BUDGET", "40000000")))
+    except ValueError:
+        return 40_000_000
+
+
+def correlation_max_columns() -> int:
+    """Maximum columns retained when a correlation workload needs bounding."""
+    try:
+        return max(2, int(os.environ.get("DSA_CORR_MAX_COLUMNS", "64")))
+    except ValueError:
+        return 64
+
+
+def correlation_pvalue_rows() -> int:
+    """Maximum complete rows used for any one reported pairwise p-value."""
+    try:
+        return max(1_000, int(os.environ.get("DSA_CORR_PVALUE_ROWS", str(_CORR_PVALUE_ROWS))))
+    except ValueError:
+        return _CORR_PVALUE_ROWS
+
+
+def _correlation_pairs(column_count: int) -> int:
+    """Return the number of unique off-diagonal pairs for ``column_count``."""
+    return column_count * (column_count - 1) // 2
+
+
+def _select_correlation_columns(
+    df: pd.DataFrame,
+    roles: dict[str, str],
+    target_column: str | None,
+    objective: str | None,
+    limit: int,
+) -> tuple[list[str], list[str]]:
+    """Select a deterministic, informative subset for a bounded matrix.
+
+    Target and objective-mentioned columns take precedence, followed by
+    semantic measure/ordinal roles, completeness and variance.  Returning
+    selected names in source order keeps output stable for equivalent inputs.
+    """
+    objective_lower = (objective or "").lower()
+    completeness = df.notna().mean()
+    variance = df.var(numeric_only=True).fillna(float("-inf"))
+
+    def score(column: str) -> tuple[int, int, int, float, float, str]:
+        role = roles.get(column, "")
+        role_score = 2 if role == "measure" else 1 if role == "ordinal" else 0
+        mentioned = int(column.lower() in objective_lower)
+        is_target = int(column == target_column)
+        return (
+            is_target,
+            mentioned,
+            role_score,
+            float(completeness[column]),
+            float(variance.get(column, float("-inf"))),
+            column,
+        )
+
+    ranked = sorted((str(column) for column in df.columns), key=score, reverse=True)
+    chosen = set(ranked[:limit])
+    selected = [str(column) for column in df.columns if str(column) in chosen]
+    excluded = [str(column) for column in df.columns if str(column) not in chosen]
+    return selected, excluded
+
+
 def sample_note(n_from: int, n_to: int) -> dict[str, Any]:
     """Output fields marking an exploratory result computed on a random sample."""
     return {
@@ -161,6 +242,55 @@ def _spearman_matrix(df: pd.DataFrame) -> pd.DataFrame:
     if bool(np.isnan(df.to_numpy(dtype=float)).any()):
         return df.corr(method="spearman")
     return pearson_matrix(df.rank(method="average"))
+
+
+def _accelerated_pearson_matrix(
+    df: pd.DataFrame,
+    policy: ComputePolicy,
+) -> tuple[pd.DataFrame, BackendDecision]:
+    """Use optional CuPy for a complete dense matrix, otherwise exact CPU semantics."""
+    values = df.to_numpy(dtype=float, na_value=np.nan)
+    has_missing = not bool(np.isfinite(values).all())
+    decision = select_array_backend(
+        policy, len(df), df.shape[1], has_missing=has_missing,
+    )
+    if decision.backend == "cpu":
+        return pearson_matrix(df), decision
+    try:
+        import cupy as cp
+
+        device_values = cp.asarray(values, dtype=cp.float64)
+        device_corr = cp.corrcoef(device_values, rowvar=False)
+        result = cp.asnumpy(device_corr)
+        return pd.DataFrame(result, index=df.columns, columns=df.columns), decision
+    except Exception as exc:
+        fallback = BackendDecision(
+            "cpu",
+            "cpu",
+            f"cuda_array_kernel_failed:{type(exc).__name__}",
+            decision.estimated_vram_bytes,
+        )
+        return pearson_matrix(df), fallback
+    finally:
+        try:
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+        except (NameError, AttributeError):
+            pass
+
+
+def _accelerated_spearman_matrix(
+    df: pd.DataFrame,
+    policy: ComputePolicy,
+) -> tuple[pd.DataFrame, BackendDecision]:
+    """Rank once and accelerate Pearson when complete; retain pairwise CPU semantics for NaNs."""
+    values = df.to_numpy(dtype=float, na_value=np.nan)
+    if not bool(np.isfinite(values).all()):
+        decision = select_array_backend(
+            policy, len(df), df.shape[1], has_missing=True,
+        )
+        return _spearman_matrix(df), decision
+    return _accelerated_pearson_matrix(df.rank(method="average"), policy)
 
 
 def _read_df(file_path: str) -> pd.DataFrame:
@@ -1031,6 +1161,10 @@ class CorrelationAnalysisTool(BaseTool):
         "Methods: 'auto' (default: Pearson, Spearman for skewed columns), "
         "'pearson', 'spearman', 'kendall'."
     )
+    requires_context: ClassVar[dict[str, str]] = {
+        "user_objective": "objective",
+        "ui_compute_backend": "compute_backend",
+    }
 
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
         if profile is None:
@@ -1043,6 +1177,8 @@ class CorrelationAnalysisTool(BaseTool):
         method: str = "auto",
         top_n: int = 10,
         target_column: str | None = None,
+        objective: str | None = None,
+        compute_backend: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         from scipy import stats
@@ -1050,6 +1186,13 @@ class CorrelationAnalysisTool(BaseTool):
         from src.core.profiler import SEVERE_SKEW_THRESHOLD, profile_dataframe
 
         df = _read_df(file_path)
+        top_n = min(max(0, top_n), _CORR_MAX_REPORTED_PAIRS)
+        policy = ComputePolicy.from_env()
+        if compute_backend is not None:
+            try:
+                policy = replace(policy, mode=cast(ComputeBackend, compute_backend))
+            except ValueError as exc:
+                raise ToolExecutionError(f"Invalid compute_backend: {compute_backend!r}") from exc
         num_df = df.select_dtypes(include="number")
         try:
             roles = {c.name: c.semantic_role for c in profile_dataframe(df).columns}
@@ -1065,13 +1208,50 @@ class CorrelationAnalysisTool(BaseTool):
         if num_df.shape[1] < 2:
             raise ToolExecutionError("Need at least 2 numerical columns for correlation analysis.")
 
-        # The matrix is exploratory, so above the size cap it is computed on a
-        # seeded sample; the p-values below are tests and use every row.
+        # Correlation work grows with both rows and column pairs.  Keep exact
+        # semantics for inputs within the work budget, but use a deterministic
+        # objective/role-aware column subset and seeded row sample when it is
+        # exceeded.  This prevents a wide, pairwise-missing Spearman matrix
+        # from entering pandas' unbounded per-pair ranking path.
         test_df = num_df
         sampled: dict[str, Any] = {}
-        if len(num_df) > analysis_sample_rows():
-            num_df = num_df.sample(n=analysis_sample_rows(), random_state=0)
+        excluded_columns: list[str] = []
+        original_column_count = num_df.shape[1]
+        original_work = len(num_df) * _correlation_pairs(original_column_count)
+        work_budget = correlation_work_budget()
+        column_budget = min(correlation_max_columns(), policy.max_corr_columns)
+        if original_work > work_budget:
+            selected_columns, excluded_columns = _select_correlation_columns(
+                num_df, roles, target_column, objective, min(column_budget, original_column_count)
+            )
+            num_df = num_df[selected_columns]
+
+        pair_count = _correlation_pairs(num_df.shape[1])
+        row_budget = min(policy.max_corr_rows, max(2, work_budget // max(1, pair_count)))
+        subsampling_note: str | None = None
+        if len(num_df) > row_budget:
+            num_df = num_df.sample(n=row_budget, random_state=0)
             sampled = sample_note(len(test_df), len(num_df))
+            subsampling_note = (
+                f"Row subsampling applied: evaluated {len(num_df):,} of {len(test_df):,} rows "
+                f"to respect correlation budget ({row_budget:,} max rows)."
+            )
+
+        bounded_work = len(num_df) * pair_count
+        if sampled:
+            approximation = "seeded_sample"
+        elif method == "spearman":
+            approximation = "rank_then_pearson"
+        else:
+            approximation = "none"
+        correlation_budget = {
+            "work_budget": work_budget,
+            "estimated_work_before": original_work,
+            "estimated_work_after": bounded_work,
+            "row_budget": row_budget,
+            "column_budget": column_budget,
+            "pair_count": pair_count,
+        }
 
         # DataFrame.corr is pairwise-complete, so no global dropna.
         if method == "auto":
@@ -1079,18 +1259,32 @@ class CorrelationAnalysisTool(BaseTool):
                 c for c in num_df.columns
                 if abs(float(num_df[c].skew())) >= SEVERE_SKEW_THRESHOLD
             }
-            corr = pearson_matrix(num_df)
+            corr, pearson_decision = _accelerated_pearson_matrix(num_df, policy)
+            backend_decisions = [pearson_decision]
             if skewed:
-                spearman = _spearman_matrix(num_df)
+                spearman, spearman_decision = _accelerated_spearman_matrix(num_df, policy)
+                backend_decisions.append(spearman_decision)
                 use_rank = np.array([[a in skewed or b in skewed for b in corr.columns] for a in corr.columns])
                 corr = corr.where(~use_rank, spearman)
+                if not sampled:
+                    approximation = "rank_then_pearson"
         else:
             skewed = set()
-            corr = (
-                pearson_matrix(num_df) if method == "pearson"
-                else _spearman_matrix(num_df) if method == "spearman"
-                else num_df.corr(method=method)
-            )
+            if method == "pearson":
+                corr, decision = _accelerated_pearson_matrix(num_df, policy)
+            elif method == "spearman":
+                corr, decision = _accelerated_spearman_matrix(num_df, policy)
+            else:
+                corr = num_df.corr(method=method)
+                decision = BackendDecision("cpu", "cpu", "kendall_has_no_cuda_backend")
+            backend_decisions = [decision]
+
+        cuda_decision = next(
+            (decision for decision in backend_decisions if decision.backend == "cuda"),
+            None,
+        )
+        selected_decision = cuda_decision or backend_decisions[-1]
+        backend_reason = "; ".join(dict.fromkeys(decision.reason for decision in backend_decisions))
 
         def _pair_method(a: str, b: str) -> str:
             if method != "auto":
@@ -1124,16 +1318,37 @@ class CorrelationAnalysisTool(BaseTool):
                 pair["in_group"] = True
         top_pairs = pairs[:top_n]
         tests = {"pearson": stats.pearsonr, "spearman": stats.spearmanr, "kendall": stats.kendalltau}
+        pvalue_row_budget = correlation_pvalue_rows()
+
+        def bounded_test_rows(both: pd.DataFrame) -> pd.DataFrame:
+            """Bound one expensive exact-test input without touching small inputs."""
+            if len(both) <= pvalue_row_budget:
+                return both
+            return both.sample(n=pvalue_row_budget, random_state=0)
+
         for pair in top_pairs:
             both = test_df[[pair["col_a"], pair["col_b"]]].dropna()
             pair_method = _pair_method(pair["col_a"], pair["col_b"])
             pair["method"] = pair_method
+            sampled_from = len(both)
+            both = bounded_test_rows(both)
             pair["n"] = len(both)
+            if len(both) != sampled_from:
+                pair["p_value_sampled_from"] = sampled_from
             try:
                 p_val = float(tests[pair_method](both.iloc[:, 0], both.iloc[:, 1])[1])
                 pair["p_value"] = None if np.isnan(p_val) else round(p_val, 6)
             except (ValueError, KeyError):
                 pair["p_value"] = None
+
+        # Local FDR correction across evaluated exploratory screening pairs
+        valid_p_pairs = [p for p in top_pairs if p.get("p_value") is not None]
+        if valid_p_pairs:
+            from src.core.multiple_testing import apply_benjamini_hochberg
+            corrected = apply_benjamini_hochberg([{"p_value": p["p_value"]} for p in valid_p_pairs])
+            for p, corr_dict in zip(valid_p_pairs, corrected, strict=True):
+                p["p_adjusted"] = corr_dict.get("p_adjusted")
+                p["significant_after_correction"] = corr_dict.get("significant_after_correction", False)
 
         # Target correlations
         target_corrs: dict[str, float] = {}
@@ -1216,6 +1431,8 @@ class CorrelationAnalysisTool(BaseTool):
         if target_values is not None and target_column:
             for c in list(target_corrs)[:_CORR_TOP_N]:
                 both = pd.concat([test_df[c], target_values], axis=1).dropna()
+                sampled_from = len(both)
+                both = bounded_test_rows(both)
                 t_method = "pearson" if target_encoded else _pair_method(c, target_column)
                 try:
                     p_val = float(tests[t_method](both.iloc[:, 0], both.iloc[:, 1])[1])
@@ -1225,6 +1442,7 @@ class CorrelationAnalysisTool(BaseTool):
                     "n": len(both),
                     "p_value": None if np.isnan(p_val) else round(p_val, 6),
                     "method": t_method,
+                    "p_value_sampled_from": sampled_from if len(both) != sampled_from else None,
                 }
 
         lead = next((p for p in top_pairs if not p.get("definitional")), None)
@@ -1241,9 +1459,31 @@ class CorrelationAnalysisTool(BaseTool):
             **sampled,
             "summary": (
                 f"Correlation ({method}) on {len(cols)} features. {top_summary}."
-                + (f" Correlation matrix {sampled['sample_caveat']}; p-values use all rows." if sampled else "")
+                + (
+                    f" Correlation matrix {sampled['sample_caveat']}; reported p-values use up to "
+                    f"{pvalue_row_budget:,} rows."
+                    if sampled else ""
+                )
             ),
             "method": method,
+            "compute_backend": selected_decision.backend,
+            "compute_device": selected_decision.device,
+            "backend_reason": backend_reason,
+            "estimated_vram_bytes": max(
+                decision.estimated_vram_bytes for decision in backend_decisions
+            ),
+            "approximation": approximation,
+            "subsampling_note": subsampling_note,
+            "exploratory_screening_test_count": len(valid_p_pairs),
+            "test_family": "exploratory_screening",
+            "sampling": {
+                "applied": bool(sampled),
+                "seed": 0 if sampled else None,
+                "reason": "correlation work budget" if sampled else None,
+            },
+            "correlation_budget": correlation_budget,
+            "p_value_row_budget": pvalue_row_budget,
+            "excluded_columns": excluded_columns,
             "spearman_columns": sorted(str(c) for c in skewed),
             "top_correlations": top_pairs,
             "correlation_groups": corr_groups,
@@ -1338,6 +1578,7 @@ class CorrelationAnalysisTool(BaseTool):
             both_measures = col_a in measure_names and col_b in measure_names
             pair_method = pair.get("method", method)
             p_value = pair.get("p_value")
+            pair_p_adj = pair.get("p_adjusted")
             pair_n = pair.get("n", n_samples)
             covered.add(frozenset((str(col_a), str(col_b))))
             results.append(Finding(
@@ -1348,11 +1589,14 @@ class CorrelationAnalysisTool(BaseTool):
                     f"{str(pair_method).capitalize()} correlation between '{col_a}' and "
                     f"'{col_b}' is r={r:.2f} (n={pair_n if pair_n else 'unknown'}"
                     + (f", p={p_value:.3g}" if p_value is not None else "")
+                    + (f", p_adj={pair_p_adj:.3g}" if pair_p_adj is not None else "")
                     + ")."
                 ),
                 evidence={
                     "col_a": col_a, "col_b": col_b, "correlation": r,
                     "method": pair_method, "p_value": p_value, "n": pair_n,
+                    "test_family": "exploratory_screening",
+                    "p_adjusted_within_tool": pair_p_adj,
                 },
                 source_tool=self.name,
                 measure=col_a,
@@ -1360,6 +1604,7 @@ class CorrelationAnalysisTool(BaseTool):
                 effect=r,
                 effect_kind="r",
                 p_value=p_value,
+                p_adjusted=pair_p_adj,
                 confidence=confidence,
                 layer="appendix" if pair.get("in_group") else "analyst",
             ))
@@ -1415,6 +1660,8 @@ class CorrelationAnalysisTool(BaseTool):
                     "method": output.get("target_correlation_method"),
                     "positive_class": positive,
                     "p_value": p_value, "n": fstats.get("n"),
+                    "test_family": "confirmatory_objective",
+                    "is_target_correlation": True,
                 },
                 source_tool=self.name,
                 measure=str(feature),
@@ -1446,6 +1693,16 @@ class CorrelationAnalysisTool(BaseTool):
             "target_column": {
                 "type": "string",
                 "description": "If given, also returns feature↔target correlations.",
+                "required": False,
+            },
+            "objective": {
+                "type": "string",
+                "description": "Optional analysis objective used to prioritize columns when wide data is bounded.",
+                "required": False,
+            },
+            "compute_backend": {
+                "type": "string",
+                "description": "auto | cpu | cuda. CUDA is admitted only for complete dense matrices and safely falls back to CPU.",
                 "required": False,
             },
         }

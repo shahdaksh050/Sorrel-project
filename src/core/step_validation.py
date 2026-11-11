@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 
 #: Column-valued parameter names that don't end in _column/_col/_columns.
 _COLUMN_PARAM_NAMES = frozenset({"columns", "stratify_by"})
+_NUMERIC_ONLY_TOOLS = frozenset({
+    "correlation_analysis", "statistical_analysis", "select_statistical_test",
+    "cluster_data", "regression_analysis", "train_model", "evaluate_model",
+    "scenario_simulation", "detect_outliers",
+})
 
 
 def is_column_param(key: str) -> bool:
@@ -176,6 +181,16 @@ def validate_step(
     note = f"normalised {len(changed)} parameter{'s' if len(changed) != 1 else ''}" if changed else ""
 
     errors: list[str] = []
+    # This is deliberately a validation gate as well as a planner heuristic:
+    # LLM plans can bypass the deterministic fallback.  A text-only dataset
+    # must never reach numeric statistics/clustering merely because a tool
+    # happened to accept a file path.
+    numerical_cols = list(getattr(memory.dataset_metadata, "numerical_cols", []) or [])
+    tool_name = str(getattr(tool, "name", ""))
+    if tool_name in _NUMERIC_ONLY_TOOLS and not numerical_cols:
+        errors.append(f"{tool_name} requires numeric columns; this dataset has none.")
+    if tool_name == "cluster_data" and len(numerical_cols) < 2:
+        errors.append("cluster_data requires at least two numeric columns.")
     missing = [
         k for k, spec in schema.items()
         if isinstance(spec, dict) and spec.get("required") and k not in injected

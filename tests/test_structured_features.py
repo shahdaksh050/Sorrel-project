@@ -5,7 +5,24 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.tools.structured_features import StructuredFeatureExtractionTool
+from src.tools.structured_features import StructuredFeatureExtractionTool, _candidate_text_sources
+
+
+def test_candidate_text_sources_skip_numeric_and_irrelevant_wide_columns() -> None:
+    """The extractor avoids the former rows-by-all-columns string matrix."""
+    frame = pd.DataFrame(
+        {
+            **{f"measure_{index}": [float(index), float(index + 1)] for index in range(80)},
+            "region": ["north", "south"],
+            "specification": ["8 GB RAM, Wi-Fi", "16 GB RAM, 5G"],
+        }
+    )
+
+    names, texts, skipped = _candidate_text_sources(frame)
+
+    assert names == ["specification"]
+    assert texts == [["8 GB RAM, Wi-Fi", "16 GB RAM, 5G"]]
+    assert skipped == ["region"]
 
 
 def test_extracts_typed_features_and_preserves_source_columns(tmp_path: Path) -> None:

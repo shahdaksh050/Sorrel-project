@@ -281,14 +281,19 @@ def _fit_mixed(work: pd.DataFrame, xcols: list[str], slope: str | None) -> tuple
 def _fit_mixed_once(
     work: pd.DataFrame, xcols: list[str], slope: str | None, method: str
 ) -> tuple[dict[str, Any] | None, str]:
-    import statsmodels.formula.api as smf
+    import statsmodels.api as sm
     from statsmodels.tools.sm_exceptions import ConvergenceWarning
 
-    formula = "y ~ " + " + ".join(xcols)
+    exog = sm.add_constant(work[xcols], has_constant="add")
+    exog_re = sm.add_constant(work[[slope]], has_constant="add") if slope else None
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
-            model = smf.mixedlm(formula, work, groups=work["g"], re_formula=f"~{slope}" if slope else None)
+            # Use the matrix API instead of Patsy's process-global formula
+            # evaluation namespace. This is deterministic even after a long
+            # one-process suite has imported many modules with names that can
+            # collide with formula helper symbols.
+            model = sm.MixedLM(work["y"], exog, groups=work["g"], exog_re=exog_re)
             res = model.fit(reml=True, method=method, maxiter=200)
         except (np.linalg.LinAlgError, ValueError, FloatingPointError, IndexError) as exc:
             return None, str(exc)[:80] or type(exc).__name__
@@ -296,7 +301,7 @@ def _fit_mixed_once(
         return None, "convergence warning or singular fit"
     if not bool(getattr(res, "converged", True)):
         return None, "did not converge"
-    names = [str(n) for n in res.fe_params.index]
+    names = [str(name) for name in exog.columns]
     coefs = np.asarray(res.fe_params, dtype=float)
     ses = np.asarray(res.bse_fe, dtype=float)
     if not (np.isfinite(coefs).all() and np.isfinite(ses).all() and (ses > 0).all()):
@@ -311,17 +316,18 @@ def _fit_mixed_once(
 
 
 def _fit_ols_cluster(work: pd.DataFrame, xcols: list[str]) -> dict[str, Any]:
-    import statsmodels.formula.api as smf
+    import statsmodels.api as sm
 
     codes = pd.factorize(work["g"])[0]
+    exog = sm.add_constant(work[xcols], has_constant="add")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            res = smf.ols("y ~ " + " + ".join(xcols), work).fit(cov_type="cluster", cov_kwds={"groups": codes})
+            res = sm.OLS(work["y"], exog).fit(cov_type="cluster", cov_kwds={"groups": codes})
     except (np.linalg.LinAlgError, ValueError) as exc:
         raise ToolExecutionError(f"The model could not be fitted ({exc}); try fewer or different feature_columns.") from exc
     return {
-        "names": [str(n) for n in res.params.index], "coefs": np.asarray(res.params, dtype=float),
+        "names": [str(name) for name in exog.columns], "coefs": np.asarray(res.params, dtype=float),
         "ses": np.asarray(res.bse, dtype=float), "var_group": None, "var_resid": float(res.scale),
     }
 

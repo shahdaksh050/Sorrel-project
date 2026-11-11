@@ -69,6 +69,18 @@ class TestBuildHtmlReport:
         assert "<h1>What we found in empty</h1>" in doc
         assert "The charts" not in doc  # no charts, no section
 
+    def test_public_status_and_coverage_are_visible(self) -> None:
+        insights = {
+            "status": "partial",
+            "coverage": {"answered": 1, "total": 4},
+            "execution_issues": [{"code": "tool_failed", "message": "optional failure"}],
+        }
+        doc = build_html_report("partial_run", insights, [], [])
+        assert "status: partial" in doc
+        assert "Run status &amp; coverage" in doc
+        assert "1 of 4" in doc
+        assert "Execution issues" in doc
+
     def test_boilerplate_summary_uses_findings_and_separates_hygiene(self) -> None:
         findings = [
             {

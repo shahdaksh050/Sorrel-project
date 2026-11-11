@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from src.core.compute_policy import ComputeBackend
+
 
 @dataclass(frozen=True)
 class RunConfig:
@@ -28,3 +30,4 @@ class RunConfig:
     api_key: str | None = field(default=None, repr=False)
     base_url: str | None = None
     reasoning_effort: str | None = None
+    compute_backend: ComputeBackend | None = None

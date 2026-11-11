@@ -80,6 +80,7 @@ from src.core.joins import join_related
 from src.core.llm_client import _DEFAULT_MODELS as _DEFAULT_MODELS
 from src.core.llm_client import LLMClient as LLMClient
 from src.core.llm_client import LocalOnlyError as LocalOnlyError
+from src.core.llm_client import llm_concurrency as llm_concurrency
 from src.core.memory import AnalysisStep, DatasetMetadata, MemorySystem, ToolResult
 from src.core.model_telemetry import get_limiter
 from src.core.profiler import DatasetProfile, profile_dataframe
@@ -693,8 +694,8 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # section can show real coverage ("N questions, M answered") rather
         # than only ever listing which tools ran.
         try:
-            agenda = build_agenda(
-                self.last_profile, self.memory.get_context("analysis_decision"), self.objective
+            agenda = self._build_question_agenda(
+                self.last_profile, self.memory.get_context("analysis_decision")
             )
             self.memory.set_context("question_agenda", [q.to_dict() for q in agenda])
         except Exception as exc:
@@ -930,6 +931,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             system_prompt=self._prompt_manager.get_system_prompt(),
             max_depth=int(os.getenv("RLM_MAX_DEPTH", "5")),
             base_max_tokens=getattr(self.llm_client, "max_tokens", 4096),
+            max_concurrency=llm_concurrency(),
         )
 
     def _reasoning_loop(self) -> dict[str, Any]:
@@ -1046,7 +1048,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     break
 
                 # ---- Stage 6: RLM Decomposition (if enabled & many features, once only) ----
-                if self.enable_rlm and not self._rlm_decomposed and self._should_decompose():
+                if self.enable_rlm and not self._rlm_decomposed:
                     progress.update(task_id, description="Stage 6 — RLM task decomposition…")
                     if self.on_iteration_callback:  # progress notice only; the decomposition is unchanged
                         self.on_iteration_callback(iteration, "stage6:rlm_decomposition")
@@ -1291,17 +1293,29 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # statistical test or report tool failed.  Keep the payload compact
         # and free of parameters/raw data; the full structured result remains
         # in MemorySystem for the audit trail.
+        agenda = self.memory.get_context("question_agenda") or []
+        critical_tools = {
+            str(question.get("suggested_tool"))
+            for question in agenda
+            if isinstance(question, dict)
+            and question.get("suggested_tool")
+            and float(question.get("objective_fit") or 0.0) >= 0.75
+        }
         execution_issues = [
             {
+                "code": "analysis_step_failed" if result.status == "error" else "analysis_step_interrupted",
+                "severity": "error" if result.status == "error" else "warning",
+                "stage": "tool_execution",
                 "tool": result.tool_name,
                 "status": result.status,
+                "objective_critical": result.tool_name in critical_tools,
                 "message": str(result.error_message or result.output.get("summary", ""))[:300],
             }
             for result in self.memory.tool_results
             if result.status in {"error", "interrupt"}
         ]
+        final_result["execution_issues"] = execution_issues
         if execution_issues:
-            final_result["execution_issues"] = execution_issues
             degradations = list(self.memory.get_context("degradations") or [])
             for issue in execution_issues:
                 note = (
@@ -1320,18 +1334,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             logger.debug("question coverage report skipped", exc_info=True)
 
     def _run_post_hoc_audits(self, final_result: dict[str, Any]) -> pd.DataFrame | None:
-        """Claim verification plus the post-hoc audits (deliverable contract,
-        dependence, target leakage, fragility, causal language) and check marks."""
-        # ---- Verbatim-metric validation: enforce "cite only verbatim
-        # metrics" as a mechanism, not just a prompt instruction ----
-        unverified = self._flag_unverified_claims(final_result)
-        if unverified:
-            self.memory.set_context("unverified_claims", unverified)
-            console.print(
-                f"[yellow]⚠ {len(unverified)} unverified metric claim(s) in the "
-                f"final synthesis — see memory context 'unverified_claims'.[/]"
-            )
-
+        """Run evidence audits before rebuilding and verifying final prose."""
         # ---- Shared cleaned-dataset read for the post-hoc audits below
         # (Deliverable Contract, Dependence/Confounding, Target Leakage,
         # Finding Fragility) — one read, reused, instead of reading the same
@@ -1611,6 +1614,15 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             self.on_iteration_callback(self.memory.iteration_count, "stage7:report")
         self._attach_run_metadata(final_result)
         audit_df = self._run_post_hoc_audits(final_result)
+        self._rebuild_primary_synthesis(final_result)
+        unverified = self._flag_unverified_claims(final_result)
+        self.memory.set_context("unverified_claims", unverified)
+        if unverified:
+            console.print(
+                f"[yellow]⚠ {len(unverified)} unverified metric claim(s) were "
+                "quarantined from the final synthesis.[/]"
+            )
+        self._resolve_public_status(final_result)
 
         # ---- Stage 7: Dossier Generation ----
         self._generate_dashboard()
@@ -1620,6 +1632,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         self._audit_contract(final_result, audit_df)
         self._generate_final_report(final_result)
         self._generate_html_report(final_result)
+        self.memory.set_context("public_final_result", final_result)
         self._write_run_summary()
 
         # Print reasoning trace
@@ -1906,12 +1919,9 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         if not wide:
             return False
         # Auto: each sub-task is a paid LLM call, so skip it when the
-        # deterministic tools already covered the numeric columns.
+        # deterministic tools already covered the numeric columns or primary agenda is satisfied.
         reason = self._rlm_skip_reason()
         if reason:
-            if not getattr(self, "_rlm_skip_logged", False):
-                self._rlm_skip_logged = True
-                console.print(f"  [dim]RLM decomposition skipped: {reason}.[/]")
             return False
         return True
 
@@ -1920,6 +1930,18 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         num_cols = meta.numerical_cols if meta is not None else []
         if len(num_cols) < 8:
             return f"only {len(num_cols)} numeric columns (< 8)"
+        agenda_raw = self.memory.get_context("question_agenda") or []
+        if agenda_raw and self.last_profile is not None:
+            try:
+                agenda = [Question(**q) if isinstance(q, dict) else q for q in agenda_raw]
+                findings_dicts = [f.to_dict() for f in self.memory.findings]
+                cov = coverage_report(agenda, findings_dicts)
+                primary = [q for q in agenda if getattr(q, "expected_value", 0) >= 0.7]
+                primary_unanswered = [q for q in primary if q not in cov.get("answered", [])]
+                if not primary_unanswered and len(cov.get("answered", [])) >= max(1, len(agenda) // 2):
+                    return "all primary agenda questions are satisfied and profiling is complete"
+            except Exception:
+                pass
         if self._prompt_manager is None:
             return ""
         groups = [num_cols[i: i + 8] for i in range(0, len(num_cols), 8)]
@@ -1935,6 +1957,11 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         This is the core RLM innovation: instead of one monolithic context,
         each feature group gets its own focused reasoning call.
         """
+        if not self._should_decompose():
+            console.print("  [dim]RLM decomposition not required; all primary feature groups covered.[/]")
+            self.memory.set_context("rlm_sub_results", [])
+            return
+
         if self._rlm_engine is None or self._prompt_manager is None:
             return
 
@@ -2017,8 +2044,23 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
     # ------------------------------------------------------------------
     # Stage 7 — Report generation
     # ------------------------------------------------------------------
-
-
-
-
-
+    def _build_question_agenda(
+        self,
+        profile: DatasetProfile | None,
+        decision: dict[str, Any] | None,
+        excluded_columns: set[str] | None = None,
+    ) -> list[Question]:
+        """Build the reasoning agenda from registry-injected tool contracts."""
+        specialist_tools = self.tool_registry.candidate_tools(
+            profile,
+            self.memory.dataset_metadata,
+            use_ml=self.use_ml,
+            use_llm=self.use_llm,
+        )
+        return build_agenda(
+            profile,
+            decision,
+            self.objective,
+            excluded_columns=excluded_columns,
+            specialist_tools=specialist_tools,
+        )

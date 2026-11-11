@@ -31,7 +31,7 @@ from raw rows.
   - [System context](#system-context)
   - [Layers and rules](#layers-and-rules)
   - [Data flow](#data-flow)
-  - [The five-stage workflow](#the-five-stage-workflow)
+  - [The seven-stage workflow](#the-seven-stage-workflow)
   - [Sequence diagrams](#sequence-diagrams)
   - [Class diagrams](#class-diagrams)
 - [The workspace](#the-workspace)
@@ -115,6 +115,11 @@ python main.py --dataset data/sample_customer_churn.csv \
 `requirements.lock` pins an exact environment. Never commit `.env`, API keys,
 output containing sensitive data, or large private datasets.
 
+CUDA acceleration is optional. On a supported NVIDIA/CUDA 13 Windows setup,
+install the extra with `pip install -e ".[gpu]"`; without it, array kernels stay
+on CPU and XGBoost independently uses CUDA only after its runtime smoke test.
+`COMPUTE_BACKEND=cpu` is the immediate rollback switch.
+
 ## How it is built
 
 ### System context
@@ -167,7 +172,7 @@ flowchart TB
 
 | Layer | Where | Responsibility |
 | --- | --- | --- |
-| Interface | `app.py`, `ui/`, `main.py` | Collect inputs, run the analysis on a worker thread, show progress and results. |
+| Interface | `app.py`, `ui/`, `main.py` | Collect inputs, supervise an isolated analysis worker, show progress and results. |
 | Reasoning | `src/core/controller*.py`, `prompt_manager.py` | Plan, validate, orchestrate, audit and write up the analysis. |
 | State | `src/core/memory.py`, `findings.py`, `profiler.py` | The external environment the LLM reads summaries of: metadata, results, findings, context. |
 | Inference | `src/rlm/engine.py` | Provider invocation with token/cost accounting and a reasoning trace. |
@@ -255,15 +260,17 @@ What reaches an LLM prompt is metadata, the data profile, tool summaries and
 ranked findings, with dataset-derived text sanitised and personal-data columns
 masked. Raw rows and full data frames do not.
 
-### The five-stage workflow
+### The seven-stage workflow
 
 | Stage | Name | Where it happens |
 | :---: | --- | --- |
 | 1 | Dataset ingestion & profiling | `AgentController.load_dataset`, `io.py`, `coercion.py`, `profiler.py` |
-| 2 | Hypothesis & action plan generation | First `RLMEngine.invoke` call, or the deterministic fallback plan |
+| 2 | Initial reasoning | First `RLMEngine.invoke` call, or the deterministic fallback plan |
 | 3 | Tool execution & sandbox verification | `StepMixin._execute_steps`, `tools/*`, `sandbox.py` |
-| 4 | Iterative refinement & adversarial review | Later `RLMEngine.invoke` calls and review passes |
-| 5 | Synthesis, post-hoc audits & dossier generation | `_finalize_analysis`: dashboard, audits, reports, HTML, run summary |
+| 4 | Result interpretation | Later `RLMEngine.invoke` calls interpret tool output |
+| 5 | Iterative refinement & adversarial review | Review passes and plan refinement |
+| 6 | RLM workflow management | Recursive invocation, REPL environment, and trace management |
+| 7 | Synthesis, post-hoc audits & dossier generation | `_finalize_analysis`: dashboard, audits, reports, HTML, run summary |
 
 Stage 4 uses one LLM call per later iteration: it reads the results so far and
 returns the next plan or signals completion. The loop has several exits, and
@@ -871,6 +878,11 @@ lists the common settings. The table below is built from what the code reads.
 | `MAX_TRAIN_SAMPLES` | `50000` | Row cap when fitting models. |
 | `DSA_MAX_ROWS` | `1000000` | Row cap when reading a file. |
 | `DSA_ANALYSIS_SAMPLE_ROWS` | `200000` | Row count above which exploratory statistics run on a seeded random sample. |
+| `COMPUTE_BACKEND` | `auto` | `auto`, `cpu`, or `cuda`; unsupported or unsafe CUDA work falls back to CPU. |
+| `GPU_MIN_CELLS`, `GPU_MEMORY_FRACTION` | `200000`, `0.60` | Minimum worthwhile GPU workload and maximum share of currently free VRAM. |
+| `MAX_STAT_ROWS`, `MAX_CORR_ROWS`, `MAX_CORR_COLUMNS` | `50000`, `20000`, `64` | Explicit exploratory-statistics and correlation bounds. |
+| `DSA_CORR_WORK_BUDGET`, `DSA_CORR_PVALUE_ROWS` | `40000000`, `200000` | Correlation row-pair work budget and reported-pair p-value row cap. |
+| `TOOL_TIMEOUT_S` | `120` | Default analysis-tool wall-clock budget. |
 | `ENABLE_TOOL_LIBRARY`, `GENERATED_TOOL_LIBRARY` | `false`, `output/tool_library` | Reuse validated generated tools across runs. |
 | `OUTPUT_DIR` | `output` | Root of the artefacts. |
 
@@ -892,6 +904,9 @@ lists the common settings. The table below is built from what the code reads.
 | `DSA_MIN_CELL_SIZE` | `5` | Smallest group that may be reported by name. |
 | `MAX_UPLOAD_MB`, `MAX_UNCOMPRESSED_MB`, `MAX_COMPRESSION_RATIO` | `200`, `500`, `100` | Upload limits. |
 | `MAX_CONCURRENT_RUNS` | `4` | Analyses a server runs at once. |
+| `RUNNER_BACKEND` | `process` | Isolate Streamlit from analysis work; `thread` is a temporary rollback mode. |
+| `RUNNER_STOP_GRACE_S`, `RUNNER_CPU_THREADS` | `10`, `2` | Cooperative-stop grace period and BLAS/OpenMP threads per worker. |
+| `RUNNER_WALL_TIMEOUT_S`, `RUNNER_MEMORY_MB` | `3600`, `4096` | Per-run wall-clock and worker-process-tree RSS limits; `0` disables either limit. |
 | `DSA_LANDING_DIR` | | Serve the landing component from another directory. |
 
 </details>

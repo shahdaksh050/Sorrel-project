@@ -484,6 +484,7 @@ class ExperimentAnalysisTool(BaseTool):
                 confidence=min(1.0, min(c["n"], c["n_control"]) / 200.0),
                 surprise=min(1.0, abs(effect)),
                 caveats=list(output.get("caveats") or []),
+                evidence_tier="pilot",
             ))
         srm = output.get("srm") or {}
         if srm.get("flagged"):

@@ -115,6 +115,9 @@ class CausalAnalysisTool(BaseTool):
                 if isinstance(covariates, list) and all(isinstance(value, str) for value in covariates):
                     prepared["covariates"] = covariates
         prepared["study_design"] = validated_design
+        prepared["assignment_verified"] = bool(
+            isinstance(design, dict) and design.get("randomization_verified")
+        )
         return prepared
 
     def execute(  # type: ignore[override]
@@ -125,6 +128,7 @@ class CausalAnalysisTool(BaseTool):
         covariates: list[str] | None = None,
         method: str = "ipw",
         study_design: str = "observational",
+        assignment_verified: bool = False,
         **_: Any,
     ) -> dict[str, Any]:
         if method not in {"auto", "ipw"}:
@@ -229,8 +233,17 @@ class CausalAnalysisTool(BaseTool):
             "Observational estimates require no unmeasured confounding, correct propensity specification, consistency, and positivity.",
             "Column names cannot prove temporal order; confirm every covariate was measured before treatment.",
         ]
+        causal_claim_permitted = bool(
+            study_design == "randomized_experiment"
+            and assignment_verified
+            and max_after_smd <= 0.1
+        )
         if study_design == "randomized_experiment":
-            caveats[0] = "Randomization must be verified externally; this tool does not verify treatment assignment."
+            caveats[0] = (
+                "Random assignment was externally verified."
+                if assignment_verified
+                else "Randomization must be verified externally; this tool does not verify treatment assignment."
+            )
         if max_after_smd > 0.1:
             caveats.append("Residual covariate imbalance exceeds 0.10 SMD; interpret estimate cautiously.")
         wording = "adjusted association" if study_design == "observational" else "design-conditional treatment contrast"
@@ -239,6 +252,7 @@ class CausalAnalysisTool(BaseTool):
             "status": "estimated_with_assumptions",
             "identification_status": "conditionally_identified",
             "study_design": study_design,
+            "assignment_verified": assignment_verified,
             "method": "stabilized_ipw",
             "propensity_cross_fitting": {"folds": 5, "shuffle": True, "random_state": _RANDOM_STATE},
             "outcome": outcome,
@@ -255,7 +269,7 @@ class CausalAnalysisTool(BaseTool):
             "warnings": caveats,
             # A caller needs external evidence of assignment and temporal order
             # before upgrading this output to a causal claim.
-            "causal_claim_permitted": False,
+            "causal_claim_permitted": causal_claim_permitted,
         }
 
     @staticmethod
@@ -319,12 +333,14 @@ class CausalAnalysisTool(BaseTool):
     def findings(self, output: dict[str, Any], profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> list[Finding]:
         if output.get("status") != "estimated_with_assumptions":
             return [Finding(finding_id="causal_not_identifiable", kind="method_fit", headline=str(output["summary"]), evidence=output, source_tool=self.name, confidence=0.95)]
+        causal = bool(output.get("causal_claim_permitted"))
         return [Finding(
             finding_id=f"causal_{output['outcome']}_{output['treatment']}", kind="test", headline=str(output["summary"]),
             detail="Conditional estimate; causal interpretation depends on the listed assumptions.", evidence=output,
             source_tool=self.name, measure=str(output["outcome"]), dimension=str(output["treatment"]),
             effect=float(output["estimate"]), effect_kind="estimate", confidence=0.7,
             caveats=list(output.get("assumptions", [])),
+            evidence_tier="causal_action" if causal else "hypothesis",
         )]
 
     def get_schema(self) -> dict[str, Any]:
@@ -335,6 +351,11 @@ class CausalAnalysisTool(BaseTool):
             "covariates": {"type": "array", "description": "Known pre-treatment covariate columns.", "required": True},
             "method": {"type": "string", "description": "auto or ipw.", "required": False},
             "study_design": {"type": "string", "description": "observational or randomized_experiment.", "required": False},
+            "assignment_verified": {
+                "type": "boolean",
+                "description": "True only when external assignment records verified randomization.",
+                "required": False,
+            },
         }
 
 
@@ -613,6 +634,10 @@ class DifferenceInDifferencesTool(BaseTool):
                 effect_kind="estimate",
                 confidence=0.75,
                 caveats=list(output.get("assumptions", [])),
+                evidence_tier=(
+                    "pilot" if (output.get("parallel_trends") or {}).get("status") == "passed"
+                    else "hypothesis"
+                ),
             )
         ]
 

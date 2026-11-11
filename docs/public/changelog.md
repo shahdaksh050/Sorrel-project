@@ -1,26 +1,22 @@
 # Changelog
 
-Version: 1.0.0  
-Last Updated: 2026-10-12  
-Canonical: http://localhost:8501/docs/changelog.md  
+Version: 1.0.1
+Last Updated: 2026-10-16
+Canonical: /docs/changelog.md
 
-All notable public API, protocol, and compatibility changes to Sorrel are documented in this file.
+## [1.0.1] — 2026-10-16
 
----
+- Corrected public documentation to describe the shipped local Streamlit and
+  CLI application.
+- Marked REST, MCP, stable remote schema, tenancy, hosted quotas, and automatic
+  retention as unshipped roadmap work.
+- Replaced immutable-audit wording with the implemented local mutable JSONL
+  write-log behaviour.
+- Replaced workstation-specific canonical URLs with deployment-origin-safe
+  root-relative references.
+- Corrected the public workflow description to seven stages.
 
-## [1.0.0] — 2026-10-12
+## [1.0.0] — historical note
 
-### Added
-- **External AI Discovery Surface**:
-  - Root `/llms.txt` index adhering to standard machine-readable agent specification.
-  - Public `sitemap.xml` enumerating canonical documentation endpoints.
-  - Crawler policy `robots.txt` explicitly governing search indexers vs. AI training scrapers.
-  - RFC 9116 security declaration at `/.well-known/security.txt` and `/security.txt`.
-- **Public AI Documentation**:
-  - Released comprehensive Markdown documentation across `docs/public/` covering product overview, seven-stage workflow, safety boundaries, API quickstart, MCP server, file limits, result schemas, and quotas.
-- **Origin Configuration Engine**:
-  - Introduced `src/core/origin_config.py` with environment variable override (`SORREL_PUBLIC_ORIGIN`) and non-local validation.
-- **Surface Validation Script**:
-  - Added `scripts/check_ai_surface.py` to continuously validate root assets, anchor integrity, and schema compliance in CI.
-- **Discovery Test Suite**:
-  - Implemented `tests/test_ai_discovery.py` verifying contract integrity and crawler compliance.
+The prior public discovery documents described proposed remote interfaces that
+were not implemented in this repository. They are superseded by version 1.0.1.

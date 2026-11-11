@@ -58,6 +58,22 @@ class TestGenerateReportTool:
         assert "## Tool Execution Log" in content
         assert "clean_data" in content
 
+    def test_markdown_surfaces_public_status_coverage_and_issues(self, report_dir: str) -> None:
+        insights = {
+            **LLM_INSIGHTS,
+            "status": "succeeded_with_warnings",
+            "coverage": {"answered": 2, "total": 3, "unanswered": [{"text": "Why did churn rise?"}]},
+            "execution_issues": [{"severity": "warning", "code": "tool_failed", "message": "One optional tool failed."}],
+        }
+        result = GenerateReportTool().run(
+            dataset_name="status", tool_results_json="[]", llm_insights=insights, output_dir=report_dir
+        )
+        content = Path(result.output["markdown_path"]).read_text(encoding="utf-8")
+        assert "## Run Status & Coverage" in content
+        assert "succeeded_with_warnings" in content
+        assert "2 of 3" in content
+        assert "tool_failed" in content
+
     def test_tolerates_missing_llm_insights(self, report_dir: str) -> None:
         result = GenerateReportTool().run(
             dataset_name="no_insights",

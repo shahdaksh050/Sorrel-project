@@ -1,17 +1,15 @@
-"""
-Integrity-checked model persistence.
+"""Integrity-checked model persistence.
 
-`pickle.load` executes code, so a model file must only be loaded if this
-system wrote it. `save_model` writes the pickle plus an HMAC-SHA256 sidecar
-(`<model>.sig`) keyed by a random secret kept next to the model in
-`.model_key` (mode 0600, created on first save). `load_model` verifies the
-sidecar before unpickling and raises `ModelIntegrityError` for a missing or
-mismatching signature — so a pickle planted by anything other than
-`save_model` (e.g. via a prompt-injected `model_path`) is never executed.
+Pickle deserialisation can execute code, so :func:`load_model` only unpickles
+bytes that carry a valid HMAC sidecar made by this installation.  The signing
+key is deliberately kept in an operator-owned configuration directory, never
+beside a model, run artifact, or export.  Configure its exact location with
+``MODEL_SIGNING_KEY_PATH`` or its parent directory with
+``DSA_MODEL_KEY_DIR``.  On POSIX, newly-created key material is private to the
+current user (directories ``0700``; key ``0600``).
 
-Threat model: this stops files the pipeline did not write. It does not stop an
-attacker who can already read the key file, which is the same trust boundary
-as the output directory itself.
+There is intentionally no migration path that accepts old unsigned pickles:
+they remain unsafe and are refused before ``pickle.loads`` is reached.
 """
 from __future__ import annotations
 
@@ -23,24 +21,69 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-KEY_FILENAME = ".model_key"
+KEY_FILENAME = "model-signing.key"
 SIG_SUFFIX = ".sig"
 
 
 class ModelIntegrityError(Exception):
-    """A model file is unsigned, or its signature does not match its bytes."""
+    """A model is unsigned, unverifiable, or has unsafe key configuration."""
+
+
+def _configured_key_path() -> Path:
+    """Return the operator-controlled key path without creating it."""
+    explicit = os.getenv("MODEL_SIGNING_KEY_PATH")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    key_dir = os.getenv("DSA_MODEL_KEY_DIR")
+    base = Path(key_dir).expanduser() if key_dir else Path.home() / ".dsa_agent"
+    return (base / KEY_FILENAME).resolve()
+
+
+def _key_is_outside_artifact_roots(key_path: Path, model_path: Path) -> bool:
+    """Reject keys below a model directory or named run/output/export root."""
+    artifact_root_names = {"model", "models", "output", "run", "runs", "export", "exports"}
+    roots = [parent for parent in model_path.parents if parent.name.lower() in artifact_root_names]
+    for root in roots:
+        try:
+            key_path.relative_to(root)
+        except ValueError:
+            continue
+        return False
+    return True
+
+
+def _private_mode(path: Path, expected: int) -> bool:
+    """Check POSIX permissions; Windows ACLs are managed by the OS instead."""
+    if os.name == "nt":
+        return True
+    return path.stat().st_mode & 0o777 == expected
 
 
 def _key_for(model_path: Path, create: bool) -> bytes | None:
-    key_path = model_path.parent / KEY_FILENAME
+    key_path = _configured_key_path()
+    if not _key_is_outside_artifact_roots(key_path, model_path):
+        raise ModelIntegrityError("MODEL_SIGNING_KEY_PATH must be outside model/run/export roots.")
+    if key_path.parent.exists() and not _private_mode(key_path.parent, 0o700):
+        raise ModelIntegrityError("Model signing key directory has unsafe permissions.")
     if key_path.exists():
-        return key_path.read_bytes()
+        if not key_path.is_file() or not _private_mode(key_path, 0o600):
+            raise ModelIntegrityError("Model signing key has unsafe type or permissions.")
+        key = key_path.read_bytes()
+        if len(key) < 32:
+            raise ModelIntegrityError("Model signing key is invalid.")
+        return key
     if not create:
         return None
+    key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not _private_mode(key_path.parent, 0o700):
+        raise ModelIntegrityError("Model signing key directory has unsafe permissions.")
     key = secrets.token_bytes(32)
-    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(key)
+    try:
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return _key_for(model_path, create=False)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(key)
     return key
 
 
@@ -49,8 +92,8 @@ def _sig_path(model_path: Path) -> Path:
 
 
 def save_model(obj: Any, path: str | Path) -> Path:
-    """Pickle `obj` to `path` and write its HMAC sidecar. Returns the path."""
-    model_path = Path(path)
+    """Pickle ``obj`` to ``path`` and write a verifiable HMAC sidecar."""
+    model_path = Path(path).resolve()
     model_path.parent.mkdir(parents=True, exist_ok=True)
     data = pickle.dumps(obj)
     key = _key_for(model_path, create=True)
@@ -63,11 +106,11 @@ def save_model(obj: Any, path: str | Path) -> Path:
 
 
 def load_model(path: str | Path) -> Any:
-    """Verify the HMAC sidecar, then unpickle. Raises `ModelIntegrityError`."""
-    model_path = Path(path)
+    """Verify the HMAC sidecar, then unpickle; never accept unsigned models."""
+    model_path = Path(path).resolve()
     sig_path = _sig_path(model_path)
     key = _key_for(model_path, create=False)
-    if key is None or not sig_path.exists():
+    if key is None or not sig_path.is_file() or not model_path.is_file():
         raise ModelIntegrityError(
             f"{model_path.name} has no integrity signature; refusing to load an unverified pickle."
         )

@@ -88,7 +88,7 @@ def detect_and_strip_summary_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, list[
     mask_to_drop = pd.Series(False, index=df.index)
 
     for col in df.columns:
-        if df[col].dtype == "object":
+        if pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]):
             series_clean = df[col].astype(str).str.strip().str.lower()
             is_summary = series_clean.isin(_SUMMARY_TOKENS)
             if is_summary.any():

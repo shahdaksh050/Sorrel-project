@@ -53,7 +53,7 @@ def test_e2e_deterministic_air_quality(tmp_path: Path) -> None:
 
     result = controller.analyze(file_path=target_csv)
 
-    assert result["status"] == "complete"
+    assert result["status"] in {"succeeded", "succeeded_with_warnings"}
     assert "insights" in result
     assert "findings" in result
     # Check that domain pack for air quality activated
@@ -87,7 +87,7 @@ def test_e2e_ab_test_study_design(tmp_path: Path) -> None:
     )
     result = controller.analyze(file_path=csv_path)
 
-    assert result["status"] == "complete"
+    assert result["status"] in {"succeeded", "succeeded_with_warnings"}
     assert controller.study_design == "randomized_experiment"
     assert controller.memory.get_context("study_design") == "randomized_experiment"
 

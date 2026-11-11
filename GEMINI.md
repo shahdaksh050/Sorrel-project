@@ -149,6 +149,9 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
 | BE-13 | Antigravity (Gemini) | Complete | Expectations vs Reality Output Audit & Pipeline Remediation: Fixed segment_comparison 2-way interaction crash on binary targets (eliminated duplicate column DataFrame selection in pd.to_numeric), fixed Action Prioritization Matrix classification and lever naming (filtered out benign statistical provenance/disclaimer notes, added multivariate regression drivers to Quick Wins with explicit 'Target feature=level' levers, stopped bivariate correlation noise from dominating Quick Wins), and enriched driver/scenario recommendations in controller_report without violating verbatim-number claim verification. |
 | BE-14 | Antigravity (Gemini) | Complete | Dynamic data analysis upgrades & quantitative domain expansion: ThresholdAnalysisTool (non-linear tipping points & breakpoints), MultiSeasonalAnalysisTool (FFT multi-periodicity decomposition), RankingDynamicsTool (Bradley-Terry latent strength & home advantage), Prescriptive Multi-Driver Joint Optimization in ScenarioSimulationTool, Empirical Next-Best-Action guidance in prompt_manager, Reshaping & Ingestion Normalization in reshaping.py & DSAToolkit, with 0 lint violations and 0 mypy errors across 111 source files. |
 | BE-15 | Antigravity (Gemini) | Complete | Fix Analysis Crash (LLM Token Blowout & Fallback Schema AttributeError): converted tool schemas to canonical flat dict format, made _build_fallback_plan schema inspection defensive, wrapped _build_fallback_plan in emergency recovery, calibrated OpenRouter reasoning effort to 'low' and 'minimal' on retry, expanded retry token headroom to 8192, and added reasoning text extraction fallback. |
+| UI-4 | Antigravity (Gemini) | Complete | Fix UI color/contrast & button double box: eliminated infinite tab flashing in app.py, fixed low-contrast sidebar collapse controls and white-on-white stFileChip text, eliminated nested double box on sidebar collapse button by scoping borders to button only. |
+| UI-5 | Antigravity (Gemini) | Complete | Uploaded file chip nested boxes & delete icon styling: reset stFileChips, ul, li wrappers to border: none, scoped card border exclusively to div[data-testid="stFileChip"], eliminated inner borders on filename, icon, and delete button. |
+| BE-16 | Antigravity (Gemini) | Complete | Major statistical & pipeline reliability fixes: causal vs observational pilot guardrails in action matrix, compound demographic protected attribute exclusion in scenario simulation, target leakage hard-gating with clean skipping of downstream evaluation and feature importance charts, cross-run report isolation in adopt_run, prospective FDR multiple-testing control, and Stage 6 RLM fast-exit. Verified with 136 unit tests, 0 ruff violations, and 0 mypy errors. |
 
 ### I. Sandbox Optimization & Group Comparison Steering (2026-10-09) [Task BE-3]
 - **Worker Subprocess Lightening** ([`src/core/_sandbox_worker.py`](file:///d:/(Dev2)DSA_AGENT/src/core/_sandbox_worker.py)): Replaced heavy `profile_dataframe(df)` in `_build_schema` with a lightweight, direct pandas dtype classifier, dropping the costly profiling pass and regex scans inside the child process.
@@ -358,4 +361,28 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
 - **Verification & Tests**:
   - Added unit tests in [`tests/test_controller_reasoning_steps.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_controller_reasoning_steps.py) covering all registered tool schemas in `_build_fallback_plan` and multi-failure recovery in `_request_plan`.
   - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 111 source files).
+
+### U. Statistical Reliability, Causal Guardrails & UI Nested Box Cleanup (2026-10-18) [Tasks BE-16, UI-4, UI-5]
+- **Sidebar Collapse & File Chip Styling** ([`ui/styles.py`](file:///d:/(Dev2)DSA_AGENT/ui/styles.py)):
+  - Stripped outer box wrappers on `div[data-testid="stSidebarCollapseButton"]` and scoped single crisp border strictly to the child `<button>`, eliminating the "double box" in both Day and Night modes.
+  - Resolved low-contrast white-on-white text for uploaded file chips in Night mode.
+  - Reset `stFileChips`, `ul`, `li` wrappers to `border: none !important; background: transparent !important;`, and targeted card border strictly to `div[data-testid="stFileChip"]`.
+  - Stripped nested borders from all inner elements (`stFileChipName`, icon, `stFileChipDeleteBtn`), eliminating the multiple nested boxes around the filename, delete icon, and container.
+- **Causal vs Observational Guardrails in Action Matrix** ([`src/core/findings.py`](file:///d:/(Dev2)DSA_AGENT/src/core/findings.py)):
+  - Enforced sample size checking in `classify_action_matrix`: `min(sample_sizes) >= 100` and `records >= 100` required before admitting observational segment contrasts into `matrix["pilot"]`. Smaller samples are routed to `matrix["watch_caveats"]`.
+- **Protected Attribute Safeguards in Prescriptive Scenarios** ([`src/tools/scenario_simulation.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/scenario_simulation.py)):
+  - Enhanced `_is_protected_col()` to tokenize compound demographic column names (`customer_age`, `user_gender`, `age_band`), blocking them from candidate optimization levers and segment equalization.
+  - Added inflected adverse terms (`churned`, `defaults`, `failures`, `emissions`, `bankruptcies`) to `_ADVERSE_TARGET_TERMS`.
+- **Target Leakage Hard-Gating & Downstream Step Skipping** ([`src/core/controller_steps.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller_steps.py)):
+  - When target leakage ($R^2 \ge 0.999$) gates model training, both `evaluate_model` and `generate_visualizations(chart_type="feature_importance")` are cleanly skipped with status `"skipped"`, preventing crashes from attempting to load non-existent model weights.
+- **Cross-Run State Isolation** ([`ui/run.py`](file:///d:/(Dev2)DSA_AGENT/ui/run.py)):
+  - Confined `adopt_run()` artifact candidates strictly to `registry.run_dir`, eliminating cross-run state bleed from root workspace files across server reloads.
+- **Recommendation Badge Accuracy** ([`ui/tabs/answers_tab.py`](file:///d:/(Dev2)DSA_AGENT/ui/tabs/answers_tab.py)):
+  - Added prefix-aware recommendation badge categorization (`Test`, `Watch`, `Explore`, `Do`), preventing observational caveats from being tagged as mandatory "Do" actions.
+- **Verification & Tests**:
+  - Unit tests added in `tests/test_action_matrix.py`, `tests/test_scenario_simulation.py`, `tests/test_controller.py`, `tests/test_run_worker.py`.
+  - Ran 136-test suite: 136 passed in 39.69s.
+  - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 115 source files).
+  - End-to-end integration: `python main.py --dataset data/sample_customer_churn.csv --target Churn --no-llm` executed 7 stages to completion with exit code 0.
+
 

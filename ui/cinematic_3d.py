@@ -220,7 +220,19 @@ def extract_cinematic_state(session_state: Any) -> dict[str, Any]:
     if train_out and isinstance(train_out, dict):
         best_model_candidate = train_out.get("best_model")
         models_trained = train_out.get("models_trained", {})
-        if isinstance(models_trained, dict) and models_trained:
+        is_gated = bool(train_out.get("model_training_gated") or train_out.get("is_leaked"))
+        has_valid_weights = (
+            best_model_candidate is not None
+            and not is_gated
+            and isinstance(models_trained, dict)
+            and any(
+                isinstance(m_info, dict)
+                and m_info.get("model_path")
+                and Path(str(m_info.get("model_path"))).exists()
+                for m_info in models_trained.values()
+            )
+        )
+        if has_valid_weights and isinstance(models_trained, dict) and models_trained:
             has_models = True
             best_model_name = str(best_model_candidate or "Model")
             for m_name, m_info in models_trained.items():
@@ -240,6 +252,9 @@ def extract_cinematic_state(session_state: Any) -> dict[str, Any]:
                         best_cv_score = cv_m
                         best_gap = gap if gap is not None else 0.0
                         overfit_warnings.extend(warns)
+        else:
+            has_models = False
+            best_model_name = "None (Gated / Descriptive EDA)"
 
     analysis_done = bool(session_state.get("analysis_done") or session_state.get("final_report"))
     if not has_models:

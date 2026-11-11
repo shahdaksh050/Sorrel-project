@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from src.core.analysis_io import read_analysis_df
+from src.core.column_patterns import find_benchmark_pairs
 from src.core.io import DatasetReadError, invalidate_read_cache
 from src.core.security import UploadValidationError, resolve_output_path
 from src.core.semantic_readiness import assess_semantic_readiness
@@ -41,6 +42,19 @@ _LENGTH_RE = re.compile(r"(?P<number>\d+(?:\.\d+)?)\s*(?P<unit>in(?:ch(?:es)?)?|
 _REFRESH_RE = re.compile(r"(?P<number>\d+(?:\.\d+)?)\s*hz\b", re.IGNORECASE)
 _MEGAPIXEL_RE = re.compile(r"(?P<number>\d+(?:\.\d+)?)\s*(?:mp|megapixel)\b", re.IGNORECASE)
 _FREQUENCY_RE = re.compile(r"(?P<number>\d+(?:\.\d+)?)\s*(?P<unit>ghz|mhz|khz)\b", re.IGNORECASE)
+
+# One inexpensive filter decides which textual columns can possibly contain a
+# supported structured value.  The extractor used to stringify every cell in
+# every column and then run seventeen parsers over the resulting matrix.  On
+# the 47,970 x 105 incident dataset that meant tens of millions of regex calls
+# and kept the Streamlit process CPU-bound for 275 seconds.
+_STRUCTURED_SIGNAL_RE = re.compile(
+    r"(?:â‚¹|\b(?:inr|rs\.?)\b|[$â‚¬Â£Â¥])\s*\d"
+    r"|\b\d+(?:\.\d+)?\s*(?:tb|gb|mb|mah|kw|watt|w|in(?:ch(?:es)?)?|cm|mm|ft|m|hz|mp|megapixel|ghz|mhz|khz)\b"
+    r"|\b(?:android|ios|ipados|windows(?:\s+phone)?|macos|linux|harmonyos|chrome\s*os|"
+    r"5g|nfc|bluetooth|wi-?fi|fm\s+radio|fast\s+charg(?:e|ing))\b",
+    re.IGNORECASE,
+)
 
 _PLATFORM_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("Android", re.compile(r"\bandroid\b", re.IGNORECASE)),
@@ -223,73 +237,39 @@ def _consolidate_rows(
     return values, [source_names[index] for index in sorted(used_indexes)]
 
 
+def _candidate_text_sources(df: pd.DataFrame) -> tuple[list[str], list[list[str]], list[str]]:
+    """Materialise only text columns containing a supported signature.
+
+    Returns candidate names/text, plus skipped text-column names for audit.
+    Numeric columns are intentionally not stringified: already typed measures
+    are retained as-is and none of the parsers should duplicate them.
+    """
+    names: list[str] = []
+    texts: list[list[str]] = []
+    skipped: list[str] = []
+    for raw_name in df.columns:
+        series = df[raw_name]
+        if not (
+            pd.api.types.is_object_dtype(series)
+            or isinstance(series.dtype, pd.StringDtype)
+            or isinstance(series.dtype, pd.CategoricalDtype)
+        ):
+            continue
+        values = ["" if pd.isna(value) else str(value) for value in series.tolist()]
+        # Classify distinct values once. This is especially important for
+        # categorical columns with tens of thousands of repeated labels.
+        if not any(_STRUCTURED_SIGNAL_RE.search(value) for value in dict.fromkeys(values) if value):
+            skipped.append(str(raw_name))
+            continue
+        names.append(str(raw_name))
+        texts.append(values)
+    return names, texts, skipped
+
+
 
 def _find_benchmark_pairs(columns: Sequence[str]) -> list[tuple[str, str, str]]:
-    """Scan columns for paired observed vs expected / actual vs target benchmarks.
-    Returns list of (observed_col, expected_col, base_stem)."""
-    col_lower_map = {c.lower(): c for c in columns}
-    pairs: list[tuple[str, str, str]] = []
-    seen: set[tuple[str, str]] = set()
-
-    # 1. Prefix pairs: actual_X vs target_X / expected_X / budget_X
-    prefix_obs = ("actual_", "observed_")
-    prefix_exp = ("target_", "expected_", "budget_", "predicted_")
-    for c in columns:
-        c_low = c.lower()
-        for p_obs in prefix_obs:
-            if c_low.startswith(p_obs):
-                stem = c_low[len(p_obs):]
-                for p_exp in prefix_exp:
-                    cand_exp = p_exp + stem
-                    if cand_exp in col_lower_map:
-                        obs = c
-                        exp = col_lower_map[cand_exp]
-                        if (obs, exp) not in seen and obs != exp:
-                            seen.add((obs, exp))
-                            pairs.append((obs, exp, stem))
-
-    # 2. Suffix pairs: X_actual vs X_target / X_expected / X_budget
-    suffix_obs = ("_actual", "_observed", "_obs")
-    suffix_exp = ("_target", "_expected", "_budget", "_predicted", "_exp")
-    for c in columns:
-        c_low = c.lower()
-        for s_obs in suffix_obs:
-            if c_low.endswith(s_obs):
-                stem = c_low[:-len(s_obs)]
-                for s_exp in suffix_exp:
-                    cand_exp = stem + s_exp
-                    if cand_exp in col_lower_map:
-                        obs = c
-                        exp = col_lower_map[cand_exp]
-                        if (obs, exp) not in seen and obs != exp:
-                            seen.add((obs, exp))
-                            pairs.append((obs, exp, stem))
-
-    # 3. Canonical domain equivalents
-    known_pairs = [
-        ("goals", "xgoals", "goals"),
-        ("goals", "xg", "goals"),
-        ("home_goals", "home_xg", "home_goals"),
-        ("home_goals", "home_xgoals", "home_goals"),
-        ("away_goals", "away_xg", "away_goals"),
-        ("away_goals", "away_xgoals", "away_goals"),
-        ("duration", "eta", "duration"),
-        ("revenue", "quota", "revenue"),
-        ("sales", "budget", "sales"),
-        ("cost", "budget", "cost"),
-        ("actual", "target", "target"),
-        ("actual", "budget", "budget"),
-        ("observed", "expected", "expected"),
-    ]
-    for obs_name, exp_name, stem in known_pairs:
-        if obs_name in col_lower_map and exp_name in col_lower_map:
-            obs = col_lower_map[obs_name]
-            exp = col_lower_map[exp_name]
-            if (obs, exp) not in seen and obs != exp:
-                seen.add((obs, exp))
-                pairs.append((obs, exp, stem))
-
-    return pairs
+    """Backward-compatible alias for the neutral core helper."""
+    return find_benchmark_pairs(columns)
 
 class StructuredFeatureExtractionTool(BaseTool):
     """Add deterministic typed features parsed from common units and concepts."""
@@ -337,11 +317,7 @@ class StructuredFeatureExtractionTool(BaseTool):
         readiness = assess_semantic_readiness(df)
         output = df.copy()
         provenance: list[dict[str, Any]] = []
-        source_names = [str(source) for source in df.columns]
-        source_texts = [
-            ["" if pd.isna(value) else str(value) for value in df[source].tolist()]
-            for source in df.columns
-        ]
+        source_names, source_texts, skipped_text_sources = _candidate_text_sources(df)
 
         # Emit one canonical feature per concept, not one copy per source
         # column. Source-local copies are highly correlated aliases of the
@@ -487,6 +463,13 @@ class StructuredFeatureExtractionTool(BaseTool):
             "provenance": provenance,
             "quarantined_columns": quarantined_columns,
             "semantic_readiness": readiness,
+            "extraction_scope": {
+                "text_columns_scanned": source_names,
+                "text_columns_without_supported_signatures": skipped_text_sources,
+                "numeric_columns_preserved_without_text_parsing": sum(
+                    pd.api.types.is_numeric_dtype(df[column]) for column in df.columns
+                ),
+            },
         }
 
     def get_schema(self) -> dict[str, Any]:

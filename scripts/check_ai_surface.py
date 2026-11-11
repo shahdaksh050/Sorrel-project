@@ -1,211 +1,182 @@
 #!/usr/bin/env python3
-"""
-AI Discovery Surface Checker & Linter
-
-Validates public discovery files (robots.txt, sitemap.xml, llms.txt, security.txt)
-and public Markdown documentation against repository standards, ensuring zero
-hallucinated paths, invalid local URLs, or broken links.
-"""
+"""Validate the public discovery surface against shipped local capabilities."""
 from __future__ import annotations
 
-import argparse
+import json
 import re
 import sys
 import xml.etree.ElementTree as ET
+from html import escape
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PUBLIC_DIR = REPO_ROOT / "public"
 DOCS_PUBLIC_DIR = REPO_ROOT / "docs" / "public"
-LANDING_INDEX = REPO_ROOT / "ui" / "landing_component" / "index.html"
+DISCOVERY_DOCS = {
+    "overview.md", "workflow.md", "safety.md", "file-formats.md", "limits.md", "changelog.md",
+}
+ROADMAP_DOCS = {"api-quickstart.md", "mcp.md", "result-schema.md"}
+FORBIDDEN_URL = re.compile(
+    r"(?:https?://(?:localhost|127\\.0\\.0\\.1)|file:///|\\.local)",
+    re.IGNORECASE,
+)
+REMOTE_CLAIMS = (
+    "REST API enables", "provides a remote Model Context Protocol", "stable JSON schema returned",
+    "active runs per tenant", "automatically purged after 24 hours", "Immutable Audit Trail",
+)
+LANDING_PATH = REPO_ROOT / "ui" / "landing_component" / "index.html"
+_DOCS_REGISTRY_RE = re.compile(r"var DOCS_REGISTRY = .*?;\r?\n", re.DOTALL)
 
 
-def check_robots_txt(origin: str) -> list[str]:
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def embedded_docs_registry() -> dict[str, str]:
+    """Return the deterministic documentation payload embedded by the UI."""
+    return {
+        path.stem: _read(path)
+        for path in sorted(DOCS_PUBLIC_DIR.glob("*.md"), key=lambda item: item.name)
+    }
+
+
+def sync_landing_docs() -> None:
+    """Replace the landing page's generated docs registry from source docs."""
+    html = _read(LANDING_PATH)
+    replacement = f"var DOCS_REGISTRY = {json.dumps(embedded_docs_registry(), ensure_ascii=False)};\n"
+    updated, count = _DOCS_REGISTRY_RE.subn(lambda _: replacement, html, count=1)
+    if count != 1:
+        raise RuntimeError("landing page DOCS_REGISTRY marker was not found exactly once")
+    blocks = {
+        "llms-code-content": _read(PUBLIC_DIR / "llms.txt"),
+        "robots-code-content": _read(PUBLIC_DIR / "robots.txt"),
+        "sitemap-code-content": _read(PUBLIC_DIR / "sitemap.xml"),
+        "policy-code-content": _read(PUBLIC_DIR / ".well-known" / "security.txt"),
+        "api-code-content": (
+            "REST API is not shipped in this repository.\n"
+            "Use the local Streamlit workspace or: python main.py --dataset <path>\n"
+            "See /docs/api-quickstart.md for the release-gated roadmap."
+        ),
+        "mcp-code-content": (
+            "Remote MCP is not shipped in this repository.\n"
+            "No /mcp endpoint or bearer-token contract is currently available.\n"
+            "See /docs/mcp.md for the release-gated roadmap."
+        ),
+    }
+    for element_id, content in blocks.items():
+        pattern = re.compile(
+            rf'(<pre class="ai-code-block" id="{re.escape(element_id)}">).*?(</pre>)',
+            re.DOTALL,
+        )
+        updated, block_count = pattern.subn(
+            lambda match, block=content: f"{match.group(1)}{escape(block)}{match.group(2)}",
+            updated,
+            count=1,
+        )
+        if block_count != 1:
+            raise RuntimeError(f"landing page block {element_id!r} was not found exactly once")
+    for old, new in (
+        ('href="http://localhost:8501/"', 'href="/"'),
+        ('href="http://localhost:8501/docs/overview.md"', 'href="/docs/overview.md"'),
+        ('href="http://localhost:8501/llms.txt"', 'href="/llms.txt"'),
+        ('content="http://localhost:8501/"', 'content="/"'),
+    ):
+        updated = updated.replace(old, new)
+    LANDING_PATH.write_text(updated, encoding="utf-8")
+
+
+def check_public_assets() -> list[str]:
     errors: list[str] = []
-    robots_path = PUBLIC_DIR / "robots.txt"
-    if not robots_path.is_file():
-        return [f"Missing {robots_path}"]
-
-    content = robots_path.read_text(encoding="utf-8")
-    if "User-agent:" not in content:
-        errors.append("robots.txt must declare at least one User-agent directive")
-    if "Disallow: /api/" not in content or "Disallow: /runs/" not in content:
-        errors.append("robots.txt must disallow private paths (/api/, /runs/, /uploads/)")
-    if "Sitemap:" not in content:
-        errors.append("robots.txt must specify a Sitemap URL")
-    if ".local" in content or ("localhost" in content and not origin.startswith("http://localhost")):
-        errors.append("robots.txt contains illegal .local or localhost references")
-
-    expected_sitemap = f"{origin}/sitemap.xml"
-    if expected_sitemap not in content:
-        errors.append(f"robots.txt Sitemap directive should match canonical origin ({expected_sitemap})")
-
-    return errors
-
-
-def check_sitemap_xml(origin: str) -> list[str]:
-    errors: list[str] = []
-    sitemap_path = PUBLIC_DIR / "sitemap.xml"
-    if not sitemap_path.is_file():
-        return [f"Missing {sitemap_path}"]
-
-    content = sitemap_path.read_text(encoding="utf-8")
-    if ".local" in content or ("localhost" in content and not origin.startswith("http://localhost")):
-        errors.append("sitemap.xml contains illegal .local or localhost references")
-
-    try:
-        root = ET.fromstring(content)
-    except ET.ParseError as e:
-        return [f"sitemap.xml failed XML parsing: {e}"]
-
-    # Extract all <loc> text values
-    namespace = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-    urls = [elem.text.strip() for elem in root.findall(".//sm:loc", namespace) if elem.text]
-
-    if not urls:
-        errors.append("sitemap.xml contains no <loc> URL elements")
-
-    for url in urls:
-        if not url.startswith(origin):
-            errors.append(f"sitemap URL does not start with expected origin ({origin}): {url}")
-        if url.endswith(".md"):
-            # Ensure referenced doc exists in docs/public/
-            slug = url.split("/docs/")[-1]
-            doc_file = DOCS_PUBLIC_DIR / slug
-            if not doc_file.is_file():
-                errors.append(f"sitemap.xml references missing documentation file: {doc_file}")
-
-    return errors
-
-
-def check_llms_txt(origin: str) -> list[str]:
-    errors: list[str] = []
-    llms_path = PUBLIC_DIR / "llms.txt"
-    if not llms_path.is_file():
-        return [f"Missing {llms_path}"]
-
-    content = llms_path.read_text(encoding="utf-8")
-    lines = content.splitlines()
-
-    # Rule 1: Exactly one H1 heading
-    h1_count = sum(1 for line in lines if line.startswith("# ") and not line.startswith("## "))
-    if h1_count != 1:
-        errors.append(f"llms.txt must have exactly 1 H1 heading (found {h1_count})")
-
-    # Rule 2: Must contain blockquote summary
-    if not any(line.startswith("> ") for line in lines):
-        errors.append("llms.txt must have a blockquote summary (> ...)")
-
-    # Rule 3: Required section headings
-    required_sections = ["## Start Here", "## Integrate", "## Reference"]
-    for sec in required_sections:
-        if sec not in content:
-            errors.append(f"llms.txt missing required section '{sec}'")
-
-    # Rule 4: Context size budget (< 4096 bytes)
-    if len(content.encode("utf-8")) > 4096:
-        errors.append(f"llms.txt exceeds context size budget ({len(content.encode('utf-8'))} > 4096 bytes)")
-
-    # Rule 5: Validate linked files
-    link_pattern = re.compile(r"\[([^\]]+)\]\((https?://[^\)]+)\)")
-    for match in link_pattern.finditer(content):
-        title, url = match.group(1), match.group(2)
-        if ".local" in url or ("localhost" in url and not origin.startswith("http://localhost")):
-            errors.append(f"llms.txt link contains .local or localhost: {url}")
-        if url.endswith(".md") and "/docs/" in url:
-            slug = url.split("/docs/")[-1]
-            doc_file = DOCS_PUBLIC_DIR / slug
-            if not doc_file.is_file():
-                errors.append(f"llms.txt links to missing documentation file '{title}': {doc_file}")
-
-    return errors
-
-
-def check_security_txt(origin: str) -> list[str]:
-    errors: list[str] = []
-    for sec_path in [PUBLIC_DIR / ".well-known" / "security.txt", PUBLIC_DIR / "security.txt"]:
-        if not sec_path.is_file():
-            errors.append(f"Missing {sec_path}")
+    assets = (
+        PUBLIC_DIR / "robots.txt",
+        PUBLIC_DIR / "llms.txt",
+        PUBLIC_DIR / "security.txt",
+        PUBLIC_DIR / ".well-known" / "security.txt",
+    )
+    for path in assets:
+        if not path.is_file():
+            errors.append(f"Missing {path.relative_to(REPO_ROOT)}")
             continue
-        content = sec_path.read_text(encoding="utf-8")
-        if "Contact: mailto:" not in content:
-            errors.append(f"{sec_path.name} must declare a Contact directive")
-        if "Canonical:" not in content:
-            errors.append(f"{sec_path.name} must declare a Canonical directive")
-        if "Expires:" not in content:
-            errors.append(f"{sec_path.name} must declare an Expires directive")
-        if ".local" in content or ("localhost" in content and not origin.startswith("http://localhost")):
-            errors.append(f"{sec_path.name} contains .local or localhost")
+        if FORBIDDEN_URL.search(_read(path)):
+            errors.append(f"{path.relative_to(REPO_ROOT)} leaks a workstation URL")
+
+    robots = _read(PUBLIC_DIR / "robots.txt")
+    required_directives = (
+        "User-agent: *",
+        "Disallow: /api/",
+        "Disallow: /runs/",
+        "Sitemap: /sitemap.xml",
+    )
+    for directive in required_directives:
+        if directive not in robots:
+            errors.append(f"robots.txt missing {directive!r}")
+
+    for path in (PUBLIC_DIR / "security.txt", PUBLIC_DIR / ".well-known" / "security.txt"):
+        content = _read(path)
+        required_directives = (
+            "Contact: mailto:",
+            "Canonical: /.well-known/security.txt",
+            "Policy: /docs/safety.md",
+            "Expires:",
+        )
+        for directive in required_directives:
+            if directive not in content:
+                errors.append(f"{path.relative_to(REPO_ROOT)} missing {directive!r}")
+
+    sitemap = PUBLIC_DIR / "sitemap.xml"
+    try:
+        root = ET.fromstring(_read(sitemap))
+    except ET.ParseError as exc:
+        errors.append(f"sitemap.xml failed XML parsing: {exc}")
+    else:
+        locations = ".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc"
+        urls = [item.text or "" for item in root.findall(locations)]
+        if not urls or any(not url.startswith("{{PUBLIC_ORIGIN}}/") for url in urls):
+            errors.append("sitemap.xml must use the deployment-origin token")
+        if any(name in "\n".join(urls) for name in ROADMAP_DOCS):
+            errors.append("sitemap.xml must not index unshipped interface roadmap pages")
     return errors
 
 
-def check_public_docs(origin: str) -> list[str]:
+def check_docs() -> list[str]:
     errors: list[str] = []
-    if not DOCS_PUBLIC_DIR.is_dir():
-        return [f"Missing {DOCS_PUBLIC_DIR} directory"]
-
-    doc_files = list(DOCS_PUBLIC_DIR.glob("*.md"))
-    if len(doc_files) < 6:
-        errors.append(f"Expected at least 6 public documentation pages, found {len(doc_files)}")
-
-    for doc in doc_files:
-        text = doc.read_text(encoding="utf-8")
+    for path in DOCS_PUBLIC_DIR.glob("*.md"):
+        text = _read(path)
         if not text.startswith("# "):
-            errors.append(f"{doc.name} should start with an H1 heading ('# Title')")
-        if "Version:" not in text:
-            errors.append(f"{doc.name} missing 'Version:' header")
-        if "Last Updated:" not in text:
-            errors.append(f"{doc.name} missing 'Last Updated:' header")
-        if "Canonical:" not in text:
-            errors.append(f"{doc.name} missing 'Canonical:' link header")
-        if ".local" in text or ("localhost" in text and not origin.startswith("http://localhost")):
-            errors.append(f"{doc.name} contains illegal .local or localhost reference")
-
-    return errors
-
-
-def check_landing_metadata() -> list[str]:
-    errors: list[str] = []
-    if not LANDING_INDEX.is_file():
-        return [f"Missing {LANDING_INDEX}"]
-
-    content = LANDING_INDEX.read_text(encoding="utf-8")
-    if "dsa-agent.local" in content:
-        errors.append("landing_component/index.html still references dsa-agent.local")
-    if 'rel="canonical"' not in content:
-        errors.append("landing_component/index.html missing rel=canonical tag")
-    if 'rel="alternate"' not in content:
-        errors.append("landing_component/index.html missing rel=alternate tag for Markdown docs")
-    if 'rel="describedby"' not in content:
-        errors.append("landing_component/index.html missing rel=describedby tag for llms.txt")
-
+            errors.append(f"{path.name} must begin with an H1")
+        for header in ("Version:", "Last Updated:", f"Canonical: /docs/{path.name}"):
+            if header not in text:
+                errors.append(f"{path.name} missing {header!r}")
+        if FORBIDDEN_URL.search(text):
+            errors.append(f"{path.name} leaks a workstation URL")
+        if path.name in DISCOVERY_DOCS and any(claim in text for claim in REMOTE_CLAIMS):
+            errors.append(f"{path.name} claims an unshipped remote capability")
+        if path.name in ROADMAP_DOCS and "not" not in text.lower():
+            errors.append(f"{path.name} must clearly state that the interface is unshipped")
+    llms = _read(PUBLIC_DIR / "llms.txt")
+    if "There is no REST API or MCP server" not in llms:
+        errors.append("llms.txt must state the local-only interface boundary")
+    if any(f"/docs/{name}" in llms for name in ROADMAP_DOCS):
+        errors.append("llms.txt must not link unshipped interface roadmap pages")
+    landing = _read(LANDING_PATH)
+    if FORBIDDEN_URL.search(landing):
+        errors.append("landing page leaks a workstation URL")
+    if "REST API is not shipped" not in landing or "Remote MCP is not shipped" not in landing:
+        errors.append("landing page must label remote interfaces as unshipped")
     return errors
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate public AI discovery surface.")
-    parser.add_argument("--origin", default="http://localhost:8501", help="Expected canonical origin")
-    args = parser.parse_args(argv)
-
-    origin = args.origin.rstrip("/")
-    all_errors: list[str] = []
-
-    print(f"Checking AI discovery surface for origin: {origin}")
-
-    all_errors.extend(check_robots_txt(origin))
-    all_errors.extend(check_sitemap_xml(origin))
-    all_errors.extend(check_llms_txt(origin))
-    all_errors.extend(check_security_txt(origin))
-    all_errors.extend(check_public_docs(origin))
-    all_errors.extend(check_landing_metadata())
-
-    if all_errors:
-        print("\nDiscovery surface verification FAILED with the following errors:")
-        for err in all_errors:
-            print(f"  [ERROR] {err}")
+    args = sys.argv[1:] if argv is None else argv
+    if "--sync-landing" in args:
+        sync_landing_docs()
+    errors = check_public_assets() + check_docs()
+    if errors:
+        print("AI discovery surface verification FAILED:")
+        for error in errors:
+            print(f"  [ERROR] {error}")
         return 1
-
-    print("\nAll discovery surface checks passed cleanly (0 errors)!")
+    print("AI discovery surface verification passed (0 errors).")
     return 0
 
 

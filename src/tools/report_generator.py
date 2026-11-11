@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.findings import classify_action_matrix, is_data_hygiene_finding
 from src.core.html_report import data_understanding_rows, governance_rows
+from src.core.json_normalization import strict_json_dumps
 from src.core.multiple_testing import DEFAULT_ALPHA as _BH_ALPHA
 from src.core.multiple_testing import apply_benjamini_hochberg as _apply_benjamini_hochberg
 from src.core.plain_language import describe_uncertainty, format_p, plainify
@@ -98,17 +99,19 @@ def _build_executive_summary(
 
 
 def _findings_grounded_summary(findings: list[dict[str, Any]] | None) -> str:
-    """Build a 2-3 sentence executive summary grounded directly on the top
-    actionable findings (strategic bets / quick wins), not process commentary."""
+    """Build an evidence summary without turning observations into actions."""
     if not findings:
         return ""
-    matrix = classify_action_matrix(findings)
-    actionable = matrix["strategic_bets"] + matrix["quick_wins"]
-    if not actionable:
+    headline_findings = [
+        finding
+        for finding in _headline_findings(findings)
+        if finding.get("primary_eligible", True) and finding.get("headline")
+    ]
+    if not headline_findings:
         return ""
     return " ".join(
         plainify(str(f["headline"]).strip().rstrip(".")) + "."
-        for f in actionable[:2]
+        for f in headline_findings[:2]
     )
 
 
@@ -223,6 +226,36 @@ def _format_data_understanding(
             lines.append("")
         lines.append("What it flagged to watch out for:")
         lines.extend(f"- {c}" for c in caveats)
+    lines.append("")
+    return lines
+
+
+def _format_run_status(llm_insights: dict[str, Any]) -> list[str]:
+    """Render the public terminal status, coverage, and execution issues."""
+    status = llm_insights.get("status")
+    coverage = llm_insights.get("coverage")
+    issues = llm_insights.get("execution_issues") or []
+    if not status and not coverage and not issues:
+        return []
+    lines = ["## Run Status & Coverage", ""]
+    if status:
+        lines.append(f"- **Status**: `{status}`")
+    if isinstance(coverage, dict):
+        lines.append(
+            f"- **Questions answered**: {coverage.get('answered', 0)} of {coverage.get('total', 0)}"
+        )
+        unanswered = coverage.get("unanswered") or []
+        for question in unanswered[:3]:
+            text = question.get("text") if isinstance(question, dict) else str(question)
+            lines.append(f"  - Unanswered: {plainify(str(text))}")
+    for issue in issues[:5]:
+        if isinstance(issue, dict):
+            lines.append(
+                f"- **{issue.get('severity', 'warning')}** `{issue.get('code', 'execution_issue')}`: "
+                f"{plainify(str(issue.get('message', '')))}"
+            )
+        else:
+            lines.append(f"- **Warning**: {plainify(str(issue))}")
     lines.append("")
     return lines
 
@@ -665,6 +698,7 @@ def _format_action_matrix(findings: list[dict[str, Any]] | None) -> list[str]:
     quadrant_meta = [
         ("quick_wins", "⚡ Quick Wins (High Impact, High Feasibility)"),
         ("strategic_bets", "🎯 Strategic Bets (High Impact, High Complexity)"),
+        ("pilot", "🧪 Pilot / A/B Test (High Opportunity, Observational Contrast)"),
         ("incremental", "🔧 Incremental (Moderate Impact, High Feasibility)"),
         ("watch_caveats", "⚠️ Risk & Watch Items (Requires Guardrails)"),
     ]
@@ -721,8 +755,8 @@ class GenerateReportTool(BaseTool):
         params = super().prepare_params(params, memory, output_root)
         meta = memory.dataset_metadata
         params.setdefault("dataset_name", Path(meta.file_path).stem if meta else "dataset")
-        params["tool_results_json"] = json.dumps(
-            [r.to_dict() for r in memory.tool_results], default=str
+        params["tool_results_json"] = strict_json_dumps(
+            [r.to_dict() for r in memory.tool_results]
         )
         params.setdefault("llm_insights", {})
         params.setdefault("data_profile", memory.get_context("data_profile"))
@@ -803,6 +837,7 @@ class GenerateReportTool(BaseTool):
         # Data Overview — shape/quality plus what was detected-or-assumed at
         # read time (item 2) and repaired before analysis (item 3).
         md_lines += _format_data_overview(data_profile, read_report, coercions)
+        md_lines += _format_run_status(llm_insights)
         md_lines += _format_data_understanding(llm_insights, data_profile)
         md_lines += _format_domain_and_causal_contracts(llm_insights)
         md_lines += _format_data_integrity(findings)
@@ -911,7 +946,7 @@ class GenerateReportTool(BaseTool):
 
         json_path = Path(output_dir) / f"{dataset_name}_raw.json"
         json_path.write_text(
-            json.dumps(
+            strict_json_dumps(
                 {
                     "timestamp": timestamp,
                     "dataset": dataset_name,
@@ -931,7 +966,6 @@ class GenerateReportTool(BaseTool):
                     "analysis_decision": analysis_decision,
                 },
                 indent=2,
-                default=str,
             ),
             encoding="utf-8",
         )

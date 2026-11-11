@@ -61,6 +61,8 @@ def test_autonomous_cadence_cycle1_and_cycle2(tmp_path: pytest.TempPathFactory) 
     anchored_c2 = controller._ensure_agenda_anchor_steps(steps_c2)
     tool_names_c2 = [s.tool_name for s in anchored_c2]
 
-    # Archetype Clustering and What-If Simulation must both be present
-    assert "cluster_data" in tool_names_c2
-    assert "scenario_simulation" in tool_names_c2
+    # Generic clustering and what-if work is no longer injected without an
+    # objective-fit question; the explicit regression step remains intact.
+    assert "cluster_data" not in tool_names_c2
+    assert "scenario_simulation" not in tool_names_c2
+    assert tool_names_c2 == ["regression_analysis"]

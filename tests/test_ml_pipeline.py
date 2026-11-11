@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from src.core.memory import DatasetMetadata, MemorySystem
+from src.tools.ml_common import _build_cv_policy
 from src.tools.ml_pipeline import EvaluateModelTool, TrainModelTool
 
 
@@ -82,6 +83,12 @@ class TestTrainModelTool:
         for m in model_results.values():
             assert "cv_mean" in m
             assert "cv_std" in m
+            assert "converged" in m
+            assert "n_iter" in m
+            assert "fit_warnings" in m
+            assert "selection_status" in m
+        assert result.output["n_cv_folds"] >= 5
+        assert result.output["selected_model_status"] == "selected"
 
     def test_train_test_gap_present(self, classification_csv: str) -> None:
         result = TrainModelTool().run(
@@ -92,6 +99,17 @@ class TestTrainModelTool:
         model_results = result.output["models_trained"]
         for m in model_results.values():
             assert "train_test_gap" in m
+
+    def test_cpu_backend_telemetry_is_reported(self, classification_csv: str) -> None:
+        result = TrainModelTool().run(
+            file_path=classification_csv,
+            target_column="label",
+            models=["xgboost"],
+            compute_backend="cpu",
+        )
+        assert result.status == "success"
+        assert result.output["compute_backend"] == "cpu"
+        assert result.output["backend_reason"] == "forced_cpu"
 
     def test_regression_trains_successfully(self, regression_csv: str) -> None:
         result = TrainModelTool().run(
@@ -124,6 +142,29 @@ class TestTrainModelTool:
             target_column="nonexistent_col",
         )
         assert result.status == "error"
+
+    def test_iid_cv_promotes_low_requested_fold_count_to_five(self) -> None:
+        features = pd.DataFrame({"x": range(20)})
+        y = pd.Series([0, 1] * 10)
+        _, folds, scheme, rationale = _build_cv_policy(features, y, None, "random", "classification", 3)
+        assert folds == 5
+        assert scheme == "stratified_k_fold"
+        assert rationale is None
+
+    def test_iid_cv_reports_small_class_constraint(self) -> None:
+        features = pd.DataFrame({"x": range(8)})
+        y = pd.Series([0, 0, 0, 0, 0, 0, 1, 1])
+        _, folds, _, rationale = _build_cv_policy(features, y, None, "random", "classification", 5)
+        assert folds == 2
+        assert rationale is not None and "smallest training class" in rationale
+
+    def test_unconverged_candidate_is_not_selected_when_eligible_candidate_exists(self) -> None:
+        tool = TrainModelTool()
+        selected = tool._pick_best({
+            "unstable": {"cv_mean": 0.99, "train_test_gap": 0.01, "selection_status": "rejected_unconverged"},
+            "sound": {"cv_mean": 0.70, "train_test_gap": 0.01, "selection_status": "eligible"},
+        })
+        assert selected == "sound"
 
 
 class TestEvaluateModelTool:
@@ -335,6 +376,8 @@ def test_unresolved_target_leakage_gates_model_and_attaches_caveats(tmp_path: Pa
         output_dir=str(tmp_path / "models"),
     )
     assert out["is_leaked"] is True
+    assert out["best_model"] is None
+    assert out["model_training_gated"] is True
     # Model persistence gated: model_path should be None
     assert out["models_trained"]["logistic_regression"]["model_path"] is None
     assert out["models_trained"]["logistic_regression"]["unpromoted_due_to_leakage"] is True
@@ -347,4 +390,3 @@ def test_unresolved_target_leakage_gates_model_and_attaches_caveats(tmp_path: Pa
     assert "gated due to suspected target leakage" in model_finding.headline
     assert model_finding.confidence == 0.1
     assert len(model_finding.caveats) > 0
-

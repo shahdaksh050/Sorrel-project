@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, cast
 
 from src.core.privacy import redact_level_in_text
 
@@ -82,6 +82,8 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
+EvidenceTier = Literal["observation", "hypothesis", "pilot", "causal_action"]
+
 
 @dataclass
 class Finding:
@@ -108,10 +110,16 @@ class Finding:
     surprise: float = 0.3              # distance from base rate / prior expectation, in [0, 1]
     objective_fit: float = 0.0         # how well this answers the stated objective, in [0, 1]
     importance: float = 0.0            # ranking key, computed by compute_importance()
+    raw_importance_rank: int | None = None
+    display_rank: int | None = None
+    ranking_policy: str = "importance_then_source_diversity_v1"
 
     caveats: list[str] = field(default_factory=list)
     chart_hint: dict[str, Any] | None = None   # {"kind": "bar"/"line"/..., "data": {...}} — what would show this
     layer: str = "analyst"             # exec | analyst | appendix — which report tier this belongs on by default
+    evidence_tier: EvidenceTier = "observation"
+    primary_eligible: bool = True
+    eligibility_reasons: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Small-cell guard: a finding naming a level whose evidence `n` is
@@ -193,6 +201,47 @@ class Finding:
         self.importance = round(score, 6)
         return self.importance
 
+    def refresh_eligibility(self) -> bool:
+        """Recompute whether this finding may appear in a primary insight.
+
+        Explicit audit failures are hard gates. Unknown checks do not hide an
+        otherwise useful descriptive observation, but its evidence tier still
+        prevents it from becoming an intervention recommendation.
+        """
+        reasons: list[str] = []
+        checks = self.evidence.get("checks", {}) if isinstance(self.evidence, dict) else {}
+        if isinstance(checks, dict):
+            labels = {
+                "claim_verified": "claim verification failed",
+                "robust": "robustness check failed",
+                "leakage_free": "target leakage detected",
+                "paradox_free": "subgroup reversal detected",
+                "model_converged": "selected model did not converge",
+            }
+            for key, label in labels.items():
+                if checks.get(key) is False:
+                    reasons.append(label)
+            if self.evidence_tier == "causal_action" and checks.get("causal_language_safe") is False:
+                reasons.append("causal language was not supported")
+        if self.kind in CAVEAT_FINDING_KINDS:
+            reasons.append("method or coverage caveat")
+        self.eligibility_reasons = list(dict.fromkeys(reasons))
+        self.primary_eligible = not self.eligibility_reasons
+        return self.primary_eligible
+
+    def recommendation_disposition(self) -> Literal["monitor", "investigate", "pilot", "act"]:
+        """Return the strongest recommendation language supported by evidence."""
+        self.refresh_eligibility()
+        if not self.primary_eligible:
+            return "investigate"
+        if self.evidence_tier == "causal_action":
+            return "act"
+        if self.evidence_tier == "pilot":
+            return "pilot"
+        if self.evidence_tier == "hypothesis":
+            return "investigate"
+        return "monitor"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "finding_id": self.finding_id,
@@ -212,9 +261,15 @@ class Finding:
             "surprise": self.surprise,
             "objective_fit": self.objective_fit,
             "importance": self.importance,
+            "raw_importance_rank": self.raw_importance_rank,
+            "display_rank": self.display_rank,
+            "ranking_policy": self.ranking_policy,
             "caveats": self.caveats,
             "chart_hint": self.chart_hint,
             "layer": self.layer,
+            "evidence_tier": self.evidence_tier,
+            "primary_eligible": self.primary_eligible,
+            "eligibility_reasons": self.eligibility_reasons,
         }
 
 
@@ -274,13 +329,15 @@ def attach_finding_checks(
     simpsons_by_id = simpsons_by_id or {}
 
     for f in findings:
-        checks: dict[str, Any] = {}
+        evidence = f.evidence if isinstance(f.evidence, dict) else {}
+        raw_checks = evidence.get("checks")
+        checks: dict[str, Any] = dict(raw_checks) if isinstance(raw_checks, dict) else {}
+        checks["claim_verified"] = True
 
         p = f.p_adjusted if f.p_adjusted is not None else f.p_value
         if p is not None:
             checks["not_luck"] = p < 0.05
 
-        evidence = f.evidence if isinstance(f.evidence, dict) else {}
         sizes = [
             v for k in _SAMPLE_SIZE_KEYS
             if isinstance(v := evidence.get(k), (int, float)) and not isinstance(v, bool)
@@ -294,19 +351,27 @@ def attach_finding_checks(
         if f.finding_id in simpsons_by_id:
             checks["paradox_free"] = not simpsons_by_id[f.finding_id]
 
+        if leakage_alerts is not None:
+            checks["leakage_free"] = not bool({f.dimension, f.measure} & leaked_columns)
         if leaked_columns and ({f.dimension, f.measure} & leaked_columns):
             checks["leakage"] = True
 
+        if causal_flagged_ids is not None:
+            checks["causal_language_safe"] = f.finding_id not in causal_flagged_ids
         if f.finding_id in causal_flagged_ids:
             checks["cause"] = "neutral"
 
         gap = evidence.get("train_test_gap")
         if isinstance(gap, (int, float)) and not isinstance(gap, bool):
             checks["model_gap"] = gap <= _OVERFIT_GAP_THRESHOLD
+        converged = evidence.get("converged")
+        if isinstance(converged, bool):
+            checks["model_converged"] = converged
 
         if checks:
             evidence["checks"] = checks
             f.evidence = evidence
+        f.refresh_eligibility()
 
 
 def is_trivial(finding: Finding) -> bool:
@@ -469,6 +534,8 @@ def rank_findings(
         ),
         reverse=True,
     )
+    for raw_rank, finding in enumerate(ranked, 1):
+        finding.raw_importance_rank = raw_rank
     if suppress_trivial:
         kept = [f for f in ranked if not is_trivial(f)]
         ranked = kept if kept else ranked
@@ -476,10 +543,17 @@ def rank_findings(
     if max_per_source is not None:
         result = _diversify_by_source(result, max_per_source)
     result += dupes
-    return (
+    ordered = (
         [f for f in result if f.kind not in CAVEAT_FINDING_KINDS]
         + [f for f in result if f.kind in CAVEAT_FINDING_KINDS]
     )
+    for display_rank, finding in enumerate(ordered, 1):
+        finding.display_rank = display_rank
+        finding.ranking_policy = (
+            "importance_only_v1" if max_per_source is None
+            else "importance_then_source_diversity_v1"
+        )
+    return ordered
 
 
 def _is_actionable_feature(col: str | None) -> bool:
@@ -522,12 +596,15 @@ def classify_action_matrix(
         "quick_wins": [],
         "strategic_bets": [],
         "incremental": [],
+        "pilot": [],
         "watch_caveats": [],
     }
+    matrix["a_b_test"] = matrix["pilot"]
 
     for item in findings:
         evidence: dict[str, Any] = {}
         if isinstance(item, Finding):
+            item.refresh_eligibility()
             finding_id = item.finding_id
             kind = item.kind
             headline = item.headline
@@ -539,6 +616,9 @@ def classify_action_matrix(
             norm_eff = item.normalized_effect()
             imp = item.importance or item.compute_importance()
             caveats = list(item.caveats)
+            evidence_tier: EvidenceTier = item.evidence_tier
+            primary_eligible = item.primary_eligible
+            eligibility_reasons = list(item.eligibility_reasons)
             if isinstance(item.evidence, dict):
                 evidence = item.evidence
         elif isinstance(item, dict):
@@ -553,6 +633,15 @@ def classify_action_matrix(
             norm_eff = abs(float(effect)) if isinstance(effect, (int, float)) else 0.0
             imp = float(item.get("importance", 0.5))
             caveats = list(item.get("caveats") or [])
+            raw_tier = str(item.get("evidence_tier", "observation"))
+            evidence_tier = cast(
+                EvidenceTier,
+                raw_tier
+                if raw_tier in {"observation", "hypothesis", "pilot", "causal_action"}
+                else "observation",
+            )
+            primary_eligible = bool(item.get("primary_eligible", True))
+            eligibility_reasons = [str(v) for v in item.get("eligibility_reasons", [])]
             raw_ev = item.get("evidence")
             if isinstance(raw_ev, dict):
                 evidence = raw_ev
@@ -604,25 +693,70 @@ def classify_action_matrix(
             "confidence": round(conf, 2),
             "importance": round(imp, 3),
             "caveats": caveats,
+            "evidence_tier": evidence_tier,
         }
 
-        # 1. Watch / Caveat items: filter out benign statistical provenance/disclaimer notes
-        _disclaimer_substrings = (
-            "effects are adjusted associations",
-            "observational linear extrapolation",
-            "observational cohort difference",
-            "counts are per",
-            "assumes censoring",
-            "imputed (median/mode)",
-            "assumes independent additive driver interventions",
-            "linear optimization",
-        )
-        material_caveats = [
-            c for c in caveats
-            if not any(sub in str(c).lower() for sub in _disclaimer_substrings)
+        # Observational confidence is not intervention validity.
+        # High-sample (n >= 100), paradox-free observational segment contrasts enter the
+        # dedicated 'pilot' / 'a_b_test' quadrant for validation before scaling.
+        sample_sizes = [
+            v for k in (*_SAMPLE_SIZE_KEYS, "segment_n", "population_size", "n_records")
+            if isinstance(v := evidence.get(k), (int, float)) and not isinstance(v, bool)
         ]
-        if is_caveat_kind or has_paradox or is_fragile or len(material_caveats) > 0 or conf < 0.45 or (not is_controllable and not is_appendix):
+        has_adequate_sample = (
+            min(sample_sizes) >= 100
+            if sample_sizes
+            else (checks.get("records") is not False)
+        )
+        is_observational_disclaimer_only = all(
+            any(phrase in c.lower() for phrase in (
+                "proof of cause", "adjusted association", "observational", "unadjusted",
+                "selection effect", "confounding", "additive driver",
+            ))
+            for c in caveats
+        )
+        is_observational_segment_contrast = (
+            primary_eligible
+            and is_controllable
+            and not is_appendix
+            and not is_caveat_kind
+            and not has_paradox
+            and not is_fragile
+            and has_adequate_sample
+            and conf >= 0.50
+            and kind in ("segment_lift", "decision_scenario")
+            and is_observational_disclaimer_only
+        )
+        if is_observational_segment_contrast and evidence_tier != "causal_action":
+            entry["lever"] = f"Pilot A/B test: {lever}" if not lever.startswith("Pilot") else lever
+            entry["rationale"] = (
+                f"High-contrast observational segment ({int(conf * 100)}% confidence); "
+                f"validate via prospective A/B test or pilot before scaling."
+            )
+            matrix["pilot"].append(entry)
+            continue
+
+        # Observational confidence is not intervention validity. Only an
+        # explicitly identified causal/experimental finding may enter an
+        # action quadrant; every other evidence tier remains a monitoring,
+        # investigation, or pilot item.
+        material_caveats = list(caveats)
+        if (
+            not primary_eligible
+            or evidence_tier != "causal_action"
+            or is_caveat_kind
+            or has_paradox
+            or is_fragile
+            or len(material_caveats) > 0
+            or conf < 0.45
+            or (not is_controllable and not is_appendix)
+        ):
             reason = []
+            reason.extend(eligibility_reasons)
+            if evidence_tier != "causal_action":
+                reason.append(
+                    f"{evidence_tier.replace('_', ' ').title()} evidence — monitor or test; do not treat as a causal lever"
+                )
             if not is_controllable:
                 reason.append(f"External non-controllable factor ('{target_feature}') — monitor as risk/context, not direct lever")
             if has_paradox:
@@ -631,6 +765,8 @@ def classify_action_matrix(
                 reason.append("Sensitive to outlier trimming")
             if material_caveats:
                 reason.extend(material_caveats)
+            if not has_adequate_sample:
+                reason.append("Small sample size (n < 100) for observational contrast")
             if not reason:
                 reason.append("Low statistical confidence or caveat kind")
             entry["rationale"] = "; ".join(reason)

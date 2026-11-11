@@ -37,7 +37,7 @@ def test_threshold_analysis_detects_piecewise_shift(tmp_path: Path) -> None:
     assert len(findings) >= 1
     f = findings[0]
     assert f.kind == "threshold"
-    assert f.chart_hint == "scatter"
+    assert f.chart_hint["kind"] == "scatter"
     assert "critical threshold" in f.headline.lower()
 
 

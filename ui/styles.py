@@ -212,6 +212,74 @@ section[data-testid="stSidebar"] {{
 section[data-testid="stSidebar"] .stSlider label,
 section[data-testid="stSidebar"] label p {{ font-size: var(--text-xs); color: var(--graphite); font-weight: 500; }}
 
+/* ── Sidebar collapse/expand controls (high visibility in Night mode, single crisp border) ── */
+div[data-testid="stSidebarCollapseButton"],
+div[data-testid="collapsedControl"],
+div[data-testid="stExpandSidebarButton"],
+[data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"] {{
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}}
+
+/* Only the clickable button itself receives the card surface, border, and border-radius */
+[data-testid="stSidebarCollapseButton"] button,
+[data-testid="collapsedControl"] button,
+button[data-testid="stExpandSidebarButton"],
+[data-testid="stExpandSidebarButton"] button,
+button[aria-label="Close sidebar"],
+button[aria-label="Open sidebar"],
+button[aria-label*="sidebar" i] {{
+    background: var(--sheet) !important;
+    border: 1px solid var(--rule-strong) !important;
+    border-radius: var(--radius-control) !important;
+    color: var(--ink) !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    box-shadow: none !important;
+    outline: none !important;
+}}
+
+/* Children of the button must never have nested borders */
+[data-testid="stSidebarCollapseButton"] button *,
+[data-testid="collapsedControl"] button *,
+button[data-testid="stExpandSidebarButton"] *,
+[data-testid="stExpandSidebarButton"] button *,
+button[aria-label="Close sidebar"] *,
+button[aria-label="Open sidebar"] *,
+button[aria-label*="sidebar" i] * {{
+    border: none !important;
+    background: transparent !important;
+    color: var(--ink) !important;
+    fill: currentColor !important;
+    opacity: 1 !important;
+}}
+
+/* Hover state only on the button */
+[data-testid="stSidebarCollapseButton"] button:hover,
+[data-testid="collapsedControl"] button:hover,
+button[data-testid="stExpandSidebarButton"]:hover,
+[data-testid="stExpandSidebarButton"] button:hover,
+button[aria-label="Close sidebar"]:hover,
+button[aria-label="Open sidebar"]:hover,
+button[aria-label*="sidebar" i]:hover {{
+    background: var(--pen) !important;
+    border-color: var(--pen) !important;
+    color: var(--accent-ink) !important;
+}}
+[data-testid="stSidebarCollapseButton"] button:hover *,
+[data-testid="collapsedControl"] button:hover *,
+button[data-testid="stExpandSidebarButton"]:hover *,
+[data-testid="stExpandSidebarButton"] button:hover *,
+button[aria-label="Close sidebar"]:hover *,
+button[aria-label="Open sidebar"]:hover *,
+button[aria-label*="sidebar" i]:hover * {{
+    color: var(--accent-ink) !important;
+    fill: currentColor !important;
+}}
+
 ::-webkit-scrollbar {{ width: 10px; height: 10px; }}
 ::-webkit-scrollbar-thumb {{ background: var(--rule); border-radius: 6px; border: 2px solid var(--stock); }}
 ::-webkit-scrollbar-track {{ background: transparent; }}
@@ -241,7 +309,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 [data-testid="stMetricValue"] {{ font-family: var(--mono) !important; font-weight: 600; color: var(--ink) !important; }}
 [data-testid="stMetricLabel"] * {{ color: var(--graphite) !important; }}
 [data-testid="stFileUploader"] section {{ background: var(--stock) !important; border: 1px dashed var(--rule-strong) !important; }}
-[data-testid="stFileUploader"] section * {{ color: var(--ink) !important; }}
+[data-testid="stFileUploader"] section * {{ color: var(--ink); }}
 [data-testid="stFileUploader"] small {{ color: var(--graphite) !important; }}
 .stExpander {{ border-color: var(--rule-faint) !important; background: var(--sheet) !important; }}
 .stExpander summary {{ color: var(--ink) !important; }}
@@ -366,7 +434,7 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 .st-key-hero_actions {{ display: flex; flex-direction: column; align-items: flex-end; gap: .5rem; }}
 .st-key-hero_actions .stButton {{ width: auto; }}
 .sample-choice {{
-    padding: 14px 16px; background: var(--stock); border: 1px solid var(--rule); border-radius: var(--radius);
+    padding: 14px 16px; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
 }}
 .sample-choice .sample-title {{ color: var(--ink); font-size: var(--text-sm); font-weight: 600; }}
 .sample-choice p {{ color: var(--graphite); font-size: var(--text-xs); line-height: 1.45; margin: .25rem 0 .6rem; }}
@@ -503,6 +571,92 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
     background: transparent !important; border: 1px solid var(--rule-strong) !important; color: var(--ink) !important;
 }}
 [data-testid="stFileUploader"] button:hover {{ border-color: var(--ink) !important; }}
+/* Uploaded file chip/card (fixes low-contrast white-on-white text and nested double boxes) */
+/* Reset list and container wrappers so they never render extra borders or backgrounds */
+[data-testid="stFileChips"],
+[data-testid="stFileChips"] ul,
+[data-testid="stFileChips"] li,
+[data-testid="stFileUploader"] ul,
+[data-testid="stFileUploader"] li {{
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    list-style: none !important;
+}}
+
+/* Only the chip card itself receives a single border and background */
+div[data-testid="stFileChip"],
+.stFileChip,
+div[data-testid="stFileUploaderFileData"],
+.uploadedFileData {{
+    background: var(--sheet) !important;
+    border: 1px solid var(--rule-strong) !important;
+    border-radius: var(--radius) !important;
+    color: var(--ink) !important;
+    box-shadow: none !important;
+}}
+
+/* Children of the file chip (filename, icon, delete button) must never render nested borders */
+[data-testid="stFileChip"] *,
+.stFileChip *,
+div[data-testid="stFileUploaderFileData"] * {{
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+}}
+
+/* Filename text styling */
+[data-testid="stFileChipName"],
+.stFileChipName {{
+    color: var(--ink) !important;
+    background: transparent !important;
+    border: none !important;
+}}
+
+/* Secondary file size text */
+[data-testid="stFileChip"] small,
+.stFileChip small,
+[data-testid="stFileChip"] span:last-child,
+[data-testid="stFileChip"] div:last-child,
+[data-testid="stFileUploaderFileData"] small {{
+    color: var(--graphite) !important;
+    background: transparent !important;
+    border: none !important;
+}}
+
+/* File icon */
+[data-testid="stFileChip"] svg,
+.stFileChip svg,
+[data-testid="stFileUploader"] [data-testid*="Icon"] svg {{
+    color: var(--accent-text) !important;
+    fill: currentColor !important;
+    border: none !important;
+}}
+
+/* Delete / Remove file button */
+[data-testid="stFileChipDeleteBtn"],
+[data-testid="stFileChipDeleteBtn"] button,
+[data-testid="stFileChip"] button,
+.stFileChip button,
+[data-testid="stFileUploader"] button[aria-label*="Delete"],
+[data-testid="stFileUploader"] button[aria-label*="Remove"],
+[data-testid="stFileUploader"] [data-testid*="DeleteFile"] button {{
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: var(--graphite) !important;
+    padding: 2px !important;
+}}
+[data-testid="stFileChipDeleteBtn"] button:hover,
+[data-testid="stFileChip"] button:hover,
+.stFileChip button:hover,
+[data-testid="stFileUploader"] button[aria-label*="Delete"]:hover,
+[data-testid="stFileUploader"] button[aria-label*="Remove"]:hover {{
+    color: var(--risk) !important;
+    border: none !important;
+}}
 /* ── Inputs (Polling-safe, no !important) ── */
 [data-testid="stTextInput"] input,
 [data-testid="stTextArea"] textarea,
@@ -1103,14 +1257,24 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
    selected segment painted a light fill under light text and the label vanished. Both states take their
    colours from the tokens: the selected one is the green pen with the button-label colour (9.6:1 in Day,
    5.3:1 in Night), the other is a card with body text. The words inside inherit, whatever element holds them. */
-[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_control"] {{
+button[data-testid="stBaseButton-segmented_control"] {{
     background: var(--sheet) !important; color: var(--ink-2) !important; border-color: var(--rule-strong) !important;
 }}
-[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_control"]:hover {{
+button[data-testid="stBaseButton-segmented_control"]:hover {{
     border-color: var(--graphite) !important; color: var(--ink) !important;
 }}
-[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] {{
+button[data-testid="stBaseButton-segmented_controlActive"] {{
     background: var(--pen) !important; color: var(--accent-ink) !important; border-color: var(--pen) !important;
+}}
+[data-testid="stButtonGroup"] button[aria-checked="true"],
+[data-testid="stButtonGroup"] button[aria-pressed="true"],
+div[data-testid="stButtonGroup"] [aria-checked="true"] {{
+    background: var(--pen) !important; color: var(--accent-ink) !important; border-color: var(--pen) !important;
+}}
+[data-testid="stButtonGroup"] button[aria-checked="true"] *,
+[data-testid="stButtonGroup"] button[aria-pressed="true"] *,
+div[data-testid="stButtonGroup"] [aria-checked="true"] * {{
+    color: var(--accent-ink) !important;
 }}
 [data-testid="stButtonGroup"] button * {{ color: inherit !important; }}
 /* ── Evidence inspector (Answers): ranked findings beside the selected one ── */

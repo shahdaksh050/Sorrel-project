@@ -25,12 +25,54 @@ logger = logging.getLogger(__name__)
 
 
 _PROTECTED_ATTRIBUTES: frozenset[str] = frozenset({
-    "gender", "sex", "race", "ethnicity", "religion", "disability", "sexual_orientation",
+    "gender", "sex", "race", "ethnicity", "religion", "disability", "sexual_orientation", "age",
+})
+
+_TARGET_GOALS: frozenset[str] = frozenset({"minimize", "maximize", "hold", "sensitivity_only"})
+_ADVERSE_TARGET_TERMS: frozenset[str] = frozenset({
+    "churn", "churned", "default", "defaulted", "defaults", "fraud", "fraudulent",
+    "failure", "failures", "failed", "mortality", "pollution", "emission", "emissions",
+    "defect", "defects", "error", "errors", "incident", "incidents", "risk", "risks",
+    "complaint", "complaints",
+})
+_BENEFICIAL_TARGET_TERMS: frozenset[str] = frozenset({
+    "revenue", "revenues", "profit", "profits", "sales", "conversion", "conversions",
+    "retention", "growth", "margin", "margins",
 })
 
 
 def _slug(text: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in str(text)).strip("_").lower() or "na"
+
+
+def _resolve_target_goal(target_column: str, requested_goal: str | None) -> tuple[str, str, str]:
+    """Resolve an explicitly requested or conservatively inferred outcome direction."""
+    normalized_target = _slug(target_column)
+    target_terms = set(normalized_target.split("_"))
+    adverse = sorted(target_terms & _ADVERSE_TARGET_TERMS)
+    beneficial = sorted(target_terms & _BENEFICIAL_TARGET_TERMS)
+
+    if requested_goal is not None:
+        normalized_goal = requested_goal.strip().lower()
+        if normalized_goal not in _TARGET_GOALS:
+            allowed = ", ".join(sorted(_TARGET_GOALS))
+            raise ToolExecutionError(f"target_goal must be one of: {allowed}.")
+        if normalized_goal == "maximize" and adverse and not beneficial:
+            raise ToolExecutionError(
+                f"Cannot maximize adverse target '{target_column}' (detected adverse term(s): {', '.join(adverse)}). "
+                f"Target goal must be 'minimize', 'hold', or 'sensitivity_only'."
+            )
+        return normalized_goal, "user", "Provided by the scenario request."
+
+    if adverse and not beneficial:
+        return "minimize", "domain_policy", f"Column name contains adverse outcome term(s): {', '.join(adverse)}."
+    if beneficial and not adverse:
+        return "maximize", "domain_policy", f"Column name contains beneficial outcome term(s): {', '.join(beneficial)}."
+    return (
+        "sensitivity_only",
+        "inferred_ambiguous",
+        "No unambiguous outcome direction was supplied or inferred; reporting sensitivity only.",
+    )
 
 
 class ScenarioSimulationTool(BaseTool):
@@ -80,7 +122,7 @@ class ScenarioSimulationTool(BaseTool):
         shifts: list[float] | None = None,
         segment_column: str | None = None,
         joint_optimization: bool = True,
-        target_goal: str = "maximize",
+        target_goal: str | None = None,
         max_shift_pct: float = 20.0,
         **_: Any,
     ) -> dict[str, Any]:
@@ -104,6 +146,8 @@ class ScenarioSimulationTool(BaseTool):
         if not pd.api.types.is_numeric_dtype(df[target_column]):
             raise ToolExecutionError(f"Target column '{target_column}' must be numeric.")
 
+        resolved_goal, goal_source, goal_rationale = _resolve_target_goal(target_column, target_goal)
+
         target_s = pd.to_numeric(df[target_column], errors="coerce").dropna()
         if len(target_s) < 20:
             raise ToolExecutionError(f"Target column '{target_column}' has fewer than 20 numeric observations.")
@@ -111,9 +155,26 @@ class ScenarioSimulationTool(BaseTool):
         n_pop = len(target_s)
         base_mean = float(target_s.mean())
         base_total = float(target_s.sum())
+        is_binary_target = target_s.nunique(dropna=True) <= 2
 
         # Select driver column if omitted
-        candidate_drivers = [c for c in numeric_cols if c != target_column]
+        raw_candidate_drivers = [c for c in numeric_cols if c != target_column]
+        excluded_levers: list[dict[str, str]] = []
+        candidate_drivers: list[str] = []
+        for column in raw_candidate_drivers:
+            normalized = _slug(column)
+            tokens = set(normalized.split("_"))
+            reason = None
+            if normalized in _PROTECTED_ATTRIBUTES or bool(tokens & _PROTECTED_ATTRIBUTES):
+                reason = "protected attribute"
+            elif tokens & {"id", "key", "uuid", "date", "time", "timestamp"}:
+                reason = "identifier or temporal field"
+            elif tokens & {"sensor", "reading", "token"}:
+                reason = "measurement or token, not a controllable lever"
+            if reason:
+                excluded_levers.append({"column": str(column), "reason": reason})
+            else:
+                candidate_drivers.append(str(column))
         if not driver_column and candidate_drivers:
             # Pick highest Pearson correlation
             best_r = -1.0
@@ -158,6 +219,14 @@ class ScenarioSimulationTool(BaseTool):
                         delta_y = float(slope * delta_x)
                         ci_margin = float(1.96 * std_err * abs(delta_x))
                         new_mean = base_mean + delta_y
+                        if is_binary_target:
+                            new_mean = float(np.clip(new_mean, 0.0, 1.0))
+                            delta_y = new_mean - base_mean
+                            ci_lower = max(-base_mean, delta_y - ci_margin)
+                            ci_upper = min(1.0 - base_mean, delta_y + ci_margin)
+                        else:
+                            ci_lower = delta_y - ci_margin
+                            ci_upper = delta_y + ci_margin
                         rel_change_pct = (delta_y / base_mean * 100.0) if abs(base_mean) > 1e-9 else 0.0
                         tot_impact = delta_y * n_pop
 
@@ -168,15 +237,21 @@ class ScenarioSimulationTool(BaseTool):
                             "delta_driver": round(delta_x, 4),
                             "delta_target": round(delta_y, 4),
                             "relative_change_pct": round(rel_change_pct, 2),
-                            "ci_lower": round(delta_y - ci_margin, 4),
-                            "ci_upper": round(delta_y + ci_margin, 4),
+                            "ci_lower": round(ci_lower, 4),
+                            "ci_upper": round(ci_upper, 4),
                             "projected_mean": round(new_mean, 4),
                             "projected_total_impact": round(tot_impact, 2),
+                            "sensitivity_total": round(tot_impact, 2),
                         })
 
         # Multi-variable joint optimization across top continuous drivers
         joint_package: dict[str, Any] | None = None
-        if joint_optimization and len(candidate_drivers) >= 2:
+        prescriptive_optimization_allowed = (
+            joint_optimization
+            and resolved_goal in {"minimize", "maximize"}
+            and not is_binary_target
+        )
+        if prescriptive_optimization_allowed and len(candidate_drivers) >= 2:
             top_drivers = candidate_drivers[:4]
             sub_mv = df[[target_column, *top_drivers]].dropna()
             if len(sub_mv) >= 25:
@@ -193,7 +268,7 @@ class ScenarioSimulationTool(BaseTool):
                             s_drv = float(slopes_mv[idx])
                             mean_drv = float(np.mean(sub_mv[drv]))
                             direction = 1.0 if s_drv >= 0 else -1.0
-                            if target_goal == "minimize":
+                            if resolved_goal == "minimize":
                                 direction = -direction
                             shift_applied = direction * abs(max_shift_pct)
                             dx = mean_drv * (shift_applied / 100.0)
@@ -210,28 +285,35 @@ class ScenarioSimulationTool(BaseTool):
 
                         rel_opt_change = (total_mv_delta_y / base_mean * 100.0) if abs(base_mean) > 1e-9 else 0.0
                         joint_package = {
-                            "target_goal": target_goal,
+                            "target_goal": resolved_goal,
+                            "goal_source": goal_source,
+                            "goal_rationale": goal_rationale,
                             "drivers_optimized": top_drivers,
                             "interventions": mv_interventions,
                             "predicted_delta_target": round(total_mv_delta_y, 4),
                             "relative_change_pct": round(rel_opt_change, 2),
                             "projected_mean": round(base_mean + total_mv_delta_y, 4),
                             "projected_total_impact": round(total_mv_delta_y * n_pop, 2),
+                            "sensitivity_total": round(total_mv_delta_y * n_pop, 2),
                         }
                 except Exception:
                     joint_package = None
 
         # Segment equalization opportunity (skips demographic/protected attributes)
         segment_opportunity: dict[str, Any] | None = None
+        def _is_protected_col(col_name: Any) -> bool:
+            slugged = _slug(col_name)
+            return slugged in _PROTECTED_ATTRIBUTES or bool(set(slugged.split("_")) & _PROTECTED_ATTRIBUTES)
+
         cat_candidates = [
             c for c in df.columns
             if c != target_column
             and 2 <= df[c].nunique(dropna=True) <= 8
             and not pd.api.types.is_numeric_dtype(df[c])
-            and str(c).lower().strip() not in _PROTECTED_ATTRIBUTES
+            and not _is_protected_col(c)
         ]
         seg_col = segment_column or (cat_candidates[0] if cat_candidates else None)
-        if seg_col and seg_col in df.columns and str(seg_col).lower().strip() not in _PROTECTED_ATTRIBUTES:
+        if seg_col and seg_col in df.columns and not _is_protected_col(seg_col):
             seg_work = df[[seg_col, target_column]].dropna()
             group_stats = seg_work.groupby(seg_col)[target_column].agg(["count", "mean"])
             if len(group_stats) >= 2:
@@ -254,6 +336,7 @@ class ScenarioSimulationTool(BaseTool):
                             "gap_per_unit": round(gap, 4),
                             "gap_pct": round((gap / rest_mean) * 100.0, 2) if rest_mean > 0 else 0.0,
                             "recoverable_total": round(recoverable_total, 2),
+                            "cohort_gap_total": round(recoverable_total, 2),
                         }
 
         # Build Markdown decision table
@@ -261,10 +344,15 @@ class ScenarioSimulationTool(BaseTool):
             f"| Sensitivity Benchmark / Lever | Reference Cohort | Statistical Shift (Unadjusted) | 95% Confidence Interval | Linear Extrapolation ({n_pop:,} units) |",
             "| :--- | :--- | :--- | :--- | :--- |",
         ]
+        if joint_optimization and not prescriptive_optimization_allowed:
+            if is_binary_target:
+                lines.append("| Joint Optimization | Not generated | Binary target; unbounded prescriptive optimization is disabled | N/A | N/A |")
+            else:
+                lines.append(f"| Joint Optimization | Not generated | target_goal={resolved_goal}; descriptive sensitivity only | N/A | N/A |")
         if joint_package:
             interv_summary = ", ".join(f"{it['driver']} {it['recommended_shift_pct']:+0.0f}%" for it in joint_package["interventions"])
             lines.append(
-                f"| Multi-Driver Optimization ({interv_summary}) | All Population | "
+                f"| Multi-Driver Sensitivity Simulation ({interv_summary}) | All Population | "
                 f"{joint_package['predicted_delta_target']:+0.2f} ({joint_package['relative_change_pct']:+0.1f}%) | "
                 f"[Joint multivariate model] | {joint_package['projected_total_impact']:+,.2f} |"
             )
@@ -283,9 +371,15 @@ class ScenarioSimulationTool(BaseTool):
 
         # Build summary
         summary_parts: list[str] = []
+        summary_parts.append(f"Scenario goal: {resolved_goal} ({goal_source}; {goal_rationale})")
+        if joint_optimization and not prescriptive_optimization_allowed:
+            if is_binary_target:
+                summary_parts.append("Joint optimization was not generated because the target is binary.")
+            else:
+                summary_parts.append("Joint optimization was not generated because this scenario is non-prescriptive.")
         if joint_package:
             summary_parts.append(
-                f"Multi-driver joint optimization ({', '.join(joint_package['drivers_optimized'])}) projects a "
+                f"Multi-driver joint sensitivity simulation ({', '.join(joint_package['drivers_optimized'])}) projects a "
                 f"{joint_package['relative_change_pct']:+0.1f}% cumulative shift in '{target_column}' "
                 f"({joint_package['predicted_delta_target']:+0.2f} per unit; total impact: {joint_package['projected_total_impact']:+,.2f})."
             )
@@ -308,6 +402,17 @@ class ScenarioSimulationTool(BaseTool):
         return {
             "summary": summary,
             "target_column": target_column,
+            "target_goal": resolved_goal,
+            "goal_source": goal_source,
+            "goal_rationale": goal_rationale,
+            "is_binary_target": is_binary_target,
+            "bounded_target": is_binary_target,
+            "model_family": (
+                "bounded_probability_sensitivity" if is_binary_target
+                else "linear_sensitivity"
+            ),
+            "actionable_levers": candidate_drivers,
+            "excluded_levers": excluded_levers,
             "population_size": n_pop,
             "baseline_mean": round(base_mean, 4),
             "baseline_total": round(base_total, 2),
@@ -352,7 +457,7 @@ class ScenarioSimulationTool(BaseTool):
                     effect_kind="lift",
                     confidence=0.75,
                     surprise=0.3,
-                    caveats=["Observational linear extrapolation unadjusted for unmeasured confounding."],
+                    caveats=["Observational linear extrapolation unadjusted for unmeasured confounding; descriptive sensitivity only, not guaranteed causal impact."],
                 ))
 
         seg_opp = output.get("segment_opportunity")
@@ -376,14 +481,14 @@ class ScenarioSimulationTool(BaseTool):
                 effect_kind="lift",
                 confidence=0.70,
                 surprise=0.4,
-                caveats=["Observational cohort difference; unadjusted for confounding or selection effects."],
+                caveats=["Observational cohort difference; descriptive benchmark unadjusted for confounding or selection effects, not guaranteed causal recovery."],
             ))
 
         joint_pkg = output.get("joint_package")
         if joint_pkg and abs(joint_pkg.get("relative_change_pct", 0.0)) >= 1.0:
             drvs_str = ", ".join(joint_pkg["drivers_optimized"])
             headline = (
-                f"Multi-Driver Joint Optimization: Coordinated shift across {len(joint_pkg['drivers_optimized'])} levers ({drvs_str}) "
+                f"Multi-Driver Joint Sensitivity Simulation: Coordinated shift across {len(joint_pkg['drivers_optimized'])} levers ({drvs_str}) "
                 f"projects a {joint_pkg['relative_change_pct']:+0.1f}% cumulative shift in '{target}' "
                 f"({joint_pkg['predicted_delta_target']:+0.2f} per unit, total impact {joint_pkg['projected_total_impact']:+,.2f})."
             )
@@ -392,7 +497,7 @@ class ScenarioSimulationTool(BaseTool):
                 kind="decision_scenario",
                 headline=headline,
                 detail=(
-                    f"Multivariate optimization identified coordinated interventions across {drvs_str}. "
+                    f"Multivariate sensitivity simulation identified coordinated shifts across {drvs_str}. "
                     f"Projected mean moves to {joint_pkg['projected_mean']} across {output.get('population_size')} units."
                 ),
                 evidence=joint_pkg,
@@ -404,7 +509,7 @@ class ScenarioSimulationTool(BaseTool):
                 confidence=0.80,
                 surprise=0.5,
                 objective_fit=0.90,
-                caveats=["Multivariate linear optimization; assumes independent additive driver interventions."],
+                caveats=["Multivariate linear sensitivity optimization; descriptive OLS shift unadjusted for unmeasured confounding, not guaranteed causal impact."],
             ))
 
         return results
@@ -434,6 +539,20 @@ class ScenarioSimulationTool(BaseTool):
             "segment_column": {
                 "type": "string",
                 "description": "Categorical column to evaluate for gap recovery.",
+                "required": False,
+            },
+            "target_goal": {
+                "type": "string",
+                "enum": ["minimize", "maximize", "hold", "sensitivity_only"],
+                "description": (
+                    "Outcome direction. If omitted, only unambiguous target names are inferred; "
+                    "ambiguous targets default to sensitivity_only."
+                ),
+                "required": False,
+            },
+            "joint_optimization": {
+                "type": "boolean",
+                "description": "Generate prescriptive multi-driver shifts only for non-binary minimize/maximize goals.",
                 "required": False,
             },
         }

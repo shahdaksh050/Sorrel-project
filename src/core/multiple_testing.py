@@ -73,8 +73,12 @@ def apply_benjamini_hochberg(
 
 def adjust_findings_run_level(findings: list[Finding], alpha: float = DEFAULT_ALPHA) -> int:
     """
-    One BH family per run: every finding carrying a p-value, whichever tool
-    produced it. The tool's own (within-tool) correction is kept once in
+    One BH family per run: every confirmatory finding carrying a p-value, whichever tool
+    produced it. Exploratory screening tests (e.g. wide pairwise correlation matrices)
+    are corrected within their own tool and partitioned out to prevent FDR inflation
+    of primary confirmatory objectives.
+
+    The tool's own (within-tool) correction is kept once in
     evidence["p_adjusted_within_tool"] before the first overwrite; the
     finding's `p_adjusted` becomes the stricter of the run-level and
     within-tool values (a correction never makes a finding look more
@@ -85,6 +89,7 @@ def adjust_findings_run_level(findings: list[Finding], alpha: float = DEFAULT_AL
         f for f in findings
         if isinstance(f.p_value, (int, float)) and not isinstance(f.p_value, bool)
         and math.isfinite(f.p_value) and 0.0 <= f.p_value <= 1.0
+        and (not isinstance(f.evidence, dict) or f.evidence.get("test_family") != "exploratory_screening")
     ]
     if not family:
         return 0

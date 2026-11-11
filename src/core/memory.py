@@ -335,6 +335,10 @@ class ToolResult:
     output: dict[str, Any]
     error_message: str | None = None
     execution_time_ms: float = 0.0
+    # Execution-only operational details.  This deliberately stays separate
+    # from ``output`` so planning prompts continue to receive only a tool's
+    # analytical result, not process-level measurements.
+    telemetry: dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     iteration: int = 0   # P1.6 — which reasoning cycle produced this result
 
@@ -345,6 +349,7 @@ class ToolResult:
             "output": self.output,
             "error": self.error_message,
             "execution_time_ms": self.execution_time_ms,
+            "telemetry": self.telemetry,
             "timestamp": self.timestamp,
         }
 

@@ -96,6 +96,15 @@ class QuestionRoutingResult:
     secondary_families: list[QuestionFamily] = field(default_factory=list)
     recommended_tools: list[str] = field(default_factory=list)
     rationale: str = ""
+    expected_decision_value: float = 0.0
+
+
+_DECISION_VALUE: dict[QuestionFamily, float] = {
+    "decide": 0.95, "explain": 0.85, "predict": 0.80, "forecast": 0.75,
+    "compare": 0.70, "monitor": 0.65, "audit": 0.65, "detect": 0.60,
+    "associate": 0.45, "segment": 0.45, "describe": 0.35,
+    "fairness": 0.75, "benchmark": 0.70,
+}
 
 
 def route_question(
@@ -148,4 +157,5 @@ def route_question(
         secondary_families=secondary,
         recommended_tools=recommended_tools,
         rationale=rationale,
+        expected_decision_value=_DECISION_VALUE[primary],
     )

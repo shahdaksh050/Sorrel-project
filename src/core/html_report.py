@@ -16,7 +16,6 @@ Rules:
 from __future__ import annotations
 
 import html
-import json
 import re
 import time
 from typing import Any
@@ -25,6 +24,7 @@ from src.core.audited_entry import GLYPH, audited_checks
 from src.core.chart_theme import vega_config
 from src.core.design_tokens import css_root_block
 from src.core.findings import classify_action_matrix, is_data_hygiene_finding
+from src.core.json_normalization import strict_json_dumps
 from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.plain_language import describe_uncertainty, format_p, plainify
 from src.core.report_assets import report_assets
@@ -355,6 +355,7 @@ def _action_matrix_html(findings: list[dict[str, Any]] | None) -> str:
     quadrants = [
         ("quick_wins", "⚡ Quick Wins", "High Impact · High Feasibility", "rec"),
         ("strategic_bets", "🎯 Strategic Bets", "High Impact · Structural / Complex", "insight"),
+        ("pilot", "🧪 Pilot / A/B Tests", "High Opportunity · Test Before Scaling", "treat"),
         ("incremental", "🔧 Incremental Gains", "Moderate Impact · High Feasibility", "treat"),
         ("watch_caveats", "⚠️ Guardrails & Watch", "Confounders / Sensitive / Fragile", "warn"),
     ]
@@ -710,6 +711,9 @@ def build_html_report(
     best_model = llm_insights.get("best_model")
     if best_model:
         badges += f'<span class="badge">best model: {_esc(best_model)}</span>'
+    public_status = llm_insights.get("status")
+    if public_status:
+        badges += f'<span class="badge">status: {_esc(public_status)}</span>'
 
     sections.append(
         '<div class="brand"><span class="mark">Sorrel</span><span class="kind">Analysis report</span></div>'
@@ -722,6 +726,24 @@ def build_html_report(
     if objective:
         sections.append(
             f'<div class="objective">You asked: {_esc(objective)}</div>'
+        )
+    coverage = llm_insights.get("coverage")
+    execution_issues = llm_insights.get("execution_issues") or []
+    if isinstance(coverage, dict) or execution_issues:
+        status_rows: list[tuple[str, Any]] = []
+        if isinstance(coverage, dict):
+            status_rows.append(
+                ("Questions answered", f"{coverage.get('answered', 0)} of {coverage.get('total', 0)}")
+            )
+        if execution_issues:
+            status_rows.append(("Execution issues", len(execution_issues)))
+        sections.append(
+            "<h2>Run status &amp; coverage</h2><table>"
+            + "".join(
+                f"<tr><td>{_esc(label)}</td><td>{_esc(value)}</td></tr>"
+                for label, value in status_rows
+            )
+            + "</table>"
         )
     # 3a — prefer `insights` over the LLM's raw `reasoning` scratch text,
     # which has leaked internal plumbing into shipped reports; strip any
@@ -841,9 +863,9 @@ def build_html_report(
             dict(c.get("spec", {}), width="container") if {"mark", "layer"} & set(c.get("spec", {})) else c.get("spec", {})
             for c in charts
         ]
-        specs_json = json.dumps(specs, default=str).replace("</", "<\\/")
-        day_cfg_json = json.dumps(vega_config(dark=False), default=str).replace("</", "<\\/")
-        night_cfg_json = json.dumps(vega_config(dark=True), default=str).replace("</", "<\\/")
+        specs_json = strict_json_dumps(specs).replace("</", "<\\/")
+        day_cfg_json = strict_json_dumps(vega_config(dark=False)).replace("</", "<\\/")
+        night_cfg_json = strict_json_dumps(vega_config(dark=True)).replace("</", "<\\/")
         sections.append(
             "<h2>The charts</h2>"
             + chart_divs

@@ -62,6 +62,7 @@ def test_action_matrix_excludes_non_controllables() -> None:
         effect_kind="lift",
         confidence=0.9,
         importance=0.9,
+        evidence_tier="causal_action",
     )
 
     matrix = classify_action_matrix([odds_finding, pricing_finding])

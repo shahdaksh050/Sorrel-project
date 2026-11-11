@@ -12,8 +12,6 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
-from src.core.llm_client import llm_concurrency
-
 console = Console()
 
 #: Bounded worker pool for parallel sub-task invocation in
@@ -187,10 +185,15 @@ class RLMEngine:
         max_depth: int = 5,
         default_provider: str = "unknown",
         base_max_tokens: int = 4096,
+        max_concurrency: int = 1,
     ) -> None:
         self._llm = llm_callable
         #: The LLM's normal max_tokens, so a retry can raise it (x2, capped).
         self._base_max_tokens = base_max_tokens
+        #: Decomposition concurrency is policy supplied by the application.
+        #: Keeping a conservative default makes the engine provider-agnostic
+        #: when it is constructed outside the controller.
+        self._max_concurrency = max(1, max_concurrency)
         #: task_id -> {"status": "failed", "error": ..., "attempts": n} for
         #: the sub-tasks of the latest decompose_and_invoke() that never
         #: produced a usable reply (they are absent from its return value).
@@ -443,7 +446,7 @@ class RLMEngine:
         else:
             # Also bounded by LLM_MAX_CONCURRENCY (1 for a local model), so a
             # local server isn't handed parallel sub-tasks it would only queue.
-            workers = min(_MAX_DECOMPOSE_WORKERS, llm_concurrency(), len(sub_tasks))
+            workers = min(_MAX_DECOMPOSE_WORKERS, self._max_concurrency, len(sub_tasks))
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 for sub_task, response, exc in pool.map(_run_safe, sub_tasks):
                     _record(sub_task, response, exc)

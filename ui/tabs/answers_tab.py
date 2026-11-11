@@ -230,8 +230,18 @@ def render_answers_tab(
     st.markdown("## What to do")
     if view.recommendations:
         for rec in view.recommendations:
+            rec_plain = plainify(rec)
+            rec_lower = rec_plain.lower()
+            if any(rec_lower.startswith(p) for p in ("pilot", "test", "validate", "evaluate")):
+                badge = "Test"
+            elif any(rec_lower.startswith(p) for p in ("monitor", "watch", "track")):
+                badge = "Watch"
+            elif any(rec_lower.startswith(p) for p in ("investigate", "explore", "research")):
+                badge = "Explore"
+            else:
+                badge = "Do"
             st.markdown(
-                f'<div class="rc"><span class="mk">Do</span>{html.escape(plainify(rec))}</div>',
+                f'<div class="rc"><span class="mk">{badge}</span>{html.escape(rec_plain)}</div>',
                 unsafe_allow_html=True,
             )
     else:

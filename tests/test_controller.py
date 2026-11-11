@@ -146,7 +146,7 @@ class TestAnalyzeWorkflow:
         assert meta.task_type == "classification"
 
         final = agent.analyze()
-        assert final["status"] == "complete"
+        assert final["status"] in {"succeeded", "succeeded_with_warnings"}
         assert agent.memory.get_context("cleaned_file_path")
 
         report_dir = Path(agent._output_dir) / "reports"
@@ -160,7 +160,7 @@ class TestAnalyzeWorkflow:
 
         final = agent.analyze()
 
-        assert final["status"] == "complete"
+        assert final["status"] in {"partial", "succeeded_with_warnings"}
         assert agent.memory.get_context("llm_error")
         # Fallback plan must have actually executed tools
         executed = {r.tool_name for r in agent.memory.tool_results}
@@ -282,7 +282,7 @@ class TestVerbatimMetricValidation:
         assert flagged == []
         assert final["insights"][0] == "Accuracy of 0.8123 is strong."
 
-    def test_fabricated_number_is_flagged_and_annotated(
+    def test_fabricated_number_is_flagged_and_quarantined(
         self, agent: AgentController
     ) -> None:
         from src.core.memory import ToolResult
@@ -297,7 +297,8 @@ class TestVerbatimMetricValidation:
         final = {"insights": ["The model reaches 0.999 accuracy."], "recommendations": []}
         flagged = agent._flag_unverified_claims(final)
         assert len(flagged) == 1
-        assert "[unverified: 0.999" in final["insights"][0]
+        assert final["insights"] == []
+        assert final["rejected_claims"][0]["numbers"] == ["0.999"]
 
     def test_small_integer_counts_are_not_flagged(
         self, agent: AgentController
@@ -316,13 +317,15 @@ class TestVerbatimMetricValidation:
         flagged = agent._flag_unverified_claims(final)
         assert len(flagged) == 1
         assert "8" in flagged[0] and "5" in flagged[0]
-        assert "[unverified:" in final["insights"][0]
+        assert final["insights"] == []
+        assert final["rejected_claims"][0]["field"] == "insights"
 
     def test_unverified_key_metric_is_flagged(self, agent: AgentController) -> None:
         final = {"insights": [], "recommendations": [], "key_metrics": {"cv_mean": "0.9999"}}
         flagged = agent._flag_unverified_claims(final)
         assert len(flagged) == 1
         assert "cv_mean" in flagged[0]
+        assert final["key_metrics"] == {}
 
     def test_comma_formatted_large_number_is_verified(self, agent: AgentController) -> None:
         from src.core.memory import ToolResult
@@ -517,5 +520,78 @@ class TestMinIterationsOrchestration:
         agent.llm_client = _ScriptedLLM([FINAL_RESPONSE, step1, FINAL_RESPONSE])  # type: ignore[assignment]
         agent.load_dataset(sample_csv, target_hint="label", interactive=False)
         final = agent.analyze()
-        assert final["status"] == "complete"
+        assert final["status"] in {"partial", "succeeded_with_warnings"}
         assert agent.memory.iteration_count >= 2
+
+
+class TestStage6RLMDecomposition:
+    def test_stage_6_fast_exit_when_agenda_satisfied(
+        self, sample_csv: str, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        agent = AgentController(enable_rlm=True)
+        agent._output_dir = str(tmp_path / "output")
+        agent.load_dataset(sample_csv, target_hint="label", interactive=False)
+
+        # Set up a satisfied agenda
+        agent.memory.set_context(
+            "question_agenda",
+            [
+                {
+                    "question_id": "q1",
+                    "text": "distribution of feature_a",
+                    "kind": "distribution",
+                    "suggested_tool": "detect_outliers",
+                    "columns": ["feature_a"],
+                    "expected_value": 0.8,
+                }
+            ],
+        )
+        from src.core.findings import Finding
+        agent.memory.add_findings(
+            [
+                Finding(
+                    finding_id="f1",
+                    kind="distribution",
+                    headline="Outliers in feature_a",
+                    source_tool="detect_outliers",
+                    measure="feature_a",
+                )
+            ]
+        )
+
+        # Run decomposition
+        agent._run_rlm_decomposition()
+        # Fast-exit sets sub_results to empty list in 0 ms and 0 tokens
+        assert agent.memory.get_context("rlm_sub_results") == []
+
+
+class TestTargetLeakageGatingSteps:
+    def test_gated_model_skips_evaluation_and_feature_importance_charts(
+        self, sample_csv: str, tmp_path: Path
+    ) -> None:
+        from src.core.memory import AnalysisStep
+        agent = AgentController()
+        agent._output_dir = str(tmp_path / "output")
+        agent.load_dataset(sample_csv, target_hint="label", interactive=False)
+        agent.memory.set_context("model_training_gated", True)
+
+        eval_step = AnalysisStep(step_number=1, tool_name="evaluate_model", parameters={}, rationale="eval")
+        res_eval = agent._prepare_step(0, eval_step, 2)
+        assert res_eval is None
+        skipped_eval = agent.memory.tool_results[-1]
+        assert skipped_eval.status == "skipped"
+        assert "target leakage" in skipped_eval.output["summary"]
+
+        viz_step = AnalysisStep(
+            step_number=2,
+            tool_name="generate_visualizations",
+            parameters={"chart_type": "feature_importance"},
+            rationale="viz",
+        )
+        res_viz = agent._prepare_step(1, viz_step, 2)
+        assert res_viz is None
+        skipped_viz = agent.memory.tool_results[-1]
+        assert skipped_viz.status == "skipped"
+        assert "target leakage" in skipped_viz.output["summary"]
+
+

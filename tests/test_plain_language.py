@@ -125,6 +125,17 @@ class TestAdjustedPValues:
     def test_a_plain_p_value_is_unchanged_by_the_new_rule(self) -> None:
         assert plainify("p=0.0004") == "a result very unlikely to be down to chance"
 
+    def test_standalone_adjusted_p_has_complete_grammar(self) -> None:
+        assert plainify("Adjusted p=0.012") == (
+            "a result unlikely to be down to chance after correcting for the other tests"
+        )
+
+
+def test_ci_rewrite_preserves_surrounding_parenthesis() -> None:
+    assert plainify("Effect (95% CI 0.09 to 0.22).") == (
+        "Effect (likely between 0.09 and 0.22)."
+    )
+
 
 @pytest.mark.parametrize("text", ["rank_biserial=0.625", "rank-biserial r=0.625", "rank biserial: 0.625"])
 def test_rank_biserial_is_rewritten_in_every_spelling(text: str) -> None:

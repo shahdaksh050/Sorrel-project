@@ -110,7 +110,7 @@ def test_default_params_and_agenda_include_group_column() -> None:
     profile = profile_dataframe(_lifetimes())
     params = SurvivalAnalysisTool().default_params(profile, None)
     assert params == {"duration_column": "tenure_months", "event_column": "churned", "group_column": "plan"}
-    qs = [q for q in _specialist_questions(profile) if q.kind == "survival"]
+    qs = [q for q in _specialist_questions(profile, [SurvivalAnalysisTool()]) if q.kind == "survival"]
     assert qs and qs[0].columns == ["tenure_months", "churned", "plan"]
     ungrouped = profile_dataframe(_lifetimes().drop(columns="plan"))
     assert "group_column" not in SurvivalAnalysisTool().default_params(ungrouped, None)

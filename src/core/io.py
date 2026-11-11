@@ -161,6 +161,7 @@ class ReadReport:
     sampled: bool = False              # True when the frame exceeded get_max_rows()
     sampled_from: int | None = None    # original row count, when sampled
     sampled_to: int | None = None      # rows kept after sampling (== get_max_rows() at read time)
+    all_null_rows_dropped: int = 0     # rows empty across every retained data column
     notes: list[str] = field(default_factory=list)
     sentinels: list[dict[str, Any]] = field(default_factory=list)  # numeric placeholders nulled (src.core.sentinels)
     header_row_offset: int = 0
@@ -371,8 +372,14 @@ def _detect_header_offset(text: str, delimiter: str) -> tuple[int, int, list[str
 
     trailing_trim = 0
     for j in range(len(lines) - 1, max(header_offset, len(lines) - 15), -1):
-        line = lines[j].strip()
+        raw_line = lines[j]
+        line = raw_line.strip()
         if not line:
+            # A delimiter-only record is a data-shaped empty row, not a
+            # footnote. Keep it for the dataframe-level all-null cleanup so
+            # ReadReport can account for the full removed population.
+            if delimiter in raw_line:
+                break
             trailing_trim += 1
             continue
         if any(line.startswith(prefix) for prefix in ("*", "Note", "Notes:", "Source:", "Footnote:", "Disclaimer:")):
@@ -885,6 +892,25 @@ def _drop_empty_columns(df: pd.DataFrame, report: ReadReport) -> pd.DataFrame:
     return df.drop(columns=empty)
 
 
+def _drop_all_null_rows(df: pd.DataFrame, report: ReadReport) -> pd.DataFrame:
+    """Remove delimiter-only and otherwise content-free records after cleanup.
+
+    Column cleanup runs first: a row is empty only when it is null across the
+    columns retained for analysis.  Partially populated rows are left intact.
+    """
+    if df.empty or df.shape[1] == 0:
+        return df
+    empty_rows = df.isna().all(axis=1)
+    dropped = int(empty_rows.sum())
+    if dropped == 0:
+        return df
+    report.all_null_rows_dropped += dropped
+    report.notes.append(
+        f"Dropped {dropped} all-null row(s) after empty-column cleanup."
+    )
+    return df.loc[~empty_rows].reset_index(drop=True)
+
+
 def _read_uncached(file_path: str) -> tuple[pd.DataFrame, ReadReport]:
     path = Path(file_path)
     format_, compression = _detect_format(path)
@@ -914,6 +940,7 @@ def _read_uncached(file_path: str) -> tuple[pd.DataFrame, ReadReport]:
     else:
         df, report = _read_excel(path, format_)
     df = _drop_empty_columns(df, report)
+    df = _drop_all_null_rows(df, report)
     df, subtotal_indices, subtotal_notes = detect_and_exclude_subtotals(df)
     report.subtotals_excluded = len(subtotal_indices)
     report.notes.extend(subtotal_notes)

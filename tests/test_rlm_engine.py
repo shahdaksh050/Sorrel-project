@@ -80,7 +80,12 @@ class TestRLMEngine:
             _time.sleep(0.05)
             return {"status": "complete"}
 
-        engine = RLMEngine(llm_callable=_slow_llm, system_prompt="s", max_depth=2)
+        engine = RLMEngine(
+            llm_callable=_slow_llm,
+            system_prompt="s",
+            max_depth=2,
+            max_concurrency=5,
+        )
         tasks = [RLMSubTask(f"t{i}", f"task {i}", {}) for i in range(5)]
 
         start = _time.perf_counter()

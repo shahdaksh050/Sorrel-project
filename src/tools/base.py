@@ -12,12 +12,17 @@ Contract:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import os
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
+
+import psutil
 
 from src.core.memory import MemorySystem, ToolResult
 
@@ -57,6 +62,99 @@ _PRIOR_VALUE_CAP_CHARS = 2_000
 #: Never useful as prior data (a chart spec's rows, console output) and large
 #: enough to push the computed RESULT over the cap.
 _PRIOR_SKIP_KEYS = frozenset({"chart", "stdout"})
+
+
+class _ProcessTelemetrySampler:
+    """Bounded process resource sampler for one tool invocation.
+
+    ``psutil`` has no portable per-function peak-RSS counter.  Sampling the
+    current process at a short fixed interval gives a useful observed peak
+    without coupling tools to the UI runner or a platform-specific profiler.
+    """
+
+    _SAMPLE_INTERVAL_S: ClassVar[float] = 0.05
+
+    def __init__(self) -> None:
+        self._process = psutil.Process(os.getpid())
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._peak_rss_bytes: int | None = None
+        self._start_cpu_seconds: float | None = None
+
+    def _sample(self) -> None:
+        """Record one RSS observation, tolerating process-inspection races."""
+        try:
+            rss = int(self._process.memory_info().rss)
+        except psutil.Error:
+            return
+        self._peak_rss_bytes = max(self._peak_rss_bytes or 0, rss)
+
+    def _sample_until_stopped(self) -> None:
+        while not self._stop_event.wait(self._SAMPLE_INTERVAL_S):
+            self._sample()
+
+    def start(self) -> None:
+        """Take a baseline sample and start the bounded background sampler."""
+        self._sample()
+        try:
+            times = self._process.cpu_times()
+            self._start_cpu_seconds = float(times.user + times.system)
+        except psutil.Error:
+            self._start_cpu_seconds = None
+        self._thread = threading.Thread(
+            target=self._sample_until_stopped,
+            name="dsa-tool-resource-sampler",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> tuple[float | None, int | None]:
+        """Stop sampling and return ``(cpu_ms, observed_peak_rss_bytes)``."""
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self._SAMPLE_INTERVAL_S * 2)
+        self._sample()
+        cpu_ms: float | None = None
+        if self._start_cpu_seconds is not None:
+            try:
+                times = self._process.cpu_times()
+                cpu_ms = max(0.0, (float(times.user + times.system) - self._start_cpu_seconds) * 1000)
+            except psutil.Error:
+                pass
+        return cpu_ms, self._peak_rss_bytes
+
+
+def _output_execution_metadata(output: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    """Extract optional backend and sampling decisions from a tool output."""
+    backend: str | None = None
+    raw_backend = output.get("compute_backend", output.get("backend"))
+    if isinstance(raw_backend, str):
+        backend = raw_backend
+    elif isinstance(raw_backend, dict):
+        candidate = raw_backend.get("backend", raw_backend.get("device"))
+        if isinstance(candidate, str):
+            backend = candidate
+
+    raw_sampling = output.get("sampling")
+    sampling = dict(raw_sampling) if isinstance(raw_sampling, dict) else {}
+    return backend, sampling
+
+
+def _tool_telemetry(
+    output: dict[str, Any],
+    elapsed_ms: float,
+    sampler: _ProcessTelemetrySampler,
+) -> dict[str, Any]:
+    """Create the JSON-safe operational record attached to a ``ToolResult``."""
+    cpu_time_ms, peak_rss_bytes = sampler.stop()
+    backend, sampling = _output_execution_metadata(output)
+    return {
+        "wall_time_ms": elapsed_ms,
+        "cpu_time_ms": cpu_time_ms,
+        "peak_rss_bytes": peak_rss_bytes,
+        "backend": backend,
+        "sampling": sampling,
+    }
 
 
 def _resolved_path(value: Any) -> Path | None:
@@ -304,46 +402,82 @@ class BaseTool(ABC):
         structured ToolResult so the agent loop never crashes.
         """
         start = time.monotonic()
+        sampler = _ProcessTelemetrySampler()
+        sampler.start()
         try:
-            output = self.execute(**kwargs)
+            timeout_s = kwargs.pop("timeout_s", None)
+            if timeout_s is None:
+                try:
+                    from src.core.compute_policy import ComputePolicy
+                    timeout_s = ComputePolicy.from_env().tool_timeout_s
+                except Exception:
+                    timeout_s = 120.0
+
+            if timeout_s is not None and float(timeout_s) > 0:
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                try:
+                    from src.core.run_context import in_run_context
+                    fn = in_run_context(self.execute)
+                except Exception:
+                    fn = self.execute
+                try:
+                    future = executor.submit(fn, **kwargs)
+                    output = future.result(timeout=float(timeout_s))
+                except concurrent.futures.TimeoutError as err:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise ToolExecutionError(
+                        f"Tool '{self.name}' timed out after {float(timeout_s):.1f} seconds."
+                    ) from err
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                output = self.execute(**kwargs)
+
             elapsed = (time.monotonic() - start) * 1000
             return ToolResult(
                 tool_name=self.name,
                 status="success",
                 output=output,
                 execution_time_ms=elapsed,
+                telemetry=_tool_telemetry(output, elapsed, sampler),
             )
         except ToolInterruptSignal as sig:
             elapsed = (time.monotonic() - start) * 1000
+            interrupt_output = {
+                "summary": f"Tool interrupt signaled by {self.name}: {sig.reason}",
+                "interrupt_reason": sig.reason,
+                "recommended_pivot": sig.recommended_pivot,
+                "details": sig.details,
+            }
             return ToolResult(
                 tool_name=self.name,
                 status="interrupt",
-                output={
-                    "summary": f"Tool interrupt signaled by {self.name}: {sig.reason}",
-                    "interrupt_reason": sig.reason,
-                    "recommended_pivot": sig.recommended_pivot,
-                    "details": sig.details,
-                },
+                output=interrupt_output,
                 error_message=sig.reason,
                 execution_time_ms=elapsed,
+                telemetry=_tool_telemetry(interrupt_output, elapsed, sampler),
             )
         except ToolExecutionError as exc:
             elapsed = (time.monotonic() - start) * 1000
+            error_output: dict[str, Any] = {}
             return ToolResult(
                 tool_name=self.name,
                 status="error",
-                output={},
+                output=error_output,
                 error_message=str(exc),
                 execution_time_ms=elapsed,
+                telemetry=_tool_telemetry(error_output, elapsed, sampler),
             )
         except Exception as exc:
             elapsed = (time.monotonic() - start) * 1000
+            unexpected_output: dict[str, Any] = {}
             return ToolResult(
                 tool_name=self.name,
                 status="error",
-                output={},
+                output=unexpected_output,
                 error_message=f"Unexpected error in {self.name}: {exc!r}",
                 execution_time_ms=elapsed,
+                telemetry=_tool_telemetry(unexpected_output, elapsed, sampler),
             )
 
     def to_prompt_description(self) -> str:

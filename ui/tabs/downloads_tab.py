@@ -18,6 +18,21 @@ from src.core.html_report import retheme_report_html
 from ui.components.cards import artifact_info_html, md_text, tab_head
 
 
+def _downloadable_models(models_dir: Path) -> list[Path]:
+    """Only expose serialized model artifacts, never keys, signatures, or links."""
+    if not models_dir.is_dir() or models_dir.is_symlink():
+        return []
+    return sorted(
+        path
+        for path in models_dir.iterdir()
+        if path.is_file()
+        and not path.is_symlink()
+        and not path.name.startswith(".")
+        and path.suffix.lower() == ".pkl"
+        and "key" not in path.name.lower()
+    )
+
+
 def _shelf_group(title: str) -> None:
     """A group label for the shelf, kept as a level-3 heading for assistive technology."""
     st.markdown(
@@ -112,9 +127,10 @@ def render_downloads_tab(
                 )
 
         mdir = out / "models"
-        if mdir.exists() and any(mdir.iterdir()):
+        model_files = _downloadable_models(mdir)
+        if model_files:
             _shelf_group("Models")
-            for n, mdl_f in enumerate(sorted(mdir.iterdir())):
+            for n, mdl_f in enumerate(model_files):
                 mdl_bytes = mdl_f.read_bytes()
                 with st.container(key=f"artifact_model_{n}"):
                     info, action = st.columns([0.72, 0.28], vertical_alignment="center")

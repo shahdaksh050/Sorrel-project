@@ -34,6 +34,8 @@ class Question:
     columns: list[str] = field(default_factory=list)
     expected_value: float = 0.5    # rough prior on how likely this is to matter, in [0, 1]
     suggested_tool: str | None = None
+    objective_fit: float = 0.0
+    selection_rationale: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -42,7 +44,40 @@ class Question:
             "columns": self.columns,
             "expected_value": self.expected_value,
             "suggested_tool": self.suggested_tool,
+            "objective_fit": self.objective_fit,
+            "selection_rationale": self.selection_rationale,
         }
+
+
+def objective_fit(objective: str, *, kind: str, columns: list[str]) -> float:
+    """Conservative, deterministic relevance score for a proposed question.
+
+    Column mentions are strong evidence of fit.  Intent-word matches provide a
+    smaller lift, while an unspecified objective deliberately remains neutral
+    rather than inventing a business decision.
+    """
+    text = objective.lower().strip()
+    if not text:
+        return 0.5
+    column_hit = any(re.search(rf"(?<!\w){re.escape(column.lower())}(?!\w)", text) for column in columns)
+    terms: dict[str, tuple[str, ...]] = {
+        "trend": ("trend", "forecast", "time", "season", "change"),
+        "segment": ("segment", "compare", "group", "region", "cohort"),
+        "relationship": ("relationship", "correlat", "associate", "driver"),
+        "distribution": ("distribution", "outlier", "anomal", "overview"),
+        "driver": ("predict", "driver", "model", "churn", "risk"),
+        "model": ("predict", "model", "classif", "regress"),
+        "quality": ("quality", "audit", "clean", "missing"),
+        "forecast": ("forecast", "future", "next", "project"),
+        "survival": ("survival", "retain", "churn", "time until", "duration"),
+        "curve_fit": ("curve", "nonlinear", "fit"),
+        "mixed_model": ("repeated", "within", "between", "panel"),
+        "association": ("basket", "bought together", "association"),
+        "elasticity": ("price", "elasticity", "demand"),
+        "equity": ("fair", "equity", "bias", "disparity"),
+    }
+    intent_hit = any(term in text for term in terms.get(kind, ()))
+    return 1.0 if column_hit else (0.75 if intent_hit else 0.25)
 
 
 def build_agenda(
@@ -50,6 +85,7 @@ def build_agenda(
     decision: dict[str, Any] | None,
     objective: str = "",
     excluded_columns: set[str] | None = None,
+    specialist_tools: list[Any] | None = None,
 ) -> list[Question]:
     """
     Generate a ranked question agenda from the semantic profile.
@@ -66,7 +102,6 @@ def build_agenda(
 
     questions: list[Question] = []
     excluded = excluded_columns or set()
-    objective_l = objective.lower()
     measures = [column for column in profile.measures() if column.name not in excluded]
     dimensions = [
         column
@@ -218,7 +253,7 @@ def build_agenda(
             seen.add(key)
             questions.append(q)
 
-    for q in _specialist_questions(profile):
+    for q in _specialist_questions(profile, specialist_tools or [], objective=objective):
         key = (q.kind, q.suggested_tool, tuple(sorted(q.columns)))
         if key not in seen:
             seen.add(key)
@@ -276,13 +311,29 @@ def build_agenda(
     # expected-value model is out of scope for this pass; keyword overlap
     # between the objective and a question's kind/columns is a reasonable
     # first cut and costs nothing to compute.
-    if objective_l:
-        for q in questions:
-            if any(re.search(rf"(?<!\w){re.escape(col.lower())}(?!\w)", objective_l) for col in q.columns):
-                q.expected_value = min(1.0, q.expected_value + 0.15)
+    for q in questions:
+        q.objective_fit = objective_fit(objective, kind=q.kind, columns=q.columns)
+        q.expected_value = round(min(1.0, q.expected_value + (0.15 if q.objective_fit >= 0.75 else 0.0)), 2)
+        q.selection_rationale = (
+            f"objective fit {q.objective_fit:.2f}; expected decision value {q.expected_value:.2f}"
+        )
 
-    questions.sort(key=lambda q: q.expected_value, reverse=True)
-    return questions
+    # Python's sort is stable, so equal-value questions retain the semantic
+    # column preference established above (for example, names before IDs).
+    questions.sort(key=lambda q: -q.expected_value)
+    # A wide table can generate dozens of nearly identical comparisons. Keep
+    # the agenda decision-focused and deterministic: one question is a unit of
+    # coverage, while each tool gets a small, explicit exploration budget.
+    per_tool_budget = 3
+    selected: list[Question] = []
+    per_tool_count: dict[str | None, int] = {}
+    for question in questions:
+        count = per_tool_count.get(question.suggested_tool, 0)
+        if question.suggested_tool is not None and count >= per_tool_budget:
+            continue
+        selected.append(question)
+        per_tool_count[question.suggested_tool] = count + 1
+    return selected
 
 
 def _archetype_questions(profile: DatasetProfile, arm: ColumnProfile | None) -> list[Question]:
@@ -415,53 +466,66 @@ def _archetype_questions(profile: DatasetProfile, arm: ColumnProfile | None) -> 
     return questions
 
 
-#: kind -> (module, class, value, question template, default_params keys).
-_SPECIALIST_TOOLS: dict[str, tuple[str, str, float, str, tuple[str, ...]]] = {
-    "survival": (
-        "survival", "SurvivalAnalysisTool", 0.75,
+#: tool name -> (kind, value, question template, default_params keys).
+_SPECIALIST_TOOLS: dict[str, tuple[str, float, str, tuple[str, ...]]] = {
+    "survival_analysis": (
+        "survival", 0.75,
         "How long until '{1}' happens, and do some groups leave sooner?", ("duration_column", "event_column"),
     ),
-    "curve_fit": (
-        "curve_fit", "CurveFitAnalysisTool", 0.7,
+    "curve_fit_analysis": (
+        "curve_fit", 0.7,
         "What curve does '{1}' follow as '{0}' changes?", ("x_column", "y_column"),
     ),
-    "mixed_model": (
-        "mixed_model", "MixedModelAnalysisTool", 0.7,
+    "mixed_model_analysis": (
+        "mixed_model", 0.7,
         "How much of '{0}' differs between '{1}' groups rather than within them?", ("target_column", "group_column"),
     ),
-    "forecast": (
-        "forecast", "ForecastAnalysisTool", 0.7,
+    "forecast_analysis": (
+        "forecast", 0.7,
         "Where is '{1}' heading over the next periods?", ("date_column", "value_column"),
     ),
-    "association": (
-        "basket", "BasketAnalysisTool", 0.7,
+    "basket_analysis": (
+        "basket", 0.7,
         "Which items are usually bought together?", ("order_column", "item_column"),
     ),
-    "elasticity": (
-        "elasticity", "PriceElasticityTool", 0.7,
+    "price_elasticity_analysis": (
+        "elasticity", 0.7,
         "How sensitive is '{1}' to '{0}'?", ("price_column", "quantity_column"),
     ),
-    "equity": (
-        "equity", "EquityAnalysisTool", 0.75,
+    "equity_analysis": (
+        "equity", 0.75,
         "Do '{1}' results differ by '{0}' after allowing for other factors?", ("group_column", "outcome_column"),
     ),
 }
 
 
-def _specialist_questions(profile: DatasetProfile) -> list[Question]:
+def _specialist_questions(
+    profile: DatasetProfile,
+    tools: list[Any],
+    objective: str = "",
+) -> list[Question]:
     """One question per specialist tool (survival, curve fit, mixed model,
     forecast, basket, elasticity, equity) whose `applies_to` fits the data,
     with columns resolved by the tool's own `default_params`."""
-    import importlib
-
     questions: list[Question] = []
-    for kind, (module, cls, value, template, keys) in _SPECIALIST_TOOLS.items():
+    for tool in tools:
+        spec = _SPECIALIST_TOOLS.get(str(getattr(tool, "name", "")))
+        if spec is None:
+            continue
+        kind, value, template, keys = spec
         try:
-            tool = getattr(importlib.import_module(f"src.tools.{module}"), cls)()
-            if tool.applies_to(profile, None) <= 0:
+            applicability = tool.applies_to(profile, None)
+            if applicability <= 0:
                 continue
             params = tool.default_params(profile, None)
             cols = [str(params[k]) for k in keys]
+            # Specialist selection has two hard prerequisites: an executable
+            # parameterization and a meaningful question.  With no supplied
+            # objective we retain a neutral exploratory fit; an explicitly
+            # unrelated objective does not spend a specialist-tool budget.
+            fit = objective_fit(objective, kind=kind, columns=cols)
+            if objective and fit < 0.5:
+                continue
             if kind == "survival" and params.get("group_column"):
                 cols.append(str(params["group_column"]))  # optional: the group comparison
             questions.append(Question(
@@ -470,6 +534,10 @@ def _specialist_questions(profile: DatasetProfile) -> list[Question]:
                 columns=cols,
                 expected_value=value,
                 suggested_tool=tool.name,
+                objective_fit=fit,
+                selection_rationale=(
+                    f"specialist applicability {applicability:.2f}; objective fit {fit:.2f}"
+                ),
             ))
         except Exception:
             continue
@@ -545,7 +613,7 @@ def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> d
             f.get("kind") in _LLM_KINDS and _mentioned(f, q.columns) >= min(2, len(q.columns))
             for f in findings
         ) if q.columns else False
-        if q.kind in _SPECIALIST_TOOLS:
+        if q.kind in {spec[0] for spec in _SPECIALIST_TOOLS.values()}:
             # A specialist tool having run and reported (not just a caveat)
             # is the answer, whatever columns its own resolver picked.
             hit = any(

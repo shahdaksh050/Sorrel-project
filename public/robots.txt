@@ -16,4 +16,5 @@ Disallow: /
 User-agent: CCBot
 Disallow: /
 
-Sitemap: http://localhost:8501/sitemap.xml
+# Configure this relative sitemap reference at the deployment origin.
+Sitemap: /sitemap.xml

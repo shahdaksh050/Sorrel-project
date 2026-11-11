@@ -217,3 +217,28 @@ def test_all_null_columns_dropped_with_note(tmp_path) -> None:
     df, report = read_any(str(path))
     assert list(df.columns) == ["a", "b"]
     assert any("Dropped 2 empty column(s)" in n for n in report.notes)
+
+
+@pytest.mark.parametrize(("suffix", "delimiter"), [("csv", ","), ("tsv", "\t")])
+def test_delimiter_only_rows_are_removed_and_partially_empty_rows_are_preserved(
+    tmp_path: Path, suffix: str, delimiter: str
+) -> None:
+    path = tmp_path / f"delimiter_only.{suffix}"
+    delimiter_rows = "".join(f"{delimiter}{delimiter}\n" for _ in range(16))
+    path.write_text(
+        f"name{delimiter}score{delimiter}group\n"
+        f"alpha{delimiter}10{delimiter}A\n"
+        f"beta{delimiter}{delimiter}B\n"
+        f"{delimiter_rows}",
+        encoding="utf-8",
+    )
+
+    df, report = read_any(str(path))
+
+    assert df.loc[0].to_dict() == {"name": "alpha", "score": 10.0, "group": "A"}
+    assert df.loc[1, "name"] == "beta"
+    assert pd.isna(df.loc[1, "score"])
+    assert df.loc[1, "group"] == "B"
+    assert len(df) == 2
+    assert report.all_null_rows_dropped == 16
+    assert any("Dropped 16 all-null row(s)" in note for note in report.notes)

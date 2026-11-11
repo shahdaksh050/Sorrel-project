@@ -1,6 +1,8 @@
 """Hosted-server defaults for code execution (governance.py, sandbox.py)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -79,3 +81,14 @@ def test_a_demanded_docker_that_is_running_leaves_code_available(
     monkeypatch.setenv("SANDBOX_REQUIRE_ISOLATION", "true")
     monkeypatch.setattr(DockerSandbox, "is_available", staticmethod(lambda: True))
     assert code_execution_available()
+
+
+def test_governance_summary_reports_audit_write_status_not_integrity(tmp_path: Path) -> None:
+    from src.core.governance import CodeGovernor
+
+    summary = CodeGovernor(str(tmp_path), "session").summary()
+    assert summary["audit_write_ok"] is True
+    assert summary["audit_integrity_ok"] is True  # deprecated compatibility alias
+    assert summary["audit_event_count"] == 0
+    assert summary["llm_audit_event_count"] == 0
+    assert summary["audit_log"] is None

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -9,7 +10,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from ui.run import RUN_DIR_PREFIX, ActiveRun, RunSpec, remove_run_dir, retain_run_artifacts
+from ui.run import (
+    RUN_DIR_PREFIX,
+    ActiveRun,
+    RunSpec,
+    adopt_run,
+    forget_run,
+    remove_run_dir,
+    retain_run_artifacts,
+)
 
 from src.core.run_config import RunConfig
 
@@ -69,18 +78,72 @@ def _wait(run: ActiveRun, seconds: float = 120.0) -> None:
 def test_a_run_completes_with_a_view_and_truthful_stages(tmp_path: Path) -> None:
     run = ActiveRun(_spec(tmp_path))
     run.start()
+    assert run.run_id is not None
+    assert adopt_run(run.run_id) is run
     _wait(run)
 
     snap = run.snapshot()
-    assert snap.state == "done"
+    assert snap.state == "done", run.error
     out = run.outcome
     assert out is not None and out.stopped is False
-    assert out.final["status"] == "complete"
+    assert out.final["status"] in {"succeeded", "succeeded_with_warnings"}
     assert out.run_view.objective == "Does value differ by group?"
     assert out.run_view.how.no_ai is True
     assert out.tool_results
     assert {e[0]: e[1] for e in snap.stage_log}["7"] == "done"
     assert snap.progress_lines, "progress lines feed the Details run trace"
+    durable = run.registry_status
+    assert durable is not None
+    assert durable.status == "succeeded"
+    assert durable.stage == "7:done"
+    assert "reports/data_report.md" in durable.artifacts
+    # A replacement Streamlit session can still fold a run that completed
+    # while the original browser was disconnected.
+    assert adopt_run(run.run_id) is run
+    forget_run(run.run_id)
+    assert adopt_run(run.run_id) is None
+
+
+def test_adopt_run_restores_from_disk_across_server_reload(tmp_path: Path) -> None:
+    from ui.run import _ACTIVE_RUNS, _ACTIVE_RUNS_LOCK
+    run = ActiveRun(_spec(tmp_path))
+    run.start()
+    _wait(run)
+
+    run_id = run.run_id
+    assert run_id is not None
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS.clear()
+
+    restored = adopt_run(run_id, search_root=tmp_path)
+    assert restored is not None
+    assert restored.run_id == run_id
+    assert restored.finished is True
+    assert restored.outcome is not None
+
+
+def test_adopt_run_never_adopts_unrelated_workspace_report(tmp_path: Path) -> None:
+    from ui.run import _ACTIVE_RUNS, _ACTIVE_RUNS_LOCK
+
+    from src.core.run_registry import RunRegistry
+
+    run_id = "f" * 32
+    run_dir = tmp_path / f"dsa-run-{run_id}"
+    run_dir.mkdir(parents=True)
+    registry = RunRegistry(run_dir)
+    registry.create(run_id)
+    registry.finish("failed")
+
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS.clear()
+
+    adopted = adopt_run(run_id, search_root=tmp_path)
+    assert adopted is not None
+    assert adopted.run_id == run_id
+    assert adopted.error is not None
+    assert adopted.outcome is None
+
+
 
 
 def test_provisional_findings_are_collected_while_running_and_match_the_final_ones(tmp_path: Path) -> None:
@@ -182,6 +245,29 @@ def test_retained_run_contains_the_complete_artifact_tree(tmp_path: Path, monkey
     assert (retained / "data" / "derived" / "features.csv").read_text(encoding="utf-8") == "features"
 
 
+def test_retention_excludes_dotfiles_keys_unknown_files_and_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "temporary-output"
+    (source / "reports").mkdir(parents=True)
+    (source / "reports" / "summary.json").write_text("{}", encoding="utf-8")
+    (source / "models").mkdir()
+    (source / "models" / "model.pkl").write_text("model", encoding="utf-8")
+    (source / "models" / ".model_key").write_text("secret", encoding="utf-8")
+    (source / "models" / "model-signing.key").write_text("secret", encoding="utf-8")
+    (source / "models" / "notes.txt").write_text("unknown", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    summary_path = retain_run_artifacts(str(source))
+
+    assert summary_path is not None
+    retained = Path(summary_path).parents[1]
+    assert (retained / "models" / "model.pkl").is_file()
+    assert not (retained / "models" / ".model_key").exists()
+    assert not (retained / "models" / "model-signing.key").exists()
+    assert not (retained / "models" / "notes.txt").exists()
+
+
 def test_a_run_cannot_be_started_twice(tmp_path: Path) -> None:
     run = ActiveRun(_spec(tmp_path))
     run.start()
@@ -215,6 +301,72 @@ def test_the_worker_module_never_imports_streamlit() -> None:
     assert not {m for m in imported if m == "streamlit" or m.startswith("streamlit.")}
     # No attribute access to session state either (the docstring may mention it).
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "session_state"]
+
+
+def test_process_runner_is_the_safe_default_and_thread_is_an_explicit_escape_hatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ui.run as run_mod
+
+    monkeypatch.delenv("RUNNER_BACKEND", raising=False)
+    assert run_mod._runner_backend() == "process"
+    monkeypatch.setenv("RUNNER_BACKEND", "thread")
+    assert run_mod._runner_backend() == "thread"
+    monkeypatch.setenv("RUNNER_BACKEND", "unsupported")
+    assert run_mod._runner_backend() == "process"
+
+
+def test_worker_thread_cap_never_expands_existing_native_library_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ui.run as run_mod
+
+    monkeypatch.setenv("RUNNER_CPU_THREADS", "3")
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("MKL_NUM_THREADS", "99")
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "not-a-number")
+
+    run_mod._cap_worker_cpu_threads()
+
+    assert os.environ["OMP_NUM_THREADS"] == "1"
+    assert os.environ["MKL_NUM_THREADS"] == "3"
+    assert os.environ["OPENBLAS_NUM_THREADS"] == "3"
+    assert os.environ["XGBOOST_NUM_THREADS"] == "3"
+
+
+def test_parent_applies_only_valid_worker_progress_events(tmp_path: Path) -> None:
+    run = ActiveRun(_spec(tmp_path))
+
+    run._apply_worker_event(("stage", "1", "active", "ingesting"))
+    run._apply_worker_event(("progress", "reading data"))
+    run._apply_worker_event(("note", "working"))
+    run._apply_worker_event(("tool", "correlation_analysis", "running"))
+
+    snap = run.snapshot()
+    assert ("1", "active", "ingesting") in snap.stage_log
+    assert snap.progress_lines == ("reading data",)
+    assert snap.note == "working"
+    assert run._active_tool is not None
+
+    run._apply_worker_event(("progress", 42))
+    assert run.finished
+    assert run.error == "Analysis worker sent an invalid event."
+
+
+def test_active_tool_timeout_requests_a_bounded_worker_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = ActiveRun(_spec(tmp_path))
+    monkeypatch.setenv("TOOL_TIMEOUT_S", "0.001")
+    monkeypatch.setenv("RUNNER_WALL_TIMEOUT_S", "0")
+    monkeypatch.setenv("RUNNER_MEMORY_MB", "0")
+    run.tool_event("correlation_analysis", "running")
+    time.sleep(0.01)
+
+    reason = run._resource_limit_reason(None, time.monotonic())
+
+    assert reason is not None
+    assert "correlation_analysis" in reason
 
 
 # ── stale run directories and the shared run limiter ─────────────────────────

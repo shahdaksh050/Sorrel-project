@@ -16,6 +16,7 @@ def test_classify_action_matrix_buckets() -> None:
         effect=0.45,
         confidence=0.85,
         evidence={"checks": {"not_luck": True, "robust": True, "paradox_free": True}},
+        evidence_tier="causal_action",
     )
 
     # 2. Strategic bet: high impact interaction synergy
@@ -27,6 +28,7 @@ def test_classify_action_matrix_buckets() -> None:
         dimension="region_x_channel",
         effect=0.32,
         confidence=0.60,
+        evidence_tier="causal_action",
     )
 
     # 3. Incremental: moderate impact, high confidence
@@ -39,6 +41,7 @@ def test_classify_action_matrix_buckets() -> None:
         level="Mobile",
         effect=0.04,
         confidence=0.80,
+        evidence_tier="causal_action",
     )
 
     # 4. Watch / Caveat item: paradox or sensitivity fragile
@@ -81,6 +84,7 @@ def test_classify_action_matrix_accepts_dicts() -> None:
         "effect": 0.22,
         "confidence": 0.88,
         "evidence": {"checks": {"not_luck": True, "robust": True, "paradox_free": True}},
+        "evidence_tier": "causal_action",
     }
     matrix = classify_action_matrix([f_dict])
     assert len(matrix["quick_wins"]) == 1
@@ -99,6 +103,7 @@ def test_action_matrix_report_renderers() -> None:
             "effect": 0.45,
             "confidence": 0.85,
             "evidence": {"checks": {"robust": True, "paradox_free": True}},
+            "evidence_tier": "causal_action",
         },
         {
             "finding_id": "f2",
@@ -158,8 +163,8 @@ def test_classify_action_matrix_filters_hygiene_alarms() -> None:
     assert len(matrix["watch_caveats"]) == 0
 
 
-def test_disclaimer_caveats_do_not_disqualify_actionable_drivers() -> None:
-    # A regression driver carrying standard statistical disclaimers must reach Quick Wins
+def test_observational_disclaimer_disqualifies_action_quadrants() -> None:
+    # Statistical confidence is not causal/action evidence.
     f_driver = Finding(
         finding_id="f_driver",
         kind="driver",
@@ -175,8 +180,54 @@ def test_disclaimer_caveats_do_not_disqualify_actionable_drivers() -> None:
         ],
     )
     matrix = classify_action_matrix([f_driver])
-    assert len(matrix["quick_wins"]) == 1
-    item = matrix["quick_wins"][0]
+    assert len(matrix["quick_wins"]) == 0
+    item = matrix["watch_caveats"][0]
     assert item["finding_id"] == "f_driver"
     assert item["lever"] == "Target contract='One year vs Month-to-month'"
+
+
+def test_observational_segment_contrast_enters_pilot_quadrant() -> None:
+    f_seg = Finding(
+        finding_id="f_seg_contrast",
+        kind="segment_lift",
+        headline="Premium tier users show +35% higher engagement",
+        measure="engagement",
+        dimension="tier",
+        level="Premium",
+        effect=0.35,
+        confidence=0.80,
+        caveats=[
+            "Observational cohort difference; unadjusted for confounding or selection effects."
+        ],
+        evidence={"checks": {"paradox_free": True, "robust": True}, "n": 250},
+    )
+    matrix = classify_action_matrix([f_seg])
+    assert len(matrix["pilot"]) == 1
+    assert len(matrix["a_b_test"]) == 1
+    item = matrix["pilot"][0]
+    assert item["finding_id"] == "f_seg_contrast"
+    assert "Pilot" in item["lever"]
+    assert "prospective A/B test or pilot" in item["rationale"]
+
+
+def test_observational_segment_contrast_small_sample_rejected_from_pilot() -> None:
+    f_small = Finding(
+        finding_id="f_seg_small",
+        kind="segment_lift",
+        headline="Pilot group shows +40% engagement",
+        measure="engagement",
+        dimension="tier",
+        level="Pilot",
+        effect=0.40,
+        confidence=0.80,
+        caveats=[
+            "Observational cohort difference; unadjusted for confounding or selection effects."
+        ],
+        evidence={"checks": {"paradox_free": True, "robust": True}, "n": 45},
+    )
+    matrix = classify_action_matrix([f_small])
+    assert len(matrix["pilot"]) == 0
+    assert len(matrix["watch_caveats"]) == 1
+    assert "Small sample size" in matrix["watch_caveats"][0]["rationale"]
+
 

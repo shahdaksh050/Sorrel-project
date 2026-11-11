@@ -1,5 +1,5 @@
 """
-Verbatim-claim verification — flags numbers in the LLM's final synthesis
+Verbatim-claim verification — quarantines numbers in the LLM's final synthesis
 that cannot be traced back to an actual tool result.
 
 Split out of ``src/core/controller.py``; ``AgentController`` keeps thin
@@ -197,10 +197,10 @@ def flag_unverified_claims(memory: MemorySystem, final_result: dict[str, Any]) -
     """
     Enforce SYSTEM_PROMPT_CORE's "cite only verbatim metrics" rule.
 
-    Any numeric literal in `insights`/`recommendations`/`key_metrics`
-    that doesn't trace back to a real tool result is annotated
-    in-place with `[unverified: ...]` (never silently trusted) and
-    returned so the caller can log/report the hallucination rate.
+    Any numeric literal in `insights`/`recommendations` that does not trace
+    back to a real tool result is removed from the primary surface and copied
+    to ``rejected_claims`` with its reason.  Detection without quarantine is
+    not enforcement: an annotated recommendation is still actionable text.
 
     Round 8 hardening — a number existing ANYWHERE in the pooled tool
     output used to be enough to "verify" it, which passed claims that
@@ -215,6 +215,7 @@ def flag_unverified_claims(memory: MemorySystem, final_result: dict[str, Any]) -
     verified, per_tool_pools = verified_number_pools(memory)
     ran_tools = {r.tool_name for r in memory.tool_results}
     flagged: list[str] = []
+    rejected: list[dict[str, Any]] = []
 
     meta = memory.dataset_metadata
     meta_pool: set[str] = set()
@@ -257,10 +258,14 @@ def flag_unverified_claims(memory: MemorySystem, final_result: dict[str, Any]) -
                 bad = sorted({n for n in claimed if _canon_number(n) not in valid_pool})
                 if bad:
                     attribution = "/".join(attributed_tools)
-                    items[i] = (
-                        f"{item} [unverified: {', '.join(bad)} "
-                        f"(not in {attribution} output)]"
-                    )
+                    rejected.append({
+                        "field": field,
+                        "index": i,
+                        "text": item,
+                        "numbers": bad,
+                        "reason": f"not in {attribution} output",
+                    })
+                    items[i] = None
                     flagged.append(
                         f"{field}[{i}]: {', '.join(bad)} (attributed to {attribution})"
                     )
@@ -268,12 +273,20 @@ def flag_unverified_claims(memory: MemorySystem, final_result: dict[str, Any]) -
 
             bad = sorted({n for n in claimed if _canon_number(n) not in verified})
             if bad:
-                items[i] = f"{item} [unverified: {', '.join(bad)}]"
+                rejected.append({
+                    "field": field,
+                    "index": i,
+                    "text": item,
+                    "numbers": bad,
+                    "reason": "not present in audited execution output",
+                })
+                items[i] = None
                 flagged.append(f"{field}[{i}]: {', '.join(bad)}")
+        final_result[field] = [item for item in items if item is not None]
 
     key_metrics = final_result.get("key_metrics")
     if isinstance(key_metrics, dict):
-        for k, v in key_metrics.items():
+        for k, v in list(key_metrics.items()):
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 nums = [str(v)]
             elif isinstance(v, str):
@@ -283,5 +296,15 @@ def flag_unverified_claims(memory: MemorySystem, final_result: dict[str, Any]) -
             bad = sorted({n for n in nums if _canon_number(n) not in verified})
             if bad:
                 flagged.append(f"key_metrics.{k}={v!r} [unverified: {', '.join(bad)}]")
+                rejected.append({
+                    "field": "key_metrics",
+                    "key": str(k),
+                    "value": v,
+                    "numbers": bad,
+                    "reason": "not present in audited execution output",
+                })
+                del key_metrics[k]
 
+    if rejected:
+        final_result.setdefault("rejected_claims", []).extend(rejected)
     return flagged

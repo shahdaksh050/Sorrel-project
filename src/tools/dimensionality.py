@@ -10,10 +10,17 @@ Answers two questions a data scientist asks before modelling wide data:
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
 
+from src.core.compute_policy import (
+    BackendDecision,
+    ComputeBackend,
+    ComputePolicy,
+    select_array_backend,
+)
 from src.core.findings import Finding
 from src.core.profiler import profile_dataframe
 from src.tools.base import BaseTool, ToolExecutionError
@@ -28,6 +35,56 @@ if TYPE_CHECKING:
 HIGH_CORRELATION_THRESHOLD = 0.9
 
 
+def _gpu_pca_explained_variance(
+    values: np.ndarray,
+    policy: ComputePolicy,
+) -> tuple[np.ndarray | None, BackendDecision]:
+    """Return PCA variance ratios via CuPy only when the dense matrix is safe.
+
+    ``values`` has already been standardized with the CPU implementation used
+    by the historical sklearn PCA path.  This keeps imputation and scaling
+    semantics identical, while moving the bounded SVD to CUDA when available.
+    A CUDA error is deliberately non-fatal: PCA is exploratory and the CPU
+    implementation remains the authoritative fallback.
+    """
+    decision = select_array_backend(
+        policy,
+        int(values.shape[0]),
+        int(values.shape[1]),
+        has_missing=bool(np.isnan(values).any()),
+    )
+    if decision.backend != "cuda":
+        return None, decision
+    cupy_module: Any | None = None
+    try:
+        import cupy as cp
+
+        cupy_module = cp
+        gpu_values = cp.asarray(values, dtype=cp.float64)
+        singular_values = cp.linalg.svd(gpu_values, compute_uv=False, full_matrices=False)
+        squared = singular_values * singular_values
+        total = float(cp.asnumpy(squared.sum()))
+        if not np.isfinite(total) or total <= 0.0:
+            raise ValueError("PCA variance is not positive")
+        ratios = np.asarray(cp.asnumpy(squared / total), dtype=float)
+        return ratios, decision
+    except Exception:
+        return None, BackendDecision(
+            "cpu",
+            "cpu",
+            "cuda_pca_failed_cpu_fallback",
+            decision.estimated_vram_bytes,
+        )
+    finally:
+        # Release only CuPy's caching pools; CPU arrays stay owned by NumPy.
+        try:
+            if cupy_module is not None:
+                cupy_module.get_default_memory_pool().free_all_blocks()
+                cupy_module.get_default_pinned_memory_pool().free_all_blocks()
+        except Exception:
+            pass
+
+
 class DimensionalityAnalysisTool(BaseTool):
     """PCA explained-variance structure plus a multicollinearity screen."""
 
@@ -40,6 +97,10 @@ class DimensionalityAnalysisTool(BaseTool):
         "with |correlation| > 0.9 (multicollinearity risk). Use when the data profile "
         "shows is_high_dimensional (many numeric features)."
     )
+    requires_context: ClassVar[dict[str, str]] = {
+        "target_column": "target_column",
+        "ui_compute_backend": "compute_backend",
+    }
 
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
         return 1.0 if profile is not None and profile.is_high_dimensional else 0.0
@@ -49,6 +110,7 @@ class DimensionalityAnalysisTool(BaseTool):
         file_path: str,
         target_column: str | None = None,
         variance_threshold: float = 0.95,
+        compute_backend: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         from sklearn.decomposition import PCA
@@ -73,6 +135,12 @@ class DimensionalityAnalysisTool(BaseTool):
             sampled = sample_note(len(features), analysis_sample_rows())
             features = features.sample(n=analysis_sample_rows(), random_state=0)
         filled = features.fillna(features.median(numeric_only=True))
+        policy = ComputePolicy.from_env()
+        if compute_backend is not None:
+            try:
+                policy = replace(policy, mode=cast(ComputeBackend, compute_backend))
+            except ValueError as exc:
+                raise ToolExecutionError(f"Invalid compute_backend: {compute_backend!r}") from exc
 
         # ---- Multicollinearity screen ----
         # Pairwise-complete on the raw values: median-filled rows would
@@ -92,10 +160,15 @@ class DimensionalityAnalysisTool(BaseTool):
         scaler = StandardScaler()
         X = scaler.fit_transform(filled)
         n_components = min(X.shape[0], X.shape[1])
-        pca = PCA(n_components=n_components, random_state=42)
-        pca.fit(X)
+        gpu_explained, backend_decision = _gpu_pca_explained_variance(X, policy)
+        if gpu_explained is None:
+            pca = PCA(n_components=n_components, random_state=42)
+            pca.fit(X)
+            explained_values = pca.explained_variance_ratio_
+        else:
+            explained_values = gpu_explained
 
-        explained = [round(float(v), 4) for v in pca.explained_variance_ratio_]
+        explained = [round(float(v), 4) for v in explained_values]
         cumulative = np.cumsum(explained)
         n_for_threshold = int(np.searchsorted(cumulative, variance_threshold) + 1)
         n_for_threshold = min(n_for_threshold, len(explained))
@@ -109,6 +182,7 @@ class DimensionalityAnalysisTool(BaseTool):
                 + (f" PCA and correlations {sampled['sample_caveat']}." if sampled else "")
             ),
             "n_features": int(features.shape[1]),
+            **backend_decision.as_telemetry(),
             "features_used": list(features.columns),
             "explained_variance_ratio": explained,
             "cumulative_variance": [round(float(v), 4) for v in cumulative],
@@ -203,6 +277,12 @@ class DimensionalityAnalysisTool(BaseTool):
             "variance_threshold": {
                 "type": "float",
                 "description": "Cumulative variance fraction to report component count for. Default: 0.95.",
+                "required": False,
+            },
+            "compute_backend": {
+                "type": "string",
+                "enum": ["auto", "cpu", "cuda"],
+                "description": "Optional PCA backend preference. CUDA remains bounded and falls back to CPU.",
                 "required": False,
             },
         }

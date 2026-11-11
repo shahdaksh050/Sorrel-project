@@ -1292,7 +1292,7 @@ def run_sandboxed(
     SANDBOX_MEMORY_MB (1024).
     """
     if timeout_s is None:
-        timeout_s = _env_number("SANDBOX_TIMEOUT_S", 60.0)
+        timeout_s = _env_number("SANDBOX_TIMEOUT_S", 45.0)
     if memory_limit_mb is None:
         memory_limit_mb = int(_env_number("SANDBOX_MEMORY_MB", 1024))
     code = _normalize_sandboxed_code(code)

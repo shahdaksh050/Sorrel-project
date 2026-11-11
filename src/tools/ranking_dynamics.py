@@ -120,8 +120,36 @@ class RankingDynamicsTool(BaseTool):
         score_a_column: str | None = None,
         score_b_column: str | None = None,
         has_home_advantage: bool = True,
-        **_: Any,
+        entity_a_col: str | None = None,
+        entity_b_col: str | None = None,
+        outcome_col: str | None = None,
+        score_a_col: str | None = None,
+        score_b_col: str | None = None,
     ) -> dict[str, Any]:
+        """Model contests using canonical ``*_column`` inputs.
+
+        The explicit ``*_col`` parameters are deprecated compatibility aliases;
+        unknown names are intentionally rejected by Python rather than ignored.
+        """
+        aliases = (
+            ("entity_a_column", entity_a_column, entity_a_col),
+            ("entity_b_column", entity_b_column, entity_b_col),
+            ("outcome_column", outcome_column, outcome_col),
+            ("score_a_column", score_a_column, score_a_col),
+            ("score_b_column", score_b_column, score_b_col),
+        )
+        resolved: dict[str, str | None] = {}
+        for canonical_name, canonical_value, alias_value in aliases:
+            if canonical_value is not None and alias_value is not None and canonical_value != alias_value:
+                raise ToolExecutionError(
+                    f"Specify only {canonical_name}; its deprecated alias conflicts with it."
+                )
+            resolved[canonical_name] = canonical_value if canonical_value is not None else alias_value
+        entity_a_column = resolved["entity_a_column"]
+        entity_b_column = resolved["entity_b_column"]
+        outcome_column = resolved["outcome_column"]
+        score_a_column = resolved["score_a_column"]
+        score_b_column = resolved["score_b_column"]
         df = _read_df(file_path)
         if df.empty:
             raise ToolExecutionError("Dataset has no rows.")
@@ -273,18 +301,23 @@ class RankingDynamicsTool(BaseTool):
             f"Home-field advantage elevates win odds by {home_odds_ratio:.2f}x (model accuracy: {acc:.1%})."
         )
 
+        ratings = rankings[:15]
+        home_advantage_odds_ratio = round(home_odds_ratio, 3)
         return {
             "summary": summary,
             "entity_a_column": entity_a_column,
             "entity_b_column": entity_b_column,
             "num_competitors": len(active_entities),
             "num_contests": n_contests,
-            "home_advantage_odds": round(home_odds_ratio, 3),
+            "home_advantage_odds_ratio": home_advantage_odds_ratio,
             "home_advantage_coef": round(home_adv_coef, 3),
             "model_accuracy": round(acc, 4),
             "top_entity": top_leader["entity"],
             "top_rating": top_leader["rating"],
-            "rankings": rankings[:15],
+            "ratings": ratings,
+            # Deprecated compatibility aliases.
+            "home_advantage_odds": home_advantage_odds_ratio,
+            "rankings": ratings,
         }
 
     def findings(
@@ -293,13 +326,13 @@ class RankingDynamicsTool(BaseTool):
         profile: DatasetProfile | None = None,
         metadata: DatasetMetadata | None = None,
     ) -> list[Finding]:
-        rankings = output.get("rankings") or []
+        rankings = output.get("ratings") or output.get("rankings") or []
         if not rankings:
             return []
 
         top_e = output["top_entity"]
         top_r = output["top_rating"]
-        home_odds = output.get("home_advantage_odds", 1.0)
+        home_odds = output.get("home_advantage_odds_ratio", output.get("home_advantage_odds", 1.0))
         acc = output.get("model_accuracy", 0.0)
         n = output.get("num_contests", 0)
 

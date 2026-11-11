@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 import pandas as pd
+import pytest
 
 from src.core.semantic_readiness import assess_semantic_readiness
 
@@ -54,3 +55,23 @@ def test_unit_normalised_numeric_measure_is_not_marked_misaligned() -> None:
     price = result["per_column"][0]
     assert price["conformance_pct"] == 100.0
     assert price["issues"] == []
+
+
+def test_wide_numeric_frame_does_not_run_value_regex_scans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Typed numeric measures are classified without stringifying every cell."""
+    import src.core.semantic_readiness as readiness_module
+
+    def fail_if_scanned(values: pd.Series, expected: list[str]) -> tuple[object, int, int]:
+        raise AssertionError("numeric values must not enter semantic regex scanning")
+
+    monkeypatch.setattr(readiness_module, "_semantic_summary", fail_if_scanned)
+    frame = pd.DataFrame(
+        {f"price_{index}": [float(index), float(index + 1)] for index in range(100)}
+    )
+
+    result = readiness_module.assess_semantic_readiness(frame)
+
+    assert result["columns_assessed"] == 100
+    assert result["readiness_score"] == 100.0

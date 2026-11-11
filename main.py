@@ -9,7 +9,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -18,6 +17,8 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+
+from src.core.json_normalization import strict_json_dumps
 
 load_dotenv()
 
@@ -143,7 +144,7 @@ def _print_final_report(report: dict) -> None:  # type: ignore[type-arg]
     output_dir = os.getenv("OUTPUT_DIR", "output")
     report_path = Path(output_dir) / "reports" / "final_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(report, indent=2, default=str))
+    report_path.write_text(strict_json_dumps(report, indent=2), encoding="utf-8")
     console.print(f"\n[dim]Full report saved to: {report_path}[/]")
 
 

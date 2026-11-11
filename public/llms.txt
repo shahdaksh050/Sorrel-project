@@ -1,26 +1,20 @@
 # Sorrel
 
-> Sorrel is an evidence-first data-analysis service. It accepts tabular datasets, executes a governed seven-stage workflow, and returns checked findings, charts, reports, limitations, and an audit trail.
-
-Use the API or MCP endpoint for actions. Public documentation never grants access to uploaded datasets. Analysis runs are asynchronous and return a run identifier.
+> Sorrel is a local, evidence-oriented tabular data-analysis application with Streamlit and CLI entry points.
 
 ## Start Here
 
-- [Product overview](http://localhost:8501/docs/overview.md): What Sorrel does and does not do.
-- [Analysis workflow](http://localhost:8501/docs/workflow.md): The seven stages and their outputs.
-- [Safety and privacy](http://localhost:8501/docs/safety.md): Data handling, sandboxing, PII, and retention.
+- [Product overview](/docs/overview.md): Shipped capabilities and boundaries.
+- [Analysis workflow](/docs/workflow.md): The canonical seven-stage local workflow.
+- [Safety and privacy](/docs/safety.md): Local data handling and sandbox safeguards.
 
 ## Integrate
 
-- [API quickstart](http://localhost:8501/docs/api-quickstart.md): Upload, start, poll, and fetch a result.
-- [MCP setup](http://localhost:8501/docs/mcp.md): Remote MCP endpoint, tools, and authentication.
+There is no REST API or MCP server in the current release. Use the local CLI or
+Streamlit workspace; do not treat local artefact JSON as a stable remote schema.
 
 ## Reference
 
-- [Supported files](http://localhost:8501/docs/file-formats.md): Accepted formats and upload limits.
-- [Result schema](http://localhost:8501/docs/result-schema.md): Findings, evidence, caveats, and artifacts.
-- [Limits](http://localhost:8501/docs/limits.md): Runtime, concurrency, quotas, and model behavior.
-
-## Optional
-
-- [Changelog](http://localhost:8501/docs/changelog.md): Contract and product changes.
+- [Supported files](/docs/file-formats.md): Local reader formats and row cap.
+- [Runtime limits](/docs/limits.md): Local configurable defaults.
+- [Changelog](/docs/changelog.md): Public contract changes.

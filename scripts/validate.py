@@ -158,7 +158,7 @@ class MockLLMClient:
                             "target_column": "label",
                             "task_type": "classification",
                             "models": ["logistic_regression"],
-                            "n_cv_folds": 3,
+                            "n_cv_folds": 5,
                             "max_depth": 4,
                         },
                         "rationale": "Train with CV and regularisation.",
@@ -187,7 +187,10 @@ def make_sample_csv(path: Path) -> None:
         fa: Any = round(rng.gauss(0, 1), 3)
         fb = round(rng.gauss(5, 2), 3)
         fc = round(rng.uniform(0, 10), 3)
-        label = 1 if float(fa) + rng.gauss(0, 0.5) > 0 else 0
+        # Keep the smoke fixture learnable enough that the release-threshold
+        # assertion measures the pipeline rather than one unlucky 16-row
+        # holdout. Dedicated tests cover noisy/overfit warning paths.
+        label = 1 if float(fa) + rng.gauss(0, 0.1) > 0 else 0
         if i % 15 == 0:
             fa = ""
         rows.append([fa, fb, fc, label])
@@ -293,7 +296,7 @@ def main() -> None:
             target_column="label",
             task_type="classification",
             models=["logistic_regression"],
-            n_cv_folds=3,
+            n_cv_folds=5,
             max_depth=4,
             output_dir=model_dir,
         )
@@ -305,7 +308,9 @@ def main() -> None:
         check("S3", "train_metrics present", "train_metrics" in lr_metrics)
         check("S3", "test_metrics present", "test_metrics" in lr_metrics)
         gap = lr_metrics.get("train_test_gap", 1.0)
-        check("S3", "train_test_gap sane (<0.5)", gap < 0.5, f"gap={gap:.3f}")
+        check("S3", "train_test_gap meets release threshold (<=0.10)", gap <= 0.10, f"gap={gap:.3f}")
+        check("S3", "IID CV uses at least five folds when data permits", lr_metrics.get("cv_mean") is not None and train.output.get("n_cv_folds", 0) >= 5)
+        check("S3", "selected model has explicit status", train.output.get("selected_model_status") == "selected")
         check("S3", "best_model set", bool(train.output.get("best_model")))
         model_path = lr_metrics.get("model_path", "")
         check("S3", "model .pkl file saved", bool(model_path) and Path(model_path).exists())

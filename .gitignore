@@ -12,6 +12,17 @@ venv/
 
 # Environment & secrets
 .env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+.streamlit/secrets.*
+secrets.toml
+*.key
+*.pem
+*.p12
+*.pfx
+model-signing.key
+.model_key
 
 # Tooling caches
 .ruff_cache/

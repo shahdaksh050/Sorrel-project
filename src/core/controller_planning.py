@@ -39,6 +39,51 @@ class PlanMixin(ControllerState):
 
     _GOING_STATUSES = frozenset({"in_progress", "inprogress", "continue", "continuing", "running", "ongoing", "working"})
 
+    _NUMERIC_ONLY_TOOLS = frozenset({
+        "correlation_analysis", "statistical_analysis", "select_statistical_test",
+        "cluster_data", "regression_analysis", "train_model", "evaluate_model",
+        "scenario_simulation", "detect_outliers",
+    })
+    _OBJECTIVE_REQUIRED_TOOLS = frozenset({"scenario_simulation", "cluster_data"})
+    _MAX_STEPS_PER_TOOL = 1
+
+    def _numeric_column_count(self) -> int:
+        """Count actual numeric features, excluding a target when possible."""
+        profile = self.last_profile
+        if profile is not None:
+            return len(profile.columns_of_kind("numeric"))
+        meta = self.memory.dataset_metadata
+        return len(meta.numerical_cols) if meta is not None else 0
+
+    def _objective_allows_tool(self, tool_name: str) -> bool:
+        """Whether an optional exploratory tool has a decision-relevant ask.
+
+        Scenario simulation and clustering are not generic cleanup actions:
+        applicability only tells us that they *can* run.  They consume budget
+        only when the objective actually requests a decision/sensitivity or a
+        segmentation question.
+        """
+        if tool_name not in self._OBJECTIVE_REQUIRED_TOOLS:
+            return True
+        objective = str(getattr(self, "objective", "") or "")
+        if tool_name == "scenario_simulation":
+            pattern = r"\b(?:what[ -]?if|scenario|sensitivity|interven|lever|optim|decision|reduce|increase|improve)\b"
+            return bool(re.search(pattern, objective, re.IGNORECASE))
+        return bool(re.search(r"\b(?:segment|cluster|cohort|persona|archetype)\b", objective, re.IGNORECASE))
+
+    def _tool_hard_prerequisite_error(self, tool_name: str) -> str | None:
+        """Return a deterministic reason a proposed step must not be planned."""
+        if self.last_profile is None and self.memory.dataset_metadata is None:
+            return None
+        numeric = self._numeric_column_count()
+        if tool_name in self._NUMERIC_ONLY_TOOLS and numeric == 0:
+            return f"{tool_name} requires numeric columns; this dataset has none."
+        if tool_name == "cluster_data" and numeric < 2:
+            return "cluster_data requires at least two numeric columns."
+        if tool_name in self._OBJECTIVE_REQUIRED_TOOLS and not self._objective_allows_tool(tool_name):
+            return f"{tool_name} requires an objective that requests its decision purpose."
+        return None
+
     @classmethod
     def _plan_items(cls, reply: Any) -> list[Any]:
         """The plan's step list wherever a drifting model put it: a top-level
@@ -113,6 +158,7 @@ class PlanMixin(ControllerState):
         rejected: list[str] = []
         notes: list[str] = []
         seen: set[str] = set()
+        tool_counts: dict[str, int] = {}
         duplicates = 0
         for idx, s in enumerate(self._plan_items(llm_response), 1):
             if isinstance(s, str):
@@ -131,6 +177,13 @@ class PlanMixin(ControllerState):
                 rejected.append(resolved[0][1] or candidates[0])
                 continue
             tool_name, cleaned = hit
+            prerequisite_error = self._tool_hard_prerequisite_error(tool_name)
+            if prerequisite_error:
+                rejected.append(f"{tool_name} ({prerequisite_error})")
+                continue
+            if tool_counts.get(tool_name, 0) >= self._MAX_STEPS_PER_TOOL:
+                notes.append(f"dropped redundant {tool_name!r} step (per-tool budget {self._MAX_STEPS_PER_TOOL})")
+                continue
             if (
                 getattr(self.tool_registry.get(tool_name), "executes_code", False)
                 and not code_execution_available()
@@ -153,6 +206,7 @@ class PlanMixin(ControllerState):
                 duplicates += 1
                 continue
             seen.add(signature)
+            tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
             number = next((s[k] for k in self._STEP_NO_KEYS if s.get(k) is not None), None)
             if isinstance(number, str) and number.strip().isdigit():
                 number = int(number)
@@ -292,6 +346,7 @@ class PlanMixin(ControllerState):
                 and "cluster_data" not in completed
                 and "cluster_data" not in planned
                 and self.use_ml
+                and self._objective_allows_tool("cluster_data")
             ):
                 tool = self.tool_registry.get("cluster_data")
                 if tool.applies_to(profile, meta) >= 0.4:
@@ -312,6 +367,7 @@ class PlanMixin(ControllerState):
                 self.tool_registry.has("scenario_simulation")
                 and "scenario_simulation" not in completed
                 and "scenario_simulation" not in planned
+                and self._objective_allows_tool("scenario_simulation")
             ):
                 sim_tool = self.tool_registry.get("scenario_simulation")
                 if sim_tool.applies_to(profile, meta) > 0.0:
@@ -446,7 +502,11 @@ class PlanMixin(ControllerState):
             ("detect_outliers", {"file_path": fp, "method": "iqr"}, "Fallback plan: flag anomalous rows."),
             ("correlation_analysis", {"file_path": fp, "target_column": meta.target_column}, "Fallback plan: quantify feature relationships."),
         ):
-            if self.tool_registry.has(name) and self.tool_registry.get(name).applies_to(profile, meta) > 0.0:
+            if (
+                self.tool_registry.has(name)
+                and self.tool_registry.get(name).applies_to(profile, meta) > 0.0
+                and self._tool_hard_prerequisite_error(name) is None
+            ):
                 steps.append({
                     "step_number": len(steps) + 1,
                     "tool_name": name,
@@ -491,6 +551,10 @@ class PlanMixin(ControllerState):
         for tool in candidate_tools:
             name = getattr(tool, "name", "")
             if name in already:
+                continue
+            prerequisite_error = self._tool_hard_prerequisite_error(name)
+            if prerequisite_error is not None:
+                logger.debug("Fallback planner skipped %s: %s", name, prerequisite_error)
                 continue
             score = tool.applies_to(profile, meta)
             if score < self._FALLBACK_MIN_SCORE:
@@ -557,7 +621,10 @@ class PlanMixin(ControllerState):
         arm = self._experiment_arm_column(profile, meta.target_column)
         if arm and self.tool_registry.has("select_statistical_test"):
             test_tool = self.tool_registry.get("select_statistical_test")
-            if test_tool.applies_to(profile, meta) > 0.0:
+            if (
+                test_tool.applies_to(profile, meta) > 0.0
+                and self._tool_hard_prerequisite_error("select_statistical_test") is None
+            ):
                 test_step = next((s for s in steps if s["tool_name"] == "select_statistical_test"), None)
                 if test_step is None:
                     test_params: dict[str, Any] = {"file_path": fp}
@@ -597,7 +664,11 @@ class PlanMixin(ControllerState):
                         break
 
         # Decision Intelligence: pre-seed scenario simulation for continuous drivers
-        if self.tool_registry.has("scenario_simulation") and not any(s["tool_name"] == "scenario_simulation" for s in steps):
+        if (
+            self.tool_registry.has("scenario_simulation")
+            and self._objective_allows_tool("scenario_simulation")
+            and not any(s["tool_name"] == "scenario_simulation" for s in steps)
+        ):
             sim_tool = self.tool_registry.get("scenario_simulation")
             if sim_tool.applies_to(profile, meta) > 0.0:
                 sim_params: dict[str, Any] = {"file_path": fp}
@@ -641,7 +712,7 @@ class PlanMixin(ControllerState):
                     "rationale": "Fallback plan: evaluate the best model on held-out data.",
                 },
             ]
-        else:
+        elif self._objective_allows_tool("cluster_data") and self._numeric_column_count() >= 2:
             steps += [
                 {
                     "step_number": len(steps) + 1,

@@ -24,7 +24,7 @@ def test_multi_seasonal_detects_fft_harmonics(tmp_path: Path) -> None:
     df.to_csv(csv_path, index=False)
 
     tool = MultiSeasonalAnalysisTool()
-    res = tool.run(file_path=str(csv_path), time_column="timestamp", measure_column="grid_load_mw")
+    res = tool.run(file_path=str(csv_path), time_column="timestamp", value_column="grid_load_mw")
     assert res.status == "success"
     out: dict[str, Any] = res.output
 
@@ -40,5 +40,19 @@ def test_multi_seasonal_detects_fft_harmonics(tmp_path: Path) -> None:
     assert len(findings) >= 1
     f = findings[0]
     assert f.kind == "periodicity"
-    assert f.chart_hint == "line"
+    assert f.chart_hint["kind"] == "line"
     assert "periodic" in f.headline.lower()
+
+
+def test_multi_seasonal_accepts_explicit_deprecated_measure_alias(tmp_path: Path) -> None:
+    t = np.arange(72)
+    df = pd.DataFrame({"value": np.sin(2 * np.pi * t / 12.0)})
+    csv_path = tmp_path / "series.csv"
+    df.to_csv(csv_path, index=False)
+
+    result = MultiSeasonalAnalysisTool().run(
+        file_path=str(csv_path), measure_column="value"
+    )
+
+    assert result.status == "success"
+    assert result.output["value_column"] == "value"

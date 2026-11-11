@@ -1,5 +1,5 @@
 """
-Background analysis run: the worker thread and the state the page polls.
+Background analysis run: the parent monitor and the state the page polls.
 
 The Streamlit script starts one `ActiveRun` per analysis and keeps it in session
 state; a polling fragment reads `ActiveRun.snapshot()` once a second. Everything
@@ -7,18 +7,26 @@ here runs on, or is read from, a thread that is not the script thread, so:
 
 * this module never imports Streamlit and never touches `st.session_state`;
 * every setting the worker needs arrives in a frozen `RunSpec`;
-* the worker writes only to the `ActiveRun`, under its lock, and the script
-  thread folds the finished `RunOutcome` into session state itself.
+* the worker is normally a spawned process, so a native-library crash or an
+  interrupted Streamlit session cannot take the analysis down with it;
+* the parent monitor owns `ActiveRun` state and the script thread folds the
+  finished `RunOutcome` into session state itself.
 
-Stop is cooperative. `request_stop` sets an event that the controller polls at
-its checkpoints (`AgentController.should_stop`), so a tool that is already
-running finishes first. Nothing here kills a thread.
+Stop starts cooperatively: `request_stop` sets an event that the controller
+polls at its checkpoints (`AgentController.should_stop`).  If the worker does
+not honour it within a bounded grace period, only that known child process is
+terminated.  ``RUNNER_BACKEND=thread`` remains available for constrained
+debugging, but production defaults to ``process``.
 """
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
+import pickle
+import queue
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -28,8 +36,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import psutil
+
 from src.core.findings import Finding, is_trivial
 from src.core.run_config import RunConfig
+from src.core.run_registry import RunRegistry, RunStatus, RunTerminalStatus, find_run
 from src.core.run_view import (
     RUN_VIEW_CONTEXT_KEYS,
     ProvisionalFinding,
@@ -58,13 +69,11 @@ def _retained_run_dir() -> Path:
 
 
 def retain_run_artifacts(output_dir: str) -> str | None:
-    """Copy a completed run's full artifact tree into ``output/runs``.
+    """Copy a completed run's safe, user-facing artifacts into ``output/runs``.
 
-    The UI's temporary directory is cleaned when its tab is discarded, so a
-    comparison summary alone is not sufficient to reproduce a result.  This
-    copies reports, audit logs, models, visualisations, and any derived data
-    without deciding which artifacts matter.  The returned path remains the
-    retained summary location for the existing comparison UI.
+    Retention is intentionally an allowlist, not a snapshot of the worker
+    tree.  Dotfiles, symlinks, signing keys, scratch files, and unknown future
+    artifacts never cross this boundary.
     """
     source = Path(output_dir).resolve()
     if not source.is_dir() or source.is_symlink():
@@ -75,11 +84,44 @@ def retain_run_artifacts(output_dir: str) -> str | None:
         # recursive copy.  Refuse rather than copying an unbounded tree.
         if destination.is_relative_to(source):
             return None
-        shutil.copytree(source, destination, symlinks=True)
+        for relative in _retained_artifacts(source):
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source / relative, target)
         summary = destination / "reports" / "summary.json"
         return str(summary) if summary.is_file() else None
     except OSError:
         return None
+
+
+_RETAINED_SUFFIXES: dict[str, frozenset[str]] = {
+    "reports": frozenset({".html", ".json", ".md"}),
+    "audit": frozenset({".jsonl"}),
+    "models": frozenset({".pkl", ".sig"}),
+    "visualizations": frozenset({".html", ".pdf", ".png", ".svg"}),
+    "data": frozenset({".csv", ".json", ".parquet", ".tsv"}),
+}
+
+
+def _retained_artifacts(source: Path) -> list[Path]:
+    """Return safe artifact paths relative to ``source`` in stable order."""
+    retained: list[Path] = []
+    for category, suffixes in _RETAINED_SUFFIXES.items():
+        directory = source / category
+        if not directory.is_dir() or directory.is_symlink():
+            continue
+        for candidate in directory.rglob("*"):
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+            relative = candidate.relative_to(source)
+            if any(part.startswith(".") for part in relative.parts):
+                continue
+            if candidate.suffix.lower() not in suffixes:
+                continue
+            if "key" in candidate.name.lower():
+                continue
+            retained.append(relative)
+    return sorted(retained)
 
 RunState = Literal["running", "done", "error"]
 StageEntry = tuple[str, str, str]  # (stage number, status, detail)
@@ -184,6 +226,82 @@ def _max_concurrent_runs() -> int:
 #: an unbounded number of analyses at once. Extra runs wait their turn and say so.
 _RUN_SLOTS = threading.BoundedSemaphore(_max_concurrent_runs())
 _SLOT_POLL_S = 0.5
+_HEARTBEAT_INTERVAL_S = 5.0
+
+
+def _runner_backend() -> Literal["process", "thread"]:
+    """Return the supported runner backend, safely defaulting to isolation."""
+    return "thread" if os.getenv("RUNNER_BACKEND", "process").strip().lower() == "thread" else "process"
+
+
+def _stop_grace_s() -> float:
+    """Return the cancellation grace period without accepting a negative wait."""
+    try:
+        return max(0.0, float(os.getenv("RUNNER_STOP_GRACE_S", "10")))
+    except ValueError:
+        return 10.0
+
+
+def _worker_cpu_threads() -> int:
+    """Bound native numerical libraries inside one analysis worker."""
+    try:
+        return max(1, int(os.getenv("RUNNER_CPU_THREADS", "2")))
+    except ValueError:
+        return 2
+
+
+def _positive_limit(name: str, default: float) -> float:
+    """Read a non-negative operational limit; zero disables the limit."""
+    try:
+        return max(0.0, float(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _process_tree_rss_bytes(process_id: int) -> int | None:
+    """Return current RSS for an exact worker and its living descendants."""
+    try:
+        process = psutil.Process(process_id)
+        members = [process, *process.children(recursive=True)]
+        return sum(int(member.memory_info().rss) for member in members if member.is_running())
+    except psutil.Error:
+        return None
+
+
+def _cap_worker_cpu_threads() -> None:
+    """Apply a conservative thread cap before importing the controller stack."""
+    cap = _worker_cpu_threads()
+    for key in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "XGBOOST_NUM_THREADS",
+    ):
+        try:
+            existing = int(os.environ.get(key, str(cap)))
+        except ValueError:
+            existing = cap
+        os.environ[key] = str(max(1, min(cap, existing)))
+
+
+def _configure_worker_streams() -> None:
+    """Make Rich/controller output safe on Windows non-UTF-8 consoles."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+# Kept outside Streamlit session state so a replacement browser session can
+# adopt a still-running local worker by its validated durable run ID.
+_ACTIVE_RUNS: dict[str, ActiveRun] = {}
+_ACTIVE_RUNS_LOCK = threading.Lock()
+_FORGOTTEN_RUNS: set[str] = set()
 
 
 @dataclass(frozen=True)
@@ -208,6 +326,7 @@ class RunSpec:
     ml_test_size: float | None = None
     ml_n_cv_folds: int | None = None
     ml_tune: bool | None = None
+    compute_backend: str = "auto"
     is_sample: bool = False
     #: Persist the completed artifact tree where "Compare with a previous run"
     #: looks. Off on a shared deployment, where that folder would mix visitors'
@@ -247,8 +366,79 @@ class RunSnapshot:
     provisional: tuple[ProvisionalFinding, ...] = ()
 
 
+class _WorkerRun:
+    """Minimal, pickle-safe ``ActiveRun`` facade used inside a spawned child.
+
+    The analysis code only needs this small callback surface.  It deliberately
+    contains no locks, registry, Streamlit state, or parent object reference;
+    all state changes travel over the queue and are applied by the monitor.
+    """
+
+    def __init__(self, spec: RunSpec, events: Any, stop_event: Any) -> None:
+        self.spec = spec
+        self._events = events
+        self._stop_event = stop_event
+
+    @property
+    def should_stop(self) -> bool:
+        return bool(self._stop_event.is_set())
+
+    def _send(self, kind: str, *payload: Any) -> None:
+        message = (kind, *payload)
+        # ``Queue.put`` serialises on a feeder thread; force that check here
+        # so a non-pickleable controller value becomes a visible worker error
+        # instead of a silent lost completion event.
+        pickle.dumps(message)
+        self._events.put(message)
+
+    def set_stage(self, num: str, status: str, detail: str = "") -> None:
+        self._send("stage", num, status, detail)
+
+    def advance(
+        self,
+        num: str,
+        detail: str,
+        *,
+        closing: dict[str, str] | None = None,
+        reopen: tuple[str, ...] = (),
+    ) -> None:
+        self._send("advance", num, detail, closing, reopen)
+
+    def add_progress(self, line: str) -> None:
+        self._send("progress", line)
+
+    def add_finding(self, finding: Finding) -> None:
+        self._send("finding", finding)
+
+    def set_note(self, note: str) -> None:
+        self._send("note", note)
+
+    def set_metadata(self, meta: Any) -> None:
+        self._send("metadata", meta)
+
+    def tool_event(self, tool_name: str, status: str) -> None:
+        self._send("tool", tool_name, status)
+
+    def _complete(self, outcome: RunOutcome) -> None:
+        self._send("complete", outcome)
+
+
+def _worker_entry(spec: RunSpec, events: Any, stop_event: Any) -> None:
+    """Spawn target: cap native threads, execute, and return a safe error trace."""
+    _configure_worker_streams()
+    _cap_worker_cpu_threads()
+    worker = _WorkerRun(spec, events, stop_event)
+    try:
+        _execute(worker)
+    except Exception:
+        # The parent, not this process, decides the user-visible terminal
+        # state. Tracebacks are vital for operators; a hard process exit is
+        # detected separately by the parent monitor.
+        events.put(("error", traceback.format_exc()))
+
+
 class ActiveRun:
-    """One analysis on its own thread. Create, `start()`, then poll `snapshot()`."""
+    """One analysis with a parent monitor. Create, `start()`, then poll it."""
 
     def __init__(self, spec: RunSpec) -> None:
         self.spec = spec
@@ -264,17 +454,40 @@ class ActiveRun:
         self._error: str | None = None
         self._metadata: Any = None
         self._thread: threading.Thread | None = None
+        self._registry = RunRegistry(spec.tmp_dir)
+        self._run_id: str | None = None
+        self._registry_lock = threading.Lock()
+        self._heartbeat_stop = threading.Event()
+        self._worker: Any = None
+        self._worker_stop: Any = None
+        self._active_tool: tuple[str, float] | None = None
+
+    @property
+    def run_id(self) -> str | None:
+        """The durable opaque identifier assigned when ``start`` is called."""
+        return self._run_id
+
+    @property
+    def registry_status(self) -> RunStatus | None:
+        """The safe durable status, suitable for a reconnecting UI."""
+        return self._registry.load()
 
     # ── control (script thread) ──────────────────────────────────────────────
 
     def start(self) -> None:
         if self._thread is not None:
             raise RuntimeError("run already started")
+        record = self._registry.create()
+        self._run_id = record.run_id
+        with _ACTIVE_RUNS_LOCK:
+            _ACTIVE_RUNS[record.run_id] = self
         self._thread = threading.Thread(target=self._main, name="dsa-run", daemon=True)
         self._thread.start()
 
     def request_stop(self) -> None:
         self._stop_event.set()
+        if self._worker_stop is not None:
+            self._worker_stop.set()
 
     def discard_and_stop(self) -> None:
         """Abandon the run: stop it and drop its results once the worker ends."""
@@ -326,6 +539,7 @@ class ActiveRun:
         with self._lock:
             self._stage_log = [e for e in self._stage_log if e[0] != num] + [(num, status, detail)]
             self._stage_log.sort(key=lambda e: e[0])
+        self._update_registry(stage=f"{num}:{status}")
 
     def advance(
         self,
@@ -356,6 +570,7 @@ class ActiveRun:
                     log[n] = ("pending", "")
             log[num] = ("active", detail)
             self._stage_log = sorted(((n, s, d) for n, (s, d) in log.items()), key=lambda e: e[0])
+        self._update_registry(stage=f"{num}:active")
 
     def add_progress(self, line: str) -> None:
         with self._lock:
@@ -378,12 +593,23 @@ class ActiveRun:
         with self._lock:
             self._metadata = meta
 
+    def tool_event(self, tool_name: str, status: str) -> None:
+        """Track one controller tool deadline without changing tool contracts."""
+        with self._lock:
+            if status == "running":
+                self._active_tool = (tool_name, time.monotonic())
+            elif self._active_tool is not None and self._active_tool[0] == tool_name:
+                self._active_tool = None
+
     def _complete(self, outcome: RunOutcome) -> None:
+        status: RunTerminalStatus = "partial" if outcome.stopped else "succeeded"
+        self._finish_registry(status, _public_artifact_paths(self.spec.output_dir))
         with self._lock:
             self._outcome = outcome
             self._state = "done"
 
-    def _fail(self, error: str) -> None:
+    def _fail(self, error: str, terminal_status: RunTerminalStatus = "failed") -> None:
+        self._finish_registry(terminal_status)
         with self._lock:
             self._error = error
             self._state = "error"
@@ -395,6 +621,27 @@ class ActiveRun:
                     ]
                     self._stage_log.sort(key=lambda e: e[0])
                     break
+
+    def _update_registry(self, stage: str | None = None) -> None:
+        """Best-effort status persistence must never hide the real run result."""
+        try:
+            with self._registry_lock:
+                self._registry.heartbeat(stage)
+        except (OSError, RuntimeError):
+            pass
+
+    def _finish_registry(
+        self, status: RunTerminalStatus, artifacts: tuple[str, ...] = ()
+    ) -> None:
+        try:
+            with self._registry_lock:
+                self._registry.finish(status, artifacts)
+        except (OSError, RuntimeError):
+            pass
+
+    def _heartbeat_main(self) -> None:
+        while not self._heartbeat_stop.wait(_HEARTBEAT_INTERVAL_S):
+            self._update_registry()
 
     def _acquire_slot(self) -> bool:
         """Wait for a free run slot; False if the run was stopped while it waited."""
@@ -409,15 +656,22 @@ class ActiveRun:
 
     def _main(self) -> None:
         slot = False
+        heartbeater = threading.Thread(target=self._heartbeat_main, name="dsa-run-heartbeat", daemon=True)
+        heartbeater.start()
         try:
             slot = self._acquire_slot()
             if slot:
-                _execute(self)
+                if _runner_backend() == "thread":
+                    _execute(self)
+                else:
+                    self._run_in_process()
             else:
                 self._fail("Stopped before the analysis started.")
         except Exception:
             self._fail(traceback.format_exc())
         finally:
+            self._heartbeat_stop.set()
+            heartbeater.join(timeout=_HEARTBEAT_INTERVAL_S + 1.0)
             if slot:
                 _RUN_SLOTS.release()
             with self._lock:
@@ -425,11 +679,299 @@ class ActiveRun:
                 if self._state == "running":  # defensive: never leave the page polling forever
                     self._state = "error"
                     self._error = self._error or "The run ended without a result."
+            if discarded and self._run_id is not None:
+                with _ACTIVE_RUNS_LOCK:
+                    if _ACTIVE_RUNS.get(self._run_id) is self:
+                        _ACTIVE_RUNS.pop(self._run_id, None)
             if discarded:
                 remove_run_dir(self.spec.tmp_dir)
 
+    def _run_in_process(self) -> None:
+        """Run one analysis child and project its IPC events onto this parent."""
+        context = multiprocessing.get_context("spawn")
+        events = context.Queue()
+        stop_event = context.Event()
+        if self._stop_event.is_set():
+            stop_event.set()
+        worker = context.Process(
+            target=_worker_entry,
+            args=(self.spec, events, stop_event),
+            name="dsa-analysis-worker",
+            daemon=False,
+        )
+        self._worker = worker
+        self._worker_stop = stop_event
+        worker.start()
+        if worker.pid is None:
+            raise RuntimeError("analysis worker started without a process ID")
+        with self._registry_lock:
+            self._registry.set_process_identity(worker.pid)
+        stop_started: float | None = time.monotonic() if self._stop_event.is_set() else None
+        run_started = time.monotonic()
+        limit_reason: str | None = None
+        force_stopped = False
+        try:
+            while True:
+                if self._stop_event.is_set() and stop_started is None:
+                    stop_started = time.monotonic()
+                    stop_event.set()
+                self._drain_worker_events(events, timeout=0.15)
+                if self.finished:
+                    break
+                if stop_started is None:
+                    limit_reason = self._resource_limit_reason(worker.pid, run_started)
+                    if limit_reason is not None:
+                        self.add_progress(f"[limit] {limit_reason}; requesting a partial result")
+                        self.set_note(limit_reason)
+                        self.request_stop()
+                        stop_started = time.monotonic()
+                if (
+                    stop_started is not None
+                    and worker.is_alive()
+                    and time.monotonic() - stop_started >= _stop_grace_s()
+                ):
+                    worker.terminate()
+                    force_stopped = True
+                    worker.join(timeout=5.0)
+                    self._fail(
+                        (
+                            f"{limit_reason}; the worker did not return a partial result within "
+                            "the cancellation grace period."
+                            if limit_reason is not None
+                            else "Stopped after the worker did not respond within the cancellation grace period."
+                        ),
+                        terminal_status="cancelled",
+                    )
+                    break
+                if not worker.is_alive():
+                    # A Queue feeder can finish after the child exits; drain
+                    # every already-available event before declaring it lost.
+                    self._drain_worker_events(events, timeout=0.0)
+                    if not self.finished:
+                        if self._stop_event.is_set():
+                            self._fail("Stopped before the worker returned a partial result.", "cancelled")
+                        else:
+                            self._fail(
+                                f"Analysis worker exited unexpectedly (exit code {worker.exitcode})."
+                            )
+                    break
+            if worker.is_alive():
+                worker.join(timeout=5.0)
+        finally:
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=5.0)
+                if not self.finished and not force_stopped:
+                    self._fail("Analysis worker was terminated during cleanup.")
+            events.close()
+            events.join_thread()
+            self._worker = None
+            self._worker_stop = None
 
-def _execute(run: ActiveRun) -> None:
+    def _resource_limit_reason(self, worker_pid: int | None, run_started: float) -> str | None:
+        """Return a plain-language limit breach for cooperative cancellation."""
+        now = time.monotonic()
+        tool_timeout = _positive_limit("TOOL_TIMEOUT_S", 120.0)
+        with self._lock:
+            active_tool = self._active_tool
+        if tool_timeout and active_tool is not None and now - active_tool[1] >= tool_timeout:
+            return f"Tool '{active_tool[0]}' exceeded its {tool_timeout:g}-second limit"
+        wall_timeout = _positive_limit("RUNNER_WALL_TIMEOUT_S", 3600.0)
+        if wall_timeout and now - run_started >= wall_timeout:
+            return f"Analysis exceeded its {wall_timeout:g}-second wall-clock limit"
+        rss_limit_mb = _positive_limit("RUNNER_MEMORY_MB", 4096.0)
+        if worker_pid is not None and rss_limit_mb:
+            rss = _process_tree_rss_bytes(worker_pid)
+            if rss is not None and rss > int(rss_limit_mb * 1024 * 1024):
+                return f"Analysis exceeded its {rss_limit_mb:g} MB memory limit"
+        return None
+
+    def _drain_worker_events(self, events: Any, timeout: float) -> None:
+        """Apply available child events while treating malformed IPC as a failure."""
+        first = True
+        while True:
+            try:
+                if first and timeout > 0:
+                    event = events.get(timeout=timeout)
+                else:
+                    event = events.get_nowait()
+            except queue.Empty:
+                return
+            first = False
+            if not isinstance(event, tuple) or not event or not isinstance(event[0], str):
+                self._fail("Analysis worker sent an invalid progress event.")
+                return
+            self._apply_worker_event(event)
+            if self.finished:
+                return
+
+    def _apply_worker_event(self, event: tuple[Any, ...]) -> None:
+        """Validate a child's small event protocol before mutating parent state."""
+        kind, *payload = event
+        if kind == "stage" and len(payload) == 3 and all(isinstance(item, str) for item in payload):
+            self.set_stage(payload[0], payload[1], payload[2])
+        elif kind == "advance" and len(payload) == 4:
+            num, detail, closing, reopen = payload
+            if isinstance(num, str) and isinstance(detail, str) and (
+                closing is None or isinstance(closing, dict)
+            ) and isinstance(reopen, tuple):
+                self.advance(num, detail, closing=closing, reopen=reopen)
+            else:
+                self._fail("Analysis worker sent an invalid stage transition.")
+        elif kind == "progress" and len(payload) == 1 and isinstance(payload[0], str):
+            self.add_progress(payload[0])
+        elif kind == "finding" and len(payload) == 1 and isinstance(payload[0], Finding):
+            self.add_finding(payload[0])
+        elif kind == "note" and len(payload) == 1 and isinstance(payload[0], str):
+            self.set_note(payload[0])
+        elif kind == "metadata" and len(payload) == 1:
+            self.set_metadata(payload[0])
+        elif kind == "tool" and len(payload) == 2 and all(
+            isinstance(item, str) for item in payload
+        ):
+            self.tool_event(payload[0], payload[1])
+        elif kind == "complete" and len(payload) == 1 and isinstance(payload[0], RunOutcome):
+            self._complete(payload[0])
+        elif kind == "error" and len(payload) == 1 and isinstance(payload[0], str):
+            self._fail(payload[0])
+        else:
+            self._fail("Analysis worker sent an invalid event.")
+
+
+def adopt_run(run_id: str, search_root: str | Path | None = None) -> ActiveRun | None:
+    """Return a local run when its durable registry record validates.
+
+    Completed runs deliberately remain adoptable until the user starts a new
+    analysis.  This lets a replacement Streamlit session fold an outcome that
+    finished while its original browser tab was disconnected.
+    """
+    if run_id is None or not RunRegistry.valid_run_id(run_id):
+        return None
+    with _ACTIVE_RUNS_LOCK:
+        if run_id in _FORGOTTEN_RUNS:
+            return None
+        candidate = _ACTIVE_RUNS.get(run_id)
+    if candidate is not None:
+        status = candidate.registry_status
+        return candidate if status is not None and status.run_id == run_id else None
+
+    # Inspect on-disk run_status.json and artifact directories if missing from _ACTIVE_RUNS
+    registry = find_run(run_id, root=search_root)
+    if registry is None:
+        return None
+    status = registry.load()
+    if status is None or status.run_id != run_id:
+        return None
+
+    dummy_spec = RunSpec(
+        dataset_path="",
+        output_dir=str(registry.run_dir),
+        tmp_dir=str(registry.run_dir),
+        stage_names=(),
+        objective="",
+        target=None,
+        min_iterations=1,
+        max_iterations=1,
+        use_llm=False,
+        use_ml=False,
+        run_config=RunConfig(),
+    )
+    adopted = ActiveRun(dummy_spec)
+    adopted._run_id = run_id
+    adopted._registry = registry
+
+    if status.status == "succeeded":
+        adopted._state = "done"
+    elif status.status in ("failed", "cancelled"):
+        adopted._state = "error" if status.status == "failed" else "stopped"
+        adopted._error = f"Run status: {status.status}"
+    else:
+        if registry.is_abandoned(60.0):
+            adopted._state = "error"
+            adopted._error = "Process terminated or abandoned."
+        else:
+            adopted._state = "running"
+
+    final_report_path: Path | None = None
+    candidates = [
+        registry.run_dir / "reports" / "final_report.json",
+        registry.run_dir / "reports" / "data_raw.json",
+        registry.run_dir / "out" / "reports" / "final_report.json",
+        registry.run_dir / "out" / "reports" / "data_raw.json",
+        registry.run_dir / "output" / "reports" / "final_report.json",
+        registry.run_dir / "output" / "reports" / "data_raw.json",
+        registry.run_dir / "final_report.json",
+    ]
+    for art in status.artifacts:
+        p = Path(art)
+        if not p.is_absolute():
+            for base in (registry.run_dir, registry.run_dir / "out", registry.run_dir / "output"):
+                cand = base / art
+                if cand.name in ("final_report.json", "data_raw.json") and cand.is_file():
+                    candidates.insert(0, cand)
+        elif p.name in ("final_report.json", "data_raw.json") and p.is_file():
+            candidates.insert(0, p)
+
+    for c in candidates:
+        if c.is_file():
+            final_report_path = c
+            break
+
+    if final_report_path is not None:
+        try:
+            final_data = json.loads(final_report_path.read_text(encoding="utf-8"))
+            if isinstance(final_data, dict):
+                dash_path = final_report_path.parent / "dashboard.json"
+                dash_data = None
+                if dash_path.is_file():
+                    try:
+                        dash_data = json.loads(dash_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        dash_data = None
+
+                view = build_run_view(
+                    final_data,
+                    {},
+                    objective=final_data.get("objective", ""),
+                    is_sample=False,
+                )
+                adopted._outcome = RunOutcome(
+                    final=final_data,
+                    tool_results=final_data.get("tool_results", []),
+                    profile=final_data.get("profile"),
+                    read_report=None,
+                    coercions=None,
+                    profile_status=None,
+                    dashboard=dash_data,
+                    run_view=view,
+                    llm_warning=None,
+                    summary_path=str(final_report_path),
+                    metadata=final_data.get("metadata"),
+                    stopped=status.status == "cancelled",
+                )
+        except Exception:
+            pass
+
+    with _ACTIVE_RUNS_LOCK:
+        _ACTIVE_RUNS[run_id] = adopted
+    return adopted
+
+
+def forget_run(run_id: str | None) -> None:
+    """Release one retained run after its owner explicitly starts over."""
+    if run_id is None or not RunRegistry.valid_run_id(run_id):
+        return
+    with _ACTIVE_RUNS_LOCK:
+        _FORGOTTEN_RUNS.add(run_id)
+        _ACTIVE_RUNS.pop(run_id, None)
+
+
+def _public_artifact_paths(output_dir: str) -> tuple[str, ...]:
+    """Return only already allowlisted public artifacts relative to output."""
+    return tuple(path.as_posix() for path in _retained_artifacts(Path(output_dir)))
+
+
+def _execute(run: ActiveRun | _WorkerRun) -> None:
     """The analysis itself: the work the Run click handler used to do inline."""
     # Imported here, like the script did: `src` is loaded after the console stub.
     from src.core.controller import AgentController
@@ -455,6 +997,7 @@ def _execute(run: ActiveRun) -> None:
         output_dir=spec.output_dir,
         run_config=spec.run_config,
     )
+    agent.memory.set_context("ui_compute_backend", spec.compute_backend)
     if spec.use_ml:
         # IMPROVEMENTS.md 7.16: TrainModelTool.requires_context reads these back
         # and fills them into the real train_model call when the planner leaves
@@ -495,6 +1038,7 @@ def _execute(run: ActiveRun) -> None:
     cycle = {"iteration": 1, "planned": False, "ran": 0}
 
     def on_step(tool_name: str, status: str, detail: str) -> None:
+        run.tool_event(tool_name, status)
         iteration = cycle["iteration"]
         label = detail if iteration == 1 else f"iter {iteration} · {detail}"
         if not cycle["planned"]:

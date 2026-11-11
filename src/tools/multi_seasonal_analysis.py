@@ -93,8 +93,20 @@ class MultiSeasonalAnalysisTool(BaseTool):
         time_column: str | None = None,
         value_column: str | None = None,
         max_harmonics: int = 3,
-        **_: Any,
+        measure_column: str | None = None,
     ) -> dict[str, Any]:
+        """Run spectral analysis using ``value_column`` as the canonical input.
+
+        ``measure_column`` is a deprecated, explicit compatibility alias.  It
+        is deliberately not accepted through ``**kwargs`` so misspelled or
+        unsupported planner parameters fail visibly.
+        """
+        if value_column is not None and measure_column is not None and value_column != measure_column:
+            raise ToolExecutionError(
+                "Specify only value_column; measure_column is a deprecated alias and conflicts with it."
+            )
+        if value_column is None:
+            value_column = measure_column
         df = _read_df(file_path)
         if df.empty:
             raise ToolExecutionError("Dataset has no rows.")
@@ -179,7 +191,7 @@ class MultiSeasonalAnalysisTool(BaseTool):
                 continue
 
             # Check if this peak is too close to an already selected frequency (within 10%)
-            if any(abs(c["period"] - period) / period < 0.10 for c in top_cycles):
+            if any(abs(c["period_steps"] - period) / period < 0.10 for c in top_cycles):
                 continue
 
             amp = float(2.0 * np.abs(fft_vals[idx]) / n)
@@ -192,7 +204,7 @@ class MultiSeasonalAnalysisTool(BaseTool):
             reconstructed_signal += amp * np.cos(2.0 * np.pi * freq * t + phase)
 
             top_cycles.append({
-                "period": round(period, 1),
+                "period_steps": round(period, 1),
                 "frequency": round(freq, 5),
                 "amplitude": round(amp, 4),
                 "variance_explained_pct": round(var_pct, 2),
@@ -207,7 +219,7 @@ class MultiSeasonalAnalysisTool(BaseTool):
             lead = top_cycles[0]
             summary = (
                 f"Identified {len(top_cycles)} dominant periodic cycle(s) in '{value_column}' across {n} observations: "
-                f"primary cycle repeats every {lead['period']:.1f} steps (amplitude={lead['amplitude']:.3g}, "
+                f"primary cycle repeats every {lead['period_steps']:.1f} steps (amplitude={lead['amplitude']:.3g}, "
                 f"explaining {lead['variance_explained_pct']:.1f}% of variance; total seasonal strength: {seasonal_strength:.1%})."
             )
         else:
@@ -216,16 +228,28 @@ class MultiSeasonalAnalysisTool(BaseTool):
                 f"no dominant periodic cycles detected (no harmonic explains >= 5% variance; seasonal strength: {seasonal_strength:.1%})."
             )
 
+        primary_period_steps = top_cycles[0]["period_steps"] if top_cycles else None
+        primary_variance_explained_pct = top_cycles[0]["variance_explained_pct"] if top_cycles else 0.0
+        periodic_variance_explained_pct = round(seasonal_strength * 100.0, 2)
+        # ``period`` and ``primary_period`` are retained only for consumers of
+        # pre-EVR-14 output.  New consumers must use the explicit unit-bearing
+        # canonical names above.
+        for cycle in top_cycles:
+            cycle["period"] = cycle["period_steps"]
+
         return {
             "summary": summary,
             "value_column": value_column,
             "time_column": time_column,
             "has_periodicity": has_periodicity,
             "dominant_cycles": top_cycles,
-            "primary_period": top_cycles[0]["period"] if top_cycles else None,
-            "primary_variance_explained_pct": top_cycles[0]["variance_explained_pct"] if top_cycles else 0.0,
+            "primary_period_steps": primary_period_steps,
+            "primary_variance_explained_pct": primary_variance_explained_pct,
+            "periodic_variance_explained_pct": periodic_variance_explained_pct,
             "seasonal_strength": round(seasonal_strength, 4),
             "sample_size": n,
+            # Deprecated compatibility aliases.
+            "primary_period": primary_period_steps,
         }
 
     def findings(
@@ -240,14 +264,18 @@ class MultiSeasonalAnalysisTool(BaseTool):
         val_col = output["value_column"]
         cycles = output["dominant_cycles"]
         lead = cycles[0]
-        period = lead["period"]
+        period = lead.get("period_steps", lead.get("period"))
         var_pct = lead["variance_explained_pct"]
         strength = output.get("seasonal_strength", 0.0)
         n = output.get("sample_size", 0)
 
         secondary_desc = ""
         if len(cycles) > 1:
-            sec_periods = [f"{c['period']:.1f} steps ({c['variance_explained_pct']:.1f}%)" for c in cycles[1:]]
+            sec_periods = [
+                f"{c.get('period_steps', c.get('period')):.1f} steps "
+                f"({c['variance_explained_pct']:.1f}%)"
+                for c in cycles[1:]
+            ]
             secondary_desc = f"; secondary harmonics at {', '.join(sec_periods)}"
 
         headline = (

@@ -6,9 +6,9 @@ Run:
 
 Key design points
 -----------------
-* The analysis runs on a worker thread (ui/run.py). The script never blocks:
-  a polling fragment shows progress and Stop and folds the finished result into
-  session state. The worker never calls st.* and never reads session state.
+* The analysis normally runs in a spawned worker process (ui/run.py). The
+  script never blocks: a lightweight monitor forwards progress to a polling
+  fragment, and the worker never calls st.* or reads session state.
 * Dataset preview is saved to session_state on file upload and rendered from
   there — no dependency on sidebar scope surviving a rerun.
 * OpenRouter support added (any model string, OpenAI-compatible endpoint).
@@ -157,7 +157,15 @@ from ui.components.cards import (
     section as _section,
 )
 from ui.components.provisional import build_provisional_html
-from ui.run import RUN_DIR_PREFIX, ActiveRun, RunSpec, remove_run_dir, sweep_stale_run_dirs
+from ui.run import (
+    RUN_DIR_PREFIX,
+    ActiveRun,
+    RunSpec,
+    adopt_run,
+    forget_run,
+    remove_run_dir,
+    sweep_stale_run_dirs,
+)
 from ui.styles import inject_theme_css as _inject_theme_css
 from ui.tabs import (
     render_answers_tab,
@@ -197,6 +205,7 @@ _DEFAULTS: dict[str, Any] = {
     "run_view":       None,   # RunView of the finished run (src/core/run_view.py)
     "seen_stages":    set(),  # tracks which stages have entered to animate once
     "seen_provs":     set(),  # tracks which provisional findings have entered
+    "run_id":         None,   # opaque durable identifier mirrored in the URL
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -204,6 +213,7 @@ for _k, _v in _DEFAULTS.items():
 
 # ── Inject theme-aware CSS immediately (must run after session_state is ready) ─
 _inject_theme_css()
+
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -231,6 +241,7 @@ def _active_run() -> ActiveRun | None:
 
 def _reset_pipeline() -> None:
     run = _active_run()
+    retained_run_id = st.session_state.get("run_id")
     if run is not None:
         # A run is still on its thread: signal it and let the polling fragment
         # reset once the worker ends, so a second run can never overlap it. The
@@ -238,6 +249,9 @@ def _reset_pipeline() -> None:
         run.discard_and_stop()
     else:
         _remove_run_dir(st.session_state.get("tmp_dir"))
+    forget_run(retained_run_id if isinstance(retained_run_id, str) else None)
+    st.session_state["run_id"] = None
+    st.query_params.pop("run_id", None)
     st.session_state.pop("current_summary_path", None)
     st.session_state.pop("_cinema_pres_html", None)
     for k in ("stage_log", "analysis_done", "analysis_error",
@@ -295,6 +309,35 @@ def _fold_run(run: ActiveRun) -> None:
     if out.summary_path:
         st.session_state["current_summary_path"] = out.summary_path
     st.session_state["analysis_done"] = True
+
+
+# A page refresh creates a new Streamlit session.  The worker is deliberately
+# independent of that session, so reconnect only after validating the opaque
+# ID against its on-disk registry and the local live-worker map.  A stale or
+# foreign URL is harmless: it simply behaves like a fresh session.
+_requested_run_id = st.query_params.get("run_id")
+if (
+    isinstance(_requested_run_id, str)
+    and st.session_state.get("_run") is None
+    and not (
+        st.session_state.get("analysis_done")
+        and st.session_state.get("run_id") == _requested_run_id
+    )
+):
+    _adopted_run = adopt_run(_requested_run_id)
+    if _adopted_run is not None:
+        st.session_state["run_id"] = _requested_run_id
+        st.session_state["tmp_dir"] = _adopted_run.spec.tmp_dir
+        st.session_state["_run_started"] = time.monotonic()
+        st.toast("Reconnected to the same analysis; the worker continued while the browser was away.")
+        snap = _adopted_run.snapshot()
+        if snap.state == "running":
+            st.session_state["_run"] = _adopted_run
+        else:
+            if snap.discard:
+                _reset_pipeline()
+            else:
+                _fold_run(_adopted_run)
 
 
 _run_poll_interval = "1s" if st.session_state.get("_run") is not None else None
@@ -897,6 +940,7 @@ with st.sidebar:
     max_depth = 6
     test_pct = 20
     n_cv = 5
+    compute_backend = "auto"
     if use_ml:
         with st.expander("Advanced model settings"):
             tune_hyperparameters = st.toggle(
@@ -907,6 +951,25 @@ with st.sidebar:
             max_depth = st.slider("Max tree depth (Random Forest / XGBoost)", 2, 15, 6)
             test_pct = st.slider("Test split %", 10, 40, 20, step=5)
             n_cv = st.slider("CV folds (k)", 3, 10, 5)
+            _compute_choice = st.selectbox(
+                "Compute backend",
+                ["Automatic", "CPU only", "CUDA when beneficial"],
+                help=(
+                    "Automatic uses CUDA only for supported workloads that are large enough "
+                    "and fit safely in available GPU memory. Every CUDA failure retries on CPU."
+                ),
+            )
+            compute_backend = {
+                "Automatic": "auto",
+                "CPU only": "cpu",
+                "CUDA when beneficial": "cuda",
+            }[_compute_choice]
+            if compute_backend != "cpu":
+                st.caption(
+                    "CUDA runtime verified for XGBoost."
+                    if _cuda_available()
+                    else "CUDA is unavailable to XGBoost; supported work will fall back to CPU."
+                )
 
     # "Thorough" reproduces the previous default (min=1, max=5); Quick and Deep
     # scale the same min/max iteration knobs the controller already takes.
@@ -1175,6 +1238,7 @@ if (run_clicked or _sample_run) and st.session_state.get("_run") is None:
         api_key=_effective_key or None,
         base_url=(local_base_url.strip() or None) if provider == "local" else None,
         reasoning_effort=reasoning_effort,
+        compute_backend=compute_backend,
     )
     _picked = next((m for m in _dyn_models if m["model"] == final_model), None)
     if _picked and run_llm:
@@ -1237,6 +1301,7 @@ if (run_clicked or _sample_run) and st.session_state.get("_run") is None:
             ml_test_size=test_pct / 100.0 if use_ml else None,
             ml_n_cv_folds=n_cv if use_ml else None,
             ml_tune=tune_hyperparameters if use_ml else None,
+            compute_backend=compute_backend,
             is_sample=_sample_run,
             keep_summary=not _HOSTED,
         )
@@ -1244,6 +1309,9 @@ if (run_clicked or _sample_run) and st.session_state.get("_run") is None:
     st.session_state["_run"] = _new_run
     st.session_state["_run_started"] = time.monotonic()
     _new_run.start()
+    if _new_run.run_id is not None:
+        st.session_state["run_id"] = _new_run.run_id
+        st.query_params["run_id"] = _new_run.run_id
     # Re-render once so the sidebar (Run disabled, New analysis offered) already
     # reflects the active run; the fragment below takes over from here.
     st.rerun()

@@ -88,7 +88,17 @@ def test_placeholders_nulled_with_notes(air):
 
 def test_no_finding_cites_raw_placeholder(air):
     result, _ = air
-    text = json.dumps(result["findings"], default=str) + json.dumps(result.get("insights"), default=str)
+    # Scenario effects can legitimately be near -200.  Raw source readings,
+    # by contrast, must never be preserved as claim evidence or provenance.
+    evidence_and_source = [
+        {
+            "evidence": finding.get("evidence"),
+            "source_tool": finding.get("source_tool"),
+            "source_fields": finding.get("source_fields"),
+        }
+        for finding in result["findings"]
+    ]
+    text = json.dumps(evidence_and_source, default=str)
     hits = RAW_PLACEHOLDER.findall(text)
     assert not hits, hits
 

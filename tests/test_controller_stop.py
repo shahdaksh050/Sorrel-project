@@ -51,11 +51,11 @@ def test_stop_before_any_work_returns_a_marked_partial_result(tmp_path: Path, cs
     result = _run(agent, csv_path)
 
     assert result["stopped"] is True
-    assert result["status"] == "complete"
+    assert result["status"] == "cancelled"
     # Ingestion (stage 1) and the report step still run; no analysis tool does.
     ran = {r.tool_name for r in agent.memory.tool_results}
     assert ran <= {"ingest_dataset", "planner", "generate_report"}
-    assert result["status"] == "complete"
+    assert result["status"] == "cancelled"
     notes = agent.memory.get_context("degradations") or []
     assert any("stopped" in n.lower() for n in notes)
 
@@ -119,5 +119,5 @@ def test_a_raising_finding_callback_does_not_break_the_run(tmp_path: Path, csv_p
     agent = _agent(tmp_path)
     agent.on_finding_callback = boom
     result = _run(agent, csv_path)
-    assert result["status"] == "complete"
+    assert result["status"] in {"succeeded", "succeeded_with_warnings"}
     assert agent.memory.findings

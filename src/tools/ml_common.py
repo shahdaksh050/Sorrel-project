@@ -26,6 +26,77 @@ logger = logging.getLogger(__name__)
 OVERFIT_THRESHOLD = 0.10
 
 
+def _build_cv_policy(
+    X_train: pd.DataFrame,
+    y_train: pd.Series[Any],
+    groups_train: pd.Series[Any] | None,
+    split_strategy: str,
+    task_type: str,
+    requested_folds: int,
+) -> tuple[Any, int, str, str | None]:
+    """Create a leakage-safe CV splitter and record any fold constraint.
+
+    IID runs deliberately promote requests below five folds to five when the
+    training data permits it.  Small classes, short histories, and a limited
+    number of entities are genuine constraints, rather than reasons to
+    silently claim five-fold validation.
+    """
+    from sklearn.model_selection import GroupKFold, KFold, StratifiedKFold, TimeSeriesSplit
+
+    requested = max(2, int(requested_folds))
+    desired = max(5, requested)
+    if split_strategy == "time_series":
+        available = len(X_train) - 1
+        if available < 2:
+            raise ValueError("TimeSeriesSplit requires at least three training rows")
+        folds = min(desired, available)
+        rationale = (
+            f"TimeSeriesSplit constrained to {folds} folds because only {len(X_train)} training rows "
+            "are available."
+            if folds < desired else None
+        )
+        return TimeSeriesSplit(n_splits=folds), folds, "time_series", rationale
+    if split_strategy == "panel":
+        if groups_train is None:
+            raise ValueError("panel CV requires training groups")
+        available = int(groups_train.nunique())
+        if available < 2:
+            raise ValueError("panel CV requires at least two training groups")
+        folds = min(desired, available)
+        rationale = (
+            f"GroupKFold constrained to {folds} folds because only {available} training groups are available."
+            if folds < desired else None
+        )
+        return GroupKFold(n_splits=folds), folds, "group_k_fold", rationale
+
+    available = len(X_train)
+    if task_type == "classification":
+        class_counts = y_train.value_counts(dropna=False)
+        available = min(available, int(class_counts.min())) if not class_counts.empty else 0
+        if available < 2:
+            raise ValueError("stratified CV requires at least two training examples in every class")
+        folds = min(desired, available)
+        rationale = (
+            f"StratifiedKFold constrained to {folds} folds because the smallest training class has "
+            f"{available} examples."
+            if folds < desired else None
+        )
+        return (
+            StratifiedKFold(n_splits=folds, shuffle=True, random_state=42),
+            folds,
+            "stratified_k_fold",
+            rationale,
+        )
+    if available < 2:
+        raise ValueError("K-fold CV requires at least two training rows")
+    folds = min(desired, available)
+    rationale = (
+        f"KFold constrained to {folds} folds because only {available} training rows are available."
+        if folds < desired else None
+    )
+    return KFold(n_splits=folds, shuffle=True, random_state=42), folds, "k_fold", rationale
+
+
 def _prepare_features(
     df: pd.DataFrame, target_column: str
 ) -> tuple[pd.DataFrame, pd.Series[Any], list[str]]:
@@ -163,11 +234,7 @@ def _split_train_test(
     unused by EvaluateModelTool but costs nothing extra to compute here.
     """
     from sklearn.model_selection import (
-        GroupKFold,
         GroupShuffleSplit,
-        KFold,
-        StratifiedKFold,
-        TimeSeriesSplit,
         train_test_split,
     )
 
@@ -185,7 +252,6 @@ def _split_train_test(
         split_idx = max(1, min(len(X) - 1, int(len(X) * (1 - test_size))))
         X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
         y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-        cv = TimeSeriesSplit(n_splits=min(n_cv_folds, max(2, split_idx - 1)))
     elif split_strategy == "panel" and groups is not None:
         # Same entity never appears in both train and test.
         gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=42)
@@ -193,18 +259,14 @@ def _split_train_test(
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
         groups_train = groups.iloc[train_idx]
-        n_groups = int(groups_train.nunique())
-        cv = GroupKFold(n_splits=max(2, min(n_cv_folds, n_groups)))
     else:
         stratify = y if task_type == "classification" else None
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=42, stratify=stratify
         )
-        cv = (
-            StratifiedKFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
-            if task_type == "classification"
-            else KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
-        )
+    cv, _, _, _ = _build_cv_policy(
+        X_train, y_train, groups_train, split_strategy, task_type, n_cv_folds
+    )
     return X_train, X_test, y_train, y_test, cv, groups_train
 
 

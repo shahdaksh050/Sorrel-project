@@ -6,7 +6,6 @@ their `self.*` state. Shared constants live in controller_common.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -35,6 +34,7 @@ from src.core.dashboard import (
 )
 from src.core.dependence import check_simpsons_paradox, intraclass_correlation
 from src.core.findings import Finding
+from src.core.json_normalization import strict_json_dumps
 from src.core.profiler import DatasetProfile, profile_dataframe
 from src.core.prompt_manager import (
     CHART_DESIGN_PROMPT,
@@ -46,6 +46,14 @@ logger = logging.getLogger(__name__)
 
 class ReportMixin(ControllerState):
     """Stage 7 — final synthesis, dashboard, HTML/JSON report and claim verification."""
+
+    def _primary_findings(self) -> list[Finding]:
+        """Return the single audited projection used by primary surfaces."""
+        primary: list[Finding] = []
+        for finding in self.memory.ranked_findings():
+            if finding.refresh_eligibility():
+                primary.append(finding)
+        return primary
 
     def _final_synthesis(self, stage: str) -> dict[str, Any]:
         """One LLM call for the final interpretation of everything found so
@@ -87,7 +95,7 @@ class ReportMixin(ControllerState):
                 target_column=meta.target_column,
                 task_type=meta.task_type,
                 tool_results=[r.to_dict() for r in self.memory.tool_results],
-                findings=[f.to_dict() for f in self.memory.ranked_findings()],
+                findings=[f.to_dict() for f in self._primary_findings()],
             )
             charts = self._design_charts(df, profile, charts)
             out_path = Path(self._output_dir) / "reports" / "dashboard.json"
@@ -113,24 +121,26 @@ class ReportMixin(ControllerState):
         ):
             return charts
         try:
-            findings = [f.to_dict() for f in self.memory.ranked_findings()]
+            findings = [f.to_dict() for f in self._primary_findings()]
             if not findings or self._llm_budget_exhausted():
                 return charts
             if self.llm_client.get_context_window() < _MIN_CHART_DESIGN_CONTEXT:
                 console.print("  [dim]Chart design skipped: the model's context window is too small for it.[/]")
                 return charts
+            if self._rlm_engine is None:
+                return charts
             self.llm_client.stage = "chart_design"
-            reply = self.llm_client.call(
-                CHART_DESIGN_PROMPT,
+            reply = self._rlm_engine.invoke(
                 self._prompt_manager.get_chart_design_prompt(
                     findings, [c.to_dict() for c in charts], profile
                 ),
+                depth=0,
+                stage="chart_design",
                 reasoning_effort="low",
-                max_tokens=3000,  # room for the recipes of as many charts as it judges worthwhile
+                max_tokens=3000,
+                system_prompt=CHART_DESIGN_PROMPT,
             )
-            if self._rlm_engine is not None:
-                self._rlm_engine.record_usage(reply.get("_rlm_usage"))
-                self.memory.set_context("llm_usage", self._rlm_engine.usage_summary())
+            self.memory.set_context("llm_usage", self._rlm_engine.usage_summary())
             design = design_from_reply(df, reply, findings)
             designed = [
                 c for i, raw in enumerate(design.charts)
@@ -138,8 +148,6 @@ class ReportMixin(ControllerState):
             ]
             return merge_designed(charts, designed, set(design.drop_ids))
         except Exception as exc:
-            if self._rlm_engine is not None:  # a failed call still spent tokens
-                self._rlm_engine.record_usage(getattr(exc, "rlm_usage", None))
             console.print(f"  [dim]Chart design skipped (non-fatal): {exc}[/]")
             return charts
 
@@ -149,26 +157,38 @@ class ReportMixin(ControllerState):
         meta = self.memory.dataset_metadata
         if meta is None:
             return
+        raw_final = self.memory.get_context("public_final_result")
+        final_result = raw_final if isinstance(raw_final, dict) else {}
         try:
             times: dict[str, float] = {}
             for r in self.memory.tool_results:
                 times[r.tool_name] = times.get(r.tool_name, 0.0) + float(r.execution_time_ms or 0.0) / 1000.0
             summary = {
+                "schema_version": final_result.get("schema_version", "2.0"),
+                "status": final_result.get("status", "partial"),
                 "dataset": {"name": Path(meta.file_path).stem, "rows": meta.row_count, "cols": meta.column_count},
                 "objective": self.objective,
                 "llm": {"enabled": bool(self.use_llm), "model": self.llm_client.model if self.use_llm else None},
                 "created": datetime.now(UTC).isoformat(timespec="seconds"),
                 "findings": [
                     {"finding_id": f.finding_id, "kind": f.kind, "layer": f.layer,
-                     "importance": f.importance, "headline": f.headline}
-                    for f in self.memory.ranked_findings()
+                     "importance": f.importance, "raw_importance_rank": f.raw_importance_rank,
+                     "display_rank": f.display_rank, "ranking_policy": f.ranking_policy,
+                     "headline": f.headline}
+                    for f in self._primary_findings()
                 ],
                 "charts": [{"chart_id": c.get("chart_id"), "title": c.get("title")} for c in self._last_charts],
                 "tool_seconds": {k: round(v, 3) for k, v in times.items()},
+                "execution_issues": list(final_result.get("execution_issues") or []),
+                "coverage": final_result.get("coverage"),
+                "verification_summary": {
+                    "rejected_claims": len(final_result.get("rejected_claims") or []),
+                    "quarantined_findings": len(final_result.get("quarantined_findings") or []),
+                },
             }
             out = Path(self._output_dir) / "reports" / "summary.json"
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+            out.write_text(strict_json_dumps(summary, indent=2), encoding="utf-8")
         except Exception as exc:
             console.print(f"  [yellow]Run summary not written (non-fatal): {exc}[/]")
 
@@ -226,20 +246,31 @@ class ReportMixin(ControllerState):
 
         train = self.memory.get_last_result_for("train_model")
         if train and train.status == "success":
-            models_trained = train.output.get("models_trained", {})
-            best = train.output.get("best_model")
-            if best and best in models_trained:
-                best_model = best
-                metrics = models_trained[best]
-                key_metrics["cv_mean"] = metrics.get("cv_mean")
-                key_metrics["cv_std"] = metrics.get("cv_std")
-                key_metrics["train_test_gap"] = metrics.get("train_test_gap")
             warnings = train.output.get("overfit_warnings", [])
             if warnings:
                 recommendations.append(
                     "Reduce model complexity (lower max_depth) or add regularisation "
                     "to close the train-test gap."
                 )
+            if not train.output.get("model_training_gated"):
+                models_trained = train.output.get("models_trained", {})
+                best = train.output.get("best_model")
+                if best and best in models_trained:
+                    m_path = models_trained[best].get("model_path")
+                    if m_path and Path(m_path).exists():
+                        best_model = best
+                        metrics = models_trained[best]
+                        key_metrics["cv_mean"] = metrics.get("cv_mean")
+                        key_metrics["cv_std"] = metrics.get("cv_std")
+                        key_metrics["train_test_gap"] = metrics.get("train_test_gap")
+                    else:
+                        best_model = None
+                else:
+                    best_model = None
+            else:
+                best_model = None
+        else:
+            best_model = None
 
         ranked = self.memory.ranked_findings()
         insights = [f.headline for f in ranked[:12]]
@@ -256,14 +287,30 @@ class ReportMixin(ControllerState):
                 continue
             level_label = f.evidence.get("level_label") if isinstance(f.evidence, dict) else None
             level_name = f"'{level_label}' ({f.dimension}='{f.level}')" if (level_label and str(level_label) != str(f.level)) else f"{f.dimension}='{f.level}'"
+            has_obs_caveats = (
+                f.evidence_tier != "causal_action"
+                or any(
+                    any(p in str(c).lower() for p in ("not proof of cause", "observational", "unadjusted", "association"))
+                    for c in f.caveats
+                )
+            )
             if f.kind == "segment_lift" and f.measure and f.dimension and f.level:
                 pct = f"{abs(f.effect) * 100:.1f}%" if f.effect is not None else ""
                 direction = "higher" if (f.effect or 0) > 0 else "lower"
-                recommendations.append(
-                    f"Prioritize {level_name} segment: observed {pct} {direction} {f.measure} than baseline."
-                )
+                if has_obs_caveats:
+                    recommendations.append(
+                        f"Pilot test {level_name} segment: validate whether observed {pct} {direction} {f.measure} holds under intervention."
+                    )
+                else:
+                    recommendations.append(
+                        f"Prioritize {level_name} segment: observed {pct} {direction} {f.measure} than baseline."
+                    )
             elif f.kind == "driver" and f.measure and f.dimension:
-                if f.level:
+                if has_obs_caveats:
+                    recommendations.append(
+                        f"Evaluate driver '{f.dimension}' in a controlled pilot before scaling (observed association with '{f.measure}')."
+                    )
+                elif f.level:
                     recommendations.append(
                         f"Target {f.dimension} ('{f.level}') to optimize '{f.measure}'."
                     )
@@ -272,13 +319,23 @@ class ReportMixin(ControllerState):
                         f"Optimize '{f.dimension}' as a verified multivariate driver of '{f.measure}'."
                     )
             elif f.kind == "decision_scenario" and f.dimension and f.measure:
-                recommendations.append(
-                    f"Evaluate intervention on '{f.dimension}': sensitivity simulation projects meaningful operational movement in '{f.measure}'."
-                )
+                if has_obs_caveats:
+                    recommendations.append(
+                        f"Evaluate intervention on '{f.dimension}': sensitivity simulation projects meaningful operational movement in '{f.measure}'."
+                    )
+                else:
+                    recommendations.append(
+                        f"Target intervention on '{f.dimension}': projected impact on '{f.measure}'."
+                    )
             elif f.kind == "interaction_synergy" and f.dimension and f.measure:
-                recommendations.append(
-                    f"Capitalize on multi-factor synergy: '{f.dimension}' joint levels amplify expected movement in '{f.measure}'."
-                )
+                if has_obs_caveats:
+                    recommendations.append(
+                        f"Pilot test multi-factor synergy: evaluate joint '{f.dimension}' levels before operational rollout."
+                    )
+                else:
+                    recommendations.append(
+                        f"Capitalize on multi-factor synergy: '{f.dimension}' joint levels amplify expected movement in '{f.measure}'."
+                    )
             elif f.kind == "correlation" and f.measure and f.dimension:
                 recommendations.append(
                     f"Account for the strong association between '{f.measure}' and '{f.dimension}' in operational planning."
@@ -337,6 +394,115 @@ class ReportMixin(ControllerState):
             "key_metrics": key_metrics,
             "findings": [f.to_dict() for f in ranked],
         }
+
+    def _rebuild_primary_synthesis(self, final_result: dict[str, Any]) -> None:
+        """Rebuild every primary narrative from the post-audit projection.
+
+        LLM or deterministic prose created before robustness and causal checks
+        is provisional. Keeping it after a failed audit would make the report's
+        recommendation section disagree with its own evidence cards.
+        """
+        ranked = self.memory.ranked_findings()
+        primary = self._primary_findings()
+        quarantined = [f for f in ranked if not f.primary_eligible]
+
+        final_result["findings"] = [f.to_dict() for f in ranked]
+        final_result["primary_findings"] = [f.to_dict() for f in primary]
+        final_result["quarantined_findings"] = [
+            {
+                "finding_id": f.finding_id,
+                "headline": f.headline,
+                "reasons": list(f.eligibility_reasons),
+            }
+            for f in quarantined
+        ]
+        final_result["insights"] = [f.headline for f in primary[:12]]
+        if not final_result["insights"]:
+            final_result["insights"] = [
+                "No finding passed every required post-hoc evidence gate; review the audit and limitations."
+            ]
+
+        records: list[dict[str, Any]] = []
+        for finding in primary[:8]:
+            if len(records) >= 4:
+                break
+            lever = finding.dimension or finding.measure
+            if not lever:
+                continue
+            disposition = finding.recommendation_disposition()
+            if disposition == "act":
+                action = (
+                    f"Act on '{lever}' under the validated causal or experimental design, "
+                    "with the reported assumptions and guardrails."
+                )
+            elif disposition == "pilot":
+                action = (
+                    f"Pilot a controlled change to '{lever}' and predefine the outcome and stop criteria."
+                )
+            elif disposition == "investigate":
+                action = f"Investigate '{lever}' as a hypothesis before making an operational change."
+            else:
+                action = f"Monitor '{lever}' as an observational signal, not as a causal intervention."
+            records.append(
+                {
+                    "recommendation_id": f"rec_{finding.finding_id}",
+                    "finding_ids": [finding.finding_id],
+                    "disposition": disposition,
+                    "action": action,
+                    "rationale": finding.headline,
+                    "claims": [],
+                    "limitations": list(finding.caveats),
+                }
+            )
+        if not records:
+            records.append(
+                {
+                    "recommendation_id": "rec_no_eligible_action",
+                    "finding_ids": [],
+                    "disposition": "investigate",
+                    "action": "Do not take an intervention from this run; resolve the recorded evidence gaps first.",
+                    "rationale": "No finding met the primary evidence gate.",
+                    "claims": [],
+                    "limitations": ["See quarantined_findings and execution_issues."],
+                }
+            )
+        final_result["recommendation_records"] = records
+        final_result["recommendations"] = [str(record["action"]) for record in records]
+
+    def _resolve_public_status(self, final_result: dict[str, Any]) -> None:
+        """Set the external run status without changing planner reply semantics."""
+        final_result["schema_version"] = "2.0"
+        issues = final_result.get("execution_issues")
+        issue_list = issues if isinstance(issues, list) else []
+        if final_result.get("stopped"):
+            status = "cancelled"
+        elif any(
+            isinstance(issue, dict)
+            and issue.get("severity") == "error"
+            and issue.get("objective_critical") is True
+            for issue in issue_list
+        ) or not final_result.get("primary_findings"):
+            status = "partial"
+        else:
+            warnings = bool(
+                issue_list
+                or
+                final_result.get("rejected_claims")
+                or final_result.get("quarantined_findings")
+                or self.memory.get_context("degradations")
+            )
+            coverage = final_result.get("coverage")
+            if isinstance(coverage, dict):
+                total = coverage.get("total")
+                answered = coverage.get("answered")
+                warnings = warnings or (
+                    isinstance(total, int)
+                    and total > 0
+                    and isinstance(answered, int)
+                    and answered < total
+                )
+            status = "succeeded_with_warnings" if warnings else "succeeded"
+        final_result["status"] = status
 
     def _verified_number_pool(self) -> set[str]:
         """Every numeric literal that actually appears in accumulated tool
@@ -485,9 +651,7 @@ class ReportMixin(ControllerState):
         meta = self.memory.dataset_metadata
         dataset_name = Path(meta.file_path).stem if meta else "dataset"
 
-        tool_results_json = json.dumps(
-            [r.to_dict() for r in self.memory.tool_results], default=str
-        )
+        tool_results_json = strict_json_dumps([r.to_dict() for r in self.memory.tool_results])
 
         report_tool = self.tool_registry.get("generate_report")
         result = report_tool.run(

@@ -5,15 +5,16 @@ Split out of dashboard.py; `src.core.dashboard` re-exports every name here.
 """
 from __future__ import annotations
 
-import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 
 from src.core.chart_spec import alias_fields
+from src.core.json_normalization import strict_json_dumps
 from src.core.profiler import DatasetProfile
 
 #: Hard cap on inline rows per chart (keeps specs lightweight).
@@ -53,6 +54,8 @@ class ChartSpec:
     description: str
     spec: dict[str, Any]
     finding_id: str | None = None
+    chart_role: Literal["evidence", "context"] = "context"
+    context_id: str | None = None
     priority: float = 0.0
     layer: str = "analyst"
     caption: str | None = None
@@ -62,14 +65,28 @@ class ChartSpec:
         # Vega treats . [ ] \ ' " in a field name as path syntax; alias them
         # (idempotent) so every consumer gets a spec that actually renders.
         self.spec = alias_fields(self.spec)
+        self.normalise_linkage()
+
+    def normalise_linkage(self) -> None:
+        """Synchronise chart linkage after construction or finding tagging."""
+        if self.finding_id:
+            self.chart_role = "evidence"
+            self.context_id = None
+            return
+        self.chart_role = "context"
+        if not self.context_id:
+            self.context_id = f"context:{self.chart_id}"
 
     def to_dict(self) -> dict[str, Any]:
+        self.normalise_linkage()
         return {
             "chart_id": self.chart_id,
             "title": self.title,
             "description": self.description,
             "spec": self.spec,
             "finding_id": self.finding_id,
+            "chart_role": self.chart_role,
+            "context_id": self.context_id,
             "priority": self.priority,
             "layer": self.layer,
             "caption": self.caption,
@@ -77,9 +94,24 @@ class ChartSpec:
         }
 
 
+def validate_chart_linkage(chart: ChartSpec | Mapping[str, Any]) -> str | None:
+    """Return a linkage-contract violation, or ``None`` when valid.
+
+    Accepting serialised mappings lets artifact tests enforce exactly the
+    same contract as live dashboard construction.
+    """
+    payload: Mapping[str, Any] = chart.to_dict() if isinstance(chart, ChartSpec) else chart
+    role = payload.get("chart_role")
+    if role == "evidence":
+        return None if payload.get("finding_id") else "evidence chart requires finding_id"
+    if role == "context":
+        return None if payload.get("context_id") else "context chart requires context_id"
+    return "chart_role must be 'evidence' or 'context'"
+
+
 def dashboard_to_json(charts: list[ChartSpec]) -> str:
     """Serialise a dashboard for saving to output/dashboard.json."""
-    return json.dumps([c.to_dict() for c in charts], indent=2, default=str)
+    return strict_json_dumps([c.to_dict() for c in charts], indent=2)
 
 
 def _to_primitive(value: Any) -> Any:

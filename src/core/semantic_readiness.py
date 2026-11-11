@@ -48,6 +48,15 @@ _FAMILIES: dict[str, tuple[tuple[str, ...], re.Pattern[str]]] = {
     "capability": (("feature", "capability", "support", "card", "radio", "ports"), _CAPABILITY_RE),
 }
 
+# Cheap first-stage rejection before the individual family expressions run.
+# Wide business datasets are commonly almost entirely numeric; converting
+# every value to text and trying all ten regexes was responsible for minutes
+# of CPU time in the 2026-10-17 Streamlit incident.
+_ANY_SEMANTIC_RE = re.compile(
+    "|".join(f"(?:{pattern.pattern})" for _hints, pattern in _FAMILIES.values()),
+    re.IGNORECASE,
+)
+
 _NUMERIC_FAMILIES = frozenset({
     "currency",
     "memory_storage",
@@ -83,14 +92,41 @@ def _observed_values(series: pd.Series) -> pd.Series:
     return values
 
 
-def _semantic_counts(values: pd.Series) -> Counter[str]:
-    """Count recognised semantic unit/concept signatures in inspected cells."""
+def _semantic_summary(
+    values: pd.Series,
+    expected: list[str],
+) -> tuple[Counter[str], int, int]:
+    """Scan each distinct value once and return weighted semantic counts.
+
+    The previous implementation made three passes over as many as 10,000
+    values per column and ran every family regex in two of those passes.
+    Factoring repeated categorical values and using a cheap combined precheck
+    preserves the exact counts while bounding work on wide frames.
+    """
     counts: Counter[str] = Counter()
-    for value in values:
+    classified_count = 0
+    expected_match_count = 0
+    frequencies = values.value_counts(dropna=False)
+    for raw_value, frequency in frequencies.items():
+        value = str(raw_value)
+        weight = int(frequency)
+        if not _ANY_SEMANTIC_RE.search(value):
+            continue
+        matched: set[str] = set()
         for family, (_hints, pattern) in _FAMILIES.items():
             if pattern.search(value):
-                counts[family] += 1
-    return counts
+                counts[family] += weight
+                matched.add(family)
+        if matched:
+            classified_count += weight
+            if any(family in matched for family in expected):
+                expected_match_count += weight
+    return counts, classified_count, expected_match_count
+
+
+def _semantic_counts(values: pd.Series) -> Counter[str]:
+    """Backward-compatible count-only projection of :func:`_semantic_summary`."""
+    return _semantic_summary(values, [])[0]
 
 
 def assess_semantic_readiness(df: pd.DataFrame) -> dict[str, Any]:
@@ -107,10 +143,29 @@ def assess_semantic_readiness(df: pd.DataFrame) -> dict[str, Any]:
     issues_total = 0
 
     for column in df.columns:
-        values = _observed_values(df[column])
-        non_null_count = len(values)
-        detected_counts = _semantic_counts(values)
         expected = _expected_families(column)
+        series = df[column]
+        numeric = pd.api.types.is_numeric_dtype(series)
+        # Plain numeric storage cannot contain any of the unit/platform text
+        # signatures. Name-led numeric semantic columns are already valid by
+        # construction, so avoid millions of pointless str()/regex calls.
+        if numeric:
+            non_null_count = min(int(series.notna().sum()), _MAX_ROWS_TO_SCAN)
+            numeric_semantic = bool(expected) and any(
+                family in _NUMERIC_FAMILIES for family in expected
+            )
+            if not expected:
+                continue
+            detected_counts: Counter[str] = Counter()
+            classified_value_count = 0
+            expected_match_count = 0
+        else:
+            values = _observed_values(series)
+            non_null_count = len(values)
+            detected_counts, classified_value_count, expected_match_count = _semantic_summary(
+                values, expected
+            )
+            numeric_semantic = False
         if not expected and not detected_counts:
             continue
 
@@ -118,21 +173,6 @@ def assess_semantic_readiness(df: pd.DataFrame) -> dict[str, Any]:
             family: round(100.0 * count / max(non_null_count, 1), 2)
             for family, count in sorted(detected_counts.items())
         }
-        classified_value_count = sum(
-            1
-            for value in values
-            if any(pattern.search(value) for _hints, pattern in _FAMILIES.values())
-        )
-        expected_match_count = sum(
-            1
-            for value in values
-            if any(_FAMILIES[family][1].search(value) for family in expected)
-        )
-        numeric_semantic = (
-            bool(expected)
-            and pd.api.types.is_numeric_dtype(df[column])
-            and any(family in _NUMERIC_FAMILIES for family in expected)
-        )
         conformance_pct = (
             100.0
             if numeric_semantic

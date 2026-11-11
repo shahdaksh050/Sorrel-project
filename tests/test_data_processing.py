@@ -183,3 +183,32 @@ class TestCorrelationAnalysisTool:
         result = CorrelationAnalysisTool().run(file_path=clean_csv)
         top = result.output["top_correlations"][0]
         assert abs(top["correlation"]) > 0.99
+
+    def test_exploratory_fdr_and_subsampling_telemetry(self, sample_csv: str) -> None:
+        tool = CorrelationAnalysisTool()
+        result = tool.run(file_path=sample_csv)
+        assert result.status == "success"
+        assert "exploratory_screening_test_count" in result.output
+        assert result.output["test_family"] == "exploratory_screening"
+
+        # Check local FDR fields in top pairs
+        top_pairs = result.output["top_correlations"]
+        assert len(top_pairs) > 0
+        assert "p_adjusted" in top_pairs[0]
+        assert "significant_after_correction" in top_pairs[0]
+
+        # Check findings metadata
+        findings = tool.findings(result.output, None, None)
+        assert len(findings) > 0
+        corr_finding = next(f for f in findings if f.evidence.get("col_a"))
+        assert corr_finding.evidence.get("test_family") == "exploratory_screening"
+        assert corr_finding.p_adjusted is not None
+        assert corr_finding.evidence.get("p_adjusted_within_tool") == corr_finding.p_adjusted
+
+    def test_subsampling_note_when_row_budget_exceeded(self, monkeypatch: pytest.MonkeyPatch, clean_csv: str) -> None:
+        # Force a row budget smaller than clean_csv (5 rows)
+        monkeypatch.setenv("MAX_CORR_ROWS", "3")
+        result = CorrelationAnalysisTool().run(file_path=clean_csv)
+        assert result.status == "success"
+        assert result.output.get("subsampling_note") is not None
+        assert "Row subsampling applied" in result.output["subsampling_note"]

@@ -35,6 +35,28 @@ def test_ipw_reports_guarded_estimate_and_balance(tmp_path: Path) -> None:
     assert len(output["balance"]) == 2
     assert output["causal_claim_permitted"] is False
     assert tool.findings(output, None, None)[0].kind == "test"
+    assert tool.findings(output, None, None)[0].evidence_tier == "hypothesis"
+
+
+def test_verified_randomized_design_can_reach_causal_action(tmp_path: Path) -> None:
+    tool = CausalAnalysisTool()
+    frame = _overlap_frame()
+    rng = np.random.default_rng(71)
+    frame["treatment"] = rng.binomial(1, 0.5, len(frame))
+    frame["outcome"] = (
+        4.0 * frame["treatment"] + 0.1 * frame["age"] + frame["risk"] + rng.normal(0, 1, len(frame))
+    )
+    output = tool.run(
+        file_path=_write(tmp_path, frame),
+        outcome="outcome",
+        treatment="treatment",
+        covariates=["age", "risk"],
+        study_design="randomized_experiment",
+        assignment_verified=True,
+    ).output
+    assert output["causal_claim_permitted"] is True
+    finding = tool.findings(output, None, None)[0]
+    assert finding.evidence_tier == "causal_action"
 
 
 def test_bad_overlap_is_non_identifiable(tmp_path: Path) -> None:
@@ -176,4 +198,3 @@ def test_did_refuses_missing_cell(tmp_path: Path) -> None:
 
     assert output["status"] == "not_identifiable"
     assert "Missing observations" in output["reason"]
-

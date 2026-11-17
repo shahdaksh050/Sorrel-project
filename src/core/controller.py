@@ -1135,7 +1135,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         """
         if llm_response.get("status") != "complete":
             return llm_response, None
-        if self._analytical_tools_run_count() == 0:
+        if self.memory.dataset_metadata is not None and self._analytical_tools_run_count() == 0:
             console.print(
                 "[yellow]ℹ LLM signalled complete before any analysis ran — "
                 "running the profile-driven plan first.[/]"
@@ -1167,7 +1167,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             reprompt_res = self._normalise_reply(reprompt_res)
             if reprompt_res.get("status") != "complete":
                 return reprompt_res, None
-            if self._analytical_tools_run_count() == 0:
+            if self.memory.dataset_metadata is not None and self._analytical_tools_run_count() == 0:
                 console.print(
                     "[yellow]ℹ LLM confirmed complete before any analysis ran — "
                     "running the profile-driven plan first.[/]"
@@ -1177,7 +1177,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             return reprompt_res, reprompt_res
         except Exception as exc:
             console.print(f"[yellow]⚠ Exploration reprompt failed ({exc}) — accepting completion.[/]")
-            if self._analytical_tools_run_count() == 0:
+            if self.memory.dataset_metadata is not None and self._analytical_tools_run_count() == 0:
                 return self._build_fallback_plan(), None
             return llm_response, llm_response
 

@@ -296,7 +296,7 @@ def main() -> None:
         from src.rlm.engine import RLMEngine
 
         mock_llm = MockLLMClient(cleaned_path=cleaned_path)
-        from src.core.controller import ToolRegistry
+        from src.core.tool_registry import ToolRegistry
         registry = ToolRegistry()
         pm = PromptManager(mem, registry.get_all_descriptions())
 

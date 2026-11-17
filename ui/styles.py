@@ -190,7 +190,32 @@ header[data-testid="stHeader"] {{ background: transparent; }}
 }}
 [data-testid="stStatusWidget"] svg {{ color: var(--accent-text); }}
 .stApp {{ background-color: var(--stock); background-image: none; }}
-.block-container {{ max-width: 1180px; padding-top: 2.2rem; }}
+.block-container {{
+    max-width: 100% !important;
+    width: 100% !important;
+    padding-top: 2.2rem;
+    padding-left: clamp(1.5rem, 3vw, 4rem) !important;
+    padding-right: clamp(1.5rem, 3vw, 4rem) !important;
+    transition: max-width var(--dur-base) var(--ease-out), padding var(--dur-base) var(--ease-out);
+}}
+
+/* ── Full screen when sidebar is collapsed ── */
+.stApp:has(section[data-testid="stSidebar"][aria-expanded="false"]) .block-container,
+.stApp:has([data-testid="stSidebar"][aria-expanded="false"]) .block-container,
+.stApp:has(div[data-testid="collapsedControl"]:not([style*="display: none"])) .block-container,
+.stApp:has([data-testid="collapsedControl"]:not([style*="display: none"])) .block-container,
+.stApp:has([data-testid="stExpandSidebarButton"]) .block-container,
+.stApp:has(button[aria-label*="Open sidebar" i]) .block-container,
+.stApp:has(button[aria-label*="Expand sidebar" i]) .block-container,
+section[data-testid="stSidebar"][aria-expanded="false"] ~ .main .block-container,
+section[data-testid="stSidebar"][aria-expanded="false"] ~ [data-testid="stMain"] .block-container,
+section[data-testid="stSidebar"][aria-expanded="false"] ~ section .block-container,
+[data-testid="stSidebar"][aria-expanded="false"] ~ * .block-container {{
+    max-width: 100% !important;
+    width: 100% !important;
+    padding-left: clamp(1.5rem, 3vw, 4rem) !important;
+    padding-right: clamp(1.5rem, 3vw, 4rem) !important;
+}}
 html, body, .stApp, [class*="css"] {{ font-family: var(--sans); color: var(--ink); }}
 /* Figures line up in columns: tabular numerals on every metric and table. */
 .gauge .v, .datum .v, .kpi-ring-num, .kpi-tile .v, .trust-cell .v,

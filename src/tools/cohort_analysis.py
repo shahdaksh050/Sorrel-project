@@ -91,6 +91,7 @@ class CohortAnalysisTool(BaseTool):
     """RFM segmentation and repeat-purchase analysis for transaction data."""
 
     name = "cohort_analysis"
+    is_concurrent_safe = True
     description = (
         "Analyse customer transaction data: RFM (recency/frequency/monetary) "
         "segmentation, repeat-purchase rate, average order value, revenue "

@@ -267,6 +267,14 @@ class BaseTool(ABC):
     #: execution is disabled, budgeted per run, and audit-logged.
     executes_code: ClassVar[bool] = False
 
+    #: True when this tool is read-only and thread-safe, allowing consecutive
+    #: instances to execute concurrently in parallel worker threads.
+    is_concurrent_safe: ClassVar[bool] = False
+
+    #: True when a concurrent-safe tool writes a fixed-name file, requiring
+    #: output destination deduplication or sequencing.
+    writes_fixed_file: ClassVar[bool] = False
+
     #: {memory_context_key: param_name} — filled in from MemorySystem
     #: context whenever the plan step left `param_name` empty. Covers the
     #: common case (e.g. target_column); tools with bespoke injection logic

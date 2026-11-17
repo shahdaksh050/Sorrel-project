@@ -46,8 +46,25 @@ class StepMixin(ControllerState):
         "geospatial_analysis", "experiment_analysis", "anomaly_analysis",
         "causal_analysis", "difference_in_differences",
         "survival_analysis", "basket_analysis", "price_elasticity_analysis", "equity_analysis",
-        "curve_fit_analysis",
+        "curve_fit_analysis", "threshold_analysis", "multi_seasonal_analysis",
+        "ranking_dynamics", "concentration_analysis", "change_analysis",
+        "cohort_analysis", "variable_methods", "variable_scale_analysis",
+        "workforce_analysis", "financial_analysis", "regression_analysis",
+        "forecast_analysis", "mixed_model_analysis", "graph_analysis",
     })
+
+    def _is_concurrent_safe(self, tool_name: str) -> bool:
+        """Check if a tool is thread-safe and read-only for batch parallel execution."""
+        tool = getattr(self, "tool_registry", None) and self.tool_registry.get(tool_name)
+        if tool is not None and getattr(tool, "is_concurrent_safe", False):
+            return True
+        return tool_name in self._CONCURRENT_SAFE_TOOLS
+
+    def _is_file_writing(self, p: _PreparedStep) -> bool:
+        """Check if a prepared step writes a fixed output file requiring serialization."""
+        if getattr(p.tool, "writes_fixed_file", False):
+            return True
+        return p.step.tool_name in self._FILE_WRITING_TOOLS
 
     #: Concurrent-safe tools that write a fixed-name output file.
     _FILE_WRITING_TOOLS: frozenset[str] = frozenset({"detect_outliers"})
@@ -836,8 +853,8 @@ class StepMixin(ControllerState):
         results: dict[int, ToolResult] = {}
         # detect_outliers writes <stem>_outliers_flagged.csv, so two of them
         # in one batch would clobber each other's file: run those serially.
-        if sum(p.step.tool_name in self._FILE_WRITING_TOOLS for p in to_run) > 1:
-            to_run = [p for p in to_run if p.step.tool_name not in self._FILE_WRITING_TOOLS]
+        if sum(self._is_file_writing(p) for p in to_run) > 1:
+            to_run = [p for p in to_run if not self._is_file_writing(p)]
         if len(to_run) > 1:
             with ThreadPoolExecutor(max_workers=min(4, len(to_run))) as pool:
                 run_tool = in_run_context(lambda p: p.tool.run(**p.params))
@@ -872,7 +889,7 @@ class StepMixin(ControllerState):
         for idx, step in enumerate(ordered, 1):
             if self._stop_requested():
                 return  # steps not yet started, including a pending batch, are dropped
-            if step.tool_name in self._CONCURRENT_SAFE_TOOLS:
+            if self._is_concurrent_safe(step.tool_name):
                 batch.append((idx, step))
                 continue
             if batch and self._run_batch(batch, total_steps):

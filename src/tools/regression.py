@@ -301,6 +301,7 @@ class RegressionAnalysisTool(BaseTool):
     """Inferential OLS / logistic regression with plain-English adjusted effects."""
 
     name = "regression_analysis"
+    is_concurrent_safe = True
     description = (
         "Explain what drives an outcome: OLS for a numeric target or logistic "
         "regression for a yes/no target, on a lean auto-selected set of "

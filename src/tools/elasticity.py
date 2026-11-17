@@ -139,6 +139,7 @@ class PriceElasticityTool(BaseTool):
     """How strongly units sold respond to price."""
 
     name = "price_elasticity_analysis"
+    is_concurrent_safe = True
     description = (
         "Estimate price elasticity of demand: how much units sold change when price changes "
         "(log-log regression with robust confidence intervals), per product and pooled, with "

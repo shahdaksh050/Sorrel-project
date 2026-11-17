@@ -789,6 +789,7 @@ class CurveFitAnalysisTool(BaseTool):
     """Non-linear curve fitting: dose-response, decay, growth, saturation."""
 
     name = "curve_fit_analysis"
+    is_concurrent_safe = True
     description = (
         "Fit a curve of y against a scientific-style x (dose, concentration, time, temperature, "
         "age...): linear, exponential, decay-to-plateau, logistic, 4-parameter dose-response "

@@ -373,6 +373,7 @@ class MixedModelAnalysisTool(BaseTool):
     """Random-intercept mixed model for repeated-measures / nested data."""
 
     name = "mixed_model_analysis"
+    is_concurrent_safe = True
     description = (
         "For repeated measures or nested data (replicates, patients, sites, batches, plots, schools): "
         "fit a mixed model with a random intercept per group so effects are not overstated by treating "

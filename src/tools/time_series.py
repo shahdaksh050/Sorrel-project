@@ -618,6 +618,7 @@ class TimeSeriesAnalysisTool(BaseTool):
     """Trend direction, stationarity, and seasonality diagnostics for a time-indexed value."""
 
     name = "time_series_analysis"
+    is_concurrent_safe = True
     description = (
         "Resample a time-indexed numeric column to its natural grain (day/week/month) "
         "and analyse: trend direction/slope, stationarity (Augmented Dickey-Fuller test), "

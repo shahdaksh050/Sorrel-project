@@ -32,6 +32,7 @@ class RankingDynamicsTool(BaseTool):
     """Estimate latent participant strength and tournament dynamics from pairwise contests."""
 
     name: str = "ranking_dynamics"
+    is_concurrent_safe = True
     description: str = (
         "Estimate latent skill/strength ratings, win probabilities, and home-field advantages "
         "from pairwise match results (football matches, esports, game duels, tournament fixtures) "
@@ -168,7 +169,6 @@ class RankingDynamicsTool(BaseTool):
                 entity_a_column = col_lookup["player_1"]
                 entity_b_column = col_lookup["player_2"]
             else:
-                # Find two categorical columns with similar distinct counts
                 cats = [c for c in df.columns if df[c].dtype == "object" and 2 <= df[c].nunique() <= 100]
                 if len(cats) >= 2:
                     entity_a_column = cats[0]

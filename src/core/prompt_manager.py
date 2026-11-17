@@ -35,18 +35,10 @@ from src.core.findings import Finding
 from src.core.memory import MemorySystem
 from src.core.roles import ALLOWED_ROLES
 from src.core.sandbox import ALLOWED_MODULES_TEXT
+from src.core.security import pii_redaction_enabled, redact_pii_text
 from src.core.security import sanitize_for_prompt as _sp
 
 logger = logging.getLogger(__name__)
-
-try:
-    from src.core.security import pii_redaction_enabled, redact_pii_text
-except ImportError:  # older security module without PII redaction
-    def pii_redaction_enabled() -> bool:
-        return False
-
-    def redact_pii_text(text: str) -> str:
-        return text
 
 
 def _redact(text: str) -> str:

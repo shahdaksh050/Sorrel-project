@@ -384,7 +384,6 @@ def fetch_available_models(
             profiles: list[ModelCapabilityProfile] = []
             for m in models_data:
                 name = m.get("name", "").removeprefix("models/")
-                # Filter to chat/generateContent models
                 methods = m.get("supportedGenerationMethods", [])
                 if methods and "generateContent" not in methods:
                     continue
@@ -407,7 +406,6 @@ def fetch_available_models(
                     )
                 )
             if profiles:
-                # Sort: flash models first, then pro
                 profiles.sort(key=lambda p: (0 if "flash" in p.model else 1, p.model))
                 return profiles
         except Exception:

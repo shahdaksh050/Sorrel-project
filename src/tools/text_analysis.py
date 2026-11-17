@@ -100,6 +100,7 @@ class TextAnalysisTool(BaseTool):
     """Length, vocabulary, and top-token profiling for a free-text column."""
 
     name = "text_analysis"
+    is_concurrent_safe = True
     description = (
         "Profile a free-text column: non-null count, average character/word length, "
         "vocabulary size, and the most frequent tokens (stopwords excluded). "

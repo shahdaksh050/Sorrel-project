@@ -13,7 +13,7 @@ from collections import OrderedDict
 import pandas as pd
 
 from src.core.coercion import coerce_types
-from src.core.io import _READ_CACHE, _READ_CACHE_LOCK, _cache_key, read_any
+from src.core.io import _cache_key, is_raw_cached, read_any
 
 #: Coerced frames by the read cache's (path, mtime, size) key. Coercing a
 #: 500k-row export costs seconds per call and every tool re-reads, so the
@@ -51,8 +51,7 @@ def read_analysis_df(file_path: str) -> pd.DataFrame:
     with _COERCED_LOCK:
         key_lock = _COERCED_KEY_LOCKS.setdefault(key, threading.Lock())
     with key_lock:
-        with _READ_CACHE_LOCK:
-            raw_cached = key in _READ_CACHE
+        raw_cached = is_raw_cached(file_path)
         with _COERCED_LOCK:
             hit = _COERCED.get(key) if raw_cached else _COERCED.pop(key, None)
             if hit is not None:

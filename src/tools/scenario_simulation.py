@@ -79,6 +79,7 @@ class ScenarioSimulationTool(BaseTool):
     """Simulate parametric 'What-If' interventions on drivers and segments."""
 
     name = "scenario_simulation"
+    is_concurrent_safe = True
     description = (
         "Model 'What-If' scenarios for a target outcome variable given intervention shifts "
         "(e.g. +5%, +10%, +25% on a key driver feature, or closing segment performance gaps). "
@@ -317,7 +318,6 @@ class ScenarioSimulationTool(BaseTool):
             seg_work = df[[seg_col, target_column]].dropna()
             group_stats = seg_work.groupby(seg_col)[target_column].agg(["count", "mean"])
             if len(group_stats) >= 2:
-                # Find lowest performing segment with at least 15 rows
                 eligible = group_stats[group_stats["count"] >= 15]
                 if not eligible.empty:
                     lowest_seg = eligible["mean"].idxmin()

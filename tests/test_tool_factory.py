@@ -130,7 +130,11 @@ class TestValidateSpecCode:
 class TestComputeDatasetFingerprint:
     def test_same_file_same_fingerprint(self, tmp_path: Path) -> None:
         dataset = single_column(tmp_path)
-        assert compute_dataset_fingerprint(str(dataset)) == compute_dataset_fingerprint(str(dataset))
+        fp1 = compute_dataset_fingerprint(str(dataset))
+        fp2 = compute_dataset_fingerprint(str(dataset))
+        assert isinstance(fp1, str) and len(fp1) > 0
+        assert fp1 == fp2
+        assert str(dataset.resolve()) in fp1
 
     def test_different_files_different_fingerprints(self, tmp_path: Path) -> None:
         a_dir = tmp_path / "a"

@@ -532,6 +532,7 @@ class SurvivalAnalysisTool(BaseTool):
     """Kaplan-Meier survival / retention curves, log-rank and Cox hazard ratios."""
 
     name = "survival_analysis"
+    is_concurrent_safe = True
     description = (
         "Time-to-event analysis with censoring (customer tenure until churn, time to failure "
         "or relapse): Kaplan-Meier survival curve with confidence bands, median time to event "

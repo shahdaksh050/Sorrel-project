@@ -185,6 +185,7 @@ class WorkforceAnalysisTool(BaseTool):
     """Headcount, tenure, attrition and pay-distribution analysis for HR data."""
 
     name = "workforce_analysis"
+    is_concurrent_safe = True
     description = (
         "Analyse employee/HR records: headcount and composition by department "
         "and job title, tenure distribution, attrition rate and where it "

@@ -31,6 +31,7 @@ class MultiSeasonalAnalysisTool(BaseTool):
     """Detect multiple overlapping periodic cycles and harmonic frequencies."""
 
     name: str = "multi_seasonal_analysis"
+    is_concurrent_safe = True
     description: str = (
         "Extract multiple overlapping periodic cycles (e.g. 24-hour daily load, 7-day weekly "
         "pattern, monthly cycles) in time series data using Fast Fourier Transform (FFT) spectral "
@@ -171,7 +172,6 @@ class MultiSeasonalAnalysisTool(BaseTool):
         power = np.abs(fft_vals) ** 2
         power[0] = 0.0
 
-        # Find significant peaks in power spectrum
         peak_indices = np.argsort(power)[::-1]
         top_cycles: list[dict[str, Any]] = []
         harmonics_used = min(max_harmonics, _MAX_HARMONICS)

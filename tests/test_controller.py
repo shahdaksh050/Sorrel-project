@@ -8,7 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.core.controller import AgentController, LLMClient
+from src.core.controller import AgentController
+from src.core.llm_client import LLMClient
 
 # ---------------------------------------------------------------------------
 # Fixtures

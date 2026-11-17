@@ -86,7 +86,7 @@ class TestDynamicCodeExecutionTool:
 
 class TestRegistration:
     def test_tool_is_registered(self) -> None:
-        from src.core.controller import ToolRegistry
+        from src.core.tool_registry import ToolRegistry
 
         registry = ToolRegistry()
         assert registry.has("execute_dynamic_code")

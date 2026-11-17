@@ -273,6 +273,7 @@ class ExperimentAnalysisTool(BaseTool):
     arms of an experiment, with lift, CI, power and an assignment check."""
 
     name = "experiment_analysis"
+    is_concurrent_safe = True
     description = (
         "Analyse an A/B-style experiment: compare a metric between a control "
         "arm and each treatment arm. Picks the right test automatically "

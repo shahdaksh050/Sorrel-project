@@ -133,6 +133,7 @@ class ConcentrationAnalysisTool(BaseTool):
     """Pareto/Gini concentration of a measure across an entity dimension."""
 
     name = "concentration_analysis"
+    is_concurrent_safe = True
     description = (
         "Measure how concentrated a numeric measure is across an entity "
         "dimension (customers, accounts, products...): the share of the "

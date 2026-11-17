@@ -80,6 +80,7 @@ class GraphAnalysisTool(BaseTool):
     """Network graph structure and centrality analysis from edge list data."""
 
     name = "graph_analysis"
+    is_concurrent_safe = True
     description = (
         "Analyze network graph structure from edge lists: degree distribution, "
         "connected components, PageRank centrality, and critical hub identification."

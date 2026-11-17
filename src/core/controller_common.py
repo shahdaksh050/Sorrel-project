@@ -14,7 +14,6 @@ from rich.console import Console
 
 from src.core.governance import CodeGovernor
 from src.core.hypothesis import HypothesisTree
-from src.core.io import read_any
 from src.core.llm_client import LLMClient
 from src.core.memory import AnalysisStep, MemorySystem, ToolResult
 from src.core.profiler import DatasetProfile
@@ -41,9 +40,9 @@ class _PreparedStep(NamedTuple):
 
 
 def _read_dataframe(file_path: str) -> pd.DataFrame:
-    """Load a CSV/TSV/Excel dataset for dashboard generation."""
-    df, _report = read_any(file_path)
-    return df
+    """Load a CSV/TSV/Excel dataset for dashboard generation with full type coercion."""
+    from src.core.analysis_io import read_analysis_df
+    return read_analysis_df(file_path)
 
 # Max retries before abandoning a failed step
 MAX_STEP_RETRIES = 2

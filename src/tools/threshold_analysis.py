@@ -35,6 +35,7 @@ class ThresholdAnalysisTool(BaseTool):
     """Detect non-linear breakpoints and tipping points where relationships shift."""
 
     name: str = "threshold_analysis"
+    is_concurrent_safe = True
     description: str = (
         "Detect non-linear tipping points and piecewise breakpoints in continuous features "
         "(e.g. temperature, load, power, level, duration) where the target outcome's slope or "

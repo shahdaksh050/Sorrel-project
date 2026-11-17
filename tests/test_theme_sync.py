@@ -98,3 +98,12 @@ def test_native_text_rules_use_tokens_only() -> None:
     block = styles[start : styles.index("</style>", start)]
     assert "var(--graphite)" in block and "var(--ink)" in block
     assert not re.search(r"#[0-9a-fA-F]{3,8}\b", block)
+
+
+def test_collapsed_sidebar_fullscreen_rules() -> None:
+    styles = (ROOT / "ui" / "styles.py").read_text(encoding="utf-8")
+    assert "/* ── Full screen when sidebar is collapsed ── */" in styles
+    assert 'section[data-testid="stSidebar"][aria-expanded="false"]' in styles
+    assert "max-width: 100% !important;" in styles
+    assert "clamp(1.5rem, 3vw, 4rem)" in styles
+

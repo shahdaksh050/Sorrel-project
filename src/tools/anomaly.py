@@ -262,6 +262,7 @@ class AnomalyAnalysisTool(BaseTool):
     """Spikes, level shifts and unusual segments in a measure."""
 
     name = "anomaly_analysis"
+    is_concurrent_safe = True
     description = (
         "Find what looks wrong in a measure: spikes and dips over time "
         "(robust z-score against a rolling or seasonal baseline), sudden "

@@ -348,6 +348,7 @@ class SegmentComparisonTool(BaseTool):
     test corrected across the whole family of comparisons tested."""
 
     name = "segment_comparison"
+    is_concurrent_safe = True
     description = (
         "Compare a measure (or a binary target treated as a rate) across the "
         "levels of a dimension against the dataset-wide baseline. Reports "

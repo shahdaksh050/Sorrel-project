@@ -46,6 +46,7 @@ class GeospatialAnalysisTool(BaseTool):
     """Bounding box, centroid, and density hotspots for lat/lon coordinates."""
 
     name = "geospatial_analysis"
+    is_concurrent_safe = True
     description = (
         "Analyse latitude/longitude coordinates: bounding box, centroid, point count, "
         "and the densest grid cells (spatial hotspots). Use when the data profile shows "

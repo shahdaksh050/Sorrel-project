@@ -36,13 +36,6 @@ from src.core.causal_guard import (
     audit_findings_causal_language,
     classify_study_design,
 )
-from src.core.claim_verification import _CANON_PRECISIONS as _CANON_PRECISIONS
-from src.core.claim_verification import _KEYWORD_TOOL_MAP as _KEYWORD_TOOL_MAP
-from src.core.claim_verification import _KEYWORD_TOOL_PATTERNS as _KEYWORD_TOOL_PATTERNS
-from src.core.claim_verification import _NUMBER_RE as _NUMBER_RE
-from src.core.claim_verification import _UNVERIFIABLE_SKIP_ABS_INT as _UNVERIFIABLE_SKIP_ABS_INT
-from src.core.claim_verification import _canon_number as _canon_number
-from src.core.claim_verification import _collect_numbers as _collect_numbers
 from src.core.coercion import coerce_types
 from src.core.controller_common import (  # noqa: F401 - re-exported: other modules import these from here
     _AUTODETECT_HIGH,
@@ -77,7 +70,6 @@ from src.core.hypothesis import HypothesisTree
 from src.core.integrity import evaluate_data_integrity
 from src.core.io import get_max_rows, read_any
 from src.core.joins import join_related
-from src.core.llm_client import _DEFAULT_MODELS as _DEFAULT_MODELS
 from src.core.llm_client import LLMClient as LLMClient
 from src.core.llm_client import LocalOnlyError as LocalOnlyError
 from src.core.llm_client import llm_concurrency as llm_concurrency
@@ -93,10 +85,7 @@ from src.core.question_router import route_question
 from src.core.run_config import RunConfig
 from src.core.run_context import objective_scope
 from src.core.security import sanitize_for_prompt
-from src.core.step_validation import _COLUMN_PARAM_NAMES as _COLUMN_PARAM_NAMES
-from src.core.tool_registry import _INJECTED_PARAMS as _INJECTED_PARAMS
 from src.core.tool_registry import ToolRegistry as ToolRegistry
-from src.core.tool_registry import _short_tool_description as _short_tool_description
 from src.rlm.engine import RLMEngine, RLMSubTask
 
 if TYPE_CHECKING:
@@ -221,8 +210,8 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                 Path(self._output_dir).mkdir(parents=True, exist_ok=True)
                 Path("output").mkdir(parents=True, exist_ok=True)
                 Path("output", "latest.txt").write_text(self._output_dir, encoding="utf-8")
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.debug('Could not write latest run marker: %s', exc)
         # Governance for LLM-authored code: kill switch, per-run budget, audit log.
         self._governor = CodeGovernor(self._output_dir, self.memory.session_id)
         self.llm_client.audit_dir = str(Path(self._output_dir) / AUDIT_SUBDIR)
@@ -683,8 +672,8 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                         "ok",
                     ),
                 )
-            except Exception:
-                pass  # keep the pre-target profile rather than lose it
+            except Exception as exc:
+                logger.debug('Reprofiling after target selection failed: %s', exc)
         self._pending_df = None
         self._stash_profile_context()
 
@@ -1940,8 +1929,8 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                 primary_unanswered = [q for q in primary if q not in cov.get("answered", [])]
                 if not primary_unanswered and len(cov.get("answered", [])) >= max(1, len(agenda) // 2):
                     return "all primary agenda questions are satisfied and profiling is complete"
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug('Agenda early exit check encountered error: %s', exc)
         if self._prompt_manager is None:
             return ""
         groups = [num_cols[i: i + 8] for i in range(0, len(num_cols), 8)]

@@ -168,6 +168,7 @@ class FinancialAnalysisTool(BaseTool):
     """Return, volatility and drawdown analysis for price-series datasets."""
 
     name = "financial_analysis"
+    is_concurrent_safe = True
     description = (
         "Analyse a price/market series: period returns, annualised volatility, "
         "cumulative and annualised return, maximum drawdown, Sharpe ratio and "

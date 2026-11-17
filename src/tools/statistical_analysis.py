@@ -297,6 +297,7 @@ class SelectStatisticalTestTool(BaseTool):
     """
 
     name = "select_statistical_test"
+    is_concurrent_safe = True
     description = (
         "Automatically select and run the correct statistical hypothesis test "
         "based on data characteristics (normality, group count, data types). "

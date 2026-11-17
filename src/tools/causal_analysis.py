@@ -81,6 +81,7 @@ class CausalAnalysisTool(BaseTool):
     """Diagnose overlap/balance and estimate an IPW treatment contrast safely."""
 
     name: str = "causal_analysis"
+    is_concurrent_safe = True
     description: str = (
         "Guarded binary-treatment causal diagnostic. Checks treatment overlap and covariate "
         "balance, then reports a stabilized inverse-probability-weighted outcome contrast "
@@ -363,6 +364,7 @@ class DifferenceInDifferencesTool(BaseTool):
     """Guarded panel Difference-in-Differences estimator with cluster-robust standard errors."""
 
     name: str = "difference_in_differences"
+    is_concurrent_safe = True
     description: str = (
         "Panel Difference-in-Differences (DiD) estimator. Evaluates pre-treatment "
         "parallel trends, fits two-way group/time contrast with cluster-robust standard errors, "

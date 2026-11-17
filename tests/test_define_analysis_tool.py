@@ -200,7 +200,7 @@ class TestGetSchemaAndRegistration:
         assert DefineAnalysisToolTool().requires_llm is True
 
     def test_tool_is_registered_in_registry(self) -> None:
-        from src.core.controller import ToolRegistry
+        from src.core.tool_registry import ToolRegistry
 
         registry = ToolRegistry()
         assert registry.has("define_analysis_tool")

@@ -231,7 +231,6 @@ def benford_analysis(
             "first_digit_counts": {},
         }
 
-    # Extract first significant digit
     first_digits: list[int] = []
     for val in pos_x:
         s = f"{val:.10e}"
@@ -291,7 +290,6 @@ def digit_heaping_test(
     if n < 20:
         return {"n": n, "whipples_index": None, "heaping_detected": False}
 
-    # Extract terminal digits of rounded integers
     terminals = (np.abs(np.round(num.values)).astype(int)) % 10
     counts = {d: int(np.sum(terminals == d)) for d in range(10)}
 

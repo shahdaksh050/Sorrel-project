@@ -1,0 +1,2740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sorrel — Autonomous Agent Swarm Dashboard Construction</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --grid-dot: rgba(255, 255, 255, 0.08);
+    --grid-line: rgba(255, 255, 255, 0.035);
+    --surface: #12151a;
+    --surface-raised: #181d24;
+    --surface-overlay: rgba(18, 21, 26, 0.92);
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.18);
+    --border-subtle: rgba(255, 255, 255, 0.04);
+    --ink: #f3f5f7;
+    --ink-muted: #8b95a5;
+    --ink-faint: #525a68;
+    --pen: #10b981;
+    --pen-tint: rgba(16, 185, 129, 0.12);
+    --accent: #f59e0b;
+    --risk: #ef4444;
+    --shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    --radius: 6px;
+    --radius-sm: 4px;
+    --radius-pill: 9999px;
+    --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --font-serif: 'Newsreader', Georgia, serif;
+    --font-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+    --hex-base-fill: rgba(18, 21, 26, 0.75);
+    --hex-base-stroke: #10b981;
+    --hex-glow-color: rgba(16, 185, 129, 0.15);
+    --hex-facet-fill: rgba(16, 185, 129, 0.16);
+    --hex-facet-stroke: #10b981;
+    --hex-seam-color: #10b981;
+    --hex-badge-bg: rgba(18, 21, 26, 0.92);
+    --hex-badge-border: rgba(16, 185, 129, 0.4);
+    --hex-badge-text: #10b981;
+    --ruler-line-color: #10b981;
+    --ruler-badge-bg: rgba(18, 21, 26, 0.94);
+    --ruler-badge-border: rgba(255, 255, 255, 0.35);
+    --ruler-badge-text: #ffffff;
+    --cursor-primary-bg: #0f172a;
+    --cursor-primary-border: rgba(255, 255, 255, 0.25);
+    --cursor-primary-text: #f8fafc;
+    --cursor-helper-bg: #0f172a;
+    --cursor-helper-border: rgba(255, 255, 255, 0.25);
+    --cursor-helper-text: #f8fafc;
+  }
+
+  [data-theme="day"] {
+    --bg: #f8f7f4;
+    --grid-dot: rgba(0, 0, 0, 0.08);
+    --grid-line: rgba(0, 0, 0, 0.035);
+    --surface: #ffffff;
+    --surface-raised: #f3f1ec;
+    --surface-overlay: rgba(255, 255, 255, 0.94);
+    --border: rgba(0, 0, 0, 0.09);
+    --border-strong: rgba(0, 0, 0, 0.18);
+    --border-subtle: rgba(0, 0, 0, 0.04);
+    --ink: #14171a;
+    --ink-muted: #5e6673;
+    --ink-faint: #98a1b0;
+    --pen: #059669;
+    --pen-tint: rgba(5, 150, 105, 0.1);
+    --accent: #d97706;
+    --risk: #dc2626;
+    --shadow: 0 8px 28px rgba(0, 0, 0, 0.09);
+    --hex-base-fill: rgba(255, 255, 255, 0.96);
+    --hex-base-stroke: #059669;
+    --hex-glow-color: transparent;
+    --hex-facet-fill: rgba(5, 150, 105, 0.08);
+    --hex-facet-stroke: #059669;
+    --hex-seam-color: #059669;
+    --hex-badge-bg: #ffffff;
+    --hex-badge-border: rgba(0, 0, 0, 0.18);
+    --hex-badge-text: #14171a;
+    --ruler-line-color: #059669;
+    --ruler-badge-bg: #ffffff;
+    --ruler-badge-border: rgba(0, 0, 0, 0.22);
+    --ruler-badge-text: #14171a;
+    --cursor-primary-bg: #0f172a;
+    --cursor-primary-border: rgba(255, 255, 255, 0.25);
+    --cursor-primary-text: #ffffff;
+    --cursor-helper-bg: #0f172a;
+    --cursor-helper-border: rgba(255, 255, 255, 0.25);
+    --cursor-helper-text: #ffffff;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    min-height: 100vh;
+    padding: 32px 24px 64px;
+    position: relative;
+    overflow-x: hidden;
+    background-image:
+      radial-gradient(var(--grid-dot) 1.25px, transparent 1.25px),
+      linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+    background-size: 24px 24px, 120px 120px, 120px 120px;
+    background-position: 0 0, 0 0, 0 0;
+    transition: background-color 0.25s ease, color 0.25s ease;
+  }
+
+  /* ── Master Container ───────────────────────────────────────────── */
+  .dashboard-wrapper {
+    max-width: 1240px;
+    margin: 0 auto;
+    position: relative;
+  }
+
+  /* ── Floating Controls HUD ─────────────────────────────────────── */
+  .hud-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: var(--surface-overlay);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-pill);
+    margin-bottom: 28px;
+    box-shadow: var(--shadow);
+    z-index: 1000;
+    position: sticky;
+    top: 16px;
+  }
+
+  .hud-left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .hud-brand {
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-size: 1.35rem;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+
+  .hud-badge {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: var(--radius-pill);
+    background: var(--pen-tint);
+    color: var(--pen);
+    border: 1px solid currentColor;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .hud-badge::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: pulse 2s infinite ease-in-out;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; transform: scale(0.85); }
+    50% { opacity: 1; transform: scale(1.2); }
+  }
+
+  .hud-status-text {
+    font-size: 0.825rem;
+    color: var(--ink-muted);
+    font-family: var(--font-mono);
+    min-width: 320px;
+  }
+
+  .hud-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .btn {
+    appearance: none;
+    background: var(--surface-raised);
+    color: var(--ink);
+    border: 1px solid var(--border);
+    padding: 6px 14px;
+    border-radius: var(--radius-pill);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s ease;
+    user-select: none;
+  }
+
+  .btn:hover {
+    background: var(--border);
+    border-color: var(--border-strong);
+    transform: translateY(-1px);
+  }
+
+  .btn-primary {
+    background: var(--pen);
+    color: #ffffff;
+    border-color: transparent;
+  }
+
+  .btn-primary:hover {
+    background: #059669;
+    border-color: transparent;
+  }
+
+  .btn-hexagon {
+    background: var(--surface-raised);
+    color: var(--ink);
+    border-color: var(--pen);
+  }
+
+  .btn-hexagon:hover {
+    background: var(--pen-tint);
+    border-color: var(--pen);
+  }
+
+  .speed-group {
+    display: flex;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    padding: 2px;
+  }
+
+  .speed-opt {
+    padding: 3px 9px;
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    color: var(--ink-muted);
+    border: none;
+    background: transparent;
+    transition: all 0.15s ease;
+  }
+
+  .speed-opt.active {
+    background: var(--surface);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+  }
+
+  /* ── Dashboard Grid Structure ──────────────────────────────────── */
+  .grid-dashboard {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    position: relative;
+  }
+
+  /* Top Row: 2-Card Grid (Header + Ingestion Telemetry) */
+  .grid-top {
+    display: grid;
+    grid-template-columns: 8fr 4fr;
+    gap: 20px;
+  }
+
+  .card-header-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px 28px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .card-telemetry-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .header-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .meta-lead {
+    font-size: 0.775rem;
+    font-family: var(--font-mono);
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .meta-title {
+    font-size: 1.55rem;
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .meta-desc {
+    font-size: 0.925rem;
+    color: var(--ink-muted);
+    max-width: 680px;
+    margin-top: 4px;
+  }
+
+  .telemetry-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 10px;
+  }
+
+  .telem-cell {
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .telem-label {
+    font-size: 0.6875rem;
+    color: var(--ink-faint);
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+  }
+
+  .telem-val {
+    font-size: 1.05rem;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--ink);
+    margin-top: 2px;
+  }
+
+  /* KPI Triad Row */
+  .grid-kpis {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+  }
+
+  .kpi-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: 140px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .kpi-label-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.8125rem;
+    color: var(--ink-muted);
+    font-weight: 500;
+  }
+
+  .kpi-badge {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+  }
+
+  .badge-green { background: rgba(16, 185, 129, 0.12); color: #10b981; }
+  .badge-indigo { background: rgba(99, 102, 241, 0.12); color: #6366f1; }
+  .badge-purple { background: rgba(168, 85, 247, 0.12); color: #a855f7; }
+
+  .kpi-value-row {
+    margin: 12px 0 6px;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .kpi-num {
+    font-size: 2.1rem;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    letter-spacing: -0.03em;
+    color: var(--ink);
+    line-height: 1;
+  }
+
+  .kpi-sub {
+    font-size: 0.8rem;
+    color: var(--ink-muted);
+  }
+
+  /* Mid Row: Visualizations */
+  .grid-visuals {
+    display: grid;
+    grid-template-columns: 7fr 5fr;
+    gap: 20px;
+  }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    overflow: hidden;
+    min-height: 310px;
+  }
+
+  .card-title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+
+  .card-h {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+  }
+
+  .card-h-sub {
+    font-size: 0.775rem;
+    color: var(--ink-muted);
+    font-family: var(--font-mono);
+  }
+
+  .chart-svg-box {
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    min-height: 200px;
+    position: relative;
+  }
+
+  svg.chart-canvas {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  /* Bottom Row: Models & Action Matrix */
+  .grid-bottom {
+    display: grid;
+    grid-template-columns: 6fr 6fr;
+    gap: 20px;
+  }
+
+  /* Model Leaderboard Table */
+  .model-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+    margin-top: 8px;
+  }
+
+  .model-table th {
+    text-align: left;
+    padding: 8px 10px;
+    color: var(--ink-faint);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--border-strong);
+  }
+
+  .model-table td {
+    padding: 10px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--ink);
+  }
+
+  .model-table tr.champion {
+    background: var(--pen-tint);
+  }
+
+  .model-table tr.champion td {
+    font-weight: 600;
+    color: var(--pen);
+  }
+
+  /* 2x2 Action Matrix */
+  .matrix-quadrants {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 10px;
+    flex: 1;
+  }
+
+  .quadrant {
+    padding: 12px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .quad-tag {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .quad-tag.qw { color: #10b981; }
+  .quad-tag.sp { color: #0284c7; }
+  .quad-tag.wc { color: #f59e0b; }
+  .quad-tag.lp { color: #94a3b8; }
+
+  .quad-action {
+    font-size: 0.825rem;
+    font-weight: 500;
+    color: var(--ink);
+    line-height: 1.35;
+  }
+
+  .quad-sub {
+    font-size: 0.725rem;
+    color: var(--ink-faint);
+    margin-top: 4px;
+    font-family: var(--font-mono);
+  }
+
+  /* Official Audit Seal */
+  .seal-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 24px;
+    background: var(--surface);
+    border: 1px solid rgba(234, 179, 8, 0.35);
+    border-radius: var(--radius);
+    margin-top: 4px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .seal-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .seal-stamp {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    background: rgba(234, 179, 8, 0.15);
+    border: 1.5px solid #eab308;
+    color: #eab308;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 1.15rem;
+    box-shadow: 0 0 14px rgba(234, 179, 8, 0.3);
+  }
+
+  .seal-info h4 {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .seal-info p {
+    font-size: 0.775rem;
+    color: var(--ink-muted);
+    font-family: var(--font-mono);
+    margin-top: 2px;
+  }
+
+  .telemetry-chip {
+    padding: 6px 12px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--ink-muted);
+    display: flex;
+    gap: 12px;
+  }
+
+  .telemetry-chip strong {
+    color: var(--ink);
+  }
+
+  /* ── Skeleton vs Content States ────────────────────────────────── */
+  .card-block {
+    opacity: 0;
+    transform: scale(0.97) translateY(8px);
+    transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1), transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+    pointer-events: auto;
+  }
+
+  .card-block.built {
+    opacity: 1 !important;
+    transform: scale(1) translateY(0) !important;
+  }
+
+  .card-block.stamped-flash {
+    animation: stampFlash 0.7s ease-out;
+  }
+
+  @keyframes stampFlash {
+    0% {
+      box-shadow: 0 0 0 2px var(--flash-color, #10b981), 0 0 28px var(--flash-color, #10b981);
+    }
+    100% {
+      box-shadow: 0 0 0 0 transparent, 0 0 0 transparent;
+    }
+  }
+
+  /* ── Virtual Swarm Overlay Layer ───────────────────────────────── */
+  #swarm-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 9999;
+    overflow: visible;
+  }
+
+  /* Virtual Cursor Pointer */
+  .agent-cursor {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    will-change: transform, opacity;
+    z-index: 10000;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+  }
+
+  .cursor-svg {
+    filter: drop-shadow(0 2px 7px rgba(0,0,0,0.45));
+    transition: transform 0.12s ease;
+  }
+
+  .agent-cursor.clicking .cursor-svg {
+    transform: scale(0.82) rotate(-8deg);
+  }
+
+  .cursor-pill {
+    position: absolute;
+    left: 14px;
+    top: 14px;
+    padding: 3px 8px;
+    border-radius: var(--radius-pill);
+    background: var(--cursor-primary-bg);
+    color: var(--cursor-primary-text);
+    border: 1px solid var(--cursor-primary-border);
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    transition: background 0.25s ease, color 0.25s ease, border-color 0.25s ease;
+  }
+
+  .cursor-indicator {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #94a3b8;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+
+  /* Helper Sculptor Virtual Cursors (Mode 2) */
+  .agent-cursor.helper-cursor {
+    z-index: 10001;
+  }
+
+  .agent-cursor.helper-cursor .cursor-svg {
+    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.4));
+    transition: transform 0.12s ease;
+  }
+
+  .agent-cursor.helper-cursor.clicking .cursor-svg {
+    transform: scale(0.85) rotate(-12deg);
+  }
+
+  .helper-pill {
+    position: absolute;
+    left: 14px;
+    top: 14px;
+    padding: 3px 8px;
+    border-radius: var(--radius-pill);
+    background: var(--cursor-helper-bg);
+    color: var(--cursor-helper-text);
+    font-family: var(--font-sans);
+    font-size: 0.68rem;
+    font-weight: 600;
+    white-space: nowrap;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px dashed var(--cursor-helper-border);
+    transition: background 0.25s ease, color 0.25s ease, border-color 0.25s ease;
+  }
+
+  .helper-badge {
+    font-size: 0.58rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    padding: 1px 4px;
+    background: #334155;
+    color: #f8fafc;
+    border-radius: 2px;
+  }
+
+  /* Sculptor Alignment Ruler Guidelines & Badges */
+  .sculptor-ruler-line {
+    stroke-width: 1.8;
+    stroke-dasharray: 4 3;
+    stroke-linecap: round;
+    stroke: var(--ruler-line-color);
+    pointer-events: none;
+    will-change: stroke-dasharray, stroke, opacity;
+    transition: stroke 0.25s ease;
+  }
+
+  .sculptor-ruler-badge {
+    pointer-events: none;
+    will-change: transform, opacity;
+  }
+
+  .sculptor-ruler-badge rect {
+    fill: var(--ruler-badge-bg);
+    stroke: var(--ruler-badge-border);
+    stroke-width: 1;
+    transition: fill 0.25s ease, stroke 0.25s ease;
+  }
+
+  .sculptor-ruler-badge text {
+    font-family: var(--font-mono);
+    font-size: 0.62rem;
+    font-weight: 700;
+    fill: var(--ruler-badge-text);
+    letter-spacing: 0.04em;
+    transition: fill 0.25s ease;
+  }
+
+  /* Marquee Selection Rubberband Box */
+  .selection-marquee {
+    position: absolute;
+    border: 1.5px dashed var(--marquee-color, #10b981);
+    background: var(--marquee-bg, rgba(16, 185, 129, 0.09));
+    pointer-events: none;
+    border-radius: var(--radius-sm);
+    z-index: 9998;
+    opacity: 0;
+    display: none;
+    box-sizing: border-box;
+    will-change: transform, width, height, opacity;
+  }
+
+  .selection-marquee.active {
+    display: block;
+    opacity: 1;
+  }
+
+  .marquee-handle {
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    background: #ffffff;
+    border: 1.5px solid var(--marquee-color, #10b981);
+    border-radius: 1px;
+  }
+
+  .handle-tl { top: -4px; left: -4px; }
+  .handle-tr { top: -4px; right: -4px; }
+  .handle-bl { bottom: -4px; left: -4px; }
+  .handle-br { bottom: -4px; right: -4px; }
+
+  .marquee-dimension {
+    position: absolute;
+    bottom: -22px;
+    right: 0;
+    background: var(--marquee-color, #10b981);
+    color: #ffffff;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 2px 5px;
+    border-radius: 3px;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  }
+
+  /* ── Hexagon Hub & Floating Payload Rectangles ─────────────────── */
+  #hex-hub-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 9995;
+    display: none;
+    overflow: visible;
+  }
+
+  #hex-trace-path {
+    fill: var(--hex-base-fill);
+    stroke: var(--hex-base-stroke);
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: url(#hex-glow);
+    transition: fill 0.25s ease, stroke 0.25s ease;
+  }
+
+  #hex-core-glow {
+    fill: var(--hex-glow-color);
+  }
+
+  .hex-facet {
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    cursor: pointer;
+    will-change: transform, opacity;
+    fill: var(--hex-facet-fill);
+    stroke: var(--hex-facet-stroke);
+    transition: fill 0.25s ease, stroke 0.25s ease;
+  }
+
+  .hex-seam-line {
+    stroke-width: 2.2;
+    stroke-linecap: round;
+    stroke: var(--hex-seam-color);
+    filter: drop-shadow(0 0 5px var(--hex-glow-color));
+    will-change: stroke-dashoffset, opacity;
+    transition: stroke 0.25s ease;
+  }
+
+  .hex-math-badge {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    background: var(--hex-badge-bg);
+    border: 1px solid var(--hex-badge-border);
+    color: var(--hex-badge-text);
+    padding: 6px 14px;
+    border-radius: var(--radius-pill);
+    box-shadow: var(--shadow);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    position: absolute;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 9997;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.3s ease, background 0.25s ease, color 0.25s ease, border-color 0.25s ease;
+  }
+
+  [data-theme="day"] #hex-trace-path {
+    filter: none;
+    stroke-width: 2.2;
+  }
+
+  [data-theme="day"] #hex-core-glow {
+    display: none;
+  }
+
+  [data-theme="day"] .hex-seam-line {
+    filter: none;
+    stroke-width: 1.8;
+  }
+
+  [data-theme="day"] .hex-math-badge {
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  }
+
+  .hex-payload {
+    position: absolute;
+    border: 1.5px dashed var(--pen);
+    background: var(--pen-tint);
+    border-radius: var(--radius-sm);
+    pointer-events: none;
+    z-index: 9996;
+    display: none;
+    box-sizing: border-box;
+    box-shadow: var(--shadow);
+    will-change: transform, width, height, opacity;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  .hex-payload.active {
+    display: flex;
+  }
+
+  .payload-tag {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    font-weight: 700;
+    color: #ffffff;
+    background: #0f172a;
+    padding: 2px 6px;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    white-space: nowrap;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  }
+
+  /* Reduced Motion Support */
+  @media (prefers-reduced-motion: reduce) {
+    .card-block {
+      opacity: 1 !important;
+      transform: none !important;
+    }
+    .agent-cursor, .selection-marquee, #hex-hub-container, .hex-payload {
+      display: none !important;
+    }
+  }
+</style>
+</head>
+<body data-theme="night">
+
+<div class="dashboard-wrapper">
+
+  <!-- Floating HUD Header & Playback Controller -->
+  <header class="hud-bar">
+    <div class="hud-left">
+      <span class="hud-brand">Sorrel</span>
+      <span class="hud-badge" id="hud-badge">Autonomous Swarm</span>
+      <span class="hud-status-text" id="hud-status">Initializing 10-Agent Swarm...</span>
+    </div>
+
+    <div class="hud-right">
+      <div class="speed-group">
+        <button class="speed-opt" data-speed="0.5">0.5x</button>
+        <button class="speed-opt active" data-speed="1.0">1x</button>
+        <button class="speed-opt" data-speed="2.0">2x</button>
+      </div>
+
+      <button class="btn" id="btn-theme" title="Toggle Day/Night mode">
+        <span id="theme-icon">☀️</span> <span id="theme-text">Day</span>
+      </button>
+
+      <!-- Mode 1: Marquee Area Selection & Stamping -->
+      <button class="btn btn-primary" id="btn-replay" title="Run marquee area selection animation">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.19"/></svg>
+        Marquee Swarm
+      </button>
+
+      <!-- Mode 2: Central Hexagon Core Extraction & Shifting -->
+      <button class="btn btn-hexagon" id="btn-hexagon" title="Run Central Hexagon extraction and displacement animation">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8.66 5v10L12 22l-8.66-5V7L12 2z"/></svg>
+        Hexagon Core Build
+      </button>
+
+      <button class="btn" id="btn-skip">
+        Skip to End
+      </button>
+    </div>
+  </header>
+
+  <!-- Overlay for Virtual Cursors, Marquees & Hexagon Hub -->
+  <div id="swarm-overlay">
+    <div id="hex-math-badge" class="hex-math-badge">
+      <span>📐 Equi-Area Dissection: 10 Facets</span>
+      <span style="opacity:0.65">|</span>
+      <span>A = 0.100 A₀ (6,242 px²)</span>
+    </div>
+  </div>
+
+  <!-- Central Hexagon SVG Hub (Mode 2) -->
+  <svg id="hex-hub-container" viewBox="0 0 1240 1000" preserveAspectRatio="none">
+    <defs>
+      <linearGradient id="hex-stroke-grad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#10b981" />
+        <stop offset="50%" stop-color="#0284c7" />
+        <stop offset="100%" stop-color="#a855f7" />
+      </linearGradient>
+      <filter id="hex-glow" x="-20%" y="-20%" width="140%" height="140%">
+        <feGaussianBlur stdDeviation="8" result="blur" />
+        <feMerge>
+          <feMergeNode in="blur" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+    </defs>
+    <!-- Background Radial Pulse -->
+    <circle id="hex-core-glow" cx="620" cy="420" r="160" filter="url(#hex-glow)" opacity="0" />
+    <!-- Hexagon Outer Border Drawn by Orchestrator -->
+    <path id="hex-trace-path" d="" opacity="0" />
+    <!-- 10 Equi-Area Facets Group -->
+    <g id="hex-facets-group"></g>
+    <!-- Laser Cut Seams Drawn by Swarm -->
+    <g id="hex-seams-group"></g>
+    <!-- Helper Sculptor Alignment Ruler Guidelines & Snap Badges -->
+    <g id="hex-sculpt-guides"></g>
+    <!-- Vertices -->
+    <g id="hex-vertices-group"></g>
+  </svg>
+
+  <!-- Main Analytical Dashboard Surface -->
+  <main class="grid-dashboard" id="dashboard-grid">
+
+    <!-- Top Row: Card 1 (Orchestrator) & Card 2 (Data Profiler) -->
+    <div class="grid-top">
+      <div class="card-header-block card-block" id="card-header" data-card-id="card-header">
+        <div class="header-meta">
+          <span class="meta-lead">Autonomous Executive Briefing · Run #8042</span>
+          <h1 class="meta-title">
+            <span>household_power_consumption.csv</span>
+            <span style="font-size: 0.85rem; font-weight: normal; color: var(--pen); background: var(--pen-tint); padding: 3px 10px; border-radius: var(--radius-pill); border: 1px solid currentColor;">
+              ✓ Rigorous Hypothesis Verified
+            </span>
+          </h1>
+          <p class="meta-desc">
+            Peak evening sub-metering active power exhibits a non-linear threshold regime above 3.8 kW. Coordinated load shifting yields high-confidence energy reduction.
+          </p>
+        </div>
+      </div>
+
+      <div class="card-telemetry-block card-block" id="card-telemetry" data-card-id="card-telemetry">
+        <div class="card-title-row" style="margin-bottom: 6px;">
+          <span class="card-h" style="font-size: 0.875rem;">Dataset Ingestion & Health</span>
+          <span class="kpi-badge badge-green">PROFILED</span>
+        </div>
+        <div class="telemetry-grid">
+          <div class="telem-cell">
+            <span class="telem-label">Total Records</span>
+            <span class="telem-val">260,640</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-label">Dimensions</span>
+            <span class="telem-val">10 Cols</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-label">Quality Score</span>
+            <span class="telem-val">99.4 / 100</span>
+          </div>
+          <div class="telem-cell">
+            <span class="telem-label">Missingness</span>
+            <span class="telem-val">0.00%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cards 3, 4, 5: KPI Triad Row -->
+    <div class="grid-kpis">
+      <div class="kpi-card card-block" id="card-kpi-1" data-card-id="card-kpi-1">
+        <div class="kpi-label-row">
+          <span>Primary Peak Reduction Lift</span>
+          <span class="kpi-badge badge-green">VERIFIED</span>
+        </div>
+        <div class="kpi-value-row">
+          <span class="kpi-num" data-target="18.4" data-prefix="+" data-suffix="%">+0.0%</span>
+        </div>
+        <span class="kpi-sub">Baseline shift across 9,326 peak intervals</span>
+      </div>
+
+      <div class="kpi-card card-block" id="card-kpi-2" data-card-id="card-kpi-2">
+        <div class="kpi-label-row">
+          <span>Statistical Significance (Welch t-test)</span>
+          <span class="kpi-badge badge-indigo">p &lt; 0.001</span>
+        </div>
+        <div class="kpi-value-row">
+          <span class="kpi-num" data-target="4.82" data-prefix="z = ">z = 0.00</span>
+        </div>
+        <span class="kpi-sub">FDR Benjamini-Hochberg corrected (q = 0.05)</span>
+      </div>
+
+      <div class="kpi-card card-block" id="card-kpi-3" data-card-id="card-kpi-3">
+        <div class="kpi-label-row">
+          <span>Causal Confounder Check</span>
+          <span class="kpi-badge badge-purple">STABLE</span>
+        </div>
+        <div class="kpi-value-row">
+          <span class="kpi-num" data-target="0" data-prefix="" data-suffix=" Confounders">0 Confounders</span>
+        </div>
+        <span class="kpi-sub">Simpson's paradox test invariant across all seasons</span>
+      </div>
+    </div>
+
+    <!-- Cards 6 & 7: Visualizations (Hero Line Plot & Segment Distribution) -->
+    <div class="grid-visuals">
+      <div class="chart-card card-block" id="card-chart-hero" data-card-id="card-chart-hero">
+        <div class="card-title-row">
+          <div>
+            <h3 class="card-h">Active Power Demand Trajectory</h3>
+            <span class="card-h-sub">Sub-metering 1, 2 & 3 vs Active Power Threshold</span>
+          </div>
+          <span class="kpi-badge badge-green">VEGA SPEC V5</span>
+        </div>
+        <div class="chart-svg-box">
+          <svg class="chart-canvas" viewBox="0 0 680 200" preserveAspectRatio="none">
+            <!-- Grid Lines -->
+            <line x1="40" y1="30" x2="660" y2="30" stroke="var(--border)" stroke-dasharray="3,3" />
+            <line x1="40" y1="80" x2="660" y2="80" stroke="var(--border)" stroke-dasharray="3,3" />
+            <line x1="40" y1="130" x2="660" y2="130" stroke="var(--border)" stroke-dasharray="3,3" />
+            <line x1="40" y1="180" x2="660" y2="180" stroke="var(--border)" />
+
+            <!-- Threshold Horizon -->
+            <line x1="40" y1="95" x2="660" y2="95" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.8" />
+            <text x="540" y="90" fill="#ef4444" font-size="10" font-family="var(--font-mono)">Critical Peak: 3.8 kW</text>
+
+            <!-- Animated Area Fill -->
+            <polygon class="chart-area" points="40,180 70,160 110,145 160,150 210,110 260,125 310,85 360,70 410,95 460,50 510,75 560,40 610,65 660,35 660,180" fill="url(#area-gradient)" opacity="0" />
+
+            <!-- Animated Line 1: Main Active Power -->
+            <path class="chart-path path-main" d="M40,180 Q90,150 160,150 T310,85 T460,50 T660,35" fill="none" stroke="#10b981" stroke-width="3" stroke-linecap="round" />
+
+            <!-- Animated Line 2: Sub-metering Baseline -->
+            <path class="chart-path path-sub" d="M40,175 Q100,165 180,155 T340,120 T500,105 T660,90" fill="none" stroke="#0284c7" stroke-width="2" stroke-dasharray="2,2" opacity="0.85" />
+
+            <!-- Gradient Definition -->
+            <defs>
+              <linearGradient id="area-gradient" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#10b981" stop-opacity="0.35" />
+                <stop offset="100%" stop-color="#10b981" stop-opacity="0.0" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+      </div>
+
+      <div class="chart-card card-block" id="card-chart-segment" data-card-id="card-chart-segment">
+        <div class="card-title-row">
+          <div>
+            <h3 class="card-h">Segment Contrast: Weekend vs Weekday</h3>
+            <span class="card-h-sub">Power distribution by daily load regime</span>
+          </div>
+          <span class="kpi-badge badge-indigo">LIFT: +1.84 kW</span>
+        </div>
+        <div class="chart-svg-box">
+          <svg class="chart-canvas" viewBox="0 0 460 200" preserveAspectRatio="none">
+            <!-- Grid Lines -->
+            <line x1="30" y1="180" x2="440" y2="180" stroke="var(--border)" />
+            <!-- Bar 1: Weekday Morning -->
+            <rect class="anim-bar" x="50" y="100" width="36" height="80" rx="3" fill="#6366f1" transform="scale(1, 0)" transform-origin="bottom" />
+            <text x="68" y="196" fill="var(--ink-faint)" font-size="10" font-family="var(--font-mono)" text-anchor="middle">Wk-AM</text>
+
+            <!-- Bar 2: Weekday Evening (Peak) -->
+            <rect class="anim-bar" x="130" y="45" width="36" height="135" rx="3" fill="#10b981" transform="scale(1, 0)" transform-origin="bottom" />
+            <text x="148" y="196" fill="var(--ink-faint)" font-size="10" font-family="var(--font-mono)" text-anchor="middle">Wk-PM</text>
+
+            <!-- Bar 3: Weekend Morning -->
+            <rect class="anim-bar" x="210" y="125" width="36" height="55" rx="3" fill="#6366f1" transform="scale(1, 0)" transform-origin="bottom" />
+            <text x="228" y="196" fill="var(--ink-faint)" font-size="10" font-family="var(--font-mono)" text-anchor="middle">Wkd-AM</text>
+
+            <!-- Bar 4: Weekend Evening -->
+            <rect class="anim-bar" x="290" y="65" width="36" height="115" rx="3" fill="#0284c7" transform="scale(1, 0)" transform-origin="bottom" />
+            <text x="308" y="196" fill="var(--ink-faint)" font-size="10" font-family="var(--font-mono)" text-anchor="middle">Wkd-PM</text>
+
+            <!-- Bar 5: Night Baseline -->
+            <rect class="anim-bar" x="370" y="150" width="36" height="30" rx="3" fill="#94a3b8" transform="scale(1, 0)" transform-origin="bottom" />
+            <text x="388" y="196" fill="var(--ink-faint)" font-size="10" font-family="var(--font-mono)" text-anchor="middle">Night</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cards 8 & 9: Model Leaderboard & 2x2 Action Matrix -->
+    <div class="grid-bottom">
+      <div class="chart-card card-block" id="card-models" data-card-id="card-models">
+        <div class="card-title-row">
+          <div>
+            <h3 class="card-h">Model Tournament (5-Fold Stratified CV)</h3>
+            <span class="card-h-sub">Cross-validated ranking across non-leaking predictors</span>
+          </div>
+          <span class="kpi-badge badge-green">LEAK-CHECKED</span>
+        </div>
+        <table class="model-table">
+          <thead>
+            <tr>
+              <th>Model Architecture</th>
+              <th>CV Mean R²</th>
+              <th>Train/Test Gap</th>
+              <th>Overfit Warning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="champion">
+              <td><strong>★ GradientBoostingRegressor</strong></td>
+              <td>0.894 ± 0.012</td>
+              <td>0.038</td>
+              <td>None (Healthy)</td>
+            </tr>
+            <tr>
+              <td>RandomForestRegressor</td>
+              <td>0.871 ± 0.015</td>
+              <td>0.082</td>
+              <td>None (Healthy)</td>
+            </tr>
+            <tr>
+              <td>Ridge Regression (α=1.0)</td>
+              <td>0.742 ± 0.018</td>
+              <td>0.012</td>
+              <td>None (Healthy)</td>
+            </tr>
+            <tr>
+              <td>ElasticNet (L1=0.5)</td>
+              <td>0.709 ± 0.021</td>
+              <td>0.008</td>
+              <td>None (Healthy)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="chart-card card-block" id="card-action-matrix" data-card-id="card-action-matrix">
+        <div class="card-title-row">
+          <div>
+            <h3 class="card-h">2×2 Action Prioritization Matrix</h3>
+            <span class="card-h-sub">Interventions scored by effect size and causal evidence</span>
+          </div>
+          <span class="kpi-badge badge-indigo">PRESCRIPTIVE</span>
+        </div>
+        <div class="matrix-quadrants">
+          <div class="quadrant">
+            <span class="quad-tag qw">Quick Win · Target: 18.4%</span>
+            <span class="quad-action">Shift laundry & dishwasher cycles to 22:00–06:00 window</span>
+            <span class="quad-sub">High Impact · Zero Capital Cost</span>
+          </div>
+          <div class="quadrant">
+            <span class="quad-tag sp">Strategic Pilot · Causal Test</span>
+            <span class="quad-action">Pilot smart HVAC thermostat pre-cooling at 17:30</span>
+            <span class="quad-sub">High Impact · Moderate Effort</span>
+          </div>
+          <div class="quadrant">
+            <span class="quad-tag wc">Watch Caveat · Confounded</span>
+            <span class="quad-action">Voltage variation correlates with peak but lacks causation</span>
+            <span class="quad-sub">Observational Only · Do Not Intervene</span>
+          </div>
+          <div class="quadrant">
+            <span class="quad-tag lp">Low Priority · Marginal</span>
+            <span class="quad-action">Standby vampire load reduction on kitchen circuits</span>
+            <span class="quad-sub">&lt; 0.5% Systemic Contribution</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Card 10: Quality Verifier Audit Stamp -->
+    <div class="seal-card card-block" id="seal-audit" data-card-id="seal-audit">
+      <div class="seal-left">
+        <div class="seal-stamp">✓</div>
+        <div class="seal-info">
+          <h4>Audited Autonomous Ledger — 4 of 4 Claims Verified</h4>
+          <p>Reproducible Python REPL execution · Zero unanchored figures · Benjamini-Hochberg FDR Controlled</p>
+        </div>
+      </div>
+      <div class="seal-right">
+        <span class="telemetry-chip">SHA-256: <strong>8f2a...9d10</strong></span>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Virtual Cursor Template & Choreography Engine Script -->
+<script>
+(function() {
+  // ── Swarm Agent Definitions (Unified Monotonous Slate Palette) ──────
+  const UNIFIED_CURSOR_COLOR = '#0f172a';
+  const UNIFIED_HELPER_COLOR = '#0f172a';
+
+  const AGENTS = [
+    { id: 'c1', name: 'Orchestrator', color: UNIFIED_CURSOR_COLOR, target: 'card-header', spawn: { x: 0.15, y: -0.1 } },
+    { id: 'c2', name: 'Data Profiler', color: UNIFIED_CURSOR_COLOR, target: 'card-telemetry', spawn: { x: 0.85, y: -0.1 } },
+    { id: 'c3', name: 'Metrics Bot', color: UNIFIED_CURSOR_COLOR, target: 'card-kpi-1', spawn: { x: -0.1, y: 0.25 } },
+    { id: 'c4', name: 'Statistical Core', color: UNIFIED_CURSOR_COLOR, target: 'card-kpi-2', spawn: { x: 0.5, y: -0.1 } },
+    { id: 'c5', name: 'Causal Auditor', color: UNIFIED_CURSOR_COLOR, target: 'card-kpi-3', spawn: { x: 1.1, y: 0.25 } },
+    { id: 'c6', name: 'Vega Plotter', color: UNIFIED_CURSOR_COLOR, target: 'card-chart-hero', spawn: { x: -0.1, y: 0.55 } },
+    { id: 'c7', name: 'Segment Explorer', color: UNIFIED_CURSOR_COLOR, target: 'card-chart-segment', spawn: { x: 1.1, y: 0.55 } },
+    { id: 'c8', name: 'ML Tournament', color: UNIFIED_CURSOR_COLOR, target: 'card-models', spawn: { x: -0.1, y: 0.85 } },
+    { id: 'c9', name: 'Action Architect', color: UNIFIED_CURSOR_COLOR, target: 'card-action-matrix', spawn: { x: 1.1, y: 0.85 } },
+    { id: 'c10', name: 'Quality Verifier', color: UNIFIED_CURSOR_COLOR, target: 'seal-audit', spawn: { x: 0.5, y: 1.15 } }
+  ];
+
+  const overlay = document.getElementById('swarm-overlay');
+  const hexContainer = document.getElementById('hex-hub-container');
+  const hexTracePath = document.getElementById('hex-trace-path');
+  const hexCoreGlow = document.getElementById('hex-core-glow');
+  const hexFacetsGroup = document.getElementById('hex-facets-group');
+  const hexSeamsGroup = document.getElementById('hex-seams-group');
+  const hexSculptGuides = document.getElementById('hex-sculpt-guides');
+  const hexVerticesGroup = document.getElementById('hex-vertices-group');
+  const hexMathBadge = document.getElementById('hex-math-badge');
+
+  const hudStatus = document.getElementById('hud-status');
+  const hudBadge = document.getElementById('hud-badge');
+  const replayBtn = document.getElementById('btn-replay');
+  const hexBtn = document.getElementById('btn-hexagon');
+  const skipBtn = document.getElementById('btn-skip');
+  const themeBtn = document.getElementById('btn-theme');
+  const speedButtons = document.querySelectorAll('.speed-opt');
+
+  let speedMultiplier = 1.0;
+  let animationRunning = false;
+  let activeAnimationId = 0;
+
+  // ── Spawn DOM Elements for Cursors, Marquees & Hexagon Payloads ─────
+  const cursorElements = {};
+  const marqueeElements = {};
+  const payloadElements = {};
+
+  AGENTS.forEach(agent => {
+    // 1. Create Cursor DOM (Monotonous Slate with Technical Indicator)
+    const cursor = document.createElement('div');
+    cursor.className = 'agent-cursor';
+    cursor.id = `cursor-${agent.id}`;
+    cursor.innerHTML = `
+      <svg class="cursor-svg" width="22" height="22" viewBox="0 0 24 24" fill="none">
+        <path d="M5.65 2.54l12.8 12.8-5.11.75-3.2 5.56-2.1-1.2 3.14-5.46-5.52-1.7v-.05z" fill="${UNIFIED_CURSOR_COLOR}" stroke="#ffffff" stroke-width="1.3" stroke-linejoin="round"/>
+      </svg>
+      <div class="cursor-pill">
+        <span class="cursor-indicator"></span>
+        <span>${agent.name}</span>
+      </div>
+    `;
+    overlay.appendChild(cursor);
+    cursorElements[agent.id] = cursor;
+
+    // 2. Create Marquee Rubberband DOM (Mode 1)
+    const marquee = document.createElement('div');
+    marquee.className = 'selection-marquee';
+    marquee.id = `marquee-${agent.id}`;
+    marquee.innerHTML = `
+      <div class="marquee-handle handle-tl"></div>
+      <div class="marquee-handle handle-tr"></div>
+      <div class="marquee-handle handle-bl"></div>
+      <div class="marquee-handle handle-br"></div>
+      <div class="marquee-dimension">0 × 0px</div>
+    `;
+    overlay.appendChild(marquee);
+    marqueeElements[agent.id] = marquee;
+
+    // 3. Create Hexagon Payload Miniature Block DOM (Mode 2)
+    const payload = document.createElement('div');
+    payload.className = 'hex-payload';
+    payload.id = `payload-${agent.id}`;
+    payload.innerHTML = `<span class="payload-tag">${agent.name}</span>`;
+    overlay.appendChild(payload);
+    payloadElements[agent.id] = payload;
+  });
+
+  // ── Helper Swarm Agent Definitions (10 Helper Sculptors for 90° Rectification) ──
+  const HELPER_AGENTS = [
+    { id: 'h1', pairWith: 'c1', name: 'Header Sculptor', role: 'Corner Fitter', color: UNIFIED_HELPER_COLOR, spawn: { x: 0.05, y: -0.15 } },
+    { id: 'h2', pairWith: 'c2', name: 'Telemetry Shaper', role: 'Aspect Aligner', color: UNIFIED_HELPER_COLOR, spawn: { x: 0.95, y: -0.15 } },
+    { id: 'h3', pairWith: 'c3', name: 'KPI-1 Aligner', role: 'Ortho Shaper', color: UNIFIED_HELPER_COLOR, spawn: { x: -0.15, y: 0.15 } },
+    { id: 'h4', pairWith: 'c4', name: 'KPI-2 Squarer', role: 'Corner Puller', color: UNIFIED_HELPER_COLOR, spawn: { x: 0.65, y: -0.15 } },
+    { id: 'h5', pairWith: 'c5', name: 'KPI-3 Planer', role: '90° Rectifier', color: UNIFIED_HELPER_COLOR, spawn: { x: 1.15, y: 0.15 } },
+    { id: 'h6', pairWith: 'c6', name: 'Hero Chart Fitter', role: 'Canvas Squarer', color: UNIFIED_HELPER_COLOR, spawn: { x: -0.15, y: 0.65 } },
+    { id: 'h7', pairWith: 'c7', name: 'Segment Leveler', role: 'Grid Leveler', color: UNIFIED_HELPER_COLOR, spawn: { x: 1.15, y: 0.65 } },
+    { id: 'h8', pairWith: 'c8', name: 'Model Matrix Shaper', role: 'Bounds Rectifier', color: UNIFIED_HELPER_COLOR, spawn: { x: -0.15, y: 0.95 } },
+    { id: 'h9', pairWith: 'c9', name: 'Matrix Sculptor', role: 'Edge Planer', color: UNIFIED_HELPER_COLOR, spawn: { x: 1.15, y: 0.95 } },
+    { id: 'h10', pairWith: 'c10', name: 'Seal Trimmer', role: 'Seal Sculptor', color: UNIFIED_HELPER_COLOR, spawn: { x: 0.35, y: 1.2 } }
+  ];
+
+  const helperElements = {};
+  const rulerLineElements = {};
+  const rulerBadgeElements = {};
+
+  HELPER_AGENTS.forEach(helper => {
+    // 1. Create Helper Sculptor Cursor DOM
+    const cursor = document.createElement('div');
+    cursor.className = 'agent-cursor helper-cursor';
+    cursor.id = `cursor-${helper.id}`;
+    cursor.innerHTML = `
+      <svg class="cursor-svg helper-cursor-svg" width="20" height="20" viewBox="0 0 24 24" fill="none">
+        <path d="M4 4l12 12-4.5.7-2.8 4.9-1.8-1 2.7-4.8-4.8-1.5z" fill="${UNIFIED_HELPER_COLOR}" stroke="#ffffff" stroke-width="1.3" stroke-linejoin="round"/>
+        <circle cx="17" cy="7" r="3.5" fill="none" stroke="#ffffff" stroke-width="1.2"/>
+        <path d="M17 2v3M17 9v3M12 7h3M19 7h3" stroke="#ffffff" stroke-width="1"/>
+      </svg>
+      <div class="cursor-pill helper-pill">
+        <span class="helper-badge">SCULPTOR</span>
+        <span class="helper-role-text">${helper.role}</span>
+      </div>
+    `;
+    overlay.appendChild(cursor);
+    helperElements[helper.id] = cursor;
+
+    // 2. Create Laser Alignment Ruler Guide Line
+    if (hexSculptGuides) {
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('id', `ruler-line-${helper.id}`);
+      line.setAttribute('class', 'sculptor-ruler-line');
+      line.style.opacity = '0';
+      hexSculptGuides.appendChild(line);
+      rulerLineElements[helper.id] = line;
+
+      // 3. Create Alignment Ruler Badge (Angle readout)
+      const badgeG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      badgeG.setAttribute('id', `ruler-badge-${helper.id}`);
+      badgeG.setAttribute('class', 'sculptor-ruler-badge');
+      badgeG.style.opacity = '0';
+
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('x', '-44');
+      rect.setAttribute('y', '-10');
+      rect.setAttribute('width', '88');
+      rect.setAttribute('height', '20');
+      rect.setAttribute('rx', '4');
+
+      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      text.setAttribute('x', '0');
+      text.setAttribute('y', '4');
+      text.setAttribute('text-anchor', 'middle');
+      text.textContent = '📐 54.2°';
+
+      badgeG.appendChild(rect);
+      badgeG.appendChild(text);
+      hexSculptGuides.appendChild(badgeG);
+      rulerBadgeElements[helper.id] = { group: badgeG, text: text, rect: rect };
+    }
+  });
+
+  function hexToRgba(hex, alpha) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
+  // ── Easing Utilities ────────────────────────────────────────────────
+  function easeOutCubic(t) {
+    return 1 - Math.pow(1 - t, 3);
+  }
+
+  function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  function easeOutQuad(t) {
+    return t * (2 - t);
+  }
+
+  // Quadratic Bezier Interpolator
+  function quadBezier(p0, p1, p2, t) {
+    const u = 1 - t;
+    return u * u * p0 + 2 * u * t * p1 + t * t * p2;
+  }
+
+  // ── Get Relative Coordinates of Element within Dashboard Wrapper ────
+  function getRelativeRect(el) {
+    const wrapper = document.querySelector('.dashboard-wrapper');
+    const wrapRect = wrapper.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+
+    return {
+      left: elRect.left - wrapRect.left,
+      top: elRect.top - wrapRect.top,
+      width: elRect.width,
+      height: elRect.height,
+      right: elRect.right - wrapRect.left,
+      bottom: elRect.bottom - wrapRect.top
+    };
+  }
+
+  // ── Reset Board to Blank Slate ──────────────────────────────────────
+  function resetToBlankSlate() {
+    document.querySelectorAll('.card-block').forEach(el => {
+      el.classList.remove('built', 'stamped-flash');
+      el.style.removeProperty('opacity');
+      el.style.removeProperty('transform');
+    });
+
+    // Reset numbers
+    document.querySelectorAll('.kpi-num').forEach(el => {
+      const prefix = el.getAttribute('data-prefix') || '';
+      const suffix = el.getAttribute('data-suffix') || '';
+      el.textContent = `${prefix}0.0${suffix}`;
+    });
+
+    // Reset SVG paths
+    document.querySelectorAll('.chart-path').forEach(p => {
+      const len = p.getTotalLength ? p.getTotalLength() : 800;
+      p.style.strokeDasharray = `${len}`;
+      p.style.strokeDashoffset = `${len}`;
+      p.style.transition = 'none';
+    });
+
+    // Reset Area Fill
+    const area = document.querySelector('.chart-area');
+    if (area) area.style.opacity = '0';
+
+    // Reset Bar chart
+    document.querySelectorAll('.anim-bar').forEach(b => {
+      b.style.transform = 'scale(1, 0)';
+      b.style.transition = 'none';
+    });
+
+    // Hide cursors, marquees, and payloads
+    Object.values(cursorElements).forEach(c => {
+      c.style.opacity = '0';
+      c.classList.remove('clicking');
+    });
+    Object.values(helperElements).forEach(h => {
+      h.style.opacity = '0';
+      h.classList.remove('clicking');
+    });
+    HELPER_AGENTS.forEach(h => {
+      const el = helperElements[h.id];
+      if (el) {
+        const roleText = el.querySelector('.helper-role-text');
+        if (roleText) roleText.textContent = h.role;
+      }
+    });
+    Object.values(rulerLineElements).forEach(l => {
+      l.style.opacity = '0';
+      l.style.strokeDasharray = '4 3';
+    });
+    Object.values(rulerBadgeElements).forEach(b => {
+      b.group.style.opacity = '0';
+      b.text.textContent = '📐 54.2°';
+      b.rect.style.stroke = 'rgba(255, 255, 255, 0.35)';
+    });
+    Object.values(marqueeElements).forEach(m => {
+      m.classList.remove('active');
+    });
+    Object.values(payloadElements).forEach(p => {
+      p.classList.remove('active');
+    });
+
+    // Hide hexagon
+    hexContainer.style.display = 'none';
+    hexTracePath.setAttribute('d', '');
+    hexTracePath.style.opacity = '0';
+    hexCoreGlow.style.opacity = '0';
+    hexVerticesGroup.innerHTML = '';
+    hexFacetsGroup.innerHTML = '';
+    hexSeamsGroup.innerHTML = '';
+    if (hexSculptGuides) hexSculptGuides.innerHTML = '';
+    if (hexMathBadge) {
+      hexMathBadge.style.opacity = '0';
+      hexMathBadge.style.display = 'none';
+    }
+  }
+
+  // ── Reveal All Instantly (Skip) ─────────────────────────────────────
+  function revealAllInstantly() {
+    animationRunning = false;
+    activeAnimationId++;
+
+    document.querySelectorAll('.card-block').forEach(el => {
+      el.classList.add('built');
+      el.style.removeProperty('opacity');
+      el.style.removeProperty('transform');
+    });
+
+    document.querySelectorAll('.kpi-num').forEach(el => {
+      const target = el.getAttribute('data-target') || '0';
+      const prefix = el.getAttribute('data-prefix') || '';
+      const suffix = el.getAttribute('data-suffix') || '';
+      el.textContent = `${prefix}${target}${suffix}`;
+    });
+
+    document.querySelectorAll('.chart-path').forEach(p => {
+      p.style.strokeDashoffset = '0';
+    });
+
+    const area = document.querySelector('.chart-area');
+    if (area) area.style.opacity = '1';
+
+    document.querySelectorAll('.anim-bar').forEach(b => {
+      b.style.transform = 'scale(1, 1)';
+    });
+
+    Object.values(cursorElements).forEach(c => c.style.opacity = '0');
+    Object.values(helperElements).forEach(h => h.style.opacity = '0');
+    Object.values(rulerLineElements).forEach(l => l.style.opacity = '0');
+    Object.values(rulerBadgeElements).forEach(b => b.group.style.opacity = '0');
+    Object.values(marqueeElements).forEach(m => m.classList.remove('active'));
+    Object.values(payloadElements).forEach(p => p.classList.remove('active'));
+
+    hexContainer.style.display = 'none';
+    hexFacetsGroup.innerHTML = '';
+    hexSeamsGroup.innerHTML = '';
+    if (hexSculptGuides) hexSculptGuides.innerHTML = '';
+    if (hexMathBadge) {
+      hexMathBadge.style.opacity = '0';
+      hexMathBadge.style.display = 'none';
+    }
+    hudStatus.textContent = '✨ Complete (Instant View)';
+    hudBadge.textContent = 'Ready';
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // MODE 1: PARALLEL MARQUEE SELECTION & CARD STAMPING
+  // ════════════════════════════════════════════════════════════════════
+  function runMarqueeChoreography() {
+    const currentRun = ++activeAnimationId;
+    animationRunning = true;
+
+    resetToBlankSlate();
+
+    const wrapper = document.querySelector('.dashboard-wrapper');
+    const wrapW = wrapper.clientWidth;
+    const wrapH = wrapper.clientHeight;
+
+    // Continuous timeline milestones (ms at 1.0x speed)
+    const T_ENTRY = 900 / speedMultiplier;
+    const T_DRAG = 2400 / speedMultiplier;
+    const T_STAMP = 3600 / speedMultiplier;
+    const T_COMPLETE = 4600 / speedMultiplier;
+
+    const startTime = performance.now();
+
+    const targetRects = {};
+    AGENTS.forEach(ag => {
+      const el = document.getElementById(ag.target);
+      targetRects[ag.id] = el ? getRelativeRect(el) : { left: wrapW/2, top: wrapH/2, width: 220, height: 120 };
+    });
+
+    hudStatus.textContent = '🚀 Swarm of 10 Agents Deploying (Marquee Mode)...';
+    hudBadge.textContent = 'Marquee Build';
+
+    function step(now) {
+      if (currentRun !== activeAnimationId || !animationRunning) return;
+
+      const elapsed = now - startTime;
+
+      if (elapsed < T_ENTRY) {
+        const p = easeOutCubic(elapsed / T_ENTRY);
+        hudStatus.textContent = `🎯 Swarm entering canvas (${Math.round(p * 100)}%)...`;
+
+        AGENTS.forEach(ag => {
+          const rect = targetRects[ag.id];
+          const startX = ag.spawn.x * wrapW;
+          const startY = ag.spawn.y * wrapH;
+          const endX = rect.left + 10;
+          const endY = rect.top + 10;
+
+          const curX = startX + (endX - startX) * p;
+          const curY = startY + (endY - startY) * p;
+
+          const curEl = cursorElements[ag.id];
+          curEl.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
+          curEl.style.opacity = `${Math.min(1, p * 1.6)}`;
+        });
+      }
+      else if (elapsed < T_DRAG) {
+        const dragProgress = easeInOutCubic((elapsed - T_ENTRY) / (T_DRAG - T_ENTRY));
+        hudStatus.textContent = `📐 Selecting areas & stamping cards (${Math.round(dragProgress * 100)}%)...`;
+
+        AGENTS.forEach((ag, idx) => {
+          const staggerOffset = (idx % 4) * 0.05;
+          const localP = Math.min(1, Math.max(0, (dragProgress - staggerOffset) / (1 - staggerOffset)));
+          const curvedP = easeOutQuad(localP);
+
+          const rect = targetRects[ag.id];
+          const curEl = cursorElements[ag.id];
+          const marEl = marqueeElements[ag.id];
+
+          if (localP > 0.02 && localP < 0.98) {
+            curEl.classList.add('clicking');
+          } else {
+            curEl.classList.remove('clicking');
+          }
+
+          const startX = rect.left + 8;
+          const startY = rect.top + 8;
+          const endX = rect.left + rect.width - 8;
+          const endY = rect.top + rect.height - 8;
+
+          const curX = startX + (endX - startX) * curvedP;
+          const curY = startY + (endY - startY) * curvedP;
+
+          curEl.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
+          curEl.style.opacity = '1';
+
+          if (localP > 0) {
+            marEl.classList.add('active');
+            const mWidth = (rect.width - 16) * curvedP;
+            const mHeight = (rect.height - 16) * curvedP;
+
+            marEl.style.transform = `translate3d(${startX}px, ${startY}px, 0)`;
+            marEl.style.width = `${Math.max(8, mWidth)}px`;
+            marEl.style.height = `${Math.max(8, mHeight)}px`;
+
+            const dimEl = marEl.querySelector('.marquee-dimension');
+            if (dimEl) {
+              dimEl.textContent = `${Math.round(mWidth)} × ${Math.round(mHeight)}px`;
+            }
+          }
+        });
+      }
+      else if (elapsed < T_STAMP) {
+        const stampP = easeOutCubic((elapsed - T_DRAG) / (T_STAMP - T_DRAG));
+        hudStatus.textContent = `✨ Materializing analytical components & SVGs (${Math.round(stampP * 100)}%)...`;
+
+        Object.values(marqueeElements).forEach(m => m.classList.remove('active'));
+        Object.values(cursorElements).forEach(c => c.classList.remove('clicking'));
+
+        AGENTS.forEach((ag, idx) => {
+          if (ag.id === 'c10') return;
+
+          const card = document.getElementById(ag.target);
+          if (card && !card.classList.contains('built')) {
+            card.classList.add('built');
+            card.style.setProperty('--flash-color', ag.color);
+            card.classList.add('stamped-flash');
+          }
+
+          const rect = targetRects[ag.id];
+          const idleX = rect.left + rect.width - 32 + Math.sin((elapsed + idx * 400) / 320) * 8;
+          const idleY = rect.top + rect.height - 24 + Math.cos((elapsed + idx * 400) / 320) * 6;
+          cursorElements[ag.id].style.transform = `translate3d(${idleX}px, ${idleY}px, 0)`;
+          cursorElements[ag.id].style.opacity = '1';
+        });
+
+        document.querySelectorAll('.kpi-num').forEach(el => {
+          const target = parseFloat(el.getAttribute('data-target') || '0');
+          const prefix = el.getAttribute('data-prefix') || '';
+          const suffix = el.getAttribute('data-suffix') || '';
+          const currentVal = (target * Math.min(1, stampP * 1.15)).toFixed(target % 1 === 0 ? 0 : 2);
+          el.textContent = `${prefix}${currentVal}${suffix}`;
+        });
+
+        document.querySelectorAll('.chart-path').forEach(p => {
+          const len = p.getTotalLength ? p.getTotalLength() : 800;
+          p.style.strokeDashoffset = `${len * (1 - Math.min(1, stampP * 1.25))}`;
+        });
+
+        const area = document.querySelector('.chart-area');
+        if (area) area.style.opacity = `${Math.min(1, stampP * 1.4)}`;
+
+        document.querySelectorAll('.anim-bar').forEach((b, i) => {
+          const barP = Math.min(1, Math.max(0, stampP * 1.5 - i * 0.08));
+          b.style.transform = `scale(1, ${barP})`;
+        });
+
+        const verifier = cursorElements['c10'];
+        const vRect = targetRects['c10'] || { left: wrapW / 2 - 100, top: wrapH - 120 };
+        const sweepX = wrapW * 0.3 + (vRect.left - wrapW * 0.3 + 40) * stampP;
+        const sweepY = wrapH * 0.4 + (vRect.top - wrapH * 0.4 + 20) * stampP;
+        verifier.style.transform = `translate3d(${sweepX}px, ${sweepY}px, 0)`;
+        verifier.style.opacity = '1';
+      }
+      else if (elapsed < T_COMPLETE) {
+        const exitP = (elapsed - T_STAMP) / (T_COMPLETE - T_STAMP);
+        hudStatus.textContent = `🛡️ Quality Verifier signing audit seal & swarm departing...`;
+
+        const seal = document.getElementById('seal-audit');
+        if (seal && !seal.classList.contains('built')) {
+          seal.classList.add('built');
+          seal.style.setProperty('--flash-color', '#eab308');
+          seal.classList.add('stamped-flash');
+        }
+
+        AGENTS.forEach((ag, idx) => {
+          const curEl = cursorElements[ag.id];
+          const rect = targetRects[ag.id];
+
+          if (ag.id === 'c10') {
+            const sealRect = targetRects['c10'] || { left: wrapW / 2 - 100, top: wrapH - 120 };
+            curEl.style.transform = `translate3d(${sealRect.left + 45}px, ${sealRect.top + 18}px, 0)`;
+            curEl.style.opacity = `${Math.max(0, 1 - exitP * 1.8)}`;
+          } else {
+            const origX = rect.left + rect.width - 32;
+            const origY = rect.top + rect.height - 24;
+            const floatX = origX + (idx % 2 === 0 ? -45 : 45) * exitP;
+            const floatY = origY - 65 * exitP;
+
+            curEl.style.transform = `translate3d(${floatX}px, ${floatY}px, 0)`;
+            curEl.style.opacity = `${Math.max(0, 1 - exitP * 2)}`;
+          }
+        });
+      }
+      else {
+        document.querySelectorAll('.card-block').forEach(el => el.classList.add('built'));
+        document.querySelectorAll('.kpi-num').forEach(el => {
+          const target = el.getAttribute('data-target') || '0';
+          const prefix = el.getAttribute('data-prefix') || '';
+          const suffix = el.getAttribute('data-suffix') || '';
+          el.textContent = `${prefix}${target}${suffix}`;
+        });
+        document.querySelectorAll('.chart-path').forEach(p => p.style.strokeDashoffset = '0');
+        const area = document.querySelector('.chart-area');
+        if (area) area.style.opacity = '1';
+        document.querySelectorAll('.anim-bar').forEach(b => b.style.transform = 'scale(1, 1)');
+
+        Object.values(cursorElements).forEach(c => c.style.opacity = '0');
+        Object.values(marqueeElements).forEach(m => m.classList.remove('active'));
+
+        hudStatus.textContent = '✨ Complete: Assembled via Marquee Swarm in 3.8s';
+        hudBadge.textContent = 'Ready';
+        animationRunning = false;
+        return;
+      }
+
+      requestAnimationFrame(step);
+    }
+
+    requestAnimationFrame(step);
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // MODE 2: EQUAL MATHEMATICAL HEXAGON DISSECTION & SWARM CHOREOGRAPHY
+  // ════════════════════════════════════════════════════════════════════
+  function runHexagonChoreography() {
+    const currentRun = ++activeAnimationId;
+    animationRunning = true;
+
+    resetToBlankSlate();
+
+    const wrapper = document.querySelector('.dashboard-wrapper');
+    const wrapW = wrapper.clientWidth;
+    const wrapH = wrapper.clientHeight;
+
+    // Hexagon center coordinate (centered nicely in workspace)
+    const hx = wrapW / 2;
+    const hy = Math.max(340, wrapH * 0.42);
+    const R = 155; // Hexagon radius
+    const base_angle = -Math.PI / 2;
+
+    // Mathematical parameters for regular hexagon
+    const A_tri = (Math.sqrt(3) / 4) * (R * R);
+    const A_total = 6 * A_tri;
+    const A_piece = A_total / 10; // Exactly 1/10th equal area (6,241.88 px²)
+
+    // 1. Boundary radius r(theta) for regular hexagon
+    function getHexRadius(theta) {
+      let rel = (theta - base_angle) % (2 * Math.PI);
+      if (rel < 0) rel += 2 * Math.PI;
+      const k = Math.floor(rel / (Math.PI / 3));
+      const tri_mid = base_angle + k * (Math.PI / 3) + (Math.PI / 6);
+      const phi = theta - tri_mid;
+      const d = R * Math.sqrt(3) / 2;
+      return d / Math.cos(phi);
+    }
+
+    // 2. 6 Regular Hexagon Vertices
+    const vertices = [];
+    for (let k = 0; k < 6; k++) {
+      const ang = base_angle + k * (Math.PI / 3);
+      vertices.push({
+        ang: ang,
+        x: hx + R * Math.cos(ang),
+        y: hy + R * Math.sin(ang),
+        localX: R * Math.cos(ang),
+        localY: R * Math.sin(ang)
+      });
+    }
+
+    // 3. 11 Exact Boundary Angles theta_0 ... theta_10 via Closed-Form Analytic Inverse
+    const boundaries = [];
+    const seamCoords = [];
+    for (let i = 0; i <= 10; i++) {
+      const target = i * A_piece;
+      const k = Math.min(5, Math.floor(target / A_tri));
+      const rem = target - k * A_tri;
+      const tri_mid = base_angle + k * (Math.PI / 3) + (Math.PI / 6);
+      const tan_phi = (rem / (0.375 * R * R)) - (1.0 / Math.sqrt(3));
+      const phi = Math.atan(tan_phi);
+      const theta = tri_mid + phi;
+      boundaries.push(theta);
+
+      const r = getHexRadius(theta);
+      seamCoords.push({
+        x: hx + r * Math.cos(theta),
+        y: hy + r * Math.sin(theta),
+        theta: theta,
+        r: r
+      });
+    }
+
+    // 4. Directional Mapping of Facets to Agents & Cards
+    // Angles: Facet 0 (-73°), 1 (-35°), 2 (0°), 3 (35°), 4 (73°), 5 (107°), 6 (145°), 7 (180°), 8 (-145°), 9 (-107°)
+    const FACET_TO_AGENT = ['c2', 'c4', 'c5', 'c7', 'c9', 'c10', 'c8', 'c6', 'c3', 'c1'];
+    const AGENT_TO_FACET = {};
+    FACET_TO_AGENT.forEach((agId, facetIdx) => {
+      AGENT_TO_FACET[agId] = facetIdx;
+    });
+
+
+    // Destination rects for each agent
+    const targetRects = {};
+    AGENTS.forEach(ag => {
+      const el = document.getElementById(ag.target);
+      targetRects[ag.id] = el ? getRelativeRect(el) : { left: wrapW/2 - 110, top: wrapH/2 - 60, width: 220, height: 120 };
+    });
+
+    // 5. Build 10 Polygon Facets & Compute Exact Centroids and 4-Corner Morph Targets
+    const facetData = [];
+    hexFacetsGroup.innerHTML = '';
+    hexSeamsGroup.innerHTML = '';
+    if (hexSculptGuides) hexSculptGuides.innerHTML = '';
+
+    const W_RECT = 92;
+    const H_RECT = 52;
+
+    for (let i = 0; i < 10; i++) {
+      const t0 = boundaries[i];
+      const t1 = boundaries[i + 1];
+      const pts = [{ x: 0, y: 0 }];
+      const r0 = getHexRadius(t0);
+      pts.push({ x: r0 * Math.cos(t0), y: r0 * Math.sin(t0) });
+
+      for (let v of vertices) {
+        let v_norm = (v.ang - t0) % (2 * Math.PI);
+        if (v_norm < 0) v_norm += 2 * Math.PI;
+        let t1_norm = (t1 - t0) % (2 * Math.PI);
+        if (t1_norm < 0) t1_norm += 2 * Math.PI;
+        if (v_norm > 1e-4 && v_norm < t1_norm - 1e-4) {
+          pts.push({ x: v.localX, y: v.localY });
+        }
+      }
+      const r1 = getHexRadius(t1);
+      pts.push({ x: r1 * Math.cos(t1), y: r1 * Math.sin(t1) });
+
+      // Shoelace centroid calculation
+      let cx = 0, cy = 0, signedArea = 0;
+      for (let j = 0; j < pts.length; j++) {
+        let next = (j + 1) % pts.length;
+        let cross = pts[j].x * pts[next].y - pts[next].x * pts[j].y;
+        signedArea += cross;
+        cx += (pts[j].x + pts[next].x) * cross;
+        cy += (pts[j].y + pts[next].y) * cross;
+      }
+      signedArea /= 2;
+      cx /= (6 * signedArea);
+      cy /= (6 * signedArea);
+
+      // Parameterize exactly 4 vertices for morphing
+      let pts4 = [];
+      if (pts.length === 3) {
+        pts4 = [
+          { x: pts[0].x, y: pts[0].y },
+          { x: pts[1].x, y: pts[1].y },
+          { x: (pts[1].x + pts[2].x) / 2, y: (pts[1].y + pts[2].y) / 2 },
+          { x: pts[2].x, y: pts[2].y }
+        ];
+      } else {
+        pts4 = pts.slice(0, 4).map(p => ({ x: p.x, y: p.y }));
+      }
+
+      const agId = FACET_TO_AGENT[i];
+      const target = targetRects[agId] || { left: wrapW/2 - 110, top: wrapH/2 - 60, width: 220, height: 120 };
+      const targetCx = target.left + target.width / 2;
+      const targetCy = target.top + target.height / 2;
+
+      // Outward staging vector: carried outside central hexagon toward destination card
+      const toTargetX = targetCx - hx;
+      const toTargetY = targetCy - hy;
+      const distToTarget = Math.hypot(toTargetX, toTargetY);
+      const dirAngle = Math.atan2(toTargetY, toTargetX);
+
+      // Stage outside at least 295px radially away from center, or ~48% along path to card
+      const stageDist = Math.max(295, distToTarget * 0.48);
+      const stageCx = hx + Math.cos(dirAngle) * stageDist;
+      const stageCy = hy + Math.sin(dirAngle) * stageDist;
+
+      // Translation offset: maps initial shard centroid (hx+cx, hy+cy) to outside staged position (stageCx, stageCy)
+      const stageOffsetX = stageCx - (hx + cx);
+      const stageOffsetY = stageCy - (hy + cy);
+
+      // 4 corners of target rectangle centered at outward staged position (stageCx, stageCy)
+      const rectBaseStaged = [
+        { x: stageCx - W_RECT / 2, y: stageCy - H_RECT / 2 }, // 0: TL
+        { x: stageCx + W_RECT / 2, y: stageCy - H_RECT / 2 }, // 1: TR
+        { x: stageCx + W_RECT / 2, y: stageCy + H_RECT / 2 }, // 2: BR
+        { x: stageCx - W_RECT / 2, y: stageCy + H_RECT / 2 }  // 3: BL
+      ];
+
+      // Staged 4 vertices of source shard
+      const pts4Staged = pts4.map(p => ({ x: hx + p.x + stageOffsetX, y: hy + p.y + stageOffsetY }));
+
+      // Optimal cyclic shift to avoid twisting during morph outside
+      let bestShift = 0;
+      let minDiff = 1e9;
+      for (let shift = 0; shift < 4; shift++) {
+        let diff = 0;
+        for (let k = 0; k < 4; k++) {
+          const target = rectBaseStaged[(k + shift) % 4];
+          const source = pts4Staged[k];
+          diff += Math.hypot(source.x - target.x, source.y - target.y);
+        }
+        if (diff < minDiff) {
+          minDiff = diff;
+          bestShift = shift;
+        }
+      }
+
+      const targetCornersStaged = [];
+      for (let k = 0; k < 4; k++) {
+        targetCornersStaged.push(rectBaseStaged[(k + bestShift) % 4]);
+      }
+
+      // SVG path relative to (hx, hy)
+      let dStr = `M ${hx + pts[0].x} ${hy + pts[0].y}`;
+      for (let j = 1; j < pts.length; j++) {
+        dStr += ` L ${hx + pts[j].x} ${hy + pts[j].y}`;
+      }
+      dStr += ' Z';
+
+      const agent = AGENTS.find(a => a.id === agId);
+      const helper = HELPER_AGENTS.find(h => h.pairWith === agId);
+
+      // Create SVG group for facet
+      const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.id = `facet-g-${agId}`;
+      g.className = 'hex-facet-g';
+
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', dStr);
+      path.setAttribute('class', 'hex-facet');
+      path.setAttribute('opacity', '0');
+      g.appendChild(path);
+      hexFacetsGroup.appendChild(g);
+
+      facetData.push({
+        index: i,
+        agId: agId,
+        agent: agent,
+        helper: helper,
+        pts: pts,
+        pts4: pts4,
+        pts4Staged: pts4Staged,
+        targetCornersStaged: targetCornersStaged,
+        cx: hx + cx,
+        cy: hy + cy,
+        localCx: cx,
+        localCy: cy,
+        stageOffsetX: stageOffsetX,
+        stageOffsetY: stageOffsetY,
+        stageCx: stageCx,
+        stageCy: stageCy,
+        area: Math.abs(signedArea),
+        groupEl: g,
+        pathEl: path
+      });
+    }
+
+    // 6. Build SVG Cut Seams (10 radial lines from center out to boundary)
+    const seamElements = [];
+    for (let i = 0; i < 10; i++) {
+      const seam = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      seam.setAttribute('x1', hx);
+      seam.setAttribute('y1', hy);
+      seam.setAttribute('x2', seamCoords[i].x);
+      seam.setAttribute('y2', seamCoords[i].y);
+      seam.setAttribute('class', 'hex-seam-line');
+      seam.setAttribute('stroke-dasharray', `${seamCoords[i].r}`);
+      seam.setAttribute('stroke-dashoffset', `${seamCoords[i].r}`);
+      seam.setAttribute('opacity', '0');
+      hexSeamsGroup.appendChild(seam);
+      seamElements.push(seam);
+    }
+
+    // 7. Build Helper Sculptor Laser Guides & Snap Badges
+    if (hexSculptGuides) {
+      HELPER_AGENTS.forEach(helper => {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('id', `ruler-line-${helper.id}`);
+        line.setAttribute('class', 'sculptor-ruler-line');
+        line.style.opacity = '0';
+        hexSculptGuides.appendChild(line);
+        rulerLineElements[helper.id] = line;
+
+        const badgeG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        badgeG.setAttribute('id', `ruler-badge-${helper.id}`);
+        badgeG.setAttribute('class', 'sculptor-ruler-badge');
+        badgeG.style.opacity = '0';
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', '-44');
+        rect.setAttribute('y', '-10');
+        rect.setAttribute('width', '88');
+        rect.setAttribute('height', '20');
+        rect.setAttribute('rx', '4');
+
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', '0');
+        text.setAttribute('y', '4');
+        text.setAttribute('text-anchor', 'middle');
+        text.textContent = '📐 54.2°';
+
+        badgeG.appendChild(rect);
+        badgeG.appendChild(text);
+        hexSculptGuides.appendChild(badgeG);
+        rulerBadgeElements[helper.id] = { group: badgeG, text: text, rect: rect };
+      });
+    }
+
+    // Position math badge right above hexagon
+    hexMathBadge.style.display = 'inline-flex';
+    hexMathBadge.style.left = `${hx}px`;
+    hexMathBadge.style.top = `${hy - R - 28}px`;
+    hexMathBadge.style.opacity = '0';
+
+    // Set up SVG container
+    hexContainer.style.display = 'block';
+    hexContainer.setAttribute('viewBox', `0 0 ${wrapW} ${wrapH}`);
+    hexCoreGlow.setAttribute('cx', hx);
+    hexCoreGlow.setAttribute('cy', hy);
+
+    // Build SVG path data for hexagon outer perimeter
+    let pathD = `M ${vertices[0].x} ${vertices[0].y}`;
+    for (let i = 1; i < 6; i++) {
+      pathD += ` L ${vertices[i].x} ${vertices[i].y}`;
+    }
+    pathD += ' Z';
+    hexTracePath.setAttribute('d', pathD);
+
+    const hexPerimeter = 6 * R;
+    hexTracePath.style.strokeDasharray = `${hexPerimeter}`;
+    hexTracePath.style.strokeDashoffset = `${hexPerimeter}`;
+    hexTracePath.style.opacity = '1';
+
+    // Populate vertex dots
+    hexVerticesGroup.innerHTML = '';
+    vertices.forEach(v => {
+      const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      dot.setAttribute('cx', v.x);
+      dot.setAttribute('cy', v.y);
+      dot.setAttribute('r', '4');
+      dot.setAttribute('class', 'hex-vertex-dot');
+      dot.setAttribute('fill', 'var(--pen)');
+      dot.setAttribute('opacity', '0');
+      hexVerticesGroup.appendChild(dot);
+    });
+
+
+    // Milestone timing with Radial Extraction & Shape Rectification phases
+    const T_TRACE = 1000 / speedMultiplier;
+    const T_CONVERGE = 1600 / speedMultiplier;
+    const T_SLICE = 2500 / speedMultiplier;
+    const T_EXTRACT = 3700 / speedMultiplier;
+    const T_SCULPT = 5100 / speedMultiplier;
+    const T_DISPERSE = 6500 / speedMultiplier;
+    const T_STAMP = 7200 / speedMultiplier;
+    const T_COMPLETE = 7900 / speedMultiplier;
+
+    const startTime = performance.now();
+    hudStatus.textContent = '📐 Orchestrator synthesizing Central Analytical Hexagon...';
+    hudBadge.textContent = 'Hexagon Genesis';
+
+    function stepHex(now) {
+      if (currentRun !== activeAnimationId || !animationRunning) return;
+
+      const elapsed = now - startTime;
+
+      // ── PHASE 1: ORCHESTRATOR TRACES THE CENTRAL HEXAGON (0 to T_TRACE)
+      if (elapsed < T_TRACE) {
+        const p = easeInOutCubic(elapsed / T_TRACE);
+        hudStatus.textContent = `📐 Orchestrator synthesizing Central Hexagon (${Math.round(p * 100)}%)...`;
+
+        // Progress along 6 vertices
+        const totalSides = 6;
+        const progressSides = p * totalSides;
+        const currentSide = Math.min(5, Math.floor(progressSides));
+        const sideT = progressSides - currentSide;
+
+        const p0 = vertices[currentSide] || { x: hx, y: hy };
+        const p1 = vertices[(currentSide + 1) % 6] || { x: hx, y: hy };
+
+        const curX = p0.x + (p1.x - p0.x) * sideT;
+        const curY = p0.y + (p1.y - p0.y) * sideT;
+
+        const orchCursor = cursorElements['c1'];
+        orchCursor.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
+        orchCursor.style.opacity = '1';
+
+        // Draw SVG stroke
+        hexTracePath.style.strokeDashoffset = `${hexPerimeter * (1 - p)}`;
+        hexCoreGlow.style.opacity = `${p * 0.8}`;
+
+        // Light up vertices
+        const dots = hexVerticesGroup.querySelectorAll('circle');
+        dots.forEach((dot, idx) => {
+          if (idx <= currentSide) {
+            dot.setAttribute('opacity', '1');
+          }
+        });
+      }
+
+      // ── PHASE 2: SWARM CONVERGENCE AT HEXAGON EPICENTER (T_TRACE to T_CONVERGE)
+      else if (elapsed < T_CONVERGE) {
+        const convP = easeOutCubic((elapsed - T_TRACE) / (T_CONVERGE - T_TRACE));
+        hudStatus.textContent = `⚡ 10 Agents converging at epicenter for mathematical dissection...`;
+        hudBadge.textContent = 'Swarm Ingress';
+
+        hexTracePath.style.strokeDashoffset = '0';
+        hexCoreGlow.style.opacity = '1';
+
+        // All 10 cursors converge from spawn positions to epicenter (hx, hy)
+        AGENTS.forEach(ag => {
+          const curEl = cursorElements[ag.id];
+          const spawnX = ag.spawn.x * wrapW;
+          const spawnY = ag.spawn.y * wrapH;
+
+          let curX, curY;
+          if (ag.id === 'c1') {
+            curX = vertices[0].x + (hx - vertices[0].x) * convP;
+            curY = vertices[0].y + (hy - vertices[0].y) * convP;
+          } else {
+            curX = spawnX + (hx - spawnX) * convP;
+            curY = spawnY + (hy - spawnY) * convP;
+          }
+
+          curEl.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
+          curEl.style.opacity = '1';
+        });
+      }
+
+      // ── PHASE 3: SWARM EQUALLY SLICES HEXAGON INTO 10 FACETS (T_CONVERGE to T_SLICE)
+      else if (elapsed < T_SLICE) {
+        const sliceP = easeInOutCubic((elapsed - T_CONVERGE) / (T_SLICE - T_CONVERGE));
+        hudStatus.textContent = `📐 Swarm executing Equi-Area Dissection (10 × 6,242 px²)...`;
+        hudBadge.textContent = 'Mathematical Slicing';
+
+        // Each cursor i moves from center (hx, hy) outward along ray i to its perimeter point
+        AGENTS.forEach(ag => {
+          const facetIdx = AGENT_TO_FACET[ag.id];
+          const coord = seamCoords[facetIdx];
+          const curEl = cursorElements[ag.id];
+
+          const curX = hx + (coord.x - hx) * sliceP;
+          const curY = hy + (coord.y - hy) * sliceP;
+
+          curEl.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
+          curEl.classList.add('clicking');
+
+          const seam = seamElements[facetIdx];
+          seam.style.opacity = '1';
+          seam.style.strokeDashoffset = `${coord.r * (1 - sliceP)}`;
+        });
+
+        // 10 facets fade in with theme colors
+        if (sliceP > 0.35) {
+          const facetAlpha = Math.min(1, (sliceP - 0.35) / 0.65);
+          facetData.forEach(fd => {
+            fd.pathEl.style.opacity = `${facetAlpha}`;
+          });
+          hexMathBadge.style.opacity = `${facetAlpha}`;
+        }
+      }
+
+      // ── PHASE 4: RADIAL EXTRACTION OUTWARD & CENTRAL HEXAGON DISSOLUTION (T_SLICE to T_EXTRACT)
+      else if (elapsed < T_EXTRACT) {
+        const extP = easeInOutCubic((elapsed - T_SLICE) / (T_EXTRACT - T_SLICE));
+        hudStatus.textContent = `🚀 Partition shards carried outward into orbit while core dissolves (${Math.round(extP * 100)}%)...`;
+        hudBadge.textContent = 'Radial Extraction';
+
+        // Cleanly and rapidly fade out central hexagon shape (border, glow, vertices, seams, and math badge)
+        // Completely dissolved to 0 opacity by extP = 0.4 so the center is entirely empty while shards continue outward
+        const coreAlpha = Math.max(0, 1 - extP * 2.5);
+        hexTracePath.style.opacity = `${coreAlpha}`;
+        hexCoreGlow.style.opacity = `${coreAlpha}`;
+        hexVerticesGroup.style.opacity = `${coreAlpha}`;
+        seamElements.forEach(seam => {
+          seam.style.opacity = `${coreAlpha}`;
+        });
+        hexMathBadge.style.opacity = `${coreAlpha}`;
+        if (extP > 0.25) {
+          hexMathBadge.style.display = 'none';
+        }
+
+        // Translate each facet shard outward along radial trajectory
+        AGENTS.forEach(ag => {
+          const facetIdx = AGENT_TO_FACET[ag.id];
+          const fd = facetData[facetIdx];
+          const curEl = cursorElements[ag.id];
+
+          const shiftX = fd.stageOffsetX * extP;
+          const shiftY = fd.stageOffsetY * extP;
+
+          // Render shifted triangle shard polygon
+          let dStr = `M ${hx + fd.pts[0].x + shiftX} ${hy + fd.pts[0].y + shiftY}`;
+          for (let j = 1; j < fd.pts.length; j++) {
+            dStr += ` L ${hx + fd.pts[j].x + shiftX} ${hy + fd.pts[j].y + shiftY}`;
+          }
+          dStr += ' Z';
+          fd.pathEl.setAttribute('d', dStr);
+          fd.pathEl.style.opacity = '1';
+
+          // Primary cursor holds centroid of moving shard
+          const curX = fd.cx + shiftX;
+          const curY = fd.cy + shiftY;
+          curEl.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
+          curEl.classList.add('clicking');
+        });
+
+        // Helper Sculptors glide in towards the exterior staged shard positions
+        if (extP > 0.3) {
+          const helpP = easeOutCubic((extP - 0.3) / 0.7);
+          HELPER_AGENTS.forEach(helper => {
+            const fd = facetData.find(f => f.helper.id === helper.id);
+            const helpEl = helperElements[helper.id];
+            const spawnX = helper.spawn.x * wrapW;
+            const spawnY = helper.spawn.y * wrapH;
+            const targetX = hx + fd.pts4[2].x + fd.stageOffsetX;
+            const targetY = hy + fd.pts4[2].y + fd.stageOffsetY;
+
+            const curX = spawnX + (targetX - spawnX) * helpP;
+            const curY = spawnY + (targetY - spawnY) * helpP;
+
+            helpEl.style.transform = `translate3d(${curX}px, ${curY}px, 0)`;
+            helpEl.style.opacity = `${helpP * 0.95}`;
+          });
+        }
+      }
+
+      // ── PHASE 5: 10 HELPER SCULPTORS RESHAPE SHARDS INTO 90° RECTANGLES OUTSIDE (T_EXTRACT to T_SCULPT)
+      else if (elapsed < T_SCULPT) {
+        const sculptElapsed = elapsed - T_EXTRACT;
+        const sculptTotal = T_SCULPT - T_EXTRACT;
+        const sculptP = sculptElapsed / sculptTotal;
+
+        // Ensure central hexagon is completely invisible
+        hexTracePath.style.opacity = '0';
+        hexCoreGlow.style.opacity = '0';
+        hexVerticesGroup.style.opacity = '0';
+        hexMathBadge.style.opacity = '0';
+        seamElements.forEach(s => s.style.opacity = '0');
+
+        // Sub-phase 5a: Helper cursors latch onto vertices at exterior staged positions (0 to 0.25)
+        if (sculptP < 0.25) {
+          const latchP = easeOutCubic(sculptP / 0.25);
+          hudStatus.textContent = `⚡ 10 Helper Sculptors latching onto staged vertices with alignment guides...`;
+          hudBadge.textContent = 'Sculptor Latch-On';
+
+          AGENTS.forEach(ag => {
+            const facetIdx = AGENT_TO_FACET[ag.id];
+            const fd = facetData[facetIdx];
+            const curEl = cursorElements[ag.id];
+            const helpEl = helperElements[fd.helper.id];
+            const line = rulerLineElements[fd.helper.id];
+            const badge = rulerBadgeElements[fd.helper.id];
+
+            const p0 = { x: hx + fd.pts4[0].x + fd.stageOffsetX, y: hy + fd.pts4[0].y + fd.stageOffsetY };
+            const p2 = { x: hx + fd.pts4[2].x + fd.stageOffsetX, y: hy + fd.pts4[2].y + fd.stageOffsetY };
+
+            curEl.style.transform = `translate3d(${p0.x}px, ${p0.y}px, 0)`;
+            curEl.style.opacity = '1';
+
+            helpEl.style.transform = `translate3d(${p2.x}px, ${p2.y}px, 0)`;
+            helpEl.style.opacity = '1';
+            if (latchP > 0.6) helpEl.classList.add('clicking');
+
+            if (line) {
+              line.setAttribute('x1', p0.x);
+              line.setAttribute('y1', p0.y);
+              line.setAttribute('x2', p2.x);
+              line.setAttribute('y2', p2.y);
+              line.style.opacity = `${latchP}`;
+            }
+            if (badge) {
+              badge.group.setAttribute('transform', `translate(${(p0.x + p2.x) / 2}, ${(p0.y + p2.y) / 2})`);
+              badge.group.style.opacity = `${latchP}`;
+              badge.text.textContent = '📐 54.2°';
+            }
+          });
+        }
+        // Sub-phase 5b: Pulling vertices and smoothly morphing polygon into 90° rectangle outside (0.25 to 1.0)
+        else {
+          const morphP = (sculptP - 0.25) / 0.75;
+          const eMorph = easeInOutCubic(morphP);
+          hudStatus.textContent = `📐 10 Helper cursors pulling vertices & squaring angles to 90° (${Math.round(eMorph * 100)}%)...`;
+          hudBadge.textContent = '90° Shape Rectification';
+
+          AGENTS.forEach(ag => {
+            const facetIdx = AGENT_TO_FACET[ag.id];
+            const fd = facetData[facetIdx];
+            const curEl = cursorElements[ag.id];
+            const helpEl = helperElements[fd.helper.id];
+            const line = rulerLineElements[fd.helper.id];
+            const badge = rulerBadgeElements[fd.helper.id];
+
+            // Morph 4 vertices from staged shard polygon to rectangle
+            const curV = [];
+            for (let k = 0; k < 4; k++) {
+              const sV = { x: hx + fd.pts4[k].x + fd.stageOffsetX, y: hy + fd.pts4[k].y + fd.stageOffsetY };
+              const tV = fd.targetCornersStaged[k];
+              curV.push({
+                x: sV.x + (tV.x - sV.x) * eMorph,
+                y: sV.y + (tV.y - sV.y) * eMorph
+              });
+            }
+
+            fd.pathEl.setAttribute('d', `M ${curV[0].x} ${curV[0].y} L ${curV[1].x} ${curV[1].y} L ${curV[2].x} ${curV[2].y} L ${curV[3].x} ${curV[3].y} Z`);
+
+            // Primary cursor holds Top-Left (curV[0])
+            curEl.style.transform = `translate3d(${curV[0].x}px, ${curV[0].y}px, 0)`;
+            curEl.style.opacity = '1';
+
+            // Helper cursor holds Bottom-Right (curV[2])
+            helpEl.style.transform = `translate3d(${curV[2].x}px, ${curV[2].y}px, 0)`;
+            helpEl.style.opacity = '1';
+            helpEl.classList.add('clicking');
+
+            if (line) {
+              line.setAttribute('x1', curV[0].x);
+              line.setAttribute('y1', curV[0].y);
+              line.setAttribute('x2', curV[2].x);
+              line.setAttribute('y2', curV[2].y);
+              line.style.opacity = '1';
+              if (eMorph >= 0.92) {
+                line.style.strokeDasharray = 'none';
+              }
+            }
+            if (badge) {
+              const midX = (curV[0].x + curV[2].x) / 2;
+              const midY = (curV[0].y + curV[2].y) / 2;
+              badge.group.setAttribute('transform', `translate(${midX}, ${midY})`);
+              badge.group.style.opacity = '1';
+              if (eMorph < 0.92) {
+                badge.text.textContent = `📐 ${(54 + 36 * eMorph).toFixed(1)}°`;
+              } else {
+                badge.text.textContent = '⟂ 90.0° SNAP';
+              }
+            }
+          });
+        }
+      }
+
+      // ── PHASE 6: DUAL-CURSOR RADIAL TRANSPORT OF SQUARED PAYLOADS TO CARDS (T_SCULPT to T_DISPERSE)
+      else if (elapsed < T_DISPERSE) {
+        const dispP = easeInOutCubic((elapsed - T_SCULPT) / (T_DISPERSE - T_SCULPT));
+        hudStatus.textContent = `🚚 10 Agent Pairs transporting squared payload rectangles (${Math.round(dispP * 100)}%)...`;
+        hudBadge.textContent = 'Dual-Escort Dispatch';
+
+        AGENTS.forEach((ag, idx) => {
+          const facetIdx = AGENT_TO_FACET[ag.id];
+          const fd = facetData[facetIdx];
+          const curEl = cursorElements[ag.id];
+          const helpEl = helperElements[fd.helper.id];
+          const pEl = payloadElements[ag.id];
+          const target = targetRects[ag.id];
+          const line = rulerLineElements[fd.helper.id];
+          const badge = rulerBadgeElements[fd.helper.id];
+
+          // Center coordinate movement from staged center (stageCx, stageCy) to target card center
+          const pStart = { x: fd.stageCx, y: fd.stageCy };
+          const pEnd = { x: target.left + target.width / 2, y: target.top + target.height / 2 };
+
+          const ctrlX = (pStart.x + pEnd.x) / 2 + (idx % 2 === 0 ? 50 : -50);
+          const ctrlY = (pStart.y + pEnd.y) / 2 - 40;
+
+          const curCenterX = quadBezier(pStart.x, ctrlX, pEnd.x, dispP);
+          const curCenterY = quadBezier(pStart.y, ctrlY, pEnd.y, dispP);
+
+          // Payload expansion from miniature to full card dimensions
+          pEl.classList.add('active');
+          let curW = W_RECT;
+          let curH = H_RECT;
+          if (dispP > 0.35) {
+            const expP = (dispP - 0.35) / 0.65;
+            curW = W_RECT + (target.width - W_RECT) * easeOutQuad(expP);
+            curH = H_RECT + (target.height - H_RECT) * easeOutQuad(expP);
+          }
+
+          pEl.style.width = `${curW}px`;
+          pEl.style.height = `${curH}px`;
+          pEl.style.transform = `translate3d(${curCenterX - curW/2}px, ${curCenterY - curH/2}px, 0)`;
+
+          // Primary Cursor (Lead) holds Top-Left
+          const leadX = curCenterX - curW / 2;
+          const leadY = curCenterY - curH / 2;
+          curEl.style.transform = `translate3d(${leadX}px, ${leadY}px, 0)`;
+          curEl.style.opacity = '1';
+
+          // Helper Cursor (Sculptor) holds Bottom-Right
+          const helpX = curCenterX + curW / 2;
+          const helpY = curCenterY + curH / 2;
+          helpEl.style.transform = `translate3d(${helpX - 8}px, ${helpY - 8}px, 0)`;
+          helpEl.style.opacity = '1';
+
+          // Hide original SVG facet as payload takes over
+          fd.pathEl.style.opacity = `${Math.max(0, 1 - dispP * 2.5)}`;
+
+          // Fade out ruler line & badge
+          if (line) line.style.opacity = `${Math.max(0, 1 - dispP * 1.8)}`;
+          if (badge) badge.group.style.opacity = `${Math.max(0, 1 - dispP * 2)}`;
+        });
+      }
+
+      // ── PHASE 7: SNAP, CARD MATERIALIZATION & UNFURL (T_DISPERSE to T_STAMP)
+      else if (elapsed < T_STAMP) {
+        const stampP = easeOutCubic((elapsed - T_DISPERSE) / (T_STAMP - T_DISPERSE));
+        hudStatus.textContent = `✨ Snapping 90° rectangular cards into place & unfurling data...`;
+        hudBadge.textContent = 'Unfurling Cards';
+
+        Object.values(cursorElements).forEach(c => c.classList.remove('clicking'));
+        Object.values(helperElements).forEach(h => h.classList.remove('clicking'));
+        Object.values(payloadElements).forEach(p => p.classList.remove('active'));
+        hexContainer.style.display = 'none';
+
+        AGENTS.forEach((ag, idx) => {
+          if (ag.id === 'c10') return;
+
+          const card = document.getElementById(ag.target);
+          if (card && !card.classList.contains('built')) {
+            card.classList.add('built');
+            card.style.setProperty('--flash-color', 'var(--pen)');
+            card.classList.add('stamped-flash');
+          }
+
+          const rect = targetRects[ag.id];
+          const idleLeadX = rect.left + rect.width - 32 + Math.sin((elapsed + idx * 400) / 320) * 8;
+          const idleLeadY = rect.top + 16 + Math.cos((elapsed + idx * 400) / 320) * 6;
+          cursorElements[ag.id].style.transform = `translate3d(${idleLeadX}px, ${idleLeadY}px, 0)`;
+          cursorElements[ag.id].style.opacity = '1';
+
+          const helper = HELPER_AGENTS.find(h => h.pairWith === ag.id);
+          if (helper) {
+            const helpEl = helperElements[helper.id];
+            const idleHelpX = rect.left + rect.width - 24 + Math.cos((elapsed + idx * 400) / 320) * 6;
+            const idleHelpY = rect.top + rect.height - 24 + Math.sin((elapsed + idx * 400) / 320) * 6;
+            helpEl.style.transform = `translate3d(${idleHelpX}px, ${idleHelpY}px, 0)`;
+            helpEl.style.opacity = '1';
+            const roleSpan = helpEl.querySelector('.helper-role-text');
+            if (roleSpan) roleSpan.textContent = '✓ SQUARED 90°';
+          }
+        });
+
+        // Roll up numbers
+        document.querySelectorAll('.kpi-num').forEach(el => {
+          const target = parseFloat(el.getAttribute('data-target') || '0');
+          const prefix = el.getAttribute('data-prefix') || '';
+          const suffix = el.getAttribute('data-suffix') || '';
+          const currentVal = (target * Math.min(1, stampP * 1.15)).toFixed(target % 1 === 0 ? 0 : 2);
+          el.textContent = `${prefix}${currentVal}${suffix}`;
+        });
+
+        // Draw SVG charts
+        document.querySelectorAll('.chart-path').forEach(p => {
+          const len = p.getTotalLength ? p.getTotalLength() : 800;
+          p.style.strokeDashoffset = `${len * (1 - Math.min(1, stampP * 1.25))}`;
+        });
+
+        const area = document.querySelector('.chart-area');
+        if (area) area.style.opacity = `${Math.min(1, stampP * 1.4)}`;
+
+        document.querySelectorAll('.anim-bar').forEach((b, i) => {
+          const barP = Math.min(1, Math.max(0, stampP * 1.5 - i * 0.08));
+          b.style.transform = `scale(1, ${barP})`;
+        });
+
+        const verifier = cursorElements['c10'];
+        const vRect = targetRects['c10'] || { left: wrapW / 2 - 100, top: wrapH - 120 };
+        const sweepX = wrapW * 0.3 + (vRect.left - wrapW * 0.3 + 40) * stampP;
+        const sweepY = wrapH * 0.4 + (vRect.top - wrapH * 0.4 + 20) * stampP;
+        verifier.style.transform = `translate3d(${sweepX}px, ${sweepY}px, 0)`;
+        verifier.style.opacity = '1';
+      }
+
+      // ── PHASE 8: AUDIT SEAL & DEPARTURE (T_STAMP to T_COMPLETE)
+      else if (elapsed < T_COMPLETE) {
+        const exitP = (elapsed - T_STAMP) / (T_COMPLETE - T_STAMP);
+        hudStatus.textContent = `🛡️ Quality Verifier signing audit seal & 20-agent swarm departing...`;
+        hudBadge.textContent = 'Audit Sign-off';
+
+        const seal = document.getElementById('seal-audit');
+        if (seal && !seal.classList.contains('built')) {
+          seal.classList.add('built');
+          seal.style.setProperty('--flash-color', '#eab308');
+          seal.classList.add('stamped-flash');
+        }
+
+        AGENTS.forEach((ag, idx) => {
+          const curEl = cursorElements[ag.id];
+          const rect = targetRects[ag.id];
+          const helper = HELPER_AGENTS.find(h => h.pairWith === ag.id);
+          const helpEl = helper ? helperElements[helper.id] : null;
+
+          if (ag.id === 'c10') {
+            const sealRect = targetRects['c10'] || { left: wrapW / 2 - 100, top: wrapH - 120 };
+            curEl.style.transform = `translate3d(${sealRect.left + 45}px, ${sealRect.top + 18}px, 0)`;
+            curEl.style.opacity = `${Math.max(0, 1 - exitP * 1.8)}`;
+            if (helpEl) {
+              helpEl.style.transform = `translate3d(${sealRect.left + 160}px, ${sealRect.top + 18}px, 0)`;
+              helpEl.style.opacity = `${Math.max(0, 1 - exitP * 1.8)}`;
+            }
+          } else {
+            const origX = rect.left + rect.width - 32;
+            const origY = rect.top + rect.height - 24;
+            const floatX = origX + (idx % 2 === 0 ? -45 : 45) * exitP;
+            const floatY = origY - 65 * exitP;
+
+            curEl.style.transform = `translate3d(${floatX}px, ${floatY}px, 0)`;
+            curEl.style.opacity = `${Math.max(0, 1 - exitP * 2)}`;
+
+            if (helpEl) {
+              const helpFloatX = origX + (idx % 2 === 0 ? 55 : -55) * exitP;
+              const helpFloatY = origY - 75 * exitP;
+              helpEl.style.transform = `translate3d(${helpFloatX}px, ${helpFloatY}px, 0)`;
+              helpEl.style.opacity = `${Math.max(0, 1 - exitP * 2)}`;
+            }
+          }
+        });
+      }
+
+      // ── COMPLETION
+      else {
+        document.querySelectorAll('.card-block').forEach(el => el.classList.add('built'));
+        document.querySelectorAll('.kpi-num').forEach(el => {
+          const target = el.getAttribute('data-target') || '0';
+          const prefix = el.getAttribute('data-prefix') || '';
+          const suffix = el.getAttribute('data-suffix') || '';
+          el.textContent = `${prefix}${target}${suffix}`;
+        });
+        document.querySelectorAll('.chart-path').forEach(p => p.style.strokeDashoffset = '0');
+        const area = document.querySelector('.chart-area');
+        if (area) area.style.opacity = '1';
+        document.querySelectorAll('.anim-bar').forEach(b => b.style.transform = 'scale(1, 1)');
+
+        Object.values(cursorElements).forEach(c => c.style.opacity = '0');
+        Object.values(helperElements).forEach(h => h.style.opacity = '0');
+        Object.values(payloadElements).forEach(p => p.classList.remove('active'));
+
+        hexContainer.style.display = 'none';
+        hexFacetsGroup.innerHTML = '';
+        hexSeamsGroup.innerHTML = '';
+        if (hexSculptGuides) hexSculptGuides.innerHTML = '';
+        hexMathBadge.style.opacity = '0';
+
+        hudStatus.textContent = '✨ Complete: 10 Components Rectified to 90° & Assembled by 20-Cursor Swarm in 6.4s';
+        hudBadge.textContent = 'Ready';
+        animationRunning = false;
+        return;
+      }
+
+      requestAnimationFrame(stepHex);
+    }
+
+    requestAnimationFrame(stepHex);
+  }
+
+  // ── Event Handlers & Controls ───────────────────────────────────────
+  replayBtn.addEventListener('click', () => {
+    runMarqueeChoreography();
+  });
+
+  hexBtn.addEventListener('click', () => {
+    runHexagonChoreography();
+  });
+
+  skipBtn.addEventListener('click', () => {
+    revealAllInstantly();
+  });
+
+  themeBtn.addEventListener('click', () => {
+    const isNight = document.body.getAttribute('data-theme') === 'night';
+    const newTheme = isNight ? 'day' : 'night';
+    document.body.setAttribute('data-theme', newTheme);
+    document.getElementById('theme-icon').textContent = isNight ? '🌙' : '☀️';
+    document.getElementById('theme-text').textContent = isNight ? 'Night' : 'Day';
+  });
+
+  speedButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      speedButtons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      speedMultiplier = parseFloat(btn.getAttribute('data-speed') || '1.0');
+    });
+  });
+
+  // ── Initialize on load ──────────────────────────────────────────────
+  window.addEventListener('DOMContentLoaded', () => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      revealAllInstantly();
+      hudStatus.textContent = 'Reduced motion preferred: animation bypassed.';
+    } else {
+      setTimeout(() => {
+        runMarqueeChoreography();
+      }, 350);
+    }
+  });
+
+})();
+</script>
+
+</body>
+</html>

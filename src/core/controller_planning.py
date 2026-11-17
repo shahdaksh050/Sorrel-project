@@ -374,8 +374,8 @@ class PlanMixin(ControllerState):
                     sim_params: dict[str, Any] = {"file_path": fp}
                     try:
                         sim_params.update(sim_tool.default_params(profile, meta) or {})
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug('Failed resolving default params for scenario_simulation: %s', exc)
                     drivers = [f for f in self.memory.findings if f.kind == "driver" and f.dimension]
                     if drivers and "driver_column" not in sim_params:
                         sim_params["driver_column"] = drivers[0].dimension
@@ -674,8 +674,8 @@ class PlanMixin(ControllerState):
                 sim_params: dict[str, Any] = {"file_path": fp}
                 try:
                     sim_params.update(sim_tool.default_params(profile, meta) or {})
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug('Failed resolving default params for scenario_simulation fallback: %s', exc)
                 steps.append({
                     "step_number": len(steps) + 1,
                     "tool_name": "scenario_simulation",

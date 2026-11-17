@@ -94,6 +94,7 @@ class BasketAnalysisTool(BaseTool):
     """Which items are bought together (association rules)."""
 
     name = "basket_analysis"
+    is_concurrent_safe = True
     description = (
         "Market-basket analysis: which items are bought together. Groups line-item "
         "rows into orders and reports the strongest 'customers who buy A also buy B' "

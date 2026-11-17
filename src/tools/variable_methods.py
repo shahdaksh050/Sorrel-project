@@ -42,6 +42,7 @@ class VariableScaleAnalysisTool(BaseTool):
     """
 
     name = "variable_scale_analysis"
+    is_concurrent_safe = True
     description = (
         "Run scale-appropriate statistical analysis for non-standard variables: "
         "circular statistics for periodic/angular data (wind direction, time-of-day), "
@@ -175,7 +176,6 @@ class VariableScaleAnalysisTool(BaseTool):
         )
         if run_comp:
             num_cols = list(df.select_dtypes(include=[np.number]).columns)
-            # Check if any subset sums to ~100 or ~1
             if len(num_cols) >= 3:
                 row_sums = df[num_cols].sum(axis=1).dropna()
                 is_pct = bool(np.isclose(row_sums.median(), 100.0, atol=5.0))

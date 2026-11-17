@@ -349,8 +349,8 @@ def main() -> None:
         # STAGES 2/4/5 — RLM Engine & Prompt Manager
         # ----------------------------------------------------------
         print("\n--- Stages 2/4/5: RLM Engine & Prompt Manager ---")
-        from src.core.controller import ToolRegistry
         from src.core.prompt_manager import PromptManager
+        from src.core.tool_registry import ToolRegistry
         from src.rlm.engine import RLMEngine
 
         mock_llm = MockLLMClient(cleaned_path=cleaned_path)

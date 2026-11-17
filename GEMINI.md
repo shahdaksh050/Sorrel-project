@@ -152,6 +152,12 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
 | UI-4 | Antigravity (Gemini) | Complete | Fix UI color/contrast & button double box: eliminated infinite tab flashing in app.py, fixed low-contrast sidebar collapse controls and white-on-white stFileChip text, eliminated nested double box on sidebar collapse button by scoping borders to button only. |
 | UI-5 | Antigravity (Gemini) | Complete | Uploaded file chip nested boxes & delete icon styling: reset stFileChips, ul, li wrappers to border: none, scoped card border exclusively to div[data-testid="stFileChip"], eliminated inner borders on filename, icon, and delete button. |
 | BE-16 | Antigravity (Gemini) | Complete | Major statistical & pipeline reliability fixes: causal vs observational pilot guardrails in action matrix, compound demographic protected attribute exclusion in scenario simulation, target leakage hard-gating with clean skipping of downstream evaluation and feature importance charts, cross-run report isolation in adopt_run, prospective FDR multiple-testing control, and Stage 6 RLM fast-exit. Verified with 136 unit tests, 0 ruff violations, and 0 mypy errors. |
+| UI-6 | Antigravity (Gemini) | Complete | Autonomous agent swarm dashboard construction animation & interactive prototype (docs/prototypes/swarm_dashboard.html, ui/components/swarm_dashboard.py, tests/test_swarm_dashboard.py) with dual modes: Mode 1 (Marquee Area Selection) and Mode 2 (Closed-form Equi-Area Hexagon Dissection into 10 equal 6,242 px² mathematical facets with laser cutting sweep & centroid dispatch). |
+| UI-7 | Antigravity (Gemini) | Complete | Main dashboard collapsed sidebar fullscreen expansion: updated base .block-container to max-width: 100% !important and width: 100% !important with responsive clamp gutters, eliminating fixed 1180px box constraint. |
+| UI-8 | Antigravity (Gemini) | Complete | Swarm 90° shape rectification & helper sculptor cursors: spawned 10 helper sculptor cursors paired 1:1 with primary agents (20 cursors total), implemented real-time vertex pulling & SVG morphing from angular hexagon facets to 90° rectangles with dynamic laser alignment guides & '⟂ 90.0° SNAP' badges, and dual-cursor radial transport escorting rectangular payloads to dashboard cards. Verified with Playwright and 20 passing unit tests. |
+| UI-9 | Antigravity (Gemini) & DeepCoder | Complete | Swarm outside radial extraction, rapid core dissolution, monotonous cursor styling (#0f172a), high-contrast Day-mode palette, and 4-phase Vega-Lite dashboard integration plan. Verified with Playwright headless Chromium and 39 passing unit tests. |
+| BE-17 | Antigravity (Gemini) | Complete | Codebase Untangling (untangle-codebase skill): promoted declarative tool concurrency & file-writing flags to BaseTool across 23 tools, encapsulated io.py read cache via is_raw_cached/get_cache_key, unified coerced reader in dashboard generation, pruned 15 dead controller re-exports, removed speculative security fallbacks, converted bare swallowed exceptions to debug logs, removed 9 restating comments, and strengthened dataset fingerprint tests. Verified with 0 ruff errors, 0 mypy errors across 115 source files, and 116 passing tests. |
+
 
 ### I. Sandbox Optimization & Group Comparison Steering (2026-10-09) [Task BE-3]
 - **Worker Subprocess Lightening** ([`src/core/_sandbox_worker.py`](file:///d:/(Dev2)DSA_AGENT/src/core/_sandbox_worker.py)): Replaced heavy `profile_dataframe(df)` in `_build_schema` with a lightweight, direct pandas dtype classifier, dropping the costly profiling pass and regex scans inside the child process.
@@ -384,5 +390,87 @@ the current UI (IDs W, S, R, A, D, Y). Section 8 of `DESIGN_LEARNINGS.md` is the
   - Ran 136-test suite: 136 passed in 39.69s.
   - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 115 source files).
   - End-to-end integration: `python main.py --dataset data/sample_customer_churn.csv --target Churn --no-llm` executed 7 stages to completion with exit code 0.
+
+### V. Autonomous Agent Swarm Dashboard Construction Animation (2026-11-11) [Task UI-6]
+- **Interactive Dummy Dashboard Prototype** ([`docs/prototypes/swarm_dashboard.html`](file:///d:/(Dev2)DSA_AGENT/docs/prototypes/swarm_dashboard.html)):
+  - Built a 60 FPS, self-contained interactive dummy dashboard with 10 specialized agent cursors (*Orchestrator, Data Profiler, Metrics Bot, Statistical Core, Causal Auditor, Vega Plotter, Segment Explorer, ML Tournament, Action Architect, Quality Verifier*).
+  - Implemented **Dual Animation Modes** with dedicated HUD switcher buttons:
+    1. **Mode 1 (`Marquee Swarm`)**:
+       - *Phase 1 (Swarm Entry)*: Cursors glide onto the blank blueprint dot grid with cubic-bezier deceleration.
+       - *Phase 2 (Area Selection Marquee Drag)*: Cursors click down, dragging animated dashed bounding boxes (`border: 1.5px dashed <color>`) with live monospace dimension chips (`w: 380px h: 220px`).
+       - *Phase 3 (Copy-Paste & Card Stamping)*: Click release triggers stamping flash, transforming wireframes into rich cards; numbers roll up from 0 to targets, SVG chart lines draw via `stroke-dashoffset`, and bar charts raise.
+       - *Phase 4 (Audit Seal & Departure)*: Lead Verifier inspects cards and stamps official gold `[VERIFIED AUDIT LEDGER]` seal; all 10 cursors glide outward and fade into the background.
+    2. **Mode 2 (`Hexagon Core Build`)**:
+       - *Phase 1 (Genesis)*: Orchestrator cursor draws a large glowing central hexagon ($R = 155\text{px}$) via real-time SVG stroke-dashoffset tracing across all 6 vertices.
+       - *Phase 2 (Crystallization)*: 10 modular payload rectangles materialize in a cluster inside the illuminated hexagon core as other agents converge.
+       - *Phase 3 (Lock-on)*: All 10 cursors grab their miniature payload blocks with a click-down pulse.
+       - *Phase 4 (Radial Transport & Expansion)*: Cursors fly outward in radial quadratic Bezier arcs carrying their payload rectangles, which smoothly expand to target card dimensions upon approach.
+       - *Phase 5 (Snap & Unfurl)*: Rectangles snap into position and unfurl into rich analytical cards while the central hexagon dissolves.
+       - *Phase 6 (Audit Seal)*: Quality Verifier signs audit ledger and swarm departs.
+  - Interactive Floating HUD: Dual mode buttons (`Marquee Swarm` & `Hexagon Core Build`), playback speed selectors (`0.5x`, `1x`, `2x`), Day/Night switcher, and instant `[Skip to End]` bypass.
+  - Accessibility: Full `prefers-reduced-motion` detection instantly renders final dashboard state.
+
+- **Streamlit Component Wrapper** ([`ui/components/swarm_dashboard.py`](file:///d:/(Dev2)DSA_AGENT/ui/components/swarm_dashboard.py)):
+  - Provides `render_swarm_dashboard(height=860, run_once=True)` with session state one-shot trigger tracking.
+- **Verification & Tests**:
+  - Unit tests in [`tests/test_swarm_dashboard.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_swarm_dashboard.py) passing cleanly (2 passed in 0.92s).
+  - Full codebase quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 115 source files).
+
+### W. Main Dashboard Collapsed Sidebar Fullscreen Expansion (2026-11-11) [Task UI-7]
+- **Fullscreen Responsiveness** ([`ui/styles.py`](file:///d:/(Dev2)DSA_AGENT/ui/styles.py)):
+  - Removed rigid `max-width: 1180px` constraint when sidebar is collapsed.
+  - Added parent `:has` and sibling `~` selectors matching `section[data-testid="stSidebar"][aria-expanded="false"]`, `div[data-testid="collapsedControl"]`, and `button[aria-label*="sidebar"]`.
+  - When the sidebar collapses, `.block-container` expands smoothly to `max-width: 100% !important` with comfortable responsive horizontal padding (`clamp(1.5rem, 3vw, 4rem)`), letting the top bar, 3D pipeline plate, stepper, cards, and charts utilize the entire screen width.
+- **Verification & Tests**:
+  - Added unit test in [`tests/test_theme_sync.py`](file:///d:/(Dev2)DSA_AGENT/tests/test_theme_sync.py) (`test_collapsed_sidebar_fullscreen_rules`).
+  - Passed `pytest tests/test_theme_sync.py tests/test_contrast.py tests/test_architecture.py tests/test_swarm_dashboard.py -v` (20 passed).
+  - Quality gates: `ruff check .` (0 violations), `mypy src/` (0 errors across 115 source files).
+
+### X. Swarm 90° Shape Rectification & Helper Sculptor Cursors (2026-11-12) [Task UI-8]
+- **Paired Helper Sculptor Cursors** ([`docs/prototypes/swarm_dashboard.html`](file:///d:/(Dev2)DSA_AGENT/docs/prototypes/swarm_dashboard.html)):
+  - Spawned 10 specialized Helper Sculptor cursors paired 1:1 with primary agents (20 total cursors on canvas), each with dashed precision borders and badge handles.
+- **Dynamic Geometric Rectification & Laser Alignment**:
+  - Implemented real-time vertex pulling and SVG path morphing from angular triangular/trapezoidal hexagon shards into true 90.0° orthogonal rectangles.
+  - Added cyan/emerald dynamic perpendicular guides and `⟂ 90.0° SNAP` badges that trigger at exact orthogonal alignment.
+  - Dual-cursor radial payload transport escorting the rectified rectangles directly to their destination card coordinates.
+- **Verification & Tests**:
+  - Validated via Playwright headless Chromium (`scripts/verify_swarm_playwright.py`) and unit tests in `tests/test_swarm_dashboard.py` (20 passed).
+
+### Y. Outside Radial Extraction, Monotonous Styling & Vega-Lite Roadmap (2026-11-13) [Task UI-9]
+- **Outside Radial Extraction & Core Dissolution**:
+  - Modified Hexagon mode: triangular shards translate outward into orbit ($d \ge 295\text{px}$) *before* morphing.
+  - The central hexagon core, perimeter stroke, and mathematical seams dissolve rapidly (`coreAlpha = 1 - extP * 2.5`), completely disappearing before the sculptors arrive.
+- **Monotonous Cursor Palette & Crisp Day Mode Contrast**:
+  - Unified all 20 cursors to an authoritative, distraction-free slate (`#0f172a`) with white labels (`#f8fafc`).
+  - Tuned Day/Light mode: crisp white shard fill `rgba(255, 255, 255, 0.96)`, rich emerald borders (`#059669`), and dark text (`#14171a`), eliminating blurry gray filters.
+- **Vega-Lite 4-Phase Implementation Roadmap** ([`walkthrough.md`](file:///C:/Users/daksh/.gemini/antigravity/brain/ccbde838-2fbd-4921-a748-b9b69f2f956e/walkthrough.md)):
+  - Formulated a 4-phase integration roadmap for streaming real backend Vega-Lite charts from `src/core/dashboard.py` into the swarm cards.
+- **Verification & Tests**:
+  - 39 tests passed across test suites; headless Playwright verified clean animations.
+
+### Z. Codebase Untangling & Architectural Boundary Hardening (2026-11-15) [Task BE-17]
+- **Skill Execution (`untangle-codebase`)**:
+  - Carried out complete structural untangling pass following `caldoai/skills/untangle-codebase`, addressing architectural coupling, surplus code, restating comments, and test debt (decision log in [`untangle_decision_log.md`](file:///C:/Users/daksh/.gemini/antigravity/brain/ccbde838-2fbd-4921-a748-b9b69f2f956e/untangle_decision_log.md)).
+- **Declarative Concurrency & File Isolation** ([`src/tools/base.py`](file:///d:/(Dev2)DSA_AGENT/src/tools/base.py), [`src/core/controller_steps.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller_steps.py)):
+  - Promoted `is_concurrent_safe` and `writes_fixed_file` to first-class tool properties across 23 analytical tools (`threshold_analysis`, `multi_seasonal_analysis`, `ranking_dynamics`, `segment_comparison`, etc.).
+  - Replaced brittle, hardcoded `_CONCURRENT_SAFE_TOOLS` string allowlist with dynamic tool introspection (`getattr(step.tool, "is_concurrent_safe", False)`).
+- **Encapsulated Data Ingestion & Coerced Reader** ([`src/core/io.py`](file:///d:/(Dev2)DSA_AGENT/src/core/io.py), [`src/core/analysis_io.py`](file:///d:/(Dev2)DSA_AGENT/src/core/analysis_io.py), [`src/core/controller_common.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller_common.py)):
+  - Replaced private variable poking (`_READ_CACHE`, `_READ_CACHE_LOCK`) in `analysis_io.py` with public `is_raw_cached()` and `get_cache_key()` in `io.py`.
+  - Replaced `controller_common._read_dataframe` with `read_analysis_df()`, ensuring dashboard generation always receives properly coerced numeric columns.
+- **Pruned Dead Re-exports & Directed Canonical Imports** ([`src/core/controller.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller.py)):
+  - Removed 11 dead private aliases (`_CANON_PRECISIONS`, `_KEYWORD_TOOL_MAP`, `_KEYWORD_TOOL_PATTERNS`, `_NUMBER_RE`, `_canon_number`, `_collect_numbers`, `_DEFAULT_MODELS`, `_COLUMN_PARAM_NAMES`, `_INJECTED_PARAMS`, `_short_tool_description`) from `controller.py`.
+  - Directed callers (`scripts/dry_run.py`, `scripts/validate.py`, `tests/`) to import `ToolRegistry` directly from `src.core.tool_registry`.
+- **Swallowed Exceptions & Defensive Fallbacks** ([`src/core/controller.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller.py), [`src/core/controller_planning.py`](file:///d:/(Dev2)DSA_AGENT/src/core/controller_planning.py), [`src/core/prompt_manager.py`](file:///d:/(Dev2)DSA_AGENT/src/core/prompt_manager.py)):
+  - Replaced silent `except Exception: pass` blocks in `controller.py` and `controller_planning.py` with explicit `logger.debug(...)` tracking.
+  - Removed speculative `try: ... except ImportError:` in `prompt_manager.py`.
+- **Comments & Tests Pruning**:
+  - Removed 9 restating comments across core modules and tools.
+  - Strengthened `tests/test_tool_factory.py:test_same_file_same_fingerprint` to test real fingerprint structure and determinism.
+- **Quality Gates**:
+  - `ruff check .`: 0 violations (`All checks passed!`).
+  - `mypy src/`: 0 errors across 115 source files (`Success: no issues found`).
+  - `pytest`: 116 tests passing across `test_architecture.py`, `test_tool_factory.py`, `test_controller.py`, `test_define_analysis_tool.py`, `test_dynamic_code_tool.py`, and UI suites.
+
+
 
 

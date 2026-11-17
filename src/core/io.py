@@ -979,6 +979,20 @@ def _cache_key(file_path: str) -> tuple[str, int, int] | None:
     return (str(Path(file_path).resolve()), stat.st_mtime_ns, stat.st_size)
 
 
+def get_cache_key(file_path: str) -> tuple[str, int, int] | None:
+    """Identity of a file's content: resolved path + mtime + size."""
+    return _cache_key(file_path)
+
+
+def is_raw_cached(file_path: str) -> bool:
+    """Return True if a fresh raw frame is currently held in the read cache."""
+    key = _cache_key(file_path)
+    if key is None:
+        return False
+    with _READ_CACHE_LOCK:
+        return key in _READ_CACHE
+
+
 def clear_read_cache() -> None:
     """Drop every cached frame. For tests and long-lived processes."""
     with _READ_CACHE_LOCK:

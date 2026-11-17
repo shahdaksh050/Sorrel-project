@@ -415,6 +415,7 @@ class ForecastAnalysisTool(BaseTool):
     """Backtested short-horizon forecast of a measure over time."""
 
     name = "forecast_analysis"
+    is_concurrent_safe = True
     description = (
         "Forecast where a measure is heading: aggregates it to a regular series (day/week/month/quarter), "
         "backtests naive, seasonal-naive, linear-trend and exponential-smoothing models on the latest "

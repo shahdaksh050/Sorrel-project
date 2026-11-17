@@ -452,7 +452,6 @@ def _normalize_sandboxed_code(code: str) -> str:
     transformer = _SandboxedCodeTransformer()
     new_tree = transformer.visit(tree)
 
-    # Check if RESULT is assigned anywhere in the AST
     if not _assigns_name_in_scope(new_tree, RESULT_VAR_NAME) and new_tree.body:
         last_stmt = new_tree.body[-1]
         if isinstance(last_stmt, ast.Expr):

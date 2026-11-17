@@ -129,6 +129,7 @@ class ChangeAnalysisTool(BaseTool):
     optionally broken down by which segment drove the change."""
 
     name = "change_analysis"
+    is_concurrent_safe = True
     description = (
         "Resample a measure to a natural period grain (monthly/weekly/daily) "
         "and report the most recent period's change vs the prior period and "

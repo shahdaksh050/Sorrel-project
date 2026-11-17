@@ -231,6 +231,7 @@ class EquityAnalysisTool(BaseTool):
     """Group gaps in pay or selection rates, raw and adjusted for controls."""
 
     name = "equity_analysis"
+    is_concurrent_safe = True
     description = (
         "Check whether an outcome differs between groups of a protected attribute "
         "(gender, race, age group ...). For pay-like numbers: the raw gap in median "

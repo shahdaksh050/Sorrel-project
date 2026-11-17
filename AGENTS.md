@@ -66,17 +66,15 @@ src/
 
 ---
 
-## 7-Stage Workflow — Agent Must Follow This Order
+## 5-Stage Workflow — Agent Must Follow This Order
 
 | Stage | Name | File(s) | Entry Point |
 | :---: | :--- | :--- | :--- |
 | 1 | Dataset Ingestion & Profiling | `controller.py`, `data_processing.py`, `profiler.py` | `AgentController.load_dataset()` |
 | 2 | Initial Reasoning | `controller.py`, `engine.py`, `prompt_manager.py` | First `RLMEngine.invoke()` call |
 | 3 | Tool Execution & Sandbox Verification | `controller.py`, `tools/*`, `sandbox.py` | `AgentController._execute_steps()` |
-| 4 | Result Interpretation | `controller.py`, `engine.py` | Second+ `RLMEngine.invoke()` call |
-| 5 | Iterative Refinement & Adversarial Review | `controller.py`, `engine.py`, `causal_design.py` | Main `for iteration` loop |
-| 6 | RLM Workflow Management | `engine.py`, `controller.py` | `AgentController._run_rlm_decomposition()` |
-| 7 | Synthesis, Post-Hoc Audits & Dossier Generation | `controller.py`, `controller_report.py`, `report_generator.py` | `AgentController._finalize_analysis()` |
+| 4 | Result Interpretation & Iterative Refinement | `controller.py`, `engine.py`, `causal_design.py` | Second+ `RLMEngine.invoke()` call |
+| 5 | Synthesis, Post-Hoc Audits & Dossier Generation | `controller.py`, `controller_report.py`, `report_generator.py` | `AgentController._finalize_analysis()` |
 
 ---
 

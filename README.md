@@ -31,7 +31,7 @@ from raw rows.
   - [System context](#system-context)
   - [Layers and rules](#layers-and-rules)
   - [Data flow](#data-flow)
-  - [The seven-stage workflow](#the-seven-stage-workflow)
+  - [The five-stage workflow](#the-five-stage-workflow)
   - [Sequence diagrams](#sequence-diagrams)
   - [Class diagrams](#class-diagrams)
 - [The workspace](#the-workspace)
@@ -260,17 +260,15 @@ What reaches an LLM prompt is metadata, the data profile, tool summaries and
 ranked findings, with dataset-derived text sanitised and personal-data columns
 masked. Raw rows and full data frames do not.
 
-### The seven-stage workflow
+### The five-stage workflow
 
 | Stage | Name | Where it happens |
 | :---: | --- | --- |
 | 1 | Dataset ingestion & profiling | `AgentController.load_dataset`, `io.py`, `coercion.py`, `profiler.py` |
 | 2 | Initial reasoning | First `RLMEngine.invoke` call, or the deterministic fallback plan |
 | 3 | Tool execution & sandbox verification | `StepMixin._execute_steps`, `tools/*`, `sandbox.py` |
-| 4 | Result interpretation | Later `RLMEngine.invoke` calls interpret tool output |
-| 5 | Iterative refinement & adversarial review | Review passes and plan refinement |
-| 6 | RLM workflow management | Recursive invocation, REPL environment, and trace management |
-| 7 | Synthesis, post-hoc audits & dossier generation | `_finalize_analysis`: dashboard, audits, reports, HTML, run summary |
+| 4 | Result interpretation & iterative refinement | Later `RLMEngine.invoke` calls interpret tool output and refine plans |
+| 5 | Synthesis, post-hoc audits & dossier generation | `_finalize_analysis`: dashboard, audits, reports, HTML, run summary |
 
 Stage 4 uses one LLM call per later iteration: it reads the results so far and
 returns the next plan or signals completion. The loop has several exits, and

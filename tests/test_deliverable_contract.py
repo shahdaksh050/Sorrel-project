@@ -112,3 +112,38 @@ def test_audit_deliverables_bar_repair_finds_pandas3_str_dtype_column() -> None:
     assert any("synthesized fallback" in r for r in report.repaired)
     assert len(final_result["charts"]) == 1
     assert final_result["charts"][0]["chart_type"] == "bar"
+
+
+def test_audit_deliverables_dict_findings_relationship_and_driver() -> None:
+    """Findings are stored as dictionaries in final_result; contract audit must
+    safely inspect dict keys without relying on object attributes or insights fallback."""
+    contract = parse_deliverable_contract("Which pollutants move together and what drives CO levels?")
+    assert contract.requires_relationship_analysis is True
+    assert any("co" in t.lower() for t in contract.required_driver_targets)
+
+    final_result: dict[str, Any] = {
+        "charts": [],
+        "findings": [
+            {
+                "finding_id": "f1",
+                "kind": "correlation",
+                "headline": "NOx and CO move together strongly (r=0.88)",
+                "measure": "CO",
+                "dimension": "NOx",
+            },
+            {
+                "finding_id": "f2",
+                "kind": "driver",
+                "headline": "Traffic volume is the primary driver of CO levels (importance 0.45)",
+                "measure": "CO",
+                "dimension": "traffic",
+            },
+        ],
+        "insights": [],  # Empty insights: audit MUST succeed solely from findings dicts
+    }
+
+    report = audit_deliverables(contract, final_result)
+    assert "Relationship analysis" in report.delivered
+    assert any("Driver analysis: CO" in d for d in report.delivered)
+    assert "Relationship analysis" not in report.missing
+    assert not any("Driver analysis: CO" in m for m in report.missing)

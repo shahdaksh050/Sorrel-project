@@ -525,45 +525,147 @@ class TestMinIterationsOrchestration:
         assert agent.memory.iteration_count >= 2
 
 
-class TestStage6RLMDecomposition:
-    def test_stage_6_fast_exit_when_agenda_satisfied(
+class TestCompletionGuardAndAnalyticalTools:
+    def test_completion_guard_excludes_ingest_dataset_on_cycle_1(
         self, sample_csv: str, tmp_path: pytest.TempPathFactory
     ) -> None:
-        agent = AgentController(enable_rlm=True)
+        agent = AgentController(min_iterations=1, max_iterations=3)
+        agent._output_dir = str(tmp_path / "output")
+        # First response: LLM tries to complete immediately on iteration 1
+        # Because only ingest_dataset has run (_analytical_tools_run_count() == 0),
+        # completion is rejected and fallback plan is triggered.
+        # Second response: LLM completes on iteration 2 after analytical tools have run.
+        agent.llm_client = _ScriptedLLM([FINAL_RESPONSE, FINAL_RESPONSE])  # type: ignore[assignment]
+        agent.load_dataset(sample_csv, target_hint="label", interactive=False)
+        assert len(agent.memory.tool_results) == 1
+        assert agent.memory.tool_results[0].tool_name == "ingest_dataset"
+        assert agent._analytical_tools_run_count() == 0
+
+        final = agent.analyze()
+        assert agent._analytical_tools_run_count() > 0
+        assert any(r.tool_name not in {"ingest_dataset", "planner"} for r in agent.memory.tool_results)
+        assert final["status"] in {"partial", "succeeded_with_warnings"}
+
+
+class TestRLMChartDesign:
+    def test_design_charts_calls_rlm_engine_invoke(
+        self, sample_csv: str, tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CHART_DESIGN", "true")
+        agent = AgentController()
+        agent._output_dir = str(tmp_path / "output")
+        agent.load_dataset(sample_csv, target_hint="label", interactive=False)
+        agent._prepare_reasoning()
+
+        from src.core.dashboard_common import ChartSpec
+        from src.core.findings import Finding
+        agent.memory.add_findings([
+            Finding(
+                finding_id="f1",
+                kind="correlation",
+                headline="feature_a correlates with feature_b",
+                source_tool="correlation_analysis",
+                measure="feature_a",
+                dimension="feature_b",
+            )
+        ])
+
+        called_with: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        assert agent._rlm_engine is not None
+
+        def mock_invoke(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            called_with.append((args, kwargs))
+            return {"charts": [], "drop_ids": []}
+
+        agent._rlm_engine.invoke = mock_invoke  # type: ignore[assignment]
+
+        import pandas as pd
+        df = pd.DataFrame({"feature_a": [1, 2, 3], "feature_b": [4, 5, 6]})
+        charts = [ChartSpec(chart_id="c1", title="Chart 1", description="Scatter chart", spec={})]
+        profile = agent.last_profile
+        assert profile is not None
+
+        result = agent._design_charts(df, profile, charts)
+        assert len(called_with) == 1
+        _, kwargs = called_with[0]
+        assert kwargs.get("stage") == "chart_design"
+        assert "system_prompt" in kwargs
+        assert result is not None
+
+    def test_design_charts_graceful_degradation_on_error(
+        self, sample_csv: str, tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("CHART_DESIGN", "true")
+        agent = AgentController()
+        agent._output_dir = str(tmp_path / "output")
+        agent.load_dataset(sample_csv, target_hint="label", interactive=False)
+        agent._prepare_reasoning()
+
+        from src.core.dashboard_common import ChartSpec
+        from src.core.findings import Finding
+        agent.memory.add_findings([
+            Finding(
+                finding_id="f1",
+                kind="correlation",
+                headline="feature_a correlates with feature_b",
+                source_tool="correlation_analysis",
+                measure="feature_a",
+                dimension="feature_b",
+            )
+        ])
+
+        assert agent._rlm_engine is not None
+
+        def mock_invoke_err(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("Simulated LLM service unavailable")
+
+        agent._rlm_engine.invoke = mock_invoke_err  # type: ignore[assignment]
+
+        import pandas as pd
+        df = pd.DataFrame({"feature_a": [1, 2, 3], "feature_b": [4, 5, 6]})
+        original_charts = [ChartSpec(chart_id="c1", title="Chart 1", description="Scatter chart", spec={})]
+        profile = agent.last_profile
+        assert profile is not None
+
+        result = agent._design_charts(df, profile, original_charts)
+        assert result == original_charts
+
+
+class TestDeliverableContractSync:
+    def test_contract_audit_repairs_chart_and_syncs_dashboard_json(
+        self, sample_csv: str, tmp_path: Path
+    ) -> None:
+        import json
+
+        import pandas as pd
+
+        from src.core.json_normalization import strict_json_dumps
+
+        agent = AgentController(objective="Show a heatmap of pollutants")
         agent._output_dir = str(tmp_path / "output")
         agent.load_dataset(sample_csv, target_hint="label", interactive=False)
 
-        # Set up a satisfied agenda
-        agent.memory.set_context(
-            "question_agenda",
-            [
-                {
-                    "question_id": "q1",
-                    "text": "distribution of feature_a",
-                    "kind": "distribution",
-                    "suggested_tool": "detect_outliers",
-                    "columns": ["feature_a"],
-                    "expected_value": 0.8,
-                }
-            ],
-        )
-        from src.core.findings import Finding
-        agent.memory.add_findings(
-            [
-                Finding(
-                    finding_id="f1",
-                    kind="distribution",
-                    headline="Outliers in feature_a",
-                    source_tool="detect_outliers",
-                    measure="feature_a",
-                )
-            ]
-        )
+        # Simulate final_result without heatmap
+        final_result: dict[str, Any] = {"charts": [], "findings": [], "insights": []}
+        agent._last_charts = []
 
-        # Run decomposition
-        agent._run_rlm_decomposition()
-        # Fast-exit sets sub_results to empty list in 0 ms and 0 tokens
-        assert agent.memory.get_context("rlm_sub_results") == []
+        audit_df = pd.DataFrame({
+            "CO": [1.0, 2.0, 3.0, 4.0],
+            "NOx": [2.0, 3.0, 4.0, 5.0],
+        })
+
+        agent._audit_contract(final_result, audit_df)
+        assert any(c.get("chart_type") == "heatmap" for c in final_result.get("charts", []))
+        agent._last_charts = list(final_result.get("charts", []))
+        assert len(agent._last_charts) == 1
+
+        out_path = Path(agent._output_dir) / "reports" / "dashboard.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(strict_json_dumps(agent._last_charts, indent=2), encoding="utf-8")
+
+        saved = json.loads(out_path.read_text(encoding="utf-8"))
+        assert len(saved) == 1
+        assert saved[0]["chart_type"] == "heatmap"
 
 
 class TestTargetLeakageGatingSteps:

@@ -193,3 +193,17 @@ def test_app_early_dotenv_loading() -> None:
     assert streamlit_line is not None, "streamlit import not found in app.py"
     assert load_dotenv_line < hosted_line, "load_dotenv() must be called before _HOSTED evaluation"
     assert hosted_line < streamlit_line, "_HOSTED must be evaluated before importing streamlit"
+
+
+def test_deprecated_stage6_symbols_pruned() -> None:
+    """Stage 6 RLM feature decomposition symbols must be pruned from controller and prompt manager."""
+    from src.core.controller import AgentController
+    from src.core.prompt_manager import PromptManager
+
+    assert not hasattr(AgentController, "_run_rlm_decomposition"), "_run_rlm_decomposition still on AgentController"
+    assert not hasattr(AgentController, "_should_decompose"), "_should_decompose still on AgentController"
+    assert not hasattr(AgentController, "_rlm_skip_reason"), "_rlm_skip_reason still on AgentController"
+
+    assert not hasattr(PromptManager, "get_rlm_subtask_prompt"), "get_rlm_subtask_prompt still on PromptManager"
+    assert not hasattr(PromptManager, "_rlm_block"), "_rlm_block still on PromptManager"
+    assert not hasattr(PromptManager, "rlm_group_findings"), "rlm_group_findings still on PromptManager"

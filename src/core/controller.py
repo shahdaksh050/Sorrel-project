@@ -1,15 +1,13 @@
 """
 Agent Controller — Orchestration and Reasoning Layer.
 
-Implements the full 7-stage agent workflow:
+Implements the formalized 5-stage agent workflow:
 
-  Stage 1 — Dataset Ingestion          load_dataset()
-  Stage 2 — Initial Reasoning Phase    analyze() → first RLM invoke
-  Stage 3 — Tool Selection & Execution analyze() → execution loop
-  Stage 4 — Result Interpretation      analyze() → iteration prompt
-  Stage 5 — Iterative Refinement       analyze() → loop until complete
-  Stage 6 — RLM Workflow Management    _run_rlm_decomposition()
-  Stage 7 — Report Generation          _generate_final_report()
+  Stage 1 — Dataset Ingestion & Profiling          load_dataset()
+  Stage 2 — Initial Reasoning Phase                analyze() → first RLM invoke
+  Stage 3 — Tool Selection & Execution             analyze() → execution loop
+  Stage 4 — Result Interpretation & Refinement     analyze() → iteration prompt
+  Stage 5 — Synthesis, Post-Hoc Audits & Dossier   _finalize_analysis()
 
 ARCHITECTURAL BOUNDARY:
   - This file handles PLANNING and ORCHESTRATION only.
@@ -19,7 +17,6 @@ ARCHITECTURAL BOUNDARY:
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 from collections.abc import Callable
@@ -70,6 +67,7 @@ from src.core.hypothesis import HypothesisTree
 from src.core.integrity import evaluate_data_integrity
 from src.core.io import get_max_rows, read_any
 from src.core.joins import join_related
+from src.core.json_normalization import strict_json_dumps
 from src.core.llm_client import LLMClient as LLMClient
 from src.core.llm_client import LocalOnlyError as LocalOnlyError
 from src.core.llm_client import llm_concurrency as llm_concurrency
@@ -78,20 +76,29 @@ from src.core.model_telemetry import get_limiter
 from src.core.profiler import DatasetProfile, profile_dataframe
 from src.core.prompt_manager import (
     ARCHETYPES,
-    RLM_SUBTASK_SYSTEM,
     PromptManager,
 )
 from src.core.question_router import route_question
 from src.core.run_config import RunConfig
 from src.core.run_context import objective_scope
-from src.core.security import sanitize_for_prompt
 from src.core.tool_registry import ToolRegistry as ToolRegistry
-from src.rlm.engine import RLMEngine, RLMSubTask
+from src.rlm.engine import RLMEngine
 
 if TYPE_CHECKING:
     from rich.progress import TaskID
 
 logger = logging.getLogger(__name__)
+
+NON_ANALYTICAL_TOOLS: frozenset[str] = frozenset({
+    "planner",
+    "ingest_dataset",
+    "load_dataset",
+    "clean_data",
+    "extract_structured_features",
+    "generate_report",
+    "generate_visualizations",
+    "define_analysis_tool",
+})
 
 
 def _synthesize_autonomous_objective(
@@ -180,12 +187,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             if max_iterations is not None
             else int(os.getenv("MAX_ITERATIONS", "15"))
         )
-        self.enable_rlm = (
-            enable_rlm
-            if enable_rlm is not None
-            else os.getenv("ENABLE_RLM_INFERENCE", "true").lower() == "true"
-        )
-        self._rlm_decomposed: bool = False   # run decomposition at most once per session
+        _ = enable_rlm  # Deprecated: Stage 6 RLM feature decomposition pruned
         self.memory = MemorySystem(persist_path=memory_persist_path)
         self.llm_client = LLMClient(run_config)
         self.tool_registry = ToolRegistry()
@@ -923,6 +925,14 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             max_concurrency=llm_concurrency(),
         )
 
+    def _analytical_tools_run_count(self) -> int:
+        """Count successful executions of analytical tools (excluding ingestion/setup/reporting)."""
+        return sum(
+            1
+            for r in self.memory.tool_results
+            if r.status == "success" and r.tool_name not in NON_ANALYTICAL_TOOLS
+        )
+
     def _reasoning_loop(self) -> dict[str, Any]:
         """Stages 2-4: run reasoning cycles until the analysis completes, stops or
         hits max_iterations. Returns the raw final result (before post-run audits)."""
@@ -983,14 +993,9 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     self._store_data_understanding(llm_response)
                     self._store_reasoning_contracts(llm_response)
 
-                # A "complete" reply before any tool ran can only be
+                # A "complete" reply before any analytical tool ran can only be
                 # invented insights: run the profile-driven plan first.
-                analysis_has_run = any(
-                    r.status == "success"
-                    and r.tool_name not in {"planner", "ingest_dataset", "load_dataset"}
-                    for r in self.memory.tool_results
-                )
-                if llm_response.get("status") == "complete" and not analysis_has_run:
+                if llm_response.get("status") == "complete" and self._analytical_tools_run_count() == 0:
                     console.print(
                         "[yellow]ℹ LLM signalled complete before any analysis ran — "
                         "running the profile-driven plan first.[/]"
@@ -1035,14 +1040,6 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     self.memory.save()
                     final_result = self._deterministic_final()
                     break
-
-                # ---- Stage 6: RLM Decomposition (if enabled & many features, once only) ----
-                if self.enable_rlm and not self._rlm_decomposed:
-                    progress.update(task_id, description="Stage 6 — RLM task decomposition…")
-                    if self.on_iteration_callback:  # progress notice only; the decomposition is unchanged
-                        self.on_iteration_callback(iteration, "stage6:rlm_decomposition")
-                    self._run_rlm_decomposition()
-                    self._rlm_decomposed = True
 
                 self.memory.save()
 
@@ -1138,6 +1135,12 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         """
         if llm_response.get("status") != "complete":
             return llm_response, None
+        if self._analytical_tools_run_count() == 0:
+            console.print(
+                "[yellow]ℹ LLM signalled complete before any analysis ran — "
+                "running the profile-driven plan first.[/]"
+            )
+            return self._build_fallback_plan(), None
         if iteration >= self.min_iterations:
             console.print("\n[bold green]✅ LLM signalled analysis complete.[/]")
             return llm_response, llm_response
@@ -1164,10 +1167,18 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             reprompt_res = self._normalise_reply(reprompt_res)
             if reprompt_res.get("status") != "complete":
                 return reprompt_res, None
+            if self._analytical_tools_run_count() == 0:
+                console.print(
+                    "[yellow]ℹ LLM confirmed complete before any analysis ran — "
+                    "running the profile-driven plan first.[/]"
+                )
+                return self._build_fallback_plan(), None
             console.print("\n[bold green]✅ LLM confirmed analysis complete.[/]")
             return reprompt_res, reprompt_res
         except Exception as exc:
             console.print(f"[yellow]⚠ Exploration reprompt failed ({exc}) — accepting completion.[/]")
+            if self._analytical_tools_run_count() == 0:
+                return self._build_fallback_plan(), None
             return llm_response, llm_response
 
     def _deterministic_cycle(self, progress: Progress, task_id: TaskID) -> dict[str, Any]:
@@ -1613,12 +1624,22 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             )
         self._resolve_public_status(final_result)
 
-        # ---- Stage 7: Dossier Generation ----
+        # ---- Stage 5: Dossier Generation ----
         self._generate_dashboard()
         # Dashboard generation may add the charts requested by the objective,
         # so the deliverable contract must inspect the final chart set.
         final_result["charts"] = list(self._last_charts)
+        prev_charts_count = len(self._last_charts)
         self._audit_contract(final_result, audit_df)
+        self._last_charts = list(final_result.get("charts", []))
+        if len(self._last_charts) > prev_charts_count:
+            try:
+                out_path = Path(self._output_dir) / "reports" / "dashboard.json"
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(strict_json_dumps(self._last_charts, indent=2), encoding="utf-8")
+                self.memory.set_context("dashboard_path", str(out_path))
+            except Exception as exc:
+                logger.debug("Failed to re-save dashboard.json after deliverable repair: %s", exc)
         self._generate_final_report(final_result)
         self._generate_html_report(final_result)
         self.memory.set_context("public_final_result", final_result)
@@ -1888,150 +1909,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
 
 
     # ------------------------------------------------------------------
-    # Stage 6 — RLM decomposition
-    # ------------------------------------------------------------------
-
-    def _should_decompose(self) -> bool:
-        """Trigger decomposition for wide datasets — the same structural
-        fact (is_high_dimensional) that gates dimensionality_analysis, so
-        there's one source of truth for "this data has a lot of features"."""
-        mode = os.getenv("RLM_DECOMPOSE", "auto").strip().lower()
-        if mode == "off":
-            return False
-        if mode == "on":
-            return True
-        if self.last_profile is not None:
-            wide = self.last_profile.is_high_dimensional
-        else:
-            meta = self.memory.dataset_metadata
-            wide = meta is not None and meta.column_count > 15
-        if not wide:
-            return False
-        # Auto: each sub-task is a paid LLM call, so skip it when the
-        # deterministic tools already covered the numeric columns or primary agenda is satisfied.
-        reason = self._rlm_skip_reason()
-        if reason:
-            return False
-        return True
-
-    def _rlm_skip_reason(self) -> str:
-        meta = self.memory.dataset_metadata
-        num_cols = meta.numerical_cols if meta is not None else []
-        if len(num_cols) < 8:
-            return f"only {len(num_cols)} numeric columns (< 8)"
-        agenda_raw = self.memory.get_context("question_agenda") or []
-        if agenda_raw and self.last_profile is not None:
-            try:
-                agenda = [Question(**q) if isinstance(q, dict) else q for q in agenda_raw]
-                findings_dicts = [f.to_dict() for f in self.memory.findings]
-                cov = coverage_report(agenda, findings_dicts)
-                primary = [q for q in agenda if getattr(q, "expected_value", 0) >= 0.7]
-                primary_unanswered = [q for q in primary if q not in cov.get("answered", [])]
-                if not primary_unanswered and len(cov.get("answered", [])) >= max(1, len(agenda) // 2):
-                    return "all primary agenda questions are satisfied and profiling is complete"
-            except Exception as exc:
-                logger.debug('Agenda early exit check encountered error: %s', exc)
-        if self._prompt_manager is None:
-            return ""
-        groups = [num_cols[i: i + 8] for i in range(0, len(num_cols), 8)]
-        if all(self._prompt_manager.rlm_group_findings(g) for g in groups):
-            return f"findings already cover all {len(groups)} numeric column groups"
-        return ""
-
-    def _run_rlm_decomposition(self) -> None:
-        """
-        Stage 6: Decompose the feature space into sub-groups and run
-        targeted LLM sub-calls on each group.
-
-        This is the core RLM innovation: instead of one monolithic context,
-        each feature group gets its own focused reasoning call.
-        """
-        if not self._should_decompose():
-            console.print("  [dim]RLM decomposition not required; all primary feature groups covered.[/]")
-            self.memory.set_context("rlm_sub_results", [])
-            return
-
-        if self._rlm_engine is None or self._prompt_manager is None:
-            return
-
-        meta = self.memory.dataset_metadata
-        if meta is None:
-            return
-
-        num_cols = meta.numerical_cols
-        cat_cols = meta.categorical_cols
-
-        # Partition numerical columns into groups of ≤8
-        groups: dict[str, list[str]] = {}
-        chunk_size = 8
-        for i in range(0, len(num_cols), chunk_size):
-            groups[f"numerical_group_{i // chunk_size + 1}"] = num_cols[i: i + chunk_size]
-        if cat_cols:
-            groups["categorical_group"] = cat_cols[:10]
-
-        sub_tasks = [
-            RLMSubTask(
-                task_id=gid,
-                description=(
-                    f"Analyse {len(cols)}-feature group: "
-                    f"{', '.join(sanitize_for_prompt(c) for c in cols[:5])}…"
-                ),
-                context={"columns": [sanitize_for_prompt(c) for c in cols], "group_id": gid},
-            )
-            for gid, cols in groups.items()
-        ]
-
-        if not sub_tasks:
-            return
-
-        def build_prompt(task: RLMSubTask) -> str:
-            assert self._prompt_manager is not None
-            ctx_summary = json.dumps(task.context)
-            return self._prompt_manager.get_rlm_subtask_prompt(
-                task_id=task.task_id,
-                description=task.description,
-                context_summary=ctx_summary,
-                columns=groups[task.task_id],
-            )
-
-        # Graceful degradation, same rationale as the stage-2 planning call
-        # (line ~1184): decomposition results are optional context for final
-        # synthesis, not a required step, so a transient LLM/API failure here
-        # (rate limit, timeout, provider outage) must not abort the run —
-        # it should just mean synthesis proceeds without the extra detail.
-        cap = max_llm_tokens_per_run()
-        if self._llm_budget_exhausted():
-            return
-        self.llm_client.stage = "stage6:rlm_decomposition"
-        try:
-            sub_results = self._rlm_engine.decompose_and_invoke(
-                sub_tasks=sub_tasks,
-                prompt_builder=build_prompt,
-                depth=1,
-                max_total_tokens=cap or None,
-                system_prompt=RLM_SUBTASK_SYSTEM,
-            )
-        except Exception as exc:
-            self.memory.set_context("rlm_decomposition_error", f"{type(exc).__name__}: {exc}")
-            console.print(f"[yellow]⚠ RLM decomposition failed: {exc}[/]")
-            console.print("[yellow]  → Continuing without sub-task decomposition.[/]")
-            return
-
-        # Store sub-results in memory context for final synthesis
-        self.memory.set_context("rlm_sub_results", sub_results)
-        console.print(
-            f"  [green]✓ RLM decomposition complete: "
-            f"{len(sub_results)} sub-task(s) resolved.[/]"
-        )
-        if self._rlm_engine.last_failures:
-            self.memory.set_context("rlm_sub_failures", self._rlm_engine.last_failures)
-            console.print(
-                f"  [yellow]  {len(self._rlm_engine.last_failures)} sub-task(s) unresolved: "
-                f"{', '.join(self._rlm_engine.last_failures)}[/]"
-            )
-
-    # ------------------------------------------------------------------
-    # Stage 7 — Report generation
+    # Agenda and question building
     # ------------------------------------------------------------------
     def _build_question_agenda(
         self,

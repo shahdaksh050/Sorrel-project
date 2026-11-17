@@ -196,7 +196,8 @@ def audit_deliverables(
         target_found = False
         # Check findings and insights
         for f in findings:
-            f_text = (getattr(f, "headline", "") or str(f)).lower()
+            headline = f.get("headline", "") if isinstance(f, dict) else getattr(f, "headline", "")
+            f_text = (headline or str(f)).lower()
             if target_l in f_text and ("driver" in f_text or "predict" in f_text or "importance" in f_text or "lift" in f_text):
                 target_found = True
                 break
@@ -215,7 +216,7 @@ def audit_deliverables(
     if contract.requires_relationship_analysis:
         rel_found = False
         for f in findings:
-            f_kind = getattr(f, "kind", "")
+            f_kind = f.get("kind", "") if isinstance(f, dict) else getattr(f, "kind", "")
             if f_kind in ("correlation", "co_movement", "cluster"):
                 rel_found = True
                 break

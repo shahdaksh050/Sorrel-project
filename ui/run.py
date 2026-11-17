@@ -1029,7 +1029,7 @@ def _execute(run: ActiveRun | _WorkerRun) -> None:
     upd("2", "active", plan_detail)
     for num in ("3", "4", "5"):
         upd(num, "pending")
-    upd("6", "pending" if spec.enable_rlm else "skipped", "" if spec.enable_rlm else "disabled")
+    upd("6", "skipped", "not needed")
     upd("7", "pending")
 
     # What the controller reports maps onto one moving "you are here": plan (2), run the planned
@@ -1107,16 +1107,13 @@ def _execute(run: ActiveRun | _WorkerRun) -> None:
         upd("3", "done", f"stopped early: {len(tool_results)} tools executed")
         upd("4", "skipped", "stopped")
         upd("5", "skipped", "stopped")
-        if spec.enable_rlm:
-            upd("6", "skipped", "stopped")
+        upd("6", "skipped", "stopped")
         upd("7", "done", "partial report saved")
     else:
         upd("3", "done", f"{len(tool_results)} tools executed: {', '.join(tool_names[:5])}")
         upd("4", "done", "results interpreted")
         upd("5", "done", f"{agent.memory.iteration_count} iteration(s)")
-        if spec.enable_rlm:
-            sub = agent.memory.get_context("rlm_sub_results")
-            upd("6", "done", f"{len(sub)} sub-tasks" if sub else "no decomposition needed")
+        upd("6", "skipped", "not needed")
         upd("7", "done", "report saved")
 
     dashboard: list[dict[str, Any]] | None = None

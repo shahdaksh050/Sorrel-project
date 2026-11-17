@@ -1157,11 +1157,11 @@ class TimeSeriesAnalysisTool(BaseTool):
                 headline=headline,
                 detail=(
                     f"Average {name} by hour of day over {d['n']:,} readings: highest at {ph:02d}:00 "
-                    f"({d['peak_value']}), lowest at {th:02d}:00 ({d['trough_value']}), overall average "
-                    f"{d['overall_mean']}. Hour of day explains {d['eta_squared']:.1%} of the variation "
-                    f"(eta squared {d['eta_squared']}, ANOVA p={d['p_value']:.3g})."
+                    f"({_num(d['peak_value'])}), lowest at {th:02d}:00 ({_num(d['trough_value'])}), overall average "
+                    f"{_num(d['overall_mean'])}. Hour of day explains {d['eta_squared']:.1%} of the variation "
+                    f"(eta squared {d['eta_squared']:.2f}, ANOVA p={d['p_value']:.3g})."
                     + (
-                        f" Weekday average {w['weekday_mean']} vs weekend {w['weekend_mean']}"
+                        f" Weekday average {_num(w['weekday_mean'])} vs weekend {_num(w['weekend_mean'])}"
                         + (f" ({gap:+.0%})." if gap is not None else ".")
                         if w else ""
                     )

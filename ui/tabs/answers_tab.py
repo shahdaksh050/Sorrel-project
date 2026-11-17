@@ -27,6 +27,7 @@ from ui.components.cards import (
     render_defect_stamp,
     render_evidence_html,
     render_run_compare,
+    round_for_reading,
     search_findings,
     state_label,
     tech_note_html,
@@ -44,7 +45,7 @@ def _evidence_inspector(
     if st.session_state.get("selected_finding") not in ids:
         st.session_state["selected_finding"] = ids[0]
     labels = {
-        fid: f"{plainify(str(f.get('headline', '')))} ({state_label(finding_state(f))})"
+        fid: f"{round_for_reading(plainify(str(f.get('headline', ''))))} ({state_label(finding_state(f))})"
         for fid, f in zip(ids, findings, strict=True)
     }
     left, right = st.columns([5, 7], gap="large")
@@ -141,6 +142,7 @@ def render_answers_tab(
     # 2. Verdict, counted from the findings listed below so the number and the list always agree.
     # Only when a check actually ran: a "0 of 0" would claim a check that did not happen.
     headline = list(view.headline_findings)
+    total = len(headline)
     states = [finding_state(f) for f in headline]
     checked = sum(1 for x in states if x != "unchecked")
     held = sum(1 for x in states if x == "held")
@@ -150,17 +152,23 @@ def render_answers_tab(
         sub_lines = []
         if needs_more:
             sub_lines.append(f"{needs_more} need{'s' if needs_more == 1 else ''} more data.")
-        if not_checked:
-            sub_lines.append(f"{not_checked} headline finding{' was' if not_checked == 1 else 's were'} not checked.")
         if gap_val is not None:
             sub_lines.append(
                 "The model held up on new data."
                 if not gap_is_risky(gap_val)
                 else "The model may have memorised examples, see below."
             )
+        if not_checked == 0:
+            lead_verdict = f"{held} of {total} finding{'s' if total != 1 else ''} held up."
+        else:
+            plural_obs = "s" if not_checked != 1 else ""
+            lead_verdict = (
+                f"{held} of {checked} audited finding{'s' if checked != 1 else ''} held up "
+                f"(out of {total} headline findings; {not_checked} exploratory observation{plural_obs} without statistical checks)."
+            )
         st.markdown(
             f'<div class="run-banner{" ok" if needs_more == 0 else " caution"}">'
-            f'{held} of {checked} checked finding{"s" if checked != 1 else ""} held up.'
+            f"{lead_verdict}"
             + "".join(f'<span class="sub">{html.escape(s)}</span>' for s in sub_lines)
             + "</div>",
             unsafe_allow_html=True,

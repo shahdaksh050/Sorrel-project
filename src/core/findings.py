@@ -60,7 +60,7 @@ _EFFECT_BENCHMARKS: dict[str, float] = {
 
 #: Evidence keys that carry a sample size; below _SMALL_N the confidence is
 #: discounted however small the p-value.
-_SAMPLE_SIZE_KEYS = ("n", "n_level", "sample_size", "n_segment", "n_obs")
+_SAMPLE_SIZE_KEYS = ("n", "n_level", "sample_size", "n_segment", "n_obs", "total", "n_total", "population_size")
 _SMALL_N = 30
 
 #: Mirrors `src.tools.ml_pipeline.OVERFIT_THRESHOLD`. Not imported directly —

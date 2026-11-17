@@ -36,7 +36,7 @@ GLYPH: dict[CheckState, str] = {"pass": "✓", "fail": "!", "neutral": "○"}
 #: Rendering order for a finding's check row.
 CHECK_ORDER: tuple[str, ...] = ("not_luck", "records", "robust", "leakage", "cause", "model_gap")
 
-_SAMPLE_KEYS = ("n", "n_level", "sample_size", "n_segment", "n_obs")
+_SAMPLE_KEYS = ("n", "n_level", "sample_size", "n_segment", "n_obs", "total", "n_total", "population_size")
 
 #: key -> (pass label, fail label). "leakage" and "cause" are handled
 #: specially below (leakage is fail-only; cause is neutral-only).

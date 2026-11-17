@@ -883,7 +883,7 @@ def adopt_run(run_id: str, search_root: str | Path | None = None) -> ActiveRun |
     if status.status == "succeeded":
         adopted._state = "done"
     elif status.status in ("failed", "cancelled"):
-        adopted._state = "error" if status.status == "failed" else "stopped"
+        adopted._state = "error"
         adopted._error = f"Run status: {status.status}"
     else:
         if registry.is_abandoned(60.0):

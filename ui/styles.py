@@ -174,6 +174,7 @@ def inject_theme_css() -> None:
         transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, color var(--dur-fast) ease;
     }}
     .stepper .step::before {{ transition: transform var(--dur-base) var(--ease-out); }}
+    .block-container {{ transition: max-width var(--dur-base) var(--ease-out), padding var(--dur-base) var(--ease-out); }}
 }}
 
 /* ── The page ── */
@@ -196,7 +197,6 @@ header[data-testid="stHeader"] {{ background: transparent; }}
     padding-top: 2.2rem;
     padding-left: clamp(1.5rem, 3vw, 4rem) !important;
     padding-right: clamp(1.5rem, 3vw, 4rem) !important;
-    transition: max-width var(--dur-base) var(--ease-out), padding var(--dur-base) var(--ease-out);
 }}
 
 /* ── Full screen when sidebar is collapsed ── */
@@ -614,7 +614,6 @@ code, kbd, pre, .stCode {{ font-family: var(--mono) !important; }}
 /* Only the chip card itself receives a single border and background */
 div[data-testid="stFileChip"],
 .stFileChip,
-div[data-testid="stFileUploaderFileData"],
 .uploadedFileData {{
     background: var(--sheet) !important;
     border: 1px solid var(--rule-strong) !important;
@@ -625,8 +624,7 @@ div[data-testid="stFileUploaderFileData"],
 
 /* Children of the file chip (filename, icon, delete button) must never render nested borders */
 [data-testid="stFileChip"] *,
-.stFileChip *,
-div[data-testid="stFileUploaderFileData"] * {{
+.stFileChip * {{
     border: none !important;
     box-shadow: none !important;
     outline: none !important;
@@ -644,8 +642,7 @@ div[data-testid="stFileUploaderFileData"] * {{
 [data-testid="stFileChip"] small,
 .stFileChip small,
 [data-testid="stFileChip"] span:last-child,
-[data-testid="stFileChip"] div:last-child,
-[data-testid="stFileUploaderFileData"] small {{
+[data-testid="stFileChip"] div:last-child {{
     color: var(--graphite) !important;
     background: transparent !important;
     border: none !important;

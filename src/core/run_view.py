@@ -57,6 +57,8 @@ class Verdict:
 
     held_up: int
     audited: int
+    total: int = 0
+    unchecked: int = 0
 
     @property
     def needs_more(self) -> int:
@@ -210,11 +212,12 @@ def compute_verdict(headline: tuple[dict[str, Any], ...]) -> Verdict | None:
     `None` when no finding was audited: a "0 of 0" would claim a check that
     did not happen. A finding held up when none of its checks failed.
     """
+    total = len(headline)
     audited = [marks for marks in (audited_checks(f.get("evidence")) for f in headline) if marks]
     if not audited:
         return None
     held_up = sum(1 for marks in audited if not any(m.state == "fail" for m in marks))
-    return Verdict(held_up=held_up, audited=len(audited))
+    return Verdict(held_up=held_up, audited=len(audited), total=total, unchecked=total - len(audited))
 
 
 # ── how we got here ──────────────────────────────────────────────────────────

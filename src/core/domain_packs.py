@@ -246,6 +246,7 @@ def evaluate_domain_pack(
                                 "exceedance_rate": rate,
                                 "violations": count_viol,
                                 "total": n_total,
+                                "n": n_total,
                                 "peak_value": max_val,
                                 "standard": spec.standard_name,
                             },

@@ -970,6 +970,48 @@
     box-shadow: 0 1px 4px rgba(0,0,0,0.3);
   }
 
+  /* Live Vega-Lite Embed & Fallback Containers */
+  .chart-svg-box .vega-embed {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  .chart-svg-box .vega-embed summary {
+    display: none !important;
+  }
+  .chart-fallback-box {
+    width: 100%;
+    height: 100%;
+    min-height: 180px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 1.5rem;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    color: var(--ink-faint);
+    background: var(--surface-raised);
+  }
+  .chart-fallback-icon {
+    font-size: 1.75rem;
+    margin-bottom: 0.5rem;
+    opacity: 0.7;
+  }
+  .chart-fallback-text {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--ink-muted);
+  }
+  .chart-fallback-sub {
+    font-size: 0.75rem;
+    margin-top: 0.25rem;
+    color: var(--ink-faint);
+  }
+
   /* Reduced Motion Support */
   @media (prefers-reduced-motion: reduce) {
     .card-block {
@@ -981,6 +1023,10 @@
     }
   }
 </style>
+<!-- Vendored Vega Scripts for Standalone Prototype Viewing -->
+<script src="../../static/vendor/vega/vega.min.js"></script>
+<script src="../../static/vendor/vega/vega-lite.min.js"></script>
+<script src="../../static/vendor/vega/vega-embed.min.js"></script>
 </head>
 <body data-theme="night">
 
@@ -1323,6 +1369,234 @@
 <!-- Virtual Cursor Template & Choreography Engine Script -->
 <script>
 (function() {
+  // ── Vega View Cache & Live Spec Mounting ───────────────────────────
+  let vegaViews = {};
+
+  function mountVegaCharts(forceThemeUpdate = false) {
+    if (typeof vegaEmbed === 'undefined') return;
+    const payload = window.__DSA_SWARM_PAYLOAD__;
+    if (!payload || !payload.charts) return;
+
+    const isNight = document.body.getAttribute('data-theme') === 'night';
+    const vegaCfg = isNight
+      ? (window.__DSA_VEGA_CFG_NIGHT__ || {})
+      : (window.__DSA_VEGA_CFG_DAY__ || {});
+
+    const embedOpts = {
+      actions: false,
+      renderer: 'svg',
+      config: vegaCfg,
+    };
+
+    // 1. Hero Chart (#card-chart-hero)
+    const heroBox = document.querySelector('#card-chart-hero .chart-svg-box');
+    if (heroBox && payload.charts.hero && payload.charts.hero.spec && Object.keys(payload.charts.hero.spec).length > 0) {
+      if (!heroBox.dataset.mounted || forceThemeUpdate) {
+        heroBox.dataset.mounted = 'true';
+        heroBox.innerHTML = '';
+        const spec = Object.assign({}, payload.charts.hero.spec, {
+          width: 'container',
+          height: 190,
+          background: 'transparent',
+        });
+        vegaEmbed(heroBox, spec, embedOpts)
+          .then(res => { vegaViews['hero'] = res.view; })
+          .catch(err => { console.warn('Hero Vega mount error:', err); });
+      }
+    } else if (heroBox && (!payload.charts.hero || !payload.charts.hero.spec || Object.keys(payload.charts.hero.spec).length === 0)) {
+      if (!heroBox.dataset.fallback) {
+        heroBox.dataset.fallback = 'true';
+        heroBox.innerHTML = `
+          <div class="chart-fallback-box">
+            <span class="chart-fallback-icon">📊</span>
+            <span class="chart-fallback-text">No Primary Chart Detected</span>
+            <span class="chart-fallback-sub">Exploratory analysis produced tabular & statistical metrics</span>
+          </div>`;
+      }
+    }
+
+    // 2. Segment Chart (#card-chart-segment)
+    const segBox = document.querySelector('#card-chart-segment .chart-svg-box');
+    if (segBox && payload.charts.segment && payload.charts.segment.spec && Object.keys(payload.charts.segment.spec).length > 0) {
+      if (!segBox.dataset.mounted || forceThemeUpdate) {
+        segBox.dataset.mounted = 'true';
+        segBox.innerHTML = '';
+        const spec = Object.assign({}, payload.charts.segment.spec, {
+          width: 'container',
+          height: 190,
+          background: 'transparent',
+        });
+        vegaEmbed(segBox, spec, embedOpts)
+          .then(res => { vegaViews['segment'] = res.view; })
+          .catch(err => { console.warn('Segment Vega mount error:', err); });
+      }
+    } else if (segBox && (!payload.charts.segment || !payload.charts.segment.spec || Object.keys(payload.charts.segment.spec).length === 0)) {
+      if (!segBox.dataset.fallback) {
+        segBox.dataset.fallback = 'true';
+        segBox.innerHTML = `
+          <div class="chart-fallback-box">
+            <span class="chart-fallback-icon">📈</span>
+            <span class="chart-fallback-text">Distribution Insights</span>
+            <span class="chart-fallback-sub">Secondary dimensions profiled across all strata</span>
+          </div>`;
+      }
+    }
+  }
+
+  function hydrateDomFromPayload() {
+    const payload = window.__DSA_SWARM_PAYLOAD__;
+    if (!payload) return;
+
+    // 1. Header Metadata
+    if (payload.metadata) {
+      const headerCard = document.getElementById('card-header');
+      if (headerCard) {
+        const leadSpan = headerCard.querySelector('.meta-lead');
+        if (leadSpan && payload.metadata.run_id) {
+          leadSpan.textContent = `Autonomous Executive Briefing · Run #${payload.metadata.run_id}`;
+        }
+        const titleH1 = headerCard.querySelector('.meta-title');
+        if (titleH1) {
+          const nameSpan = titleH1.querySelector('span:first-child');
+          if (nameSpan && payload.metadata.source_name) {
+            nameSpan.textContent = payload.metadata.source_name;
+          }
+          const badgeSpan = titleH1.querySelector('span:last-child');
+          if (badgeSpan && payload.metadata.headline_badge) {
+            badgeSpan.textContent = payload.metadata.headline_badge;
+          }
+        }
+        const descP = headerCard.querySelector('.meta-desc');
+        if (descP && payload.metadata.lead_narrative) {
+          descP.textContent = payload.metadata.lead_narrative;
+        }
+      }
+    }
+
+    // 2. Telemetry
+    if (payload.telemetry) {
+      const telemCells = document.querySelectorAll('#card-telemetry .telem-val');
+      if (telemCells.length >= 4) {
+        if (payload.telemetry.records) telemCells[0].textContent = payload.telemetry.records;
+        if (payload.telemetry.dimensions) telemCells[1].textContent = payload.telemetry.dimensions;
+        if (payload.telemetry.quality_score) telemCells[2].textContent = payload.telemetry.quality_score;
+        if (payload.telemetry.missingness) telemCells[3].textContent = payload.telemetry.missingness;
+      }
+    }
+
+    // 3. KPIs
+    if (Array.isArray(payload.kpis)) {
+      payload.kpis.forEach((kpi, idx) => {
+        const cardId = `card-kpi-${idx + 1}`;
+        const card = document.getElementById(cardId);
+        if (!card) return;
+        const labelRow = card.querySelector('.kpi-label-row');
+        if (labelRow) {
+          const lSpan = labelRow.querySelector('span:first-child');
+          if (lSpan && kpi.label) lSpan.textContent = kpi.label;
+          const bSpan = labelRow.querySelector('.kpi-badge');
+          if (bSpan && kpi.badge) bSpan.textContent = kpi.badge;
+        }
+        const numSpan = card.querySelector('.kpi-num');
+        if (numSpan) {
+          if (kpi.target !== undefined) numSpan.setAttribute('data-target', String(kpi.target));
+          numSpan.setAttribute('data-prefix', kpi.prefix || '');
+          numSpan.setAttribute('data-suffix', kpi.suffix || '');
+          if (card.classList.contains('built')) {
+            numSpan.textContent = `${kpi.prefix || ''}${kpi.target}${kpi.suffix || ''}`;
+          }
+        }
+        const subSpan = card.querySelector('.kpi-sub');
+        if (subSpan && kpi.subtext) subSpan.textContent = kpi.subtext;
+      });
+    }
+
+    // 4. Chart Headings
+    if (payload.charts) {
+      if (payload.charts.hero) {
+        const heroCard = document.getElementById('card-chart-hero');
+        if (heroCard) {
+          const h = heroCard.querySelector('.card-h');
+          if (h && payload.charts.hero.title) h.textContent = payload.charts.hero.title;
+          const sub = heroCard.querySelector('.card-h-sub');
+          if (sub && payload.charts.hero.description) sub.textContent = payload.charts.hero.description;
+          const badge = heroCard.querySelector('.kpi-badge');
+          if (badge && payload.charts.hero.badge) badge.textContent = payload.charts.hero.badge;
+        }
+      }
+      if (payload.charts.segment) {
+        const segCard = document.getElementById('card-chart-segment');
+        if (segCard) {
+          const h = segCard.querySelector('.card-h');
+          if (h && payload.charts.segment.title) h.textContent = payload.charts.segment.title;
+          const sub = segCard.querySelector('.card-h-sub');
+          if (sub && payload.charts.segment.description) sub.textContent = payload.charts.segment.description;
+          const badge = segCard.querySelector('.kpi-badge');
+          if (badge && payload.charts.segment.badge) badge.textContent = payload.charts.segment.badge;
+        }
+      }
+    }
+
+    // 5. Model Leaderboard
+    if (payload.models && payload.models.has_models && Array.isArray(payload.models.model_list) && payload.models.model_list.length > 0) {
+      const tbody = document.querySelector('#card-models .model-table tbody');
+      if (tbody) {
+        tbody.innerHTML = '';
+        payload.models.model_list.forEach((m, idx) => {
+          const tr = document.createElement('tr');
+          if (idx === 0) tr.className = 'champion';
+          tr.innerHTML = `
+            <td>${idx === 0 ? '<strong>★ ' : ''}${m.name}${idx === 0 ? '</strong>' : ''}</td>
+            <td>${m.cv_mean}</td>
+            <td>${m.gap}</td>
+            <td>${m.warning}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+      }
+    }
+
+    // 6. Action Matrix
+    if (payload.action_matrix && payload.action_matrix.has_action_matrix && payload.action_matrix.data) {
+      const quads = document.querySelectorAll('#card-action-matrix .quadrant');
+      const d = payload.action_matrix.data;
+      if (quads.length >= 4) {
+        if (d.quick_wins && quads[0]) {
+          const act = quads[0].querySelector('.quad-action');
+          if (act) act.textContent = Array.isArray(d.quick_wins) ? d.quick_wins[0] : String(d.quick_wins);
+        }
+        if (d.strategic_pilots && quads[1]) {
+          const act = quads[1].querySelector('.quad-action');
+          if (act) act.textContent = Array.isArray(d.strategic_pilots) ? d.strategic_pilots[0] : String(d.strategic_pilots);
+        }
+        if (d.watch_caveats && quads[2]) {
+          const act = quads[2].querySelector('.quad-action');
+          if (act) act.textContent = Array.isArray(d.watch_caveats) ? d.watch_caveats[0] : String(d.watch_caveats);
+        }
+        if (d.low_priority && quads[3]) {
+          const act = quads[3].querySelector('.quad-action');
+          if (act) act.textContent = Array.isArray(d.low_priority) ? d.low_priority[0] : String(d.low_priority);
+        }
+      }
+    }
+
+    // 7. Audit Seal
+    if (payload.audit) {
+      const seal = document.getElementById('seal-audit');
+      if (seal) {
+        const h4 = seal.querySelector('.seal-info h4');
+        if (h4 && payload.audit.ledger_text) h4.textContent = payload.audit.ledger_text;
+        const p = seal.querySelector('.seal-info p');
+        if (p && payload.audit.subtext) p.textContent = payload.audit.subtext;
+        const chip = seal.querySelector('.seal-right .telemetry-chip strong');
+        if (chip && payload.audit.checksum) chip.textContent = payload.audit.checksum;
+      }
+    }
+  }
+
+  // Hydrate initial DOM if payload is present
+  hydrateDomFromPayload();
+
   // ── Swarm Agent Definitions (Unified Monotonous Slate Palette) ──────
   const UNIFIED_CURSOR_COLOR = '#0f172a';
   const UNIFIED_HELPER_COLOR = '#0f172a';
@@ -1645,6 +1919,7 @@
       hexMathBadge.style.opacity = '0';
       hexMathBadge.style.display = 'none';
     }
+    mountVegaCharts();
     hudStatus.textContent = '✨ Complete (Instant View)';
     hudBadge.textContent = 'Ready';
   }
@@ -1772,6 +2047,7 @@
           cursorElements[ag.id].style.transform = `translate3d(${idleX}px, ${idleY}px, 0)`;
           cursorElements[ag.id].style.opacity = '1';
         });
+        mountVegaCharts();
 
         document.querySelectorAll('.kpi-num').forEach(el => {
           const target = parseFloat(el.getAttribute('data-target') || '0');
@@ -2578,6 +2854,7 @@
             if (roleSpan) roleSpan.textContent = '✓ SQUARED 90°';
           }
         });
+        mountVegaCharts();
 
         // Roll up numbers
         document.querySelectorAll('.kpi-num').forEach(el => {
@@ -2711,6 +2988,7 @@
     document.body.setAttribute('data-theme', newTheme);
     document.getElementById('theme-icon').textContent = isNight ? '🌙' : '☀️';
     document.getElementById('theme-text').textContent = isNight ? 'Night' : 'Day';
+    mountVegaCharts(true);
   });
 
   speedButtons.forEach(btn => {
@@ -2723,6 +3001,7 @@
 
   // ── Initialize on load ──────────────────────────────────────────────
   window.addEventListener('DOMContentLoaded', () => {
+    hydrateDomFromPayload();
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       revealAllInstantly();
       hudStatus.textContent = 'Reduced motion preferred: animation bypassed.';

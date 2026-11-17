@@ -215,14 +215,14 @@ def render_datum(cells: list[tuple[str, str]]) -> str:
 _CHECK_CSS: dict[str, str] = {"pass": "ok", "fail": "risk", "neutral": "note"}
 
 
-_LONG_DECIMAL = re.compile(r"(?<![\w.])-?\d+\.\d{3,}(?![\w.])")
+_LONG_DECIMAL = re.compile(r"(?<![\w])-?\d+\.\d{2,}(?!\.?\d)(?!\w)")
 
 
 def round_for_reading(text: str) -> str:
     """Round long decimals in prose for display (1,201.1968 reads as 1,201). The finding keeps its original values.
 
-    Magnitude sets the precision: 100 and above shows no decimals, 10 and above one, 1 and above
-    two, below 1 three. Values under 0.001 (p-values) are left alone so they are not rounded to zero.
+    Magnitude sets the precision: 100 and above shows no decimals, 10 and above one,
+    below 10 two. Values under 0.001 (p-values) are left alone so they are not rounded to zero.
     """
     def _round(match: re.Match[str]) -> str:
         value = float(match.group(0))
@@ -233,7 +233,7 @@ def round_for_reading(text: str) -> str:
             return f"{value:,.0f}"
         if magnitude >= 10:
             return f"{value:.1f}"
-        return f"{value:.2f}" if magnitude >= 1 else f"{value:.3f}"
+        return f"{value:.2f}"
 
     return _LONG_DECIMAL.sub(_round, text)
 
@@ -306,12 +306,12 @@ def render_evidence_html(finding: dict[str, Any], *, with_figures: bool = True) 
     chart (the fold is the last thing in the pane, not a label that makes the chart look folded).
     """
     state = finding_state(finding)
-    headline = html.escape(plainify(str(finding.get("headline", ""))))
+    headline = html.escape(round_for_reading(plainify(str(finding.get("headline", "")))))
     detail = round_for_reading(plainify(str(finding.get("detail") or "")))
     checks = audited_checks(finding.get("evidence"))
     marks = _check_marks_html(checks)
     caveats = "".join(
-        f"<li>{html.escape(plainify(str(c)))}</li>" for c in (finding.get("caveats") or [])[:4]
+        f"<li>{html.escape(round_for_reading(plainify(str(c))))}</li>" for c in (finding.get("caveats") or [])[:4]
     )
     return (
         f'<div class="evidence-head"><span class="verdict-mark {state}">{html.escape(state_label(state))}</span>'
@@ -325,7 +325,7 @@ def render_evidence_html(finding: dict[str, Any], *, with_figures: bool = True) 
 
 def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str], is_primary: bool = False) -> str:
     """One sentence card for a top-ranked Finding, with its audited-entry check row."""
-    headline = html.escape(plainify(str(finding.get("headline", ""))))
+    headline = html.escape(round_for_reading(plainify(str(finding.get("headline", "")))))
     detail = finding.get("detail")
     caveats = finding.get("caveats") or []
     sub_text = round_for_reading(

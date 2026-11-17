@@ -99,7 +99,7 @@ MAX_ROWS_DEFAULT = 1_000_000
 #: Default ceiling for data expanded from gzip/zip containers.  Keep this in
 #: lockstep with src.core.security.DEFAULT_MAX_UNCOMPRESSED_MB without importing
 #: that module (security imports SUPPORTED_EXTENSIONS from here).
-DEFAULT_MAX_UNCOMPRESSED_MB = 500
+DEFAULT_MAX_UNCOMPRESSED_MB = 50
 _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 
 _FORMAT_BY_SUFFIX = {

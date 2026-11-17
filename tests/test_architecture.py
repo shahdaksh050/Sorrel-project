@@ -165,3 +165,31 @@ def test_core_never_imports_private_tool_helpers() -> None:
         if private_symbols:
             offenders[str(path.relative_to(ROOT))] = private_symbols
     assert not offenders, f"core modules importing private tool helpers: {offenders}"
+
+
+def test_app_early_dotenv_loading() -> None:
+    """app.py must load .env before _HOSTED evaluation and before importing streamlit."""
+    app_path = ROOT / "app.py"
+    tree = _tree(app_path)
+    load_dotenv_line: int | None = None
+    hosted_line: int | None = None
+    streamlit_line: int | None = None
+
+    for node in tree.body:
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            if _attribute_name(node.value.func) == "load_dotenv":
+                load_dotenv_line = node.lineno
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "_HOSTED":
+                    hosted_line = node.lineno
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "streamlit":
+                    streamlit_line = node.lineno
+
+    assert load_dotenv_line is not None, "load_dotenv() call not found in app.py"
+    assert hosted_line is not None, "_HOSTED assignment not found in app.py"
+    assert streamlit_line is not None, "streamlit import not found in app.py"
+    assert load_dotenv_line < hosted_line, "load_dotenv() must be called before _HOSTED evaluation"
+    assert hosted_line < streamlit_line, "_HOSTED must be evaluated before importing streamlit"

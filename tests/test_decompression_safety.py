@@ -127,3 +127,39 @@ def test_compressed_uploads_are_validated(monkeypatch: pytest.MonkeyPatch) -> No
         validate_upload("table.csv.gz", b"not gzip")
     with pytest.raises(UploadValidationError, match="must be named"):
         validate_upload("table.gz", payload)
+
+
+def test_zip_upload_enforces_single_dataset_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAX_COMPRESSION_RATIO", "10000")
+    # Multi-file zip
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("table1.csv", b"a,b\n1,2\n")
+        zf.writestr("table2.csv", b"c,d\n3,4\n")
+    multi_zip = buf.getvalue()
+
+    with pytest.raises(UploadValidationError, match="must contain exactly one dataset file"):
+        validate_upload("data.csv.zip", multi_zip)
+
+    # Non-csv/tsv inner member
+    buf_invalid = io.BytesIO()
+    with zipfile.ZipFile(buf_invalid, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("script.py", b"print(1)\n")
+    invalid_zip = buf_invalid.getvalue()
+
+    with pytest.raises(UploadValidationError, match=r"must contain a \.csv or \.tsv file"):
+        validate_upload("data.csv.zip", invalid_zip)
+
+
+def test_zip_upload_invalid_zip_header() -> None:
+    with pytest.raises(UploadValidationError, match="zip-compressed"):
+        validate_upload("data.csv.zip", b"not a valid zip")
+
+
+def test_default_uncompressed_limit_is_50mb(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAX_UNCOMPRESSED_MB", raising=False)
+    from src.core.io import get_max_uncompressed_bytes
+    from src.core.security import max_uncompressed_bytes
+
+    assert max_uncompressed_bytes() == 50 * 1024 * 1024
+    assert get_max_uncompressed_bytes() == 50 * 1024 * 1024

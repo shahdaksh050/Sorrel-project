@@ -25,15 +25,24 @@ import types
 from pathlib import Path
 from typing import Any, cast
 
-import pandas as pd
-import streamlit as st
 from dotenv import load_dotenv
 
-load_dotenv()
+# ── Project root on sys.path & early environment loading ─────────────────────
+ROOT = Path(__file__).parent
+sys.path.insert(0, str(ROOT))
+load_dotenv(ROOT / ".env")
+
+#: Operator switch for a shared deployment. When set, visitors cannot (a) fall
+#: back to a server-side API key, (b) point the server at a URL they typed, or
+#: (c) change the safety limits, which come from the server's environment.
+_HOSTED = os.getenv("DSA_HOSTED", "false").strip().lower() in ("1", "true", "yes")
+
+import pandas as pd
+import streamlit as st
 
 from src.core.io import read_any_bytes
 from src.core.run_config import RunConfig
-from src.core.security import ALLOWED_EXTENSIONS
+from src.core.security import ALLOWED_EXTENSIONS, UploadValidationError, validate_upload
 
 
 class _SuppressStaleFragmentFilter(logging.Filter):
@@ -43,15 +52,6 @@ class _SuppressStaleFragmentFilter(logging.Filter):
 
 logging.getLogger("streamlit").addFilter(_SuppressStaleFragmentFilter())
 logging.getLogger("streamlit.runtime.fragment").addFilter(_SuppressStaleFragmentFilter())
-
-# ── Project root on sys.path ─────────────────────────────────────────────────
-ROOT = Path(__file__).parent
-sys.path.insert(0, str(ROOT))
-
-#: Operator switch for a shared deployment. When set, visitors cannot (a) fall
-#: back to a server-side API key, (b) point the server at a URL they typed, or
-#: (c) change the safety limits, which come from the server's environment.
-_HOSTED = os.getenv("DSA_HOSTED", "false").strip().lower() in ("1", "true", "yes")
 
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
@@ -721,6 +721,15 @@ with st.sidebar:
                 accept_multiple_files=True,
                 label_visibility="collapsed",
             )
+            valid_related: list[Any] = []
+            if related_uploads:
+                for _ru in related_uploads:
+                    try:
+                        validate_upload(_ru.name, _ru.getvalue())
+                        valid_related.append(_ru)
+                    except UploadValidationError as _err:
+                        st.error(f"Cannot upload '{_ru.name}': {_err}")
+                related_uploads = valid_related
         join_choices: dict[int, dict[str, Any]] = (
             _join_review(related_uploads) if related_uploads and st.session_state.get("preview_bytes") else {}
         )

@@ -186,6 +186,8 @@ def validate_upload(filename: str, raw_bytes: bytes) -> str:
             )
         if suffix == ".gz" and not head.startswith(b"\x1f\x8b"):
             raise UploadValidationError("File claims to be gzip-compressed but has an invalid header.")
+        if suffix == ".zip" and not zipfile.is_zipfile(io.BytesIO(raw_bytes)):
+            raise UploadValidationError("File claims to be zip-compressed but has an invalid header or is corrupted.")
         _check_decompression_safety(raw_bytes, suffix)
     elif suffix == ".xlsx":
         if not head.startswith(_XLSX_SIGNATURE):
@@ -213,7 +215,18 @@ def _check_decompression_safety(raw_bytes: bytes, suffix: str) -> None:
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
                 infolist = zf.infolist()
                 label = "Excel archive" if suffix == ".xlsx" else "Archive"
-                if len(infolist) > DEFAULT_MAX_ZIP_ENTRIES:
+                if suffix == ".zip":
+                    members = [info for info in infolist if not info.is_dir()]
+                    if len(members) != 1:
+                        raise UploadValidationError(
+                            "Zip archive must contain exactly one dataset file."
+                        )
+                    inner_ext = Path(members[0].filename).suffix.lower()
+                    if inner_ext not in (".csv", ".tsv"):
+                        raise UploadValidationError(
+                            f"Zip archive must contain a .csv or .tsv file, found '{inner_ext}'."
+                        )
+                elif len(infolist) > DEFAULT_MAX_ZIP_ENTRIES:
                     raise UploadValidationError(
                         f"{label} contains {len(infolist)} entries, exceeding the "
                         f"safety limit of {DEFAULT_MAX_ZIP_ENTRIES}."

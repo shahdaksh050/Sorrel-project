@@ -189,6 +189,11 @@ def _confine_file_path(file_path: Any, memory: MemorySystem) -> tuple[Path, bool
     direct tool caller cannot use planner-controlled parameters to read an
     arbitrary host file.
     """
+    derived_dict = memory.get_context("derived_datasets") or {}
+    if isinstance(file_path, str) and isinstance(derived_dict, dict) and file_path in derived_dict:
+        info = derived_dict[file_path]
+        if isinstance(info, dict) and info.get("path"):
+            file_path = info["path"]
     target = _resolved_path(file_path)
     raw = _resolved_path(
         memory.dataset_metadata.file_path if memory.dataset_metadata is not None else None
@@ -332,7 +337,8 @@ class BaseTool(ABC):
         """
         params = dict(params)
         if "file_path" in params:
-            _target, is_derived = _confine_file_path(params["file_path"], memory)
+            target, is_derived = _confine_file_path(params["file_path"], memory)
+            params["file_path"] = str(target)
             cleaned = memory.get_context("cleaned_file_path")
             if self.uses_cleaned_file and cleaned and not is_derived:
                 params["file_path"] = cleaned

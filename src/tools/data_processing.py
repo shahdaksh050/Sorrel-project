@@ -786,8 +786,6 @@ class DetectOutliersTool(BaseTool):
     """
 
     name = "detect_outliers"
-    is_concurrent_safe = True
-    writes_fixed_file = True
     is_concurrent_safe: ClassVar[bool] = True
     writes_fixed_file: ClassVar[bool] = True
     description = (
@@ -1158,7 +1156,6 @@ class CorrelationAnalysisTool(BaseTool):
     """
 
     name = "correlation_analysis"
-    is_concurrent_safe = True
     is_concurrent_safe: ClassVar[bool] = True
     description = (
         "Compute correlation matrix for numerical features. "

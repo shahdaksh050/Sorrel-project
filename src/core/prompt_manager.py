@@ -664,14 +664,14 @@ class PromptManager:
             if auto:
                 return (
                     f"\n## Analysis Mission (Autonomous Discovery)\n"
-                    f'"{_sp(auto, max_len=500)}"\n'
+                    f'"{_sp(_redact(auto), max_len=500)}"\n'
                     f"No specific question was entered. Thoroughly investigate this core outcome: "
                     f"compare cohorts, quantify key drivers, and prioritize actionable decisions.\n"
                 )
             return ""
         return (
             f"\n## User Objective\n"
-            f'"{_sp(objective, max_len=500)}"\n'
+            f'"{_sp(_redact(objective), max_len=500)}"\n'
             f"Prioritise analyses that answer it; your final insights MUST directly address it.\n"
         )
 
@@ -908,16 +908,34 @@ class PromptManager:
         nodes = htree.get("nodes", {})
         if not nodes:
             return ""
+        pii_columns = (
+            set(self.memory.get_context("pii_columns") or [])
+            if pii_redaction_enabled()
+            else set()
+        )
+        pii_levels: set[str] = set()
+        if pii_columns:
+            for f in self.memory.findings:
+                if f.dimension in pii_columns and f.level:
+                    pii_levels.add(str(f.level))
+
         lines = ["\n## Active Hypotheses & Counterfactual Checks"]
         for nid, n in list(nodes.items())[:6]:
             status = n.get("status", "untested")
-            statement = n.get("statement", "")
+            statement = str(n.get("statement", ""))
+            for lvl in pii_levels:
+                if lvl in statement:
+                    statement = statement.replace(lvl, "[redacted]")
             lines.append(
                 f"- [{_sp(nid, 80)}] ({_sp(status, 40)}): "
                 f"{_sp(_redact(statement), max_len=500)}"
             )
             for cq in (n.get("counterfactual_queries") or [])[:2]:
-                lines.append(f"    * Test probe: {_sp(_redact(cq), max_len=400)}")
+                cq_str = str(cq)
+                for lvl in pii_levels:
+                    if lvl in cq_str:
+                        cq_str = cq_str.replace(lvl, "[redacted]")
+                lines.append(f"    * Test probe: {_sp(_redact(cq_str), max_len=400)}")
         return "\n".join(lines) + "\n"
 
     def _rlm_block(self) -> str:
@@ -1088,13 +1106,24 @@ class PromptManager:
         lines: list[str] = []
         objective = self.memory.get_context("user_objective")
         if objective:
-            lines.append(f'## User goal\n"{_redact(_sp(objective, max_len=300))}"')
+            lines.append(f'## User goal\n"{_sp(_redact(objective), max_len=300)}"')
+        pii_columns = (
+            set(self.memory.get_context("pii_columns") or [])
+            if pii_redaction_enabled()
+            else set()
+        )
         lines.append("## Findings")
         for f in findings[:_DESIGN_MAX_FINDINGS]:
+            headline = str(f.get("headline") or "")
+            f_dim = f.get("dimension")
+            f_lvl = f.get("level")
+            if f_dim in pii_columns and f_lvl:
+                headline = headline.replace(str(f_lvl), "[redacted]")
+            sanitized_headline = _sp(_redact(headline), max_len=160)
             lines.append(
                 f"- {_sp(f.get('finding_id'), 40)} | {_sp(f.get('kind'), 30)} | "
                 f"measure={_sp(f.get('measure'), 60)} | dimension={_sp(f.get('dimension'), 60)} | "
-                + _redact(_sp(f.get("headline"), max_len=160))
+                f"{sanitized_headline}"
             )
         lines.append("## Existing charts (chart_id | type | x | y | title | finding_id)")
         for c in charts:
@@ -1105,17 +1134,25 @@ class PromptManager:
             )
         lines.append("## Columns (name | kind | unit | nunique | sample values)")
         for col in profile.columns[:_DESIGN_MAX_COLUMNS]:
+            col_name = getattr(col, "name", "") if not isinstance(col, dict) else col.get("name", "")
+            col_kind = getattr(col, "kind", "") if not isinstance(col, dict) else col.get("kind", "")
+            col_unit = getattr(col, "unit_hint", None) if not isinstance(col, dict) else col.get("unit_hint")
+            col_nunique = getattr(col, "nunique", 0) if not isinstance(col, dict) else col.get("nunique", 0)
+            col_top_values = getattr(col, "top_values", []) if not isinstance(col, dict) else col.get("top_values", [])
+            col_pii = getattr(col, "pii", False) if not isinstance(col, dict) else col.get("pii", False)
+
+            is_pii = bool(col_pii or col_name in pii_columns)
             samples = ""
             if (
-                col.kind == "categorical"
-                and col.nunique <= _DESIGN_SAMPLE_MAX_NUNIQUE
-                and not getattr(col, "pii", False)
+                col_kind == "categorical"
+                and col_nunique <= _DESIGN_SAMPLE_MAX_NUNIQUE
+                and not is_pii
             ):
                 samples = ", ".join(
-                    _redact(_sp(v, 30)) for v in list(col.top_values)[:_DESIGN_MAX_SAMPLES]
+                    _sp(_redact(str(v)), 30) for v in list(col_top_values)[:_DESIGN_MAX_SAMPLES]
                 )
             lines.append(
-                f"- {_sp(col.name, 60)} | {col.kind} | {col.unit_hint or '-'} | {col.nunique} | {samples}"
+                f"- {_sp(col_name, 60)} | {col_kind} | {col_unit or '-'} | {col_nunique} | {samples}"
             )
         return "\n".join(lines)
 

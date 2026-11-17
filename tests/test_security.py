@@ -10,6 +10,8 @@ from src.core.security import (
     UploadValidationError,
     escape_csv_formulas,
     max_upload_bytes,
+    pii_redaction_enabled,
+    redact_pii_text,
     resolve_output_path,
     sanitize_filename,
     sanitize_for_prompt,
@@ -153,3 +155,35 @@ class TestResolveOutputPath:
 
     def test_root_itself_is_allowed(self, tmp_path: Path) -> None:
         assert resolve_output_path(tmp_path) == tmp_path.resolve()
+
+
+class TestRedactPiiText:
+    def test_redacts_email_addresses(self) -> None:
+        raw = "Contact support at user.name@example.co.uk or admin@test.org for info"
+        redacted = redact_pii_text(raw)
+        assert "user.name@example.co.uk" not in redacted
+        assert "admin@test.org" not in redacted
+        assert "[redacted: email]" in redacted
+
+    def test_redacts_ipv4_addresses(self) -> None:
+        raw = "Origin server 192.168.1.100 failed auth from 10.0.0.1"
+        redacted = redact_pii_text(raw)
+        assert "192.168.1.100" not in redacted
+        assert "10.0.0.1" not in redacted
+        assert "[redacted: ip_address]" in redacted
+
+    def test_redacts_phone_numbers(self) -> None:
+        raw = "Call +1-800-555-0199 or 555-123-4567 today"
+        redacted = redact_pii_text(raw)
+        assert "555-0199" not in redacted
+        assert "[redacted: phone]" in redacted
+
+
+class TestPiiRedactionEnabled:
+    def test_enabled_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("REDACT_PII", raising=False)
+        assert pii_redaction_enabled() is True
+
+    def test_disabled_when_set_to_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("REDACT_PII", "false")
+        assert pii_redaction_enabled() is False

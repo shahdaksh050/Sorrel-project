@@ -123,6 +123,35 @@ def test_controller_rejects_arbitrary_path_for_every_tool_mode(
         path_agent._resolve_file_path(tool, {"file_path": str(tmp_path / "secret.csv")})
 
 
+def test_base_tool_resolves_registered_derived_alias(tmp_path: Path) -> None:
+    raw = tmp_path / "loaded.csv"
+    derived = tmp_path / "subset.csv"
+    memory = _memory(raw, derived=derived)
+    tool = _PathTool()
+
+    params = tool.prepare_params({"file_path": "subset"}, memory, str(tmp_path))
+    assert params["file_path"] == str(derived.resolve())
+
+
+class _NoSchemaPathTool(BaseTool):
+    name = "test_no_schema_path_tool"
+    description = "Tool that does not declare file_path in schema."
+
+    def execute(self, **kwargs: Any) -> dict[str, Any]:
+        return {"summary": "ok"}
+
+    def get_schema(self) -> dict[str, Any]:
+        return {"other_param": {"type": "string"}}
+
+
+def test_controller_rejects_arbitrary_path_even_if_tool_schema_omits_file_path(
+    path_agent: AgentController, tmp_path: Path
+) -> None:
+    tool = _NoSchemaPathTool()
+    with pytest.raises(ValueError, match="not the loaded dataset"):
+        path_agent._resolve_file_path(tool, {"file_path": str(tmp_path / "secret.csv")})
+
+
 def test_controller_records_rejected_path_as_plan_error(
     path_agent: AgentController, tmp_path: Path
 ) -> None:
@@ -137,6 +166,26 @@ def test_controller_records_rejected_path_as_plan_error(
 
     result = path_agent.memory.tool_results[-1]
     assert result.tool_name == "clean_data"
+    assert result.status == "error"
+    assert "Plan validation failed" in (result.error_message or "")
+    assert "not the loaded dataset" in (result.error_message or "")
+
+
+def test_controller_records_rejected_path_when_schema_omits_file_path(
+    path_agent: AgentController, tmp_path: Path
+) -> None:
+    path_agent.tool_registry.register(_NoSchemaPathTool())
+    step = AnalysisStep(
+        step_number=1,
+        tool_name="test_no_schema_path_tool",
+        parameters={"file_path": str(tmp_path / "secret.csv")},
+        rationale="Read an untrusted path via tool without file_path in schema.",
+    )
+
+    path_agent._execute_steps([step])
+
+    result = path_agent.memory.tool_results[-1]
+    assert result.tool_name == "test_no_schema_path_tool"
     assert result.status == "error"
     assert "Plan validation failed" in (result.error_message or "")
     assert "not the loaded dataset" in (result.error_message or "")

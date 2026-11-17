@@ -8,7 +8,10 @@ RESULT assignment can be present in source but never actually execute
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+import pytest
 
 from src.core import _sandbox_worker as worker
 from tests.fixtures import single_column
@@ -17,6 +20,11 @@ from tests.fixtures import single_column
 class TestExecute:
     def test_ctypes_call_function_audit_event_is_denied(self) -> None:
         assert "ctypes.call_function" in worker._DENIED_EVENTS
+
+    def test_ctypes_call_function_audit_hook_raises(self, tmp_path: Path) -> None:
+        with worker._policy_enforcement(tmp_path):
+            with pytest.raises(worker.SandboxPolicyError, match=r"ctypes\.call_function"):
+                sys.audit("ctypes.call_function", 0, ())
 
     def test_scalar_result(self, tmp_path: Path) -> None:
         dataset = single_column(tmp_path)

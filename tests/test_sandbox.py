@@ -94,6 +94,19 @@ class TestStaticCheck:
         assert result[0] == "static_check"
         assert f".{attribute}" in result[1]
 
+    @pytest.mark.parametrize("attribute", ["eval", "query", "pipe"])
+    def test_pandas_expression_evaluators_import_from_blocked(self, attribute: str) -> None:
+        result = sandbox._static_check(f"from pandas import {attribute}\nRESULT = 1\n")
+        assert result is not None
+        assert result[0] == "static_check"
+        assert f"'{attribute}'" in result[1]
+
+    def test_pd_eval_is_blocked(self) -> None:
+        result = sandbox._static_check("import pandas as pd\nRESULT = pd.eval('1 + 1')\n")
+        assert result is not None
+        assert result[0] == "static_check"
+        assert ".eval" in result[1]
+
     def test_read_csv_is_normalized_and_passes_static_check(self) -> None:
         code = "import pandas as pd\ndf = pd.read_csv('test.csv')\nRESULT = df.shape\n"
         assert sandbox._static_check(code) is None

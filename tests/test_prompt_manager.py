@@ -1,9 +1,12 @@
 """Unit tests for PromptManager across the five-stage workflow."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
+from src.core.findings import Finding
 from src.core.memory import DatasetMetadata, MemorySystem, ToolResult
 from src.core.profiler import profile_dataframe
 from src.core.prompt_manager import PromptManager
@@ -125,6 +128,112 @@ class TestPromptManager:
         prompt = pm.get_chart_design_prompt([], [], profile)
         assert "alice@example.com" not in prompt
         assert "north" in prompt
+
+    def test_hypotheses_block_redacts_pii_text(
+        self, pm: PromptManager, memory: MemorySystem
+    ) -> None:
+        memory.set_context("hypothesis_tree", {
+            "nodes": {
+                "H1": {
+                    "status": "untested",
+                    "statement": "Users with email test.user@example.com have higher churn",
+                    "counterfactual_queries": ["Check if admin@company.org has similar rates"],
+                }
+            }
+        })
+        prompt = pm.get_iteration_user_prompt()
+        assert "test.user@example.com" not in prompt
+        assert "admin@company.org" not in prompt
+        assert "[redacted: email]" in prompt
+
+    def test_hypotheses_block_redacts_pii_dimension_levels(
+        self, pm: PromptManager, memory: MemorySystem
+    ) -> None:
+        memory.set_context("pii_columns", ["customer_name"])
+        memory.add_findings([
+            Finding(
+                finding_id="F1",
+                kind="cohort",
+                source_tool="segment_comparison",
+                headline="Customer Johnathan Doe shows anomalous spend",
+                dimension="customer_name",
+                level="Johnathan Doe",
+            )
+        ])
+        memory.set_context("hypothesis_tree", {
+            "nodes": {
+                "H1": {
+                    "status": "untested",
+                    "statement": "Account Johnathan Doe drove the spike in Q3",
+                    "counterfactual_queries": ["Compare Johnathan Doe against baseline"],
+                }
+            }
+        })
+        prompt = pm.get_iteration_user_prompt()
+        assert "Johnathan Doe" not in prompt
+        assert "[redacted]" in prompt
+
+    def test_objective_block_redacts_pii(
+        self, pm: PromptManager, memory: MemorySystem
+    ) -> None:
+        memory.set_context("user_objective", "Investigate account for user.fraud@example.com now")
+        prompt = pm.get_iteration_user_prompt()
+        assert "user.fraud@example.com" not in prompt
+        assert "[redacted: email]" in prompt
+
+        memory.set_context("user_objective", None)
+        memory.set_context("autonomous_objective", "Trace leakage for owner.secure@target.io")
+        prompt_auto = pm.get_iteration_user_prompt()
+        assert "owner.secure@target.io" not in prompt_auto
+        assert "[redacted: email]" in prompt_auto
+
+    def test_chart_design_redacts_before_truncation_for_long_samples(
+        self, pm: PromptManager
+    ) -> None:
+        long_email = "verylongcustomerextendedname12345@subdomain.enterprise.org"
+        assert len(long_email) > 30
+
+        col = SimpleNamespace(
+            name="notes",
+            kind="categorical",
+            unit_hint=None,
+            nunique=2,
+            top_values=[long_email, "standard"],
+            pii=False,
+        )
+        profile = SimpleNamespace(columns=[col])
+
+        prompt = pm.get_chart_design_prompt([], [], profile)
+        assert long_email not in prompt
+        assert "[redacted: email]" in prompt
+
+    def test_chart_design_respects_pii_columns_context(
+        self, pm: PromptManager, memory: MemorySystem
+    ) -> None:
+        memory.set_context("pii_columns", ["user_id"])
+        profile = profile_dataframe(pd.DataFrame({
+            "user_id": ["USR_1001", "USR_1002"] * 3,
+            "category": ["A", "B"] * 3,
+        }))
+        prompt = pm.get_chart_design_prompt([], [], profile)
+        assert "USR_1001" not in prompt
+        assert "A" in prompt
+
+    def test_chart_design_masks_pii_finding_levels(
+        self, pm: PromptManager, memory: MemorySystem
+    ) -> None:
+        memory.set_context("pii_columns", ["vip_name"])
+        findings = [{
+            "finding_id": "F1",
+            "kind": "anomaly",
+            "measure": "spend",
+            "dimension": "vip_name",
+            "level": "Montgomery Burns",
+            "headline": "Montgomery Burns has outlier spend of $50,000",
+        }]
+        prompt = pm.get_chart_design_prompt(findings, [], profile_dataframe(pd.DataFrame({"spend": [1, 2]})))
+        assert "Montgomery Burns" not in prompt
+        assert "[redacted]" in prompt
 
 
 class TestObjectiveInjection:

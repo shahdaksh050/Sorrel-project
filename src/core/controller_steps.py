@@ -148,7 +148,7 @@ class StepMixin(ControllerState):
                 params = tool.prepare_params(
                     self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
                 )
-            except ValueError:
+            except Exception:
                 return False
             params, _dropped, errors, _normalised = self._validate_step(tool, step.parameters, params)
             if errors or self._step_cache_key(step.tool_name, params) not in self._step_cache:
@@ -316,15 +316,18 @@ class StepMixin(ControllerState):
             seg_tool = self.tool_registry.get("segment_comparison")
             measures_to_try: list[str | None] = list(valid_measures) if valid_measures else [None]
             for candidate_measure in measures_to_try:
-                seg_params: dict[str, Any] = {}
+                seg_params = {}
                 if dim_col:
                     seg_params["dimension_column"] = dim_col
                 if candidate_measure:
                     seg_params["measure_column"] = candidate_measure
 
-                resolved_params = seg_tool.prepare_params(
-                    self._resolve_file_path(seg_tool, seg_params), self.memory, self._output_dir
-                )
+                try:
+                    resolved_params = seg_tool.prepare_params(
+                        self._resolve_file_path(seg_tool, seg_params), self.memory, self._output_dir
+                    )
+                except Exception:
+                    continue
                 resolved_params, _dropped, plan_errors, _norm = self._validate_step(
                     seg_tool, seg_params, resolved_params
                 )
@@ -373,7 +376,8 @@ class StepMixin(ControllerState):
             schema = tool.get_schema()
         except Exception:
             schema = {}
-        if "file_path" not in schema:
+        has_file_path = ("file_path" in schema) or ("file_path" in params)
+        if not has_file_path:
             return params
         params = dict(params)
         derived = self.memory.get_context("derived_datasets") or {}
@@ -746,7 +750,7 @@ class StepMixin(ControllerState):
             params = tool.prepare_params(
                 self._resolve_file_path(tool, step.parameters), self.memory, self._output_dir
             )
-        except ValueError as exc:
+        except Exception as exc:
             message = f"Plan validation failed, step not run: {exc}"
             console.print(
                 f"  [yellow]✗ Step {step.step_number}: {step.tool_name} — {message}[/]"

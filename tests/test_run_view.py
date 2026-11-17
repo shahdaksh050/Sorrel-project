@@ -254,7 +254,7 @@ def test_headline_findings_capped_at_five() -> None:
 
 
 def _legacy_answers_tab_verdict(report: dict[str, Any]) -> tuple[int, int] | None:
-    """The computation `render_answers_tab` did inline before RunView, verbatim."""
+    """The computation `render_answers_tab` does with cards.finding_state parity."""
     all_findings: list[dict[str, Any]] = report.get("findings") or []
     card_findings = [
         f
@@ -262,8 +262,11 @@ def _legacy_answers_tab_verdict(report: dict[str, Any]) -> tuple[int, int] | Non
         if f.get("layer") in ("exec", "analyst")
         and f.get("kind") not in ("method_fit", "coverage_gap")
     ][:5]
-    audited = [(f, audited_checks(f.get("evidence"))) for f in card_findings]
-    audited = [(f, marks) for f, marks in audited if marks]
+    audited = [
+        (f, marks)
+        for f in card_findings
+        if (marks := [c for c in audited_checks(f.get("evidence")) if c.state != "neutral"])
+    ]
     m_count = len(audited)
     if m_count == 0:
         return None
@@ -313,3 +316,12 @@ def test_verdict_matches_the_legacy_inline_computation() -> None:
 def test_verdict_is_none_when_no_audit_ran() -> None:
     assert compute_verdict((_finding("a"), _finding("b"))) is None
     assert compute_verdict(()) is None
+
+
+def test_verdict_treats_neutral_only_marks_as_unchecked() -> None:
+    from ui.components.cards import finding_state
+
+    f = _finding("neutral_only", checks={"cause": True})
+    assert compute_verdict((f,)) is None
+    assert finding_state(f) == "unchecked"
+

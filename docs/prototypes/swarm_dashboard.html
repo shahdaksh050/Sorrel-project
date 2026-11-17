@@ -1401,7 +1401,15 @@
         });
         vegaEmbed(heroBox, spec, embedOpts)
           .then(res => { vegaViews['hero'] = res.view; })
-          .catch(err => { console.warn('Hero Vega mount error:', err); });
+          .catch(err => {
+            console.warn('Hero Vega mount error:', err);
+            heroBox.innerHTML = `
+              <div class="chart-fallback-box">
+                <span class="chart-fallback-icon">⚠️</span>
+                <span class="chart-fallback-text">Visualization Render Error</span>
+                <span class="chart-fallback-sub">Could not render chart specification</span>
+              </div>`;
+          });
       }
     } else if (heroBox && (!payload.charts.hero || !payload.charts.hero.spec || Object.keys(payload.charts.hero.spec).length === 0)) {
       if (!heroBox.dataset.fallback) {
@@ -1428,7 +1436,15 @@
         });
         vegaEmbed(segBox, spec, embedOpts)
           .then(res => { vegaViews['segment'] = res.view; })
-          .catch(err => { console.warn('Segment Vega mount error:', err); });
+          .catch(err => {
+            console.warn('Segment Vega mount error:', err);
+            segBox.innerHTML = `
+              <div class="chart-fallback-box">
+                <span class="chart-fallback-icon">⚠️</span>
+                <span class="chart-fallback-text">Visualization Render Error</span>
+                <span class="chart-fallback-sub">Could not render chart specification</span>
+              </div>`;
+          });
       }
     } else if (segBox && (!payload.charts.segment || !payload.charts.segment.spec || Object.keys(payload.charts.segment.spec).length === 0)) {
       if (!segBox.dataset.fallback) {
@@ -1545,12 +1561,20 @@
         payload.models.model_list.forEach((m, idx) => {
           const tr = document.createElement('tr');
           if (idx === 0) tr.className = 'champion';
-          tr.innerHTML = `
-            <td>${idx === 0 ? '<strong>★ ' : ''}${m.name}${idx === 0 ? '</strong>' : ''}</td>
-            <td>${m.cv_mean}</td>
-            <td>${m.gap}</td>
-            <td>${m.warning}</td>
-          `;
+          const tdName = document.createElement('td');
+          if (idx === 0) {
+            const star = document.createElement('strong');
+            star.textContent = '★ ';
+            tdName.appendChild(star);
+          }
+          tdName.appendChild(document.createTextNode(m.name || ''));
+          const tdCv = document.createElement('td');
+          tdCv.textContent = m.cv_mean || '';
+          const tdGap = document.createElement('td');
+          tdGap.textContent = m.gap || '';
+          const tdWarn = document.createElement('td');
+          tdWarn.textContent = m.warning || '';
+          tr.append(tdName, tdCv, tdGap, tdWarn);
           tbody.appendChild(tr);
         });
       }

@@ -213,7 +213,12 @@ def compute_verdict(headline: tuple[dict[str, Any], ...]) -> Verdict | None:
     did not happen. A finding held up when none of its checks failed.
     """
     total = len(headline)
-    audited = [marks for marks in (audited_checks(f.get("evidence")) for f in headline) if marks]
+    audited = [
+        marks for marks in (
+            [c for c in audited_checks(f.get("evidence")) if c.state != "neutral"]
+            for f in headline
+        ) if marks
+    ]
     if not audited:
         return None
     held_up = sum(1 for marks in audited if not any(m.state == "fail" for m in marks))

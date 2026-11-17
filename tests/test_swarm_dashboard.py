@@ -123,6 +123,8 @@ def test_swarm_html_file_exists_and_contains_expected_tokens() -> None:
     assert "hydrateDomFromPayload" in html
     assert ".chart-svg-box .vega-embed" in html
     assert "chart-fallback-box" in html
+    assert "Visualization Render Error" in html
+    assert "document.createTextNode(m.name" in html
     assert "static/vendor/vega/vega.min.js" in html
 
 

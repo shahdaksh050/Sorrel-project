@@ -163,12 +163,16 @@ def render_actions_tab(
         for idx, rec in enumerate(recs, start=1):
             rec_plain = plainify(str(rec))
             rec_lower = rec_plain.lower()
-            if any(rec_lower.startswith(p) for p in ("pilot", "test", "validate", "evaluate")):
+            if any(rec_lower.startswith(p) for p in ("remediate", "repair", "fix", "audit", "address")):
+                badge = "Repair"
+            elif any(rec_lower.startswith(p) for p in ("pilot", "test", "validate", "evaluate")):
                 badge = "Test"
             elif any(rec_lower.startswith(p) for p in ("monitor", "watch", "track")):
                 badge = "Watch"
             elif any(rec_lower.startswith(p) for p in ("investigate", "explore", "research")):
                 badge = "Explore"
+            elif any(rec_lower.startswith(p) for p in ("optimize", "tune", "refine")):
+                badge = "Tune"
             else:
                 badge = "Do"
             st.markdown(

@@ -413,3 +413,173 @@ def test_swarm_dashboard_dynamic_agent_telemetry_and_kpis() -> None:
     assert p_paradox["kpis"][2]["badge"] == "CAUTION"
 
 
+def test_forecast_chart_preserves_data_points_and_layers() -> None:
+    from src.core.dashboard_charts_basic import _forecast_chart
+    raw_fc = {
+        "value_column": "price",
+        "period_grain": "day",
+        "model": "linear_trend",
+        "mase": 0.45,
+        "chart": {
+            "type": "vega_lite",
+            "title": "Daily Price per Unit: history and forecast (95% range shaded)",
+            "data": [
+                {"period": "2023-01-01", "value": 10.0, "part": "History", "lower": 10.0, "upper": 10.0},
+                {"period": "2023-01-02", "value": 12.0, "part": "Forecast", "lower": 11.0, "upper": 13.0},
+            ],
+            "vega_lite": {
+                "height": 260,
+                "layer": [{"mark": "line"}, {"mark": "area"}],
+            },
+        },
+    }
+    chart = _forecast_chart(raw_fc)
+    assert chart is not None
+    assert "data" in chart.spec
+    assert len(chart.spec["data"]["values"]) == 2
+    assert chart.spec["data"]["values"][0]["period"] == "2023-01-01"
+
+
+def test_correlation_heatmap_square_cells_and_borders() -> None:
+    import numpy as np
+    import pandas as pd
+
+    from src.core.dashboard_charts_basic import correlation_heatmap
+
+    corr_df = pd.DataFrame(
+        np.eye(4),
+        columns=["Age", "Quantity", "Total Amount", "Price Per Unit"],
+        index=["Age", "Quantity", "Total Amount", "Price Per Unit"],
+    )
+    res = correlation_heatmap(corr_df)
+    assert res is not None
+    _rows, spec, _cap = res
+    assert spec["layer"][0]["mark"]["stroke"] == "#dcd7cc"
+    assert spec["width"]["step"] == 36
+    assert spec["height"]["step"] == 36
+    assert spec["autosize"]["type"] == "pad"
+
+
+def test_swarm_dashboard_telemetry_hydration_and_lead_narrative() -> None:
+    from dataclasses import dataclass
+
+    from ui.components.swarm_dashboard import build_swarm_payload
+
+    @dataclass
+    class MockMeta:
+        row_count: int = 260640
+        column_count: int = 10
+        file_path: str = "household_power.csv"
+
+    mock_f = [
+        {
+            "finding_id": "f_anomaly",
+            "kind": "outlier_scan",
+            "measure": "Total Amount",
+            "headline": "Total Amount spiked in 2023-05-23: $8,455 vs about $1,060 expected (+697.6%).",
+            "detail": "7.4 robust SDs from the rolling_median baseline (total per day).",
+            "evidence": {"z": 7.4},
+            "state": "held_up",
+        }
+    ]
+    p = build_swarm_payload(
+        meta=MockMeta(),
+        findings=mock_f,
+    )
+    assert p["telemetry"]["records"] == "260,640"
+    assert p["telemetry"]["dimensions"] == "10 Cols"
+    # The lead narrative must NOT leak raw z-score equations
+    assert "robust sds" not in p["metadata"]["lead_narrative"].lower()
+    assert p["kpis"][1]["label"] == "Statistical Deviation"
+    assert p["kpis"][1]["target"] == 7.4
+    assert p["kpis"][1]["prefix"] == "z = "
+
+
+def test_entity_aggregated_finding_reaches_quick_wins_and_strategic_bets() -> None:
+    from src.core.findings import Finding, classify_action_matrix
+
+    # Category='Delivery': +196.9% lift, n=68 states vs 121
+    f_delivery = Finding(
+        finding_id="f_del",
+        kind="segment_lift",
+        headline="Delivery entities average Rating of 3.40 vs 1.25 for everyone else (difference +2.15, d=1.42, 68 vs 121).",
+        dimension="Category",
+        level="Delivery",
+        measure="Rating",
+        effect=1.969,
+        confidence=0.85,
+        caveats=[
+            "Observation evidence — monitor or test; do not treat as a causal lever.",
+            "Counts are per 'State' (repeated rows aggregated), not per row.",
+        ],
+        evidence={"n": 68, "n_rest": 121, "checks": {"robust": True, "paradox_free": True}},
+    )
+
+    # Category='Plumbing': -171.7% deficit, n=114 states vs 76
+    f_plumbing = Finding(
+        finding_id="f_plumb",
+        kind="segment_lift",
+        headline="Plumbing entities average Rating of 1.13 vs 3.05 for everyone else (difference -1.92, d=-1.20, 114 vs 76).",
+        dimension="Category",
+        level="Plumbing",
+        measure="Rating",
+        effect=-1.717,
+        confidence=0.85,
+        caveats=[
+            "Observation evidence — monitor or test; do not treat as a causal lever.",
+            "Counts are per 'State' (repeated rows aggregated), not per row.",
+        ],
+        evidence={"n": 114, "n_rest": 76, "checks": {"robust": True, "paradox_free": True}},
+    )
+
+    matrix = classify_action_matrix([f_delivery, f_plumbing])
+
+    # Delivery should reach Pilot / A/B Test validation rather than getting dumped in watch_caveats
+    assert len(matrix["pilot"]) == 1
+    assert matrix["pilot"][0]["finding_id"] == "f_del"
+    assert "Delivery" in matrix["pilot"][0]["lever"]
+
+    # Plumbing should reach Strategic Bets as a remediation bet
+    assert len(matrix["strategic_bets"]) == 1
+    assert matrix["strategic_bets"][0]["finding_id"] == "f_plumb"
+    assert "Plumbing" in matrix["strategic_bets"][0]["lever"]
+    assert "Remediation" in matrix["strategic_bets"][0]["feasibility_level"]
+
+    # Neither should be rejected into watch_caveats
+    assert len(matrix["watch_caveats"]) == 0
+
+
+def test_cluster_and_correlation_plain_headlines() -> None:
+    from src.core.plain_language import business_headline
+
+    # Cluster separation
+    f_sep = {
+        "kind": "cluster",
+        "headline": "Data splits into 2 segments with reasonable separation (silhouette=0.56)",
+    }
+    hl_sep = business_headline(f_sep)
+    assert hl_sep == "Population Partitions into 2 Distinct Behavioral Cohorts"
+
+    # Cluster profile
+    f_prof = {
+        "kind": "cluster",
+        "headline": "Largest segment (cluster_0, 65 'State' entities, 51.2% of data) stands out on 'NumberReview' (mean 0.42 vs 16.7 overall)",
+    }
+    hl_prof = business_headline(f_prof)
+    assert "Dominant Segment (51.2% of Population)" in hl_prof
+    assert "Numberreview" in hl_prof
+
+    # Correlation
+    f_corr = {
+        "kind": "correlation",
+        "measure": "Rating",
+        "dimension": "NumberReview",
+        "effect": 0.55,
+        "headline": "Rating and NumberReview move together (a strong positive relationship)",
+    }
+    hl_corr = business_headline(f_corr)
+    assert "Rating and Numberreview Move in Positive Alignment" in hl_corr
+
+
+
+

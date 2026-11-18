@@ -247,6 +247,13 @@ class Finding:
             return "pilot"
         if self.evidence_tier == "hypothesis":
             return "investigate"
+        # For observational evidence: if it is a robust, controllable lever, allow action or pilot
+        if _is_actionable_feature(self.dimension or self.measure):
+            if isinstance(self.effect, (int, float)) and self.effect < -0.15:
+                return "investigate"
+            if self.effective_confidence() >= 0.70 and ((isinstance(self.effect, (int, float)) and self.effect >= 0.25) or self.normalized_effect() >= 0.25):
+                return "act"
+            return "pilot"
         return "monitor"
 
     def to_dict(self) -> dict[str, Any]:
@@ -758,14 +765,16 @@ def classify_action_matrix(
         }
 
         # Observational confidence is not intervention validity.
-        # High-sample (n >= 100), paradox-free observational segment contrasts enter the
-        # dedicated 'pilot' / 'a_b_test' quadrant for validation before scaling.
+        # Check sample size adequacy: entity-aggregated data (e.g. states, cities, stores)
+        # has a lower natural n cutoff (n >= 20) than raw row-level records (n >= 100).
         sample_sizes = [
             v for k in (*_SAMPLE_SIZE_KEYS, "segment_n", "population_size", "n_records")
             if isinstance(v := evidence.get(k), (int, float)) and not isinstance(v, bool)
         ]
+        is_entity_aggregated = any("repeated rows aggregated" in str(c).lower() or "per '" in str(c).lower() for c in caveats) or bool(evidence.get("entity_column"))
+        min_sample_threshold = 20 if is_entity_aggregated else 100
         has_adequate_sample = (
-            min(sample_sizes) >= 100
+            min(sample_sizes) >= min_sample_threshold
             if sample_sizes
             else (checks.get("records") is not False)
         )
@@ -781,7 +790,7 @@ def classify_action_matrix(
         # Observational disclaimers that suggest prospective pilot validation
         has_observational_disclaimer = bool(caveats) and any(
             any(phrase in c.lower() for phrase in (
-                "proof of cause", "adjusted association", "observational", "unadjusted",
+                "proof of cause", "adjusted association", "observational", "observation", "unadjusted",
                 "selection effect", "confounding", "additive driver",
             ))
             for c in caveats
@@ -799,6 +808,19 @@ def classify_action_matrix(
             and (has_observational_disclaimer or evidence_tier == "pilot")
         )
         if is_observational_segment_contrast and evidence_tier != "causal_action":
+            # Strongly negative effect is an operational deficit / turnaround bet
+            if isinstance(effect, (int, float)) and effect < -0.15:
+                entry["lever"] = f"Remediate underperformance: {lever}" if not lever.startswith("Remediate") else lever
+                entry["rationale"] = (
+                    f"Significant underperformance deficit ({effect:+0.1%}). "
+                    f"High-priority operational remediation and quality audit initiative."
+                )
+                entry["quadrant"] = "strategic_bets"
+                entry["impact_level"] = "High"
+                entry["feasibility_level"] = "Remediation Initiative"
+                matrix["strategic_bets"].append(entry)
+                continue
+
             entry["lever"] = f"Pilot A/B test: {lever}" if not lever.startswith("Pilot") else lever
             entry["rationale"] = (
                 f"High-contrast observational segment ({int(conf * 100)}% confidence); "
@@ -852,9 +874,14 @@ def classify_action_matrix(
             if has_data_defect:
                 reason.append("Data hygiene/imputation caveat — review data quality before action")
             if sample_sizes and not has_adequate_sample:
-                reason.append("Small sample size (n < 100) for observational contrast")
+                reason.append(f"Small sample size (n < {min_sample_threshold}) for observational contrast")
             if caveats:
-                reason.extend([c for c in caveats if c not in reason])
+                clean_cavs = [
+                    c for c in caveats
+                    if c not in reason
+                    and not any(p in c.lower() for p in ("not proof of cause", "observation evidence", "do not treat as a causal lever"))
+                ]
+                reason.extend(clean_cavs[:2])
             if not reason:
                 reason.append("Low statistical confidence or caveat kind")
             entry["rationale"] = "; ".join(reason)

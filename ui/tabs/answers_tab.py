@@ -70,7 +70,7 @@ def _evidence_inspector(
             chart = chart_by_finding.get(str(finding.get("finding_id") or ""))
             if chart:
                 # Unframed (the pane is the frame) and at the common chart height.
-                render_dashboard_chart(chart, vega_cfg, framed=False, height=260)
+                render_dashboard_chart(chart, vega_cfg, framed=False, height=260, suppress_caption=True)
             else:
                 st.caption("This finding has no chart. The statistical methodology below provides the evidence.")
             st.markdown(render_methodology_drawer(finding), unsafe_allow_html=True)

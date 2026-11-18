@@ -278,6 +278,8 @@ def plainify(text: str) -> str:
     out = _SIG_RE.sub(_significant, out)
     out = _N_RE.sub(lambda m: m.group(1) if re.match(r"\s*[A-Za-z]", m.string[m.end():]) else f"{m.group(1)} records", out)
     out = _BIG_RE.sub(_humanise, out)
+    out = re.sub(r"_log_return\b", " Log Return", out, flags=re.IGNORECASE)
+    out = re.sub(r"_rolling_vol_(\d+)\b", r" Rolling Vol \1", out, flags=re.IGNORECASE)
     return out
 
 
@@ -438,6 +440,31 @@ def business_headline(finding: dict[str, Any] | Any) -> str:
         clean_meas = str(measure).replace("_", " ").title()
         return f"Targeted Shift in {clean_dim} Unlocks Measurable Lift in {clean_meas}"
 
+    if kind == "cluster":
+        sep_match = re.search(r"splits into (\d+) segments", raw_hl, re.IGNORECASE)
+        if sep_match:
+            k_val = sep_match.group(1)
+            return f"Population Partitions into {k_val} Distinct Behavioral Cohorts"
+        prof_match = re.search(r"Largest segment\s*\([^,]+,[^,]+,\s*([\d\.]+%)\s*of data\)\s*stands out on\s*['\"]?(\w+)['\"]?", raw_hl, re.IGNORECASE)
+        if prof_match:
+            pct_str, feat_str = prof_match.group(1), prof_match.group(2)
+            clean_feat = plainify(feat_str).replace("_", " ").title()
+            return f"Dominant Segment ({pct_str} of Population) Differentiated by {clean_feat}"
+        cluster_name = f"Cluster {level}" if level is not None else "Behavioral Segment"
+        if measure:
+            clean_m = plainify(str(measure)).replace("_", " ").title()
+            return f"{cluster_name} Shows Distinct Pattern in {clean_m}"
+
+    if kind in ("correlation", "association"):
+        meas = finding.get("measure") if isinstance(finding, dict) else getattr(finding, "measure", None)
+        dim = finding.get("dimension") if isinstance(finding, dict) else getattr(finding, "dimension", None)
+        if meas and dim:
+            clean_m = plainify(str(meas)).replace("_", " ").title()
+            clean_d = plainify(str(dim)).replace("_", " ").title()
+            eff = finding.get("effect") if isinstance(finding, dict) else getattr(finding, "effect", None)
+            rel = "Positive" if (isinstance(eff, (int, float)) and eff >= 0) or "positive" in raw_hl.lower() else "Inverse"
+            return f"{clean_m} and {clean_d} Move in {rel} Alignment"
+
     # 3. Clean raw headline by stripping trailing academic notation
     cleaned = re.sub(
         r"\s*\((?:difference|d\s*=|beta\s*=|n\s*=|z\s*=|p\s*=|r\s*=|[\d\.]+[xX]|\+?-?\d+(?:\.\d+)?%\s*(?:beyond|lift|higher|lower)|\d+\s*vs\s*\d+)[^)]*\)\.?$",
@@ -494,11 +521,27 @@ def business_takeaway(finding: dict[str, Any] | Any) -> str:
             f"Operational Takeaway: High co-movement observed between '{dimension}' and '{measure}'. "
             "Align operational capacity and forecasting models to track both variables jointly."
         )
+    elif kind in ("outlier_scan", "anomaly", "change"):
+        meas = f"'{measure}'" if measure else "the primary metric"
+        lvl = f" on {level}" if level else ""
+        return (
+            f"Operational Takeaway: Significant anomalous deviation detected in {meas}{lvl}. "
+            "Audit transactional logs, external events, or operational shifts around this period to identify the root cause."
+        )
+    elif kind == "cluster":
+        return (
+            "Operational Takeaway: Distinct customer or entity clustering identified. "
+            "Tailor operational service tiers and engagement strategies to each segment's specific profile and volume."
+        )
 
     # Fallback to plainified detail if present, distinct from headline, and not raw formula notation
     detail = str(finding.get("detail", "") if isinstance(finding, dict) else getattr(finding, "detail", "") or "").strip()
     raw_hl = str(finding.get("headline", "") if isinstance(finding, dict) else getattr(finding, "headline", "") or "").strip()
-    if detail and detail.lower() != raw_hl.lower() and not any(k in detail for k in ("p=", "CI [", "d=", "n=", "beta=")):
+    if (
+        detail
+        and detail.lower() != raw_hl.lower()
+        and not any(k in detail.lower() for k in ("p=", "ci [", "d=", "n=", "beta=", "robust sd", "rolling_median", "z-score"))
+    ):
         return plainify(detail)
 
     return "Operational Takeaway: Verified statistical finding from multi-agent analysis. Monitor trend across reporting cycles."

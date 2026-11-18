@@ -1453,6 +1453,8 @@ if st.session_state.get("analysis_done"):
             vega_cfg=vega_cfg,
             findings=list(_rv.findings) if _rv is not None else None,
             run_view=_rv,
+            meta=meta,
+            prof=profile,
         )
 
     with tab_action:

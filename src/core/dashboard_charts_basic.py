@@ -684,7 +684,16 @@ def _forecast_chart(forecast_output: dict[str, Any] | None) -> ChartSpec | None:
     raw_chart = forecast_output.get("chart")
     if not isinstance(raw_chart, dict):
         return None
-    vl = raw_chart.get("vega_lite") or raw_chart
+
+    # Re-attach the data array stripped during validate_chart_spec()
+    from src.core.chart_spec import spec_to_vegalite
+    if raw_chart.get("type") == "vega_lite" and "data" in raw_chart:
+        vl = spec_to_vegalite(raw_chart)
+    else:
+        vl = raw_chart.get("vega_lite") or raw_chart
+        if "data" in raw_chart and isinstance(vl, dict) and "data" not in vl:
+            vl = {**vl, "data": {"values": raw_chart["data"]}}
+
     title = str(raw_chart.get("title") or "Forecast Analysis (95% Interval)")
     val_col = str(forecast_output.get("value_column", ""))
     grain = str(forecast_output.get("period_grain", "period"))
@@ -1008,18 +1017,18 @@ def correlation_heatmap(
 
     r_field = {"field": "r", "type": "quantitative", "title": "r"}
     x_enc: dict[str, Any] = {"field": "feature_x", "type": "nominal", "sort": ordered, "title": None,
-                             "axis": {"labelAngle": -45, "labelLimit": 260, "labelOverlap": False,
+                             "axis": {"labelAngle": -45, "labelLimit": 180, "labelOverlap": False,
                                       "orient": "bottom"}}
     y_enc: dict[str, Any] = {"field": "feature_y", "type": "nominal", "sort": ordered, "title": None,
-                             "axis": {"labelLimit": 260}}
+                             "axis": {"labelLimit": 180}}
     layers: list[dict[str, Any]] = [{
-        "mark": {"type": "rect"},
+        "mark": {"type": "rect", "stroke": "#dcd7cc", "strokeWidth": 1},
         "encoding": {
             "x": x_enc, "y": y_enc,
             "color": {**r_field, "scale": {"scheme": "blueorange", "domainMid": 0, "domain": [-1, 1]},
                       "legend": {"format": ".1f"}},
-            "tooltip": [{"field": "feature_x", "title": "Column"}, {"field": "feature_y", "title": "Column"},
-                        {**r_field, "format": ".2f"}],
+            "tooltip": [{"field": "feature_x", "title": "Column A"}, {"field": "feature_y", "title": "Column B"},
+                        {**r_field, "format": ".2f", "title": "Correlation (r)"}],
         },
     }]
     if n <= HEATMAP_TEXT_MAX_COLUMNS:
@@ -1036,7 +1045,7 @@ def correlation_heatmap(
                 "transform": [{"filter": text_filter}],
                 "encoding": {"x": x_enc, "y": y_enc, "text": {**r_field, "format": ".2f"}},
             })
-    return rows, {"width": {"step": 26}, "height": {"step": 26}, "layer": layers}, caption
+    return rows, {"width": {"step": 36}, "height": {"step": 36}, "autosize": {"type": "pad", "contains": "padding"}, "layer": layers}, caption
 
 
 def _correlation_chart(

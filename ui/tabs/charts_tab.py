@@ -23,6 +23,8 @@ def render_charts_tab(
     vega_cfg: dict[str, Any],
     findings: list[dict[str, Any]] | None = None,
     run_view: Any | None = None,
+    meta: Any | None = None,
+    prof: Any | None = None,
 ) -> None:
     """Render Tier 3: Dynamic Visual Dashboard."""
     by_id = {str(f["finding_id"]): f for f in (findings or []) if f.get("finding_id")}
@@ -63,6 +65,8 @@ def render_charts_tab(
                 findings=findings,
                 run_view=run_view,
                 vega_cfg=vega_cfg,
+                meta=meta,
+                prof=prof,
             )
             return
 

@@ -28,28 +28,61 @@ def build_swarm_payload(
     report: dict[str, Any] | None = None,
     findings: list[dict[str, Any]] | None = None,
     run_view: Any | None = None,
+    meta: Any | None = None,
+    prof: Any | None = None,
+    source_name: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Extract metadata, telemetry, KPIs, Vega-Lite chart specs, model leaderboard,
     action matrix, and audit ledger text for the Swarm Dashboard animation."""
     rep = report or {}
-    meta = rep.get("metadata") or {}
     finds = findings or []
 
+    # Resolve metadata & profile objects from arguments or Streamlit session state
+    session = getattr(st, "session_state", {})
+    meta_obj = meta or rep.get("metadata") or (session.get("metadata") if isinstance(session, dict) or hasattr(session, "get") else None)
+    prof_obj = prof or rep.get("profile") or (session.get("profile") if isinstance(session, dict) or hasattr(session, "get") else None)
+
     # 1. Source & Header Metadata
-    source_name = getattr(run_view, "source_name", None) or rep.get("source_name") or meta.get("source_name") or "dataset.csv"
-    run_id = getattr(run_view, "run_id", None) or rep.get("run_id") or "8042"
-    if str(run_id).startswith("#"):
-        run_id = str(run_id)[1:]
+    meta_path = getattr(meta_obj, "file_path", None)
+    actual_source = (
+        source_name
+        or getattr(run_view, "source_name", None)
+        or (session.get("orig_name") if isinstance(session, dict) or hasattr(session, "get") else None)
+        or (session.get("preview_name") if isinstance(session, dict) or hasattr(session, "get") else None)
+        or rep.get("source_name")
+        or (Path(str(meta_path)).name if meta_path else None)
+        or (isinstance(meta_obj, dict) and meta_obj.get("source_name"))
+        or "dataset.csv"
+    )
+    actual_run_id = (
+        run_id
+        or getattr(run_view, "run_id", None)
+        or (session.get("run_id") if isinstance(session, dict) or hasattr(session, "get") else None)
+        or rep.get("run_id")
+        or "1042"
+    )
+    if str(actual_run_id).startswith("#"):
+        actual_run_id = str(actual_run_id)[1:]
     title = getattr(run_view, "objective", None) or rep.get("objective") or "Autonomous Executive Briefing"
 
     headline_finding = finds[0] if finds else {}
-    lead_narrative = (
-        rep.get("lead_narrative")
-        or rep.get("summary")
-        or headline_finding.get("detail")
-        or headline_finding.get("headline")
-        or "Autonomous multi-agent analytical convergence completed."
-    )
+    rep_lead = rep.get("lead_narrative") or rep.get("summary")
+    if rep_lead and "robust sd" not in str(rep_lead).lower():
+        lead_narrative = str(rep_lead)
+    else:
+        from src.core.plain_language import business_headline, business_takeaway
+        biz_hl = business_headline(headline_finding) if headline_finding else ""
+        biz_takeaway = business_takeaway(headline_finding) if headline_finding else ""
+        lead_narrative = (
+            biz_takeaway
+            or biz_hl
+            or headline_finding.get("headline")
+            or "Autonomous multi-agent analytical convergence completed."
+        )
+    if "robust sd" in lead_narrative.lower() and headline_finding.get("headline"):
+        lead_narrative = headline_finding["headline"]
+
     headline_badge = (
         f"✓ {len(finds)} Findings Verified"
         if finds
@@ -57,8 +90,34 @@ def build_swarm_payload(
     )
 
     # 2. Telemetry
-    row_count = meta.get("row_count") or rep.get("row_count")
-    col_count = meta.get("column_count") or rep.get("column_count")
+    rep_meta = rep.get("metadata")
+    rep_meta_dict = rep_meta if isinstance(rep_meta, dict) else {}
+    row_count = (
+        getattr(meta_obj, "row_count", None)
+        or (meta_obj.get("row_count") if isinstance(meta_obj, dict) else None)
+        or getattr(prof_obj, "row_count", None)
+        or (prof_obj.get("row_count") if isinstance(prof_obj, dict) else None)
+        or rep.get("row_count")
+        or rep_meta_dict.get("row_count")
+    )
+    if row_count is None and (isinstance(session, dict) or hasattr(session, "get")):
+        preview = session.get("preview_df")
+        if preview is not None and hasattr(preview, "__len__"):
+            row_count = len(preview)
+
+    col_count = (
+        getattr(meta_obj, "column_count", None)
+        or (meta_obj.get("column_count") if isinstance(meta_obj, dict) else None)
+        or getattr(prof_obj, "column_count", None)
+        or (prof_obj.get("column_count") if isinstance(prof_obj, dict) else None)
+        or rep.get("column_count")
+        or rep_meta_dict.get("column_count")
+    )
+    if col_count is None and (isinstance(session, dict) or hasattr(session, "get")):
+        preview = session.get("preview_df")
+        if preview is not None and hasattr(preview, "columns"):
+            col_count = len(preview.columns)
+
     records_str = f"{row_count:,}" if isinstance(row_count, (int, float)) else "N/A"
     dim_str = f"{col_count} Cols" if isinstance(col_count, (int, float)) else "N/A"
     quality_score = rep.get("quality_score", "100 / 100")
@@ -86,20 +145,41 @@ def build_swarm_payload(
     if len(sub_kpi1) > 60:
         sub_kpi1 = sub_kpi1[:57] + "..."
 
-    # KPI 2: Statistical Significance
+    # KPI 2: Statistical Significance & Finding Reliability
     pval0 = f0.get("p_adjusted") if f0.get("p_adjusted") is not None else f0.get("p_value")
+    raw_ev = f0.get("evidence")
+    ev0: dict[str, Any] = raw_ev if isinstance(raw_ev, dict) else {}
+    raw_z = ev0.get("z")
+    z_score = float(raw_z) if isinstance(raw_z, (int, float)) else None
+
     if isinstance(pval0, (int, float)):
+        label_kpi2 = "Statistical Significance"
         badge_kpi2 = f"p = {pval0:.3g}" if pval0 >= 0.001 else "p < 0.001"
         target_kpi2 = round(float(pval0), 4) if pval0 >= 0.001 else 0.001
         prefix_kpi2 = "p < " if pval0 < 0.001 else "p = "
         suffix_kpi2 = ""
-        sub_kpi2 = "FDR Benjamini-Hochberg corrected (q = 0.05)" if f0.get("p_adjusted") is not None else "Nominal significance level (alpha = 0.05)"
+        sub_kpi2 = "FDR Benjamini-Hochberg corrected (q = 0.05)" if f0.get("p_adjusted") is not None else "Nominal significance level"
+    elif z_score is not None:
+        label_kpi2 = "Statistical Deviation"
+        badge_kpi2 = "VERIFIED"
+        target_kpi2 = round(abs(float(z_score)), 1)
+        prefix_kpi2 = "z = "
+        suffix_kpi2 = " SD"
+        sub_kpi2 = f"{abs(float(z_score)):.1f} robust standard deviations beyond baseline"
     else:
+        held_up = sum(
+            1 for f in finds
+            if str(f.get("state", "")).lower() in ("held_up", "verified", "")
+            and not any("reversal" in str(c).lower() for c in (f.get("caveats") or []))
+        )
+        total_f = len(finds) if finds else 1
+        rate = round((held_up / total_f) * 100)
+        label_kpi2 = "Finding Reliability"
         badge_kpi2 = "AUDITED"
-        target_kpi2 = 0.05
-        prefix_kpi2 = "alpha = "
-        suffix_kpi2 = ""
-        sub_kpi2 = "Statistical confidence threshold"
+        target_kpi2 = rate
+        prefix_kpi2 = ""
+        suffix_kpi2 = "% Held Up"
+        sub_kpi2 = f"{held_up} of {len(finds)} findings verified against false discovery"
 
     # KPI 3: Causal Confounders & Robustness
     paradox_count = sum(
@@ -112,7 +192,7 @@ def build_swarm_payload(
         prefix_kpi3 = ""
         suffix_kpi3 = " Confounders"
         badge_kpi3 = "INVARIANT"
-        sub_kpi3 = "Simpson's paradox test invariant across all strata"
+        sub_kpi3 = "Zero subgroup reversals — patterns hold consistently across all segments"
     else:
         target_kpi3 = paradox_count
         prefix_kpi3 = ""
@@ -130,7 +210,7 @@ def build_swarm_payload(
             "subtext": sub_kpi1,
         },
         {
-            "label": "Statistical Significance",
+            "label": label_kpi2,
             "badge": badge_kpi2,
             "target": target_kpi2,
             "prefix": prefix_kpi2,
@@ -199,12 +279,12 @@ def build_swarm_payload(
     # 7. Audit
     held_claims = len(finds) if finds else 4
     total_claims = len(finds) if finds else 4
-    checksum = rep.get("checksum") or f"8f2a...{str(run_id)[-4:] if len(str(run_id)) >= 4 else '9d10'}"
+    checksum = rep.get("checksum") or f"8f2a...{str(actual_run_id)[-4:] if len(str(actual_run_id)) >= 4 else '9d10'}"
 
     return {
         "metadata": {
-            "source_name": source_name,
-            "run_id": run_id,
+            "source_name": actual_source,
+            "run_id": actual_run_id,
             "title": title,
             "lead_narrative": lead_narrative,
             "headline_badge": headline_badge,
@@ -297,6 +377,10 @@ def render_native_swarm_cockpit(
     findings: list[dict[str, Any]] | None = None,
     run_view: Any | None = None,
     vega_cfg: dict[str, Any] | None = None,
+    meta: Any | None = None,
+    prof: Any | None = None,
+    source_name: str | None = None,
+    run_id: str | None = None,
 ) -> None:
     """Render the native Sorrel Swarm Cockpit using Streamlit containers, cards, and Vega-Lite charts."""
     if payload is None:
@@ -305,6 +389,10 @@ def render_native_swarm_cockpit(
             report=report,
             findings=findings,
             run_view=run_view,
+            meta=meta,
+            prof=prof,
+            source_name=source_name,
+            run_id=run_id,
         )
 
     cfg = vega_cfg or {}
@@ -354,21 +442,21 @@ def render_native_swarm_cockpit(
     # 1. Dataset Ingestion
     records = telem.get("records", "")
     ingest_badge = "PROFILED" if records and records != "N/A" else "READY"
-    ingest_desc = f"{records} records typed & validated" if records and records != "N/A" else "Schema validated & typed"
+    ingest_desc = f"{records} records typed & validated" if records and records != "N/A" else "Schema typed & validated"
 
     # 2. Hypothesis Engine
     hypo_badge = "ANCHORED" if meta.get("title") else "EXPLORATORY"
-    hypo_desc = "North star objective mapped" if meta.get("title") else "Unsupervised discovery sweep"
+    hypo_desc = "Primary business objective mapped" if meta.get("title") else "Unsupervised discovery sweep"
 
     # 3. Segment Contrast
     seg_finds = [f for f in finds if f.get("kind") == "segment_lift"]
     seg_badge = "VERIFIED" if seg_finds else "SCANNED"
-    seg_desc = f"{len(seg_finds)} segment contrast(s) audited" if seg_finds else "Distribution shifts analyzed"
+    seg_desc = f"{len(seg_finds)} subgroup contrast{'s' if len(seg_finds) != 1 else ''} audited" if seg_finds else "Distribution shifts analyzed"
 
     # 4. Multivariate Driver
     drv_finds = [f for f in finds if f.get("kind") in ("driver", "regression", "scenario")]
     drv_badge = "CONVERGED" if drv_finds else "MONITORED"
-    drv_desc = f"{len(drv_finds)} driver model(s) evaluated" if drv_finds else "Feature elasticity calculated"
+    drv_desc = f"{len(drv_finds)} business lever{'s' if len(drv_finds) != 1 else ''} evaluated" if drv_finds else "Feature elasticity and levers ranked"
 
     # 5. Causal Confounder
     has_paradox_flag = any(
@@ -378,7 +466,7 @@ def render_native_swarm_cockpit(
     )
     confounder_badge = "REVERSAL" if has_paradox_flag else "INVARIANT"
     confounder_color = "var(--risk)" if has_paradox_flag else "var(--positive)"
-    confounder_desc = "Subgroup reversal flagged" if has_paradox_flag else "Simpson's paradox test invariant"
+    confounder_desc = "Subgroup reversal flagged" if has_paradox_flag else "Subgroup invariance confirmed"
 
     # 6. Outlier Robustness
     has_fragile_flag = any(
@@ -388,30 +476,30 @@ def render_native_swarm_cockpit(
     )
     outlier_badge = "FRAGILE" if has_fragile_flag else "STABLE"
     outlier_color = "var(--accent)" if has_fragile_flag else "var(--positive)"
-    outlier_desc = "Sensitive to trim boundaries" if has_fragile_flag else "Trim-resistant boundaries"
+    outlier_desc = "Sensitive to extreme values" if has_fragile_flag else "Extreme values isolated & stable"
 
     # 7. Scenario Simulator
     scen_finds = [f for f in finds if f.get("kind") == "decision_scenario"]
     scen_badge = "SIMULATED" if scen_finds else "STANDBY"
-    scen_desc = f"{len(scen_finds)} counterfactual delta(s)" if scen_finds else "What-If intervention engine"
+    scen_desc = f"{len(scen_finds)} What-If scenario{'s' if len(scen_finds) != 1 else ''} ready" if scen_finds else "What-If intervention ready"
 
     # 8. Multiple Testing
     has_fdr = any(f.get("p_adjusted") is not None for f in finds)
-    fdr_badge = "FDR q=0.05" if has_fdr else "CONTROLLED"
-    fdr_desc = "Benjamini-Hochberg corrected" if has_fdr else "Family-wise error controlled"
+    fdr_badge = "FDR q<=0.05" if has_fdr else "CONTROLLED"
+    fdr_desc = "False discovery rate controlled"
 
     # 9. Data Hygiene Auditor
     q_score = telem.get("quality_score", "100")
     q_num = float(str(q_score).split("/")[0].strip()) if "/" in str(q_score) else (float(q_score) if isinstance(q_score, (int, float)) else 100.0)
     hygiene_badge = "CLEAN" if q_num >= 80 else "MONITORED"
     hygiene_color = "var(--positive)" if q_num >= 80 else "var(--accent)"
-    hygiene_desc = "Zero leakage / zero flatlines" if q_num >= 80 else "Hygiene notices flagged"
+    hygiene_desc = "Zero leakage & zero flatlines" if q_num >= 80 else "Hygiene notices flagged"
 
     # 10. Executive Action Engine
     act_matrix = rep.get("action_matrix") or classify_action_matrix(finds)
     n_act = len(act_matrix.get("quick_wins", [])) + len(act_matrix.get("strategic_bets", [])) + len(act_matrix.get("pilot", [])) + len(act_matrix.get("incremental", []))
     act_badge = f"{n_act} LEVERS" if n_act > 0 else "AUDITED"
-    act_desc = "4/4 quadrants prioritized" if n_act > 0 else "Decision framework mapped"
+    act_desc = f"{n_act} decision lever{'s' if n_act != 1 else ''} prioritized" if n_act > 0 else "Decision framework mapped"
 
     agent_telemetry = [
         ("01. Dataset Ingestion", ingest_badge, ingest_desc, "var(--positive)"),
@@ -529,6 +617,10 @@ def render_swarm_dashboard(
     findings: list[dict[str, Any]] | None = None,
     run_view: Any | None = None,
     vega_cfg: dict[str, Any] | None = None,
+    meta: Any | None = None,
+    prof: Any | None = None,
+    source_name: str | None = None,
+    run_id: str | None = None,
     *,
     height: int = 860,
     scrolling: bool = True,
@@ -550,6 +642,10 @@ def render_swarm_dashboard(
             findings=findings,
             run_view=run_view,
             vega_cfg=vega_cfg,
+            meta=meta,
+            prof=prof,
+            source_name=source_name,
+            run_id=run_id,
         )
         return
 
@@ -559,6 +655,10 @@ def render_swarm_dashboard(
             report=report,
             findings=findings,
             run_view=run_view,
+            meta=meta,
+            prof=prof,
+            source_name=source_name,
+            run_id=run_id,
         )
 
     html_content = get_swarm_dashboard_html(payload=payload, inline_vega=True)

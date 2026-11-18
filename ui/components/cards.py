@@ -868,6 +868,7 @@ def render_dashboard_chart(
     height: int | None = None,
     framed: bool = True,
     card_key: str | None = None,
+    suppress_caption: bool = False,
 ) -> None:
     """Render one dashboard panel (title, chart, caption/description).
 
@@ -877,6 +878,7 @@ def render_dashboard_chart(
     `height` gives the chart a common height with its neighbours. `framed=False` draws no border of
     its own, for a panel placed in a bordered column (which keeps a row's cards the same height).
     `card_key` names the card so the stylesheet can give it the card surface (`chart_card_...`).
+    `suppress_caption` omits bottom text when already displayed in an inspector pane.
     """
     with st.container(border=True, key=card_key) if framed else contextlib.nullcontext():
         st.markdown(
@@ -890,19 +892,22 @@ def render_dashboard_chart(
         spec = _fit_height(dict(ch.get("spec", {})), height)
         spec.setdefault("background", "transparent")
         spec.setdefault("config", vega_cfg)
-        st.vega_lite_chart(spec, width="stretch")
-        caption = ch.get("caption")
-        if caption and finding is not None and _same_sentence(
-            plainify(str(caption)), plainify(str(finding.get("headline", "")))
-        ):
-            caption = None
-        if caption:
-            st.caption(md_text(caption))
-        elif ch.get("description"):
-            st.markdown(
-                f'<div class="chart-desc">{html.escape(str(ch["description"]))}</div>',
-                unsafe_allow_html=True,
-            )
+        w_val = spec.get("width")
+        is_discrete_step = isinstance(w_val, dict) and "step" in w_val
+        st.vega_lite_chart(spec, width=None if is_discrete_step else "stretch")
+        if not suppress_caption:
+            caption = ch.get("caption")
+            if caption and finding is not None and _same_sentence(
+                plainify(str(caption)), plainify(str(finding.get("headline", "")))
+            ):
+                caption = None
+            if caption:
+                st.caption(md_text(caption))
+            elif ch.get("description"):
+                st.markdown(
+                    f'<div class="chart-desc">{html.escape(str(ch["description"]))}</div>',
+                    unsafe_allow_html=True,
+                )
         provenance = chart_provenance_html(finding)
         if provenance:
             st.markdown(provenance, unsafe_allow_html=True)

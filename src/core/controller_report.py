@@ -450,7 +450,7 @@ class ReportMixin(ControllerState):
 
             # Case 1: Controllable operational lever (dimension is actionable)
             if lever and _is_actionable_feature(lever):
-                norm_lever = lever.lower().strip()
+                norm_lever = f"{lever}_{finding.level}".lower().strip()
                 if norm_lever in seen_levers:
                     continue
                 seen_levers.add(norm_lever)
@@ -463,12 +463,15 @@ class ReportMixin(ControllerState):
                 )
 
                 disposition = finding.recommendation_disposition()
-                if disposition == "act":
-                    action = f"Act on '{lever}' under the validated causal or experimental design, with reported guardrails."
+                eff = finding.effect
+                if isinstance(eff, (int, float)) and eff < -0.15:
+                    action = f"Remediate underperformance in {level_name} to close the {measure or 'performance'} deficit."
+                elif disposition == "act":
+                    action = f"Capitalize on {level_name} to capture projected {measure or 'performance'} lift."
                 elif disposition == "pilot":
                     action = f"Pilot a controlled test of {level_name} to validate projected lift on {measure or 'performance'}."
                 elif disposition == "investigate":
-                    action = f"Investigate {level_name} as an operational factor before changing policy."
+                    action = f"Investigate {level_name} operational dynamics before changing policy."
                 else:
                     action = f"Monitor {level_name} trends as an operational context factor."
 

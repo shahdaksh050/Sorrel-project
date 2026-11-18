@@ -33,13 +33,13 @@ from src.core.dashboard import (
     merge_designed,
 )
 from src.core.dependence import check_simpsons_paradox, intraclass_correlation
-from src.core.findings import Finding
+from src.core.findings import Finding, _is_actionable_feature, _is_self_derived_finding
 from src.core.json_normalization import strict_json_dumps
 from src.core.profiler import DatasetProfile, profile_dataframe
 from src.core.prompt_manager import (
     CHART_DESIGN_PROMPT,
 )
-from src.core.stats_utils import repeated_entity
+from src.core.stats_utils import get_base_column_name, repeated_entity
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,9 @@ class ReportMixin(ControllerState):
                 raise RuntimeError(str(result.get("error", "Unknown LLM error")))
             if result.get("status") != "complete" or not result.get("insights"):
                 raise RuntimeError("final interpretation reply had no insights")
+            result.setdefault("user_objective", self.objective or None)
+            result.setdefault("autonomous_objective", self.memory.get_context("autonomous_objective"))
+            result.setdefault("objective", self.objective or self.memory.get_context("autonomous_objective") or "")
             return result
         except Exception as exc:
             self.memory.set_context("llm_error", f"{type(exc).__name__}: {exc}")
@@ -273,7 +276,7 @@ class ReportMixin(ControllerState):
             best_model = None
 
         ranked = self.memory.ranked_findings()
-        insights = [f.headline for f in ranked[:12]]
+        insights = [f.headline for f in ranked]
         if not insights:
             insights.append("Analysis produced no tool results to synthesise.")
 
@@ -387,6 +390,8 @@ class ReportMixin(ControllerState):
             "deterministic_mode": not self.use_llm,
             "ml_enabled": self.use_ml,
             "reasoning": reasoning,
+            "user_objective": self.objective or None,
+            "objective": self.objective or auto_obj or "",
             "autonomous_objective": auto_obj,
             "insights": insights,
             "recommendations": recommendations,
@@ -416,44 +421,92 @@ class ReportMixin(ControllerState):
             }
             for f in quarantined
         ]
-        final_result["insights"] = [f.headline for f in primary[:12]]
+        final_result["insights"] = [f.headline for f in primary]
         if not final_result["insights"]:
             final_result["insights"] = [
                 "No finding passed every required post-hoc evidence gate; review the audit and limitations."
             ]
 
         records: list[dict[str, Any]] = []
-        for finding in primary[:8]:
-            if len(records) >= 4:
-                break
-            lever = finding.dimension or finding.measure
-            if not lever:
+        actionable_records: list[dict[str, Any]] = []
+        outcome_records: list[dict[str, Any]] = []
+        seen_levers: set[str] = set()
+
+        for finding in primary:
+            # Never recommend tautological relationships between derived transforms
+            if _is_self_derived_finding(finding):
                 continue
-            disposition = finding.recommendation_disposition()
-            if disposition == "act":
-                action = (
-                    f"Act on '{lever}' under the validated causal or experimental design, "
-                    "with the reported assumptions and guardrails."
+
+            lever = finding.dimension
+            measure = finding.measure
+
+            # Determine candidate outcome metric if no actionable lever
+            target_metric: str | None = None
+            if not (lever and _is_actionable_feature(lever)):
+                if measure and not _is_actionable_feature(measure):
+                    target_metric = measure
+                elif lever and not _is_actionable_feature(lever):
+                    target_metric = lever
+
+            # Case 1: Controllable operational lever (dimension is actionable)
+            if lever and _is_actionable_feature(lever):
+                norm_lever = lever.lower().strip()
+                if norm_lever in seen_levers:
+                    continue
+                seen_levers.add(norm_lever)
+
+                level_label = finding.evidence.get("level_label") if isinstance(finding.evidence, dict) else None
+                level_name = (
+                    f"'{level_label}' ({finding.dimension}='{finding.level}')"
+                    if (level_label and str(level_label) != str(finding.level))
+                    else (f"{finding.dimension}='{finding.level}'" if finding.level else f"'{finding.dimension}'")
                 )
-            elif disposition == "pilot":
-                action = (
-                    f"Pilot a controlled change to '{lever}' and predefine the outcome and stop criteria."
+
+                disposition = finding.recommendation_disposition()
+                if disposition == "act":
+                    action = f"Act on '{lever}' under the validated causal or experimental design, with reported guardrails."
+                elif disposition == "pilot":
+                    action = f"Pilot a controlled test of {level_name} to validate projected lift on {measure or 'performance'}."
+                elif disposition == "investigate":
+                    action = f"Investigate {level_name} as an operational factor before changing policy."
+                else:
+                    action = f"Monitor {level_name} trends as an operational context factor."
+
+                actionable_records.append(
+                    {
+                        "recommendation_id": f"rec_{finding.finding_id}",
+                        "finding_ids": [finding.finding_id],
+                        "disposition": disposition,
+                        "action": action,
+                        "rationale": finding.headline,
+                        "claims": [],
+                        "limitations": list(finding.caveats),
+                    }
                 )
-            elif disposition == "investigate":
-                action = f"Investigate '{lever}' as a hypothesis before making an operational change."
-            else:
-                action = f"Monitor '{lever}' as an observational signal, not as a causal intervention."
-            records.append(
-                {
-                    "recommendation_id": f"rec_{finding.finding_id}",
-                    "finding_ids": [finding.finding_id],
-                    "disposition": disposition,
-                    "action": action,
-                    "rationale": finding.headline,
-                    "claims": [],
-                    "limitations": list(finding.caveats),
-                }
-            )
+
+            # Case 2: Outcome metric to track across cycles (target is outcome KPI)
+            elif target_metric:
+                norm_metric = target_metric.lower().strip()
+                if get_base_column_name(norm_metric) != norm_metric:
+                    continue
+                if norm_metric in seen_levers:
+                    continue
+                seen_levers.add(norm_metric)
+
+                action = f"Track '{target_metric}' as a key outcome metric across operational reporting cycles."
+                outcome_records.append(
+                    {
+                        "recommendation_id": f"rec_{finding.finding_id}",
+                        "finding_ids": [finding.finding_id],
+                        "disposition": "monitor",
+                        "action": action,
+                        "rationale": finding.headline,
+                        "claims": [],
+                        "limitations": list(finding.caveats),
+                    }
+                )
+
+        records = (actionable_records[:3] + outcome_records)[:4]
         if not records:
             records.append(
                 {
@@ -669,6 +722,11 @@ class ReportMixin(ControllerState):
             degradations=self.memory.get_context("degradations"),
             findings=[f.to_dict() for f in self.memory.ranked_findings()],
             analysis_decision=self.memory.get_context("analysis_decision"),
+            coverage=llm_final.get("coverage") or self.memory.get_context("coverage"),
+            domain_analysis=llm_final.get("domain_analysis") or self.memory.get_context("domain_analysis"),
+            causal_design=llm_final.get("causal_design") or self.memory.get_context("causal_design"),
+            governance=llm_final.get("governance") or self.memory.get_context("governance"),
+            active_domain_pack=self.memory.get_context("active_domain_pack"),
         )
 
         self.memory.append_tool_result(result)

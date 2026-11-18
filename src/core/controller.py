@@ -180,7 +180,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         self.min_iterations = (
             min_iterations
             if min_iterations is not None
-            else int(os.getenv("MIN_ITERATIONS", "1"))
+            else int(os.getenv("MIN_ITERATIONS", "2"))
         )
         self.max_iterations = (
             max_iterations
@@ -655,7 +655,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # the analysis-mode decision needed the profile first. Cheap next to
         # the read/coerce already done; non-fatal, and only runs when the
         # first pass actually succeeded.
-        if self._pending_df is not None and self.last_profile is not None:
+        if self._pending_df is not None and self.last_profile is not None and metadata.target_column is not None:
             try:
                 reprofiled = profile_dataframe(self._pending_df, target_column=metadata.target_column)
                 reprofiled.domains = self.last_profile.domains
@@ -716,6 +716,11 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # An LLM-enabled run may replace it in cycle 1, but a causal request
         # must never disappear merely because the provider is unavailable.
         self._store_reasoning_contracts({})
+
+        # Re-route question after profiling is settled (profile informs routing)
+        effective_objective = self.objective or self.autonomous_objective or ""
+        self.question_routing = route_question(effective_objective, profile=self.last_profile)
+        self.memory.set_context("question_routing", self.question_routing)
 
         return metadata
 
@@ -1146,15 +1151,15 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             return llm_response, llm_response
         assert self._rlm_engine is not None
         console.print(
-            f"[yellow]ℹ LLM signalled complete on iteration {iteration} "
-            f"(< min_iterations {self.min_iterations}) — prompting for deeper hypothesis exploration.[/]"
+            f"[yellow]ℹ Two-Phase Cadence: Cycle {iteration} (Phase 1: Broad Screening) complete. "
+            f"Enforcing Phase 2: Drill-Down on anomalies/drivers (min_iterations={self.min_iterations}).[/]"
         )
         continue_prompt = (
             user_prompt
-            + f"\n\n[SYSTEM DIRECTIVE: Minimum exploration cycles not yet reached "
-            f"(currently iteration {iteration} of minimum {self.min_iterations}). "
+            + "\n\n[SYSTEM DIRECTIVE: Phase 1 (Broad Archetype Screening) complete. "
+            "You MUST now execute Phase 2 (Drill-Down on anomalies/drivers) before completion. "
             "Do NOT return Form 2 yet. Formulate a specific follow-up hypothesis, anomaly check, "
-            "or deeper investigation, and return Form 1 (Action Plan) with 1–3 steps. "
+            "segment comparison on top drivers, or deeper investigation, and return Form 1 (Action Plan) with 1–3 steps. "
             "Use execute_dynamic_code if you need a custom calculation.]"
         )
         try:
@@ -1167,19 +1172,15 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             reprompt_res = self._normalise_reply(reprompt_res)
             if reprompt_res.get("status") != "complete":
                 return reprompt_res, None
-            if self.memory.dataset_metadata is not None and self._analytical_tools_run_count() == 0:
-                console.print(
-                    "[yellow]ℹ LLM confirmed complete before any analysis ran — "
-                    "running the profile-driven plan first.[/]"
-                )
-                return self._build_fallback_plan(), None
-            console.print("\n[bold green]✅ LLM confirmed analysis complete.[/]")
-            return reprompt_res, reprompt_res
+            # Reprompt still returned complete on Cycle 1 — strictly enforce Phase 2 Drill-Down
+            console.print(
+                "[yellow]ℹ LLM repeated complete before Phase 2 drill-down — "
+                "injecting Phase 2 drill-down plan on anomalies/drivers.[/]"
+            )
+            return self._build_phase2_drilldown_plan(), None
         except Exception as exc:
-            console.print(f"[yellow]⚠ Exploration reprompt failed ({exc}) — accepting completion.[/]")
-            if self.memory.dataset_metadata is not None and self._analytical_tools_run_count() == 0:
-                return self._build_fallback_plan(), None
-            return llm_response, llm_response
+            console.print(f"[yellow]⚠ Exploration reprompt failed ({exc}) — injecting Phase 2 drill-down plan.[/]")
+            return self._build_phase2_drilldown_plan(), None
 
     def _deterministic_cycle(self, progress: Progress, task_id: TaskID) -> dict[str, Any]:
         """Deterministic mode (LLM off by choice): run the profile-driven plan.
@@ -1327,9 +1328,14 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             self.memory.set_context("degradations", degradations)
         try:
             agenda = self.memory.get_context("question_agenda") or []
-            final_result["coverage"] = coverage_report(
-                [Question(**q) for q in agenda], final_result["findings"]
+            all_findings = final_result.get("findings") or [f.to_dict() for f in self.memory.ranked_findings()]
+            cov = coverage_report(
+                [Question(**q) for q in agenda],
+                all_findings,
+                tool_results=self.memory.tool_results,
             )
+            final_result["coverage"] = cov
+            self.memory.set_context("coverage", cov)
         except Exception:
             logger.debug("question coverage report skipped", exc_info=True)
 
@@ -1615,6 +1621,17 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         self._attach_run_metadata(final_result)
         audit_df = self._run_post_hoc_audits(final_result)
         self._rebuild_primary_synthesis(final_result)
+        try:
+            agenda = self.memory.get_context("question_agenda") or []
+            cov = coverage_report(
+                [Question(**q) for q in agenda],
+                final_result.get("findings", []),
+                tool_results=self.memory.tool_results,
+            )
+            final_result["coverage"] = cov
+            self.memory.set_context("coverage", cov)
+        except Exception:
+            logger.debug("question coverage report refresh skipped", exc_info=True)
         unverified = self._flag_unverified_claims(final_result)
         self.memory.set_context("unverified_claims", unverified)
         if unverified:
@@ -1824,6 +1841,9 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
 
         tool_name: str | None = None
         params: dict[str, Any] = {}
+        fp = self.memory.get_context("cleaned_file_path") or (
+            self.memory.dataset_metadata.file_path if self.memory.dataset_metadata else None
+        )
         if design.get("study_design") == "observational_cross_section" and self.use_ml:
             covariates = design.get("pre_treatment_confounders")
             if isinstance(covariates, list) and covariates:
@@ -1851,6 +1871,8 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         elif design.get("study_design") == "randomized_experiment":
             tool_name = "experiment_analysis"
             params = {"group_column": treatment, "metric_column": outcome}
+        if fp and tool_name is not None:
+            params["file_path"] = str(fp)
         if (
             tool_name is None
             or not self.tool_registry.has(tool_name)

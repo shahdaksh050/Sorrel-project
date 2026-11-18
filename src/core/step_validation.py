@@ -37,15 +37,39 @@ def columns_for(memory: MemorySystem, file_path: Any) -> list[str] | None:
     """Columns of the dataset a step will read: a registered derived
     dataset's own columns when file_path is one, else the loaded dataset's."""
     derived = memory.get_context("derived_datasets") or {}
-    if isinstance(file_path, str) and file_path and derived:
+    cleaned_path = memory.get_context("cleaned_file_path")
+    target_path = file_path if (isinstance(file_path, str) and file_path) else cleaned_path
+    if isinstance(target_path, str) and target_path and derived:
         try:
-            target = Path(file_path).resolve()
+            target = Path(target_path).resolve()
             for info in derived.values():
                 if isinstance(info, dict) and info.get("path") and Path(info["path"]).resolve() == target:
                     cols = info.get("columns")
                     return [str(c) for c in cols] if isinstance(cols, list) and cols else None
         except OSError:
             pass
+
+    is_cleaned = False
+    if cleaned_path:
+        if not file_path:
+            is_cleaned = True
+        elif isinstance(file_path, str):
+            try:
+                is_cleaned = Path(file_path).resolve() == Path(cleaned_path).resolve()
+            except OSError:
+                is_cleaned = file_path == cleaned_path
+
+    if is_cleaned:
+        if derived and "cleaned_dataset" in derived:
+            cols = derived["cleaned_dataset"].get("columns")
+            if isinstance(cols, list) and cols:
+                return [str(c) for c in cols]
+        dp = memory.get_context("data_profile")
+        if isinstance(dp, dict) and "columns" in dp:
+            cols_dp = [str(c["name"]) for c in dp["columns"] if isinstance(c, dict) and c.get("name")]
+            if cols_dp:
+                return cols_dp
+
     meta = memory.dataset_metadata
     return list(meta.columns) if meta else None
 
@@ -186,11 +210,22 @@ def validate_step(
     # must never reach numeric statistics/clustering merely because a tool
     # happened to accept a file path.
     numerical_cols = list(getattr(memory.dataset_metadata, "numerical_cols", []) or [])
+    if not numerical_cols:
+        dp = memory.get_context("data_profile")
+        if isinstance(dp, dict) and "columns" in dp:
+            numerical_cols = [
+                str(c["name"]) for c in dp["columns"]
+                if isinstance(c, dict) and c.get("kind") == "numeric" and c.get("name")
+            ]
     tool_name = str(getattr(tool, "name", ""))
     if tool_name in _NUMERIC_ONLY_TOOLS and not numerical_cols:
         errors.append(f"{tool_name} requires numeric columns; this dataset has none.")
-    if tool_name == "cluster_data" and len(numerical_cols) < 2:
-        errors.append("cluster_data requires at least two numeric columns.")
+    if tool_name == "cluster_data":
+        if len(numerical_cols) < 2:
+            errors.append("cluster_data requires at least two numeric columns.")
+        row_count = getattr(memory.dataset_metadata, "row_count", 0)
+        if row_count and row_count < 30:
+            errors.append("cluster_data requires at least 30 rows.")
     missing = [
         k for k, spec in schema.items()
         if isinstance(spec, dict) and spec.get("required") and k not in injected

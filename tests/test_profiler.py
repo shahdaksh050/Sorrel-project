@@ -128,3 +128,61 @@ class TestPromptString:
         numeric_names = [c.name for c in profile.columns_of_kind("numeric")]
         assert "income" in numeric_names
         assert "customer_id" not in numeric_names
+
+
+class TestTransactionValueSemanticDisambiguation:
+    def test_unit_rate_and_transaction_value_predicates(self) -> None:
+        from src.core.profiler import is_transaction_value_name, is_unit_rate_name
+
+        assert is_transaction_value_name("total_amount")
+        assert is_transaction_value_name("revenue")
+        assert is_transaction_value_name("sales")
+        assert is_transaction_value_name("total_price")
+        assert not is_transaction_value_name("unit_price")
+        assert not is_transaction_value_name("price_per_unit")
+
+        assert is_unit_rate_name("unit_price")
+        assert is_unit_rate_name("price")
+        assert is_unit_rate_name("rate")
+        assert is_unit_rate_name("price_per_unit")
+        assert not is_unit_rate_name("total_amount")
+        assert not is_unit_rate_name("revenue")
+
+        # Compound / phrase token disambiguation and non-pricing rate exclusions
+        assert is_transaction_value_name("extended_price") is True
+        assert is_unit_rate_name("extended_price") is False
+        assert is_transaction_value_name("order_value") is True
+        assert is_unit_rate_name("heart_rate") is False
+
+    def test_column_profile_flags_and_aggregation(self) -> None:
+        from src.core.profiler import profile_dataframe
+
+        df = pd.DataFrame({
+            "unit_price": [10.0, 15.0, 20.0],
+            "total_amount": [100.0, 150.0, 200.0],
+        })
+        profile = profile_dataframe(df)
+        up_col = profile.columns[0]
+        ta_col = profile.columns[1]
+
+        assert "unit_rate" in up_col.flags
+        assert up_col.is_unit_rate()
+        assert up_col.aggregation == "mean"
+
+        assert "transaction_value" in ta_col.flags
+        assert ta_col.is_transaction_value()
+        assert ta_col.aggregation == "sum"
+
+    def test_pick_measures_prioritizes_transaction_value(self) -> None:
+        from src.core.profiler import pick_measures, profile_dataframe
+
+        df = pd.DataFrame({
+            "unit_price": [10.0, 15.0, 20.0],
+            "general_metric": [5.0, 6.0, 7.0],
+            "total_amount": [100.0, 150.0, 200.0],
+        })
+        profile = profile_dataframe(df)
+        ordered = pick_measures(profile)
+        names = [c.name for c in ordered]
+        assert names[0] == "total_amount"
+        assert names[-1] == "unit_price"

@@ -125,19 +125,21 @@ def _f_linear(x: np.ndarray, a: float, b: float) -> Any:
 
 
 def _f_exponential(x: np.ndarray, a: float, b: float) -> Any:
-    return a * np.exp(b * x)
+    return a * np.exp(np.clip(b * x, -700.0, 700.0))
 
 
 def _f_decay(x: np.ndarray, a: float, k: float, c: float) -> Any:
-    return a * np.exp(-k * x) + c
+    return a * np.exp(np.clip(-k * x, -700.0, 700.0)) + c
 
 
 def _f_logistic(x: np.ndarray, bottom: float, top: float, x0: float, k: float) -> Any:
-    return bottom + (top - bottom) / (1.0 + np.exp(-k * (x - x0)))
+    return bottom + (top - bottom) / (1.0 + np.exp(np.clip(-k * (x - x0), -700.0, 700.0)))
 
 
 def _f_hill(x: np.ndarray, bottom: float, top: float, ec50: float, hill: float) -> Any:
-    u = (np.maximum(x, 0.0) / ec50) ** hill
+    ec50_safe = max(float(ec50), 1e-12)
+    ratio = np.clip(np.maximum(x, 0.0) / ec50_safe, 0.0, 1e12)
+    u = np.clip(ratio ** np.clip(hill, -50.0, 50.0), 0.0, 1e100)
     return bottom + (top - bottom) * u / (1.0 + u)
 
 

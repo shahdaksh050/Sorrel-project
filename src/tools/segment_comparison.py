@@ -410,6 +410,10 @@ class SegmentComparisonTool(BaseTool):
         measure_column: str | None,
         dimension_column: str | None,
     ) -> list[tuple[str, str]]:
+        if dimension_column:
+            cp_dim = _column(profile, dimension_column)
+            if cp_dim and (cp_dim.nunique > _MAX_DIM_CARD or cp_dim.nunique < 2):
+                dimension_column = None
         if measure_column and dimension_column:
             return [(measure_column, dimension_column)]
         measures = [measure_column] if measure_column else [c.name for c in _pick_measure_columns(profile)]
@@ -698,6 +702,19 @@ class SegmentComparisonTool(BaseTool):
 
         profile = profile_dataframe(df)
         pairs = self._build_pairs(profile, measure_column, dimension_column)
+        if not pairs:
+            # Autonomous self-healing: derive temporal or quantile dimensions if categorical features are sparse
+            from src.core.reshaping import (
+                discretize_continuous_quantiles,
+                extract_temporal_calendar_features,
+            )
+
+            df, time_notes = extract_temporal_calendar_features(df)
+            df, q_notes = discretize_continuous_quantiles(df)
+            if time_notes or q_notes:
+                profile = profile_dataframe(df)
+                pairs = self._build_pairs(profile, measure_column, dimension_column)
+
         if not pairs:
             raise ToolExecutionError(
                 "No usable (measure, dimension) pair: need at least one numeric "

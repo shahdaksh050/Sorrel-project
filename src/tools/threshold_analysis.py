@@ -155,6 +155,17 @@ class ThresholdAnalysisTool(BaseTool):
         tss = float(np.sum((y - y_mean) ** 2))
         r2_linear = max(0.0, 1.0 - rss_linear / tss) if tss > 1e-12 else 0.0
 
+        # Significance test of baseline linear model (H0: slope == 0)
+        df_lin = n - 2
+        p_linear = 1.0
+        if df_lin > 0 and rss_linear > 1e-12:
+            se_b = float(np.sqrt((rss_linear / df_lin) / ss_xx))
+            if se_b > 1e-12:
+                t_stat = b_linear / se_b
+                p_linear = float(2.0 * (1.0 - stats.t.cdf(abs(t_stat), df_lin)))
+        elif rss_linear <= 1e-12 and ss_xy != 0:
+            p_linear = 0.0
+
         # 2. Search candidate thresholds across interior percentiles
         low_val = float(np.percentile(x, _PERCENTILE_LOW))
         high_val = float(np.percentile(x, _PERCENTILE_HIGH))
@@ -222,11 +233,18 @@ class ThresholdAnalysisTool(BaseTool):
                 f"({pct_slope_shift:+.1f}%, F={f_stat:.2f}, p={p_val:.3g}, ΔR²={r2_gain:+.3f}, n={n})."
             )
         else:
-            summary = (
-                f"Evaluated relationship between '{feature_column}' and '{target_column}' across {n} rows: "
-                f"relationship is continuous linear (slope={b_linear:.4g}, R²={r2_linear:.3f}) with no "
-                f"statistically significant tipping point or structural break (p={p_val:.3g})."
-            )
+            if r2_linear < 0.02 or p_linear > 0.05:
+                summary = (
+                    f"Evaluated relationship between '{feature_column}' and '{target_column}' across {n} rows: "
+                    f"no meaningful relationship detected (slope={b_linear:.4g}, R²={r2_linear:.3f}, p={p_linear:.3g}); no "
+                    f"statistically significant tipping point or structural break."
+                )
+            else:
+                summary = (
+                    f"Evaluated relationship between '{feature_column}' and '{target_column}' across {n} rows: "
+                    f"relationship is continuous linear (slope={b_linear:.4g}, R²={r2_linear:.3f}, p={p_linear:.3g}) with no "
+                    f"statistically significant tipping point or structural break (breakpoint test p={p_val:.3g})."
+                )
 
         threshold = best_c if has_breakpoint else None
         f_pvalue = round(p_val, 4)
@@ -241,6 +259,7 @@ class ThresholdAnalysisTool(BaseTool):
             "slope_shift_pct": pct_slope_shift,
             "linear_slope": b_linear,
             "linear_r2": round(r2_linear, 4),
+            "linear_pvalue": round(p_linear, 4),
             "piecewise_r2": round(r2_piecewise, 4),
             "r2_gain": round(r2_gain, 4),
             "f_statistic": round(f_stat, 3),

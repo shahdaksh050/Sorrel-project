@@ -151,6 +151,14 @@ def _autodetect_datetime_column(df: pd.DataFrame) -> str | None:
         parsed = pd.to_datetime(sample, errors="coerce", format="mixed")
         if parsed.notna().mean() >= 0.9:
             return str(col)
+    for col in df.columns:
+        name_l = str(col).lower()
+        if (
+            pd.api.types.is_numeric_dtype(df[col])
+            and any(name_l == t or name_l.endswith(f"_{t}") for t in ("year", "period", "quarter", "month", "yr", "qtr"))
+            and df[col].nunique(dropna=True) >= 2
+        ):
+            return str(col)
     return None
 
 
@@ -368,9 +376,10 @@ def _panel_trends(
 
 def _month_of_year_factors(
     period_dates: pd.Series, values: np.ndarray
-) -> tuple[dict[str, float], dict[str, int], dict[str, int], dict[str, float | None]]:
+) -> tuple[dict[str, float], dict[str, int], dict[str, int], dict[str, float | None], dict[str, float]]:
     """Each calendar month's average vs. the overall mean, as a signed
-    fraction (0.4 = 40% above baseline). Computed on the resampled series so
+    fraction (0.4 = 40% above baseline) or standard deviation units when
+    the baseline mean is near zero. Computed on the resampled series so
     a monthly grain compares each month's own point, and a weekly/daily
     grain compares the months' averaged points.
 
@@ -383,21 +392,25 @@ def _month_of_year_factors(
         period) p-value, where there's enough data to run one — a simple
         significance check rather than treating any |lift| >= threshold as
         equally credible regardless of sample size or spread.
+      - `month_means`: raw average value for each calendar month.
     """
     if len(values) < 4:
-        return {}, {}, {}, {}
+        return {}, {}, {}, {}, {}
     s = pd.Series(values, index=pd.DatetimeIndex(period_dates))
     overall_mean = float(s.mean())
-    if overall_mean == 0:
-        return {}, {}, {}, {}
+    s_std = float(s.std())
+    denom = abs(overall_mean) if abs(overall_mean) >= 0.1 else (s_std if s_std > 1e-6 else 1.0)
     grouped = s.groupby(s.index.month)
     factors: dict[str, float] = {}
+    month_means: dict[str, float] = {}
     counts: dict[str, int] = {}
     years: dict[str, int] = {}
     p_values: dict[str, float | None] = {}
     for month_num, group in grouped:
         name = _MONTH_NAMES[int(month_num)]
-        factors[name] = round((float(group.mean()) - overall_mean) / abs(overall_mean), 4)
+        m_mean = float(group.mean())
+        month_means[name] = round(m_mean, 4)
+        factors[name] = round((m_mean - overall_mean) / denom, 4)
         counts[name] = int(group.size)
         years[name] = int(pd.DatetimeIndex(group.index).year.nunique())
 
@@ -412,7 +425,7 @@ def _month_of_year_factors(
             except (ValueError, ZeroDivisionError):
                 p_val = None
         p_values[name] = p_val
-    return factors, counts, years, p_values
+    return factors, counts, years, p_values, month_means
 
 
 def _day_of_week_factors(working: pd.DataFrame, aggregation: str) -> dict[str, float]:
@@ -424,10 +437,10 @@ def _day_of_week_factors(working: pd.DataFrame, aggregation: str) -> dict[str, f
         return {}
     s = pd.Series(daily["_value"].to_numpy(dtype=float), index=pd.DatetimeIndex(daily["_period"]))
     overall_mean = float(s.mean())
-    if overall_mean == 0:
-        return {}
+    s_std = float(s.std())
+    denom = abs(overall_mean) if abs(overall_mean) >= 0.1 else (s_std if s_std > 1e-6 else 1.0)
     by_dow = s.groupby(s.index.day_name()).mean()
-    return {str(k): round((float(v) - overall_mean) / abs(overall_mean), 4) for k, v in by_dow.items()}
+    return {str(k): round((float(v) - overall_mean) / denom, 4) for k, v in by_dow.items()}
 
 
 #: Time-of-day / day-of-week profile: only for sub-daily data (median gap at
@@ -538,11 +551,17 @@ def _measure_tod_profile(
     if len(by_dow) == 7 and int(by_dow["count"].min()) >= _TOD_MIN_OBS_PER_WEEKDAY:
         weekday_mean, weekend_mean = float(v[dow < 5].mean()), float(v[dow >= 5].mean())
         days = {_WEEKDAY_NAMES[int(d)]: round(float(m), 4) for d, m in by_dow["mean"].items()}
+        w_gap: float | None = None
+        if weekday_mean != 0:
+            if abs(weekday_mean) >= 0.1:
+                w_gap = round((weekend_mean - weekday_mean) / abs(weekday_mean), 4)
+            else:
+                w_gap = round(weekend_mean - weekday_mean, 4)
         weekly = {
             "means": days,
             "weekday_mean": round(weekday_mean, 4),
             "weekend_mean": round(weekend_mean, 4),
-            "weekend_gap": round((weekend_mean - weekday_mean) / abs(weekday_mean), 4) if weekday_mean else None,
+            "weekend_gap": w_gap,
             "eta_squared": round(float(
                 (by_dow["count"] * (by_dow["mean"] - float(v.mean())) ** 2).sum()
                 / float(np.sum((v - v.mean()) ** 2))
@@ -552,13 +571,18 @@ def _measure_tod_profile(
     hour_chart, day_chart = _tod_charts(name, hours, weekly["means"] if weekly else None, grand)
     if weekly is not None:
         weekly["chart"] = day_chart
+    diurnal_effect = (
+        round((peak - trough) / abs(grand), 4)
+        if abs(grand) >= 0.1
+        else round(peak - trough, 4)
+    )
     diurnal = {
         "hourly_means": hours,
         "hourly_counts": {int(h): int(c) for h, c in by_hour["count"].items()},
         "peak_hour": peak_hour, "peak_value": round(peak, 4),
         "trough_hour": trough_hour, "trough_value": round(trough, 4),
         "peak_trough_ratio": round(peak / trough, 3) if trough > 0 and peak > 0 else None,
-        "effect": round((peak - trough) / abs(grand), 4),
+        "effect": diurnal_effect,
         "overall_mean": round(grand, 4),
         "eta_squared": round(eta_sq, 4), "p_value": p_value, "n": n,
         "chart": hour_chart,
@@ -660,7 +684,12 @@ class TimeSeriesAnalysisTool(BaseTool):
         if aggregation not in ("sum", "mean"):
             aggregation = inferred_aggregation
 
-        dates = pd.to_datetime(df[date_column], errors="coerce", format="mixed")
+        if pd.api.types.is_datetime64_any_dtype(df[date_column]):
+            dates = df[date_column]
+        elif pd.api.types.is_numeric_dtype(df[date_column]):
+            dates = pd.to_datetime(df[date_column].astype(str), errors="coerce", format="mixed")
+        else:
+            dates = pd.to_datetime(df[date_column], errors="coerce", format="mixed")
         raw_values = pd.to_numeric(df[value_column], errors="coerce")
         working = pd.DataFrame({"_date": dates, "_value": raw_values}).dropna()
         working = working.sort_values("_date")
@@ -765,7 +794,7 @@ class TimeSeriesAnalysisTool(BaseTool):
         ]
 
         # ---- Calendar-aware seasonality (7.7), BH-corrected across months ----
-        month_factors, month_counts, month_years, month_p_values = _month_of_year_factors(
+        month_factors, month_counts, month_years, month_p_values, month_means = _month_of_year_factors(
             period_dates, values
         )
         month_p_adjusted: dict[str, float] = {
@@ -804,13 +833,19 @@ class TimeSeriesAnalysisTool(BaseTool):
         # season. The rest are still surfaced here (so the number isn't
         # hidden), just clearly labelled as unreplicated single-year reads
         # rather than left indistinguishable from a genuine seasonal effect.
+        overall_mean = float(values.mean()) if len(values) > 0 else 0.0
         seasonal_note = ""
         if notable_months:
             parts = []
             for name, lift in sorted(notable_months.items(), key=lambda kv: -abs(kv[1])):
                 replicated = month_years.get(name, 0) >= _MIN_YEARS_FOR_MONTH_FINDING
                 tag = "" if replicated else " [single-year, unreplicated]"
-                parts.append(f"{name} {lift * 100:+.0f}%{tag}")
+                m_mean = month_means.get(name, overall_mean + lift * abs(overall_mean))
+                mean_diff = m_mean - overall_mean
+                if abs(overall_mean) < 0.1 or abs(lift) > 3.0:
+                    parts.append(f"{name}: {mean_diff:+.2f} units vs {overall_mean:.2f} baseline{tag}")
+                else:
+                    parts.append(f"{name} {lift * 100:+.0f}%{tag}")
             seasonal_note = f" Calendar seasonality: {', '.join(parts)} vs. the yearly average."
         if seasonal_decomposition is not None:
             seasonal_note += (
@@ -920,6 +955,7 @@ class TimeSeriesAnalysisTool(BaseTool):
             "acf_skipped_reason": acf_skipped_reason,
             "seasonal_decomposition": seasonal_decomposition,
             "month_of_year_factors": month_factors,
+            "month_of_year_means": month_means,
             "month_of_year_counts": month_counts,
             "month_of_year_years": month_years,
             "month_of_year_p_values": month_p_values,
@@ -927,6 +963,7 @@ class TimeSeriesAnalysisTool(BaseTool):
             "notable_months": notable_months,
             "day_of_week_factors": day_of_week_factors,
             "panel_trends": panel,
+            "overall_mean": round(float(overall_mean), 4),
         }
 
     def findings(
@@ -1066,18 +1103,31 @@ class TimeSeriesAnalysisTool(BaseTool):
                     "history are available, so this month's lift may partly reflect the "
                     "trend rather than a repeating seasonal effect."
                 )
+            grand_mean = float(output.get("overall_mean", 0.0) or 0.0)
+            m_means = output.get("month_of_year_means") or {}
+            m_mean = m_means.get(month_name, grand_mean + lift * abs(grand_mean))
+            mean_diff = m_mean - grand_mean
+            if abs(grand_mean) < 0.1 or abs(lift) > 3.0:
+                headline_text = (
+                    f"{month_name} {measure_label.lower()} runs {abs(mean_diff):.2f} units "
+                    f"{direction_word} the {grand_mean:.2f} baseline"
+                )
+                detail_stat = f"{mean_diff:+.2f} units vs. the {grand_mean:.2f} baseline"
+            else:
+                headline_text = (
+                    f"{month_name} {measure_label.lower()} runs {abs(lift) * 100:.0f}% "
+                    f"{direction_word} the yearly average"
+                )
+                detail_stat = f"{lift * 100:+.1f}% vs. the overall mean"
             results.append(Finding(
                 finding_id="",
                 kind="change",
-                headline=(
-                    f"{month_name} {measure_label.lower()} runs {abs(lift) * 100:.0f}% "
-                    f"{direction_word} the yearly average"
-                ),
+                headline=headline_text,
                 detail=(
                     f"Calendar-month factor computed on the {grain}-resampled series "
                     f"({month_counts.get(month_name, '?')} period(s) across "
                     f"{month_years.get(month_name, '?')} years in {month_name}): "
-                    f"{lift * 100:+.1f}% vs. the overall mean."
+                    f"{detail_stat}."
                     + (
                         f" Welch t-test vs. the rest of the year: p={p_value:.4g} "
                         f"(BH-adjusted across months: {month_p_adjusted[month_name]:.4g})."
@@ -1129,14 +1179,21 @@ class TimeSeriesAnalysisTool(BaseTool):
                 f"{name} peaks at {ph:02d}:00 ({_num(d['peak_value'])}{suffix}) and is lowest at "
                 f"{th:02d}:00 ({_num(d['trough_value'])}{suffix})"
             )
-            if ratio is not None and ratio >= 1.25:
+            if abs(d.get("overall_mean", 1.0)) < 0.1 or d.get("effect", 0.0) > 3.0:
+                headline += f", a swing of {d['peak_value'] - d['trough_value']:.2f} units across the day"
+            elif ratio is not None and ratio >= 1.25:
                 headline += f", about {ratio:.1f}x higher in the {_day_part(ph)}".replace(".0x", "x")
             else:
                 headline += f", a swing of {d['effect']:.0%} of the average"
             w = weekly.get(name)
             gap = w.get("weekend_gap") if w else None
             if gap is not None and abs(gap) >= _TOD_WEEKEND_GAP_MIN:
-                headline += f"; weekends run {abs(gap):.0%} {'lower' if gap < 0 else 'higher'}"
+                w_mean = w.get("weekday_mean", 1.0) if w else 1.0
+                if abs(w_mean) < 0.1 or abs(gap) > 3.0:
+                    diff_w = (w.get("weekend_mean", 0.0) - w_mean) if w else 0.0
+                    headline += f"; weekends run {diff_w:+.2f} units vs weekday baseline"
+                else:
+                    headline += f"; weekends run {abs(gap):.0%} {'lower' if gap < 0 else 'higher'}"
             evidence: dict[str, Any] = {
                 "value_column": name, "date_column": output.get("date_column"),
                 "peak_hour": ph, "peak_value": d["peak_value"],

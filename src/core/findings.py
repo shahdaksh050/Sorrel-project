@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from src.core.privacy import redact_level_in_text
+from src.core.stats_utils import get_base_column_name, is_derived_pair
 
 #: A finding whose |effect| falls below this is suppressed outright unless
 #: it is the only finding available — the T5 "triviality suppression" rule.
@@ -90,7 +91,7 @@ class Finding:
     """One structured, audience-facing analytical claim."""
 
     finding_id: str
-    kind: str                          # segment_lift | driver | trend | concentration | correlation | outlier_scan | cluster | test | change | cohort | financial | workforce | geospatial | text | dimensionality
+    kind: str                          # segment_lift | driver | trend | concentration | correlation | outlier_scan | cluster | test | change | cohort | financial | workforce | geospatial | text | dimensionality | invariance | uniformity
     headline: str                      # audience-facing, numbers embedded
     detail: str = ""                   # analyst-facing elaboration
     evidence: dict[str, Any] = field(default_factory=dict)   # exact numbers, traceable to a ToolResult
@@ -141,6 +142,9 @@ class Finding:
         effect for its effect_kind (see _EFFECT_BENCHMARKS). A `share` whose
         evidence carries an expected/uniform share is scored on its excess
         over that baseline (concentration's top-10% share vs an even 10%). No effect -> 0.15, an unknown kind -> the old /2 cap."""
+        if self.kind in ("uniformity", "invariance"):
+            eff = abs(self.effect) if self.effect is not None else 0.0
+            return max(0.2, 1.0 - min(1.0, eff / 0.2))
         if self.effect is None:
             return 0.15
         effect = abs(self.effect)
@@ -169,7 +173,10 @@ class Finding:
         p = self.p_adjusted if self.p_adjusted is not None else self.p_value
         if p is not None:
             p_conf = 0.9 if p < 0.001 else 0.8 if p < 0.01 else 0.65 if p < 0.05 else 0.3
-            if self.kind in ("segment_lift", "driver", "test") and p < 0.05:
+            if self.kind in ("uniformity", "invariance"):
+                p_conf = 0.85 if p >= 0.20 else 0.75 if p >= 0.05 else 0.4
+                confidence = max(confidence, p_conf)
+            elif self.kind in ("segment_lift", "driver", "test") and p < 0.05:
                 confidence = max(confidence, p_conf)
             elif confidence == 0.5:
                 confidence = p_conf
@@ -336,7 +343,12 @@ def attach_finding_checks(
 
         p = f.p_adjusted if f.p_adjusted is not None else f.p_value
         if p is not None:
-            checks["not_luck"] = p < 0.05
+            if f.kind in ("uniformity", "invariance"):
+                checks["not_luck"] = p >= 0.05
+            else:
+                checks["not_luck"] = p < 0.05
+        if f.kind in ("uniformity", "invariance"):
+            checks["invariance_verified"] = (p is not None and p >= 0.05)
 
         sizes = [
             v for k in _SAMPLE_SIZE_KEYS
@@ -374,10 +386,36 @@ def attach_finding_checks(
         f.refresh_eligibility()
 
 
+def _is_self_derived_finding(finding: Finding | dict[str, Any]) -> bool:
+    """Detect if a finding represents a relationship between a base column and its
+    own derived transform or two derived transforms of the same base variable."""
+    if isinstance(finding, Finding):
+        m, d = finding.measure, finding.dimension
+        ev = finding.evidence or {}
+    elif isinstance(finding, dict):
+        m, d = finding.get("measure"), finding.get("dimension")
+        ev = finding.get("evidence") or {}
+    else:
+        return False
+    col_a = ev.get("col_a") if isinstance(ev, dict) else None
+    col_b = ev.get("col_b") if isinstance(ev, dict) else None
+    if is_derived_pair(m, d):
+        return True
+    if is_derived_pair(col_a, col_b):
+        return True
+    if is_derived_pair(m, col_b) or is_derived_pair(col_a, d):
+        return True
+    return False
+
+
 def is_trivial(finding: Finding) -> bool:
     """Shared triviality predicate (T5): a finding whose effect is
     negligible, or that is explicitly tagged as a method-fit warning rather
     than a discovery, should not compete for headline space."""
+    if _is_self_derived_finding(finding):
+        return True
+    if finding.kind in ("uniformity", "invariance"):
+        return False
     if finding.kind in CAVEAT_FINDING_KINDS:
         return False  # these are meant to be shown, just not ranked as insight
     if finding.effect is None:
@@ -518,6 +556,7 @@ def rank_findings(
     every discovery — they are shown, not ranked as insight.
     """
     findings = _drop_unskilled_drivers(findings)
+    findings = [f for f in findings if not _is_self_derived_finding(f)]
     for f in findings:
         f.compute_importance()
     ranked = sorted(
@@ -556,12 +595,31 @@ def rank_findings(
     return ordered
 
 
+_OUTCOME_FEATURE_STEMS = (
+    "revenue", "totalamount", "profit", "margin",
+    "gmv", "income", "earnings", "target", "label", "loss", "churn",
+    "churned", "conversionrate", "clickthrough",
+)
+
+
 def _is_actionable_feature(col: str | None) -> bool:
     """Determine if a column is a controllable business/system lever rather than
-    an external market quote, surrogate key, system timestamp, or weather condition."""
+    an external market quote, surrogate key, system timestamp, weather condition,
+    outcome/revenue KPI, or self-derived transform."""
     if not col or not isinstance(col, str):
         return False
+    # Derived transforms (e.g. _log_return, _lag1, _delta1) are not direct levers
+    if get_base_column_name(col).lower() != col.strip().lower():
+        return False
     norm = re.sub(r"[^a-z0-9]", "", col.lower())
+    # Outcome/KPI targets are metrics to optimize, not direct operational levers
+    clean_stems = tuple(s.replace("_", "") for s in _OUTCOME_FEATURE_STEMS)
+    if any(norm == s or norm.startswith(s) or norm.endswith(s) for s in clean_stems):
+        return False
+    if norm in ("amount", "totalamount", "spend", "totalspend", "customerspend"):
+        return False
+    if norm.startswith(("sales",)) and not norm.startswith(("salesrep", "saleschannel", "salesperson")):
+        return False
     # External market odds, betting quotes, tickers, fx rates
     if any(norm.startswith(p) for p in ("b365", "bw", "iw", "lb", "ps", "wh", "vc", "bet", "odds", "quote", "ticker", "fx")):
         return False
@@ -608,7 +666,6 @@ def classify_action_matrix(
             finding_id = item.finding_id
             kind = item.kind
             headline = item.headline
-            measure = item.measure
             dimension = item.dimension
             level = item.level
             effect = item.effect
@@ -625,7 +682,6 @@ def classify_action_matrix(
             finding_id = str(item.get("finding_id", ""))
             kind = str(item.get("kind", ""))
             headline = str(item.get("headline", ""))
-            measure = item.get("measure")
             dimension = item.get("dimension")
             level = item.get("level")
             effect = item.get("effect")
@@ -653,15 +709,19 @@ def classify_action_matrix(
         is_fragile = checks.get("robust") is False
         is_caveat_kind = kind in CAVEAT_FINDING_KINDS
 
-                # Data hygiene belongs in the dedicated integrity section, never in
+        # Data hygiene belongs in the dedicated integrity section, never in
         # a strategic or operational action quadrant.
         if is_data_hygiene_finding(item):
+            continue
+
+        # Self-derived mathematical tautologies are dropped completely
+        if _is_self_derived_finding(item):
             continue
 
         layer = getattr(item, "layer", None) or (item.get("layer") if isinstance(item, dict) else "")
         is_appendix = str(layer).lower() == "appendix"
 
-        target_feature = dimension or measure
+        target_feature = dimension or getattr(item, "measure", None) or (item.get("measure") if isinstance(item, dict) else None)
         is_controllable = _is_actionable_feature(target_feature)
 
         level_label = evidence.get("level_label") if isinstance(evidence, dict) else None
@@ -672,17 +732,18 @@ def classify_action_matrix(
             lever = f"Simulate {dimension} intervention"
         elif kind == "interaction_synergy" and dimension and level:
             lever = f"Target synergy: {dimension}='{level}'"
-        elif kind == "correlation":
-            lever = f"Co-movement: {measure} & {dimension}" if (measure and dimension) else f"Association: {measure or dimension}"
+        elif kind in ("correlation", "association"):
+            meas = getattr(item, "measure", None) or (item.get("measure") if isinstance(item, dict) else None)
+            lever = f"Context: {meas} & {dimension} (Correlation)" if (meas and dimension) else f"Context: {meas or dimension}"
         elif dimension and level:
             if level_label and str(level_label) != str(level):
                 lever = f"Target '{level_label}' ({dimension}='{level}')"
             else:
                 lever = f"Target {dimension}='{level}'"
         elif dimension:
-            lever = f"Target {dimension} segment" if kind == "segment_lift" else f"Monitor {dimension}"
-        elif measure:
-            lever = f"Optimize {measure}"
+            lever = f"Target {dimension} segment" if kind == "segment_lift" else f"Target {dimension}"
+        elif target_feature:
+            lever = f"Target {target_feature}" if is_controllable else f"Outcome metric: {target_feature}"
 
         entry = {
             "finding_id": finding_id,
@@ -736,6 +797,11 @@ def classify_action_matrix(
             matrix["pilot"].append(entry)
             continue
 
+        is_correlation = kind in ("correlation", "association")
+        raw_source = getattr(item, "source_tool", None) or (item.get("source_tool") if isinstance(item, dict) else "")
+        if raw_source in ("correlation_analysis",):
+            is_correlation = True
+
         # Observational confidence is not intervention validity. Only an
         # explicitly identified causal/experimental finding may enter an
         # action quadrant; every other evidence tier remains a monitoring,
@@ -749,10 +815,13 @@ def classify_action_matrix(
             or is_fragile
             or len(material_caveats) > 0
             or conf < 0.45
+            or is_correlation
             or (not is_controllable and not is_appendix)
         ):
             reason = []
             reason.extend(eligibility_reasons)
+            if is_correlation:
+                reason.append("Observational correlation — monitor as context or covariate, not an intervention lever")
             if evidence_tier != "causal_action":
                 reason.append(
                     f"{evidence_tier.replace('_', ' ').title()} evidence — monitor or test; do not treat as a causal lever"
@@ -773,7 +842,7 @@ def classify_action_matrix(
             matrix["watch_caveats"].append(entry)
             continue
 
-        if is_appendix or not is_controllable:
+        if is_appendix or not is_controllable or is_correlation:
             continue
 
         # 2. Impact evaluation

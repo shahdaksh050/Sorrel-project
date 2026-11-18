@@ -74,7 +74,13 @@ def _build_cv_policy(
         class_counts = y_train.value_counts(dropna=False)
         available = min(available, int(class_counts.min())) if not class_counts.empty else 0
         if available < 2:
-            raise ValueError("stratified CV requires at least two training examples in every class")
+            folds = min(desired, max(2, len(X_train)))
+            return (
+                KFold(n_splits=folds, shuffle=True, random_state=42),
+                folds,
+                "k_fold",
+                f"KFold used because smallest training class has only {available} example(s).",
+            )
         folds = min(desired, available)
         rationale = (
             f"StratifiedKFold constrained to {folds} folds because the smallest training class has "
@@ -260,7 +266,12 @@ def _split_train_test(
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
         groups_train = groups.iloc[train_idx]
     else:
-        stratify = y if task_type == "classification" else None
+        can_stratify = (
+            task_type == "classification"
+            and not y.empty
+            and bool((y.value_counts() >= 2).all())
+        )
+        stratify = y if can_stratify else None
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=42, stratify=stratify
         )

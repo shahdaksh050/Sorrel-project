@@ -18,6 +18,7 @@ import re
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -186,19 +187,47 @@ _ENTITY_REPEAT_THRESHOLD = 1.5
 _PANEL_PROBE_ROWS = 20_000
 
 # ---------------------------------------------------------------------------
-# Data archetypes — what kind of study/table this is (ImpPlan Phase 1). Unlike
+# Data archetypes — 10 universal structural archetypes (All_ArchetypePlan §3). Unlike
 # src.core.domains (what the data is *about*), an archetype is decided from
-# structure: time axis, entity repetition, scale columns, an assignment arm.
+# structure: time axis, entity repetition, scale columns, an assignment arm,
+# coordinate geometry, or graph topology.
 # ---------------------------------------------------------------------------
 
-ARCHETYPE_EVENT_LOG = "event_log"
-ARCHETYPE_PANEL = "panel"
-ARCHETYPE_SENSOR = "sensor_timeseries"
-ARCHETYPE_SURVEY = "survey"
-ARCHETYPE_EXPERIMENT = "experiment"
-ARCHETYPE_CROSS_SECTION = "cross_section"
 
-_REGULAR_FREQUENCIES = ("hourly", "daily", "weekly", "monthly", "quarterly", "yearly")
+class DatasetArchetype(StrEnum):
+    TRANSACTIONAL = "transactional"
+    CONTINUOUS_SERIES = "continuous_series"
+    PANEL = "panel"
+    CROSS_SECTIONAL = "cross_sectional"
+    SURVIVAL = "survival"
+    SURVEY = "survey"
+    BASKET = "basket"
+    NETWORK = "network"
+    GEOSPATIAL = "geospatial"
+    HYBRID_TEXT = "hybrid_text"
+
+
+ARCHETYPE_TRANSACTIONAL = DatasetArchetype.TRANSACTIONAL.value
+ARCHETYPE_CONTINUOUS_SERIES = DatasetArchetype.CONTINUOUS_SERIES.value
+ARCHETYPE_PANEL = DatasetArchetype.PANEL.value
+ARCHETYPE_CROSS_SECTIONAL = DatasetArchetype.CROSS_SECTIONAL.value
+ARCHETYPE_SURVIVAL = DatasetArchetype.SURVIVAL.value
+ARCHETYPE_SURVEY = DatasetArchetype.SURVEY.value
+ARCHETYPE_BASKET = DatasetArchetype.BASKET.value
+ARCHETYPE_NETWORK = DatasetArchetype.NETWORK.value
+ARCHETYPE_GEOSPATIAL = DatasetArchetype.GEOSPATIAL.value
+ARCHETYPE_HYBRID_TEXT = DatasetArchetype.HYBRID_TEXT.value
+
+# Backward-compatibility aliases
+ARCHETYPE_EVENT_LOG = DatasetArchetype.TRANSACTIONAL.value
+ARCHETYPE_SENSOR = DatasetArchetype.CONTINUOUS_SERIES.value
+ARCHETYPE_CROSS_SECTION = DatasetArchetype.CROSS_SECTIONAL.value
+ARCHETYPE_EXPERIMENT = "experiment"
+
+_REGULAR_FREQUENCIES = (
+    "sub_second", "secondly", "minutely", "15min", "30min", "hourly", "daily", "weekly",
+    "monthly", "quarterly", "yearly", "annual", "period",
+)
 
 #: Whole tokens that name an experiment assignment column. The column's
 #: tokens must ALL come from this set, so "group"/"test_group"/"ab_variant"
@@ -268,6 +297,64 @@ def is_lon_name(name: str) -> bool:
     ("long"), so "long_term_debt" is not a longitude."""
     tokens = name_tokens(name)
     return tokens == ["long"] or any(t in ROLE_TOKENS["geo_lon"] for t in tokens)
+
+
+_UNIT_RATE_TOKENS = (
+    "unit_price", "unitprice", "price_per_unit", "cost_per_unit",
+    "item_price", "rate", "tariff", "fee_rate", "hourly_rate",
+    "daily_rate", "unit_cost", "price",
+)
+_TRANSACTION_VALUE_TOKENS = (
+    "total_amount", "amount", "revenue", "sales", "spend", "line_total",
+    "subtotal", "total", "gross_amount", "gross_volume", "order_total",
+    "invoice_amount", "transaction_amount", "total_price", "total_spend",
+    "extended_price", "order_value",
+)
+_NON_PRICING_RATE_QUALIFIERS = (
+    *(t for t in _NON_PERCENT_RATE_QUALIFIERS if t not in ("hourly", "daily")),
+    "packet", "error", "failure", "mortality", "birth", "death", "crime", "unemployment",
+)
+
+
+def is_transaction_value_name(name: str) -> bool:
+    """True if name represents extensive transaction monetary value (e.g. total_amount, revenue, sales, extended_price, order_value)."""
+    tokens = _name_tokens(name)
+    joined = "_".join(tokens)
+    has_phrase = (
+        any(f"_{phrase}_" in f"_{joined}_" for phrase in _TRANSACTION_VALUE_TOKENS if "_" in phrase)
+        or ("extended" in tokens and "price" in tokens)
+        or ("order" in tokens and "value" in tokens)
+    )
+    has_val = (
+        has_phrase
+        or _has_token(tokens, _TRANSACTION_VALUE_TOKENS)
+        or ("total" in tokens)
+        or ("gross" in tokens)
+    )
+    has_unit_mod = any(t in tokens for t in ("unit", "rate", "per", "hourly", "daily"))
+    return bool(has_val and not has_unit_mod)
+
+
+def is_unit_rate_name(name: str) -> bool:
+    """True if name represents intensive unit rate / price per unit (e.g. unit_price, rate, price)."""
+    if is_transaction_value_name(name):
+        return False
+    tokens = _name_tokens(name)
+    if any(t in _NON_PRICING_RATE_QUALIFIERS for t in tokens):
+        return False
+    joined = "_".join(tokens)
+    has_phrase = any(
+        f"_{phrase}_" in f"_{joined}_"
+        for phrase in _UNIT_RATE_TOKENS
+        if "_" in phrase
+    ) or ("unit" in tokens and "price" in tokens)
+    return bool(
+        has_phrase
+        or _has_token(tokens, _UNIT_RATE_TOKENS)
+        or ("price" in tokens)
+        or ("rate" in tokens)
+        or any(t in tokens for t in ("unit", "tariff", "fee"))
+    )
 
 
 def _has_token(tokens: list[str], hints: tuple[str, ...]) -> bool:
@@ -396,6 +483,10 @@ def _infer_aggregation(
     if semantic_role != SEMANTIC_MEASURE:
         return None
     tokens = _name_tokens(name)
+    if is_unit_rate_name(name):
+        return "mean"
+    if is_transaction_value_name(name):
+        return "sum"
     if unit_hint == "percent" or _has_token(tokens, _MEAN_NAME_HINTS):
         return "mean"
     if unit_hint != "currency" and stats.get("negative_pct", 0.0) > _NEGATIVE_SHARE_FOR_MEAN * 100:
@@ -518,6 +609,12 @@ class ColumnProfile:
 
     def is_dimension(self) -> bool:
         return self.semantic_role in (SEMANTIC_DIMENSION, SEMANTIC_FLAG)
+
+    def is_unit_rate(self) -> bool:
+        return "unit_rate" in self.flags or is_unit_rate_name(self.name)
+
+    def is_transaction_value(self) -> bool:
+        return "transaction_value" in self.flags or is_transaction_value_name(self.name)
 
 
 @dataclass
@@ -795,8 +892,17 @@ def _is_datetime_like(series: pd.Series) -> bool:
 #: (label, nominal step in days) for time_frequency; a median gap within
 #: _FREQ_TOLERANCE of a step names the series' frequency.
 _FREQUENCIES = (
-    ("hourly", 1 / 24), ("daily", 1.0), ("weekly", 7.0), ("monthly", 30.44),
-    ("quarterly", 91.3), ("yearly", 365.25),
+    ("sub_second", 0.1 / 86_400),
+    ("secondly", 1 / 86_400),
+    ("minutely", 1 / 1_440),
+    ("15min", 15 / 1_440),
+    ("30min", 30 / 1_440),
+    ("hourly", 1 / 24),
+    ("daily", 1.0),
+    ("weekly", 7.0),
+    ("monthly", 30.44),
+    ("quarterly", 91.3),
+    ("yearly", 365.25),
 )
 _FREQ_TOLERANCE = (0.75, 1.3)
 
@@ -865,17 +971,36 @@ def is_identifier_like(
     """
     if row_count == 0:
         return False
+    name_l = name.lower()
+    has_hint = has_identifier_name_hint(name)
+    if not has_hint:
+        tokens = set(_name_tokens(name))
+        if any(
+            k in tokens or name_l == k or name_l.startswith(f"{k}_") or name_l.endswith(f"_{k}")
+            for k in (
+                "revenue", "sales", "price", "amount", "cost", "quantity",
+                "score", "rate", "wage", "salary", "spend",
+                "year", "quarter", "month", "period", "yr", "qtr", "date", "day", "week", "time", "epoch", "timestamp",
+            )
+        ):
+            return False
     if nunique is None:
         nunique = int(series.nunique(dropna=True))
     uniqueness = nunique / row_count
-    if uniqueness >= 0.98 and has_identifier_name_hint(name):
+    if uniqueness >= 0.98 and has_hint:
         return True
     if uniqueness != 1.0 or pd.api.types.is_float_dtype(series):
         return False
     if not pd.api.types.is_numeric_dtype(series):
         return True
-    # Unique integers: an ID only when they form a constant-step progression.
-    return int(series.dropna().sort_values().diff().dropna().nunique()) == 1
+    # Unique integers: an ID only when step size is exactly 1 AND
+    # (name matches identifier hint OR row_count >= 100).
+    diffs = series.dropna().sort_values().diff().dropna()
+    if diffs.empty:
+        return has_hint if row_count == 1 else False
+    if not (diffs == 1).all():
+        return False
+    return has_hint or row_count >= 100
 
 
 def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfile:
@@ -893,6 +1018,7 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
     # entirely by content, not by dtype or cardinality, so it must be
     # checked before identifier — a 100%-unique text column is text, not an ID.
     free_text_avg_words: float | None = None
+    free_text_avg_chars: float | None = None
     if (
         not pd.api.types.is_numeric_dtype(series)
         and not pd.api.types.is_bool_dtype(series)
@@ -901,6 +1027,7 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
         sample = series.dropna().astype(str).head(200)
         if not sample.empty:
             free_text_avg_words = float(sample.str.split().str.len().mean())
+            free_text_avg_chars = float(sample.str.len().mean())
 
     if nunique <= 1:
         kind = "constant"
@@ -915,10 +1042,18 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
     elif _is_datetime_like(series):
         kind = "datetime"
         stats = _datetime_stats(series)
-    elif free_text_avg_words is not None and free_text_avg_words >= FREE_TEXT_AVG_WORDS:
+    elif (
+        (free_text_avg_words is not None and free_text_avg_words >= FREE_TEXT_AVG_WORDS)
+        or (free_text_avg_chars is not None and free_text_avg_chars >= 50.0 and nunique > 10)
+    ):
         kind = "text"
         flags.append("free_text")
-        stats["avg_word_count"] = round(free_text_avg_words, 2)
+        if free_text_avg_words is not None:
+            stats["avg_word_count"] = round(free_text_avg_words, 2)
+        if free_text_avg_chars is not None:
+            stats["avg_char_length"] = round(free_text_avg_chars, 1)
+        if free_text_avg_chars is not None:
+            stats["avg_char_length"] = round(free_text_avg_chars, 1)
     elif is_identifier_like(name, series, row_count, nunique):
         kind = "identifier"
         flags.append("id_like")
@@ -950,9 +1085,16 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
             flags.append("high_cardinality")
         if free_text_avg_words is not None:
             stats["avg_word_count"] = round(free_text_avg_words, 2)
+        if free_text_avg_chars is not None:
+            stats["avg_char_length"] = round(free_text_avg_chars, 1)
 
     if missing_pct > HIGH_MISSING_FRACTION * 100:
         flags.append("high_missing")
+
+    if is_transaction_value_name(name):
+        flags.append("transaction_value")
+    elif is_unit_rate_name(name):
+        flags.append("unit_rate")
 
     semantic_role = _infer_semantic_role(name, series, kind, nunique, flags)
     unit_hint = _infer_unit_hint(name, semantic_role, stats)
@@ -1196,11 +1338,17 @@ def pick_measures(profile: DatasetProfile, objective: str = "") -> list[ColumnPr
         pos, col = item
         grounded = _grounding_key(col.name, tokens) if tokens else None
         complete = (100.0 - col.missing_pct) / 100.0 >= _MEASURE_COMPLETE_SHARE
+        is_derived = bool(re.search(r"_(?:lag\d*|delta\d*|diff\d*|pct_change|rolling_std)$", col.name))
+        is_tx_val = "transaction_value" in col.flags or is_transaction_value_name(col.name)
+        is_unit_rate = "unit_rate" in col.flags or is_unit_rate_name(col.name)
         std = float(col.stats.get("std") or 0.0)
         mean = abs(float(col.stats.get("mean") or 0.0))
         dispersion = std / (mean + std) if std > 0 else 0.0   # bounded CV
         return (
             grounded is None, grounded or (0, 0),
+            is_derived,
+            not is_tx_val,
+            is_unit_rate,
             not complete, -round(dispersion, 6), pos,
         )
 
@@ -1239,9 +1387,116 @@ def _infer_archetype(
     rows_per_entity: float | None,
     panel_group_cols: list[str],
 ) -> tuple[str, list[str]]:
-    """Structural archetype plus the facts that decided it. Checked most
-    specific first: experiment, survey (scales), panel, event log, sensor
-    series, survey (categorical questionnaire), else cross-section."""
+    """Deterministic structural archetype classification following the 10-step MECE decision ladder
+    (All_ArchetypePlan §4.1):
+      1. Geospatial (coordinate pairs)
+      2. Network (source/target graph edges)
+      3. Survival (positive duration + binary event flag)
+      4. Basket (transaction ID with repeated items + item descriptor)
+      5. Continuous Series (monotonic timestamp axis + measures)
+      6. Panel (entity repeated across regular time periods)
+      7. Transactional (event stream with entity repetition)
+      8. Survey (bounded rating scales / Likert items)
+      9. Hybrid Text (unstructured free text + structured measures)
+      10. Cross-Sectional (entity snapshot fallback)
+      [Specialized: Experiment arm check preserves A/B testing design recognition]
+    """
+    # 1. Geospatial Check
+    lat_col = next(
+        (c for c in columns if c.kind == "numeric" and re.search(r"^(?:lat|latitude|lat_deg|y_coord)$|_lat$|_latitude$", c.name, re.I)),
+        None,
+    )
+    lon_col = next(
+        (c for c in columns if c.kind == "numeric" and re.search(r"^(?:lon|long|lng|longitude|lon_deg|x_coord)$|_lon$|_long$|_lng$|_longitude$", c.name, re.I)),
+        None,
+    )
+    if lat_col is not None and lon_col is not None and lat_col.name != lon_col.name:
+        return ARCHETYPE_GEOSPATIAL, [
+            f"spatial coordinate pair: '{lat_col.name}' and '{lon_col.name}'",
+            f"{row_count} geographic points",
+        ]
+
+    # 2. Network Check
+    src_tokens = {"source", "from", "from_node", "source_id", "src", "sender", "origin", "parent", "head"}
+    dst_tokens = {"target", "to", "to_node", "target_id", "dst", "receiver", "destination", "child", "tail"}
+    src_col = next(
+        (c for c in columns if (any(t in c.name.lower().split("_") or c.name.lower() == t for t in src_tokens)) and c.nunique >= 2),
+        None,
+    )
+    dst_col = next(
+        (c for c in columns if (any(t in c.name.lower().split("_") or c.name.lower() == t for t in dst_tokens)) and c.nunique >= 2),
+        None,
+    )
+    if src_col is not None and dst_col is not None and src_col.name != dst_col.name:
+        return ARCHETYPE_NETWORK, [
+            f"graph edge representation: source='{src_col.name}', target='{dst_col.name}'",
+            f"{row_count} relations across {max(src_col.nunique, dst_col.nunique)} unique nodes",
+        ]
+
+    # 3. Survival / Censored Duration Check
+    dur_keywords = (
+        "tenure", "duration", "time_to_event", "survival_time", "days_active",
+        "months_active", "followup_time", "time_to_churn", "tenure_months",
+    )
+    dur_col = next(
+        (
+            c for c in columns
+            if c.kind == "numeric"
+            and (any(k in c.name.lower() for k in dur_keywords) or (c.semantic_role == SEMANTIC_MEASURE and "time" in c.name.lower()))
+            and c.stats.get("min", 0) >= 0
+        ),
+        None,
+    )
+    event_keywords = (
+        "churn", "churned", "died", "death", "failed", "failure", "cancelled",
+        "canceled", "attrition", "relapse", "event", "is_churn", "is_cancelled", "is_failed",
+    )
+    event_col = next(
+        (
+            c for c in columns
+            if (c.kind in ("boolean", "numeric", "categorical") and c.nunique == 2)
+            and (any(k in c.name.lower() for k in event_keywords) or c.semantic_role == SEMANTIC_FLAG)
+            and (dur_col is None or c.name != dur_col.name)
+        ),
+        None,
+    )
+    if dur_col is not None and event_col is not None:
+        return ARCHETYPE_SURVIVAL, [
+            f"duration/tenure column '{dur_col.name}' with binary event flag '{event_col.name}'",
+            "right-censored time-to-event structure",
+        ]
+
+    # 4. Basket Check
+    basket_tokens = {"basket", "order", "invoice", "receipt", "cart", "transaction"}
+    basket_id = next(
+        (
+            c for c in columns
+            if any(t in c.name.lower().split("_") or c.name.lower().startswith(t) for t in basket_tokens)
+            and c.nunique < row_count
+            and (row_count / max(1, c.nunique)) >= 1.5
+        ),
+        None,
+    )
+    item_tokens = {"item", "product", "sku", "description", "item_name", "product_name", "item_id", "product_id"}
+    item_col = next(
+        (
+            c for c in columns
+            if any(t in c.name.lower().split("_") or c.name.lower() == t for t in item_tokens)
+            and c.kind in ("categorical", "string", "identifier")
+            and c.nunique >= 3
+            and (basket_id is None or c.name != basket_id.name)
+        ),
+        None,
+    )
+    if basket_id is not None and item_col is not None:
+        items_per_basket = row_count / max(1, basket_id.nunique)
+        if items_per_basket >= 1.5:
+            return ARCHETYPE_BASKET, [
+                f"{items_per_basket:.1f} items per basket/order '{basket_id.name}'",
+                f"item descriptor '{item_col.name}' ({item_col.nunique} unique items)",
+            ]
+
+    # Specialized: Experiment Arm Check (if present before temporal/descriptive checks)
     arm = find_experiment_arm(columns, row_count)
     if arm is not None:
         outcomes = [
@@ -1254,44 +1509,93 @@ def _infer_archetype(
                 f"{len(outcomes)} outcome candidates (e.g. '{outcomes[0].name}')",
             ]
 
-    scales = ordinal_scale_columns(columns)
-    if len(scales) >= _SURVEY_MIN_ORDINALS:
-        return ARCHETYPE_SURVEY, [
-            f"{len(scales)} ordinal/rating-scale columns",
-            f"e.g. {', '.join(repr(c.name) for c in scales[:3])}",
-        ]
-
     time_col = datetime_cols[0] if datetime_cols else None
+    if not time_col:
+        int_time_cand = next(
+            (
+                c for c in columns
+                if c.kind == "numeric" and (
+                    any(c.name.lower() == t or c.name.lower().endswith(f"_{t}") for t in ("year", "period", "quarter", "month", "yr", "qtr"))
+                ) and c.nunique >= 2
+            ),
+            None,
+        )
+        if int_time_cand is not None:
+            time_col = int_time_cand.name
+            if not time_frequency:
+                name_l = time_col.lower()
+                if "year" in name_l or "yr" in name_l:
+                    time_frequency = "yearly"
+                elif "quarter" in name_l or "qtr" in name_l:
+                    time_frequency = "quarterly"
+                elif "month" in name_l:
+                    time_frequency = "monthly"
+                else:
+                    time_frequency = "period"
     regular = time_frequency in _REGULAR_FREQUENCIES
-    if time_col and panel_group_cols and regular:
-        return ARCHETYPE_PANEL, [
-            f"'{panel_group_cols[0]}' observed at most '{time_col}' timestamps",
-            f"{time_frequency} frequency",
-        ]
-
-    if time_col and entity_col and rows_per_entity and rows_per_entity > _ENTITY_REPEAT_THRESHOLD:
-        return ARCHETYPE_EVENT_LOG, [
-            f"{rows_per_entity:.1f} rows per {entity_col}",
-            f"'{time_col}' timestamps {time_frequency or 'sparse'}, not a shared grid across entities",
-        ]
-
+    time_fragments = {"time", "time_of_day", "timestamp", "clock", "date", "datetime"}
+    structural_dims = [
+        c for c in columns
+        if c.semantic_role == SEMANTIC_DIMENSION
+        and c.kind == "categorical"
+        and c.name.lower() not in time_fragments
+        and not (c.nunique > 100 and any(t in c.name.lower() for t in time_fragments))
+    ]
     dims = [c for c in columns if c.semantic_role == SEMANTIC_DIMENSION and c.kind == "categorical"]
     measures = [c for c in columns if c.semantic_role == SEMANTIC_MEASURE]
+
+    # 5. Continuous Time-Series & Signals Check
     time_profile = next((c for c in columns if c.name == time_col), None)
     unique_instants = time_profile is not None and time_profile.nunique >= 0.95 * row_count
     if (
         time_col
         and row_count >= MIN_TIME_SERIES_ROWS
         and entity_col is None
-        and (regular or (unique_instants and not dims))
-        and len(dims) <= 2
+        and (regular or (unique_instants and not structural_dims))
+        and len(structural_dims) <= 2
         and len(measures) >= max(1, (len(columns) - 1) // 2)
     ):
-        return ARCHETYPE_SENSOR, [
+        return ARCHETYPE_CONTINUOUS_SERIES, [
             f"'{time_col}' {time_frequency or 'timestamped'} axis",
-            f"{len(measures)} numeric measures, {len(dims)} categorical columns",
+            f"{len(measures)} numeric measures, {len(structural_dims)} categorical columns",
         ]
 
+    # 6. Panel / Longitudinal Repeated Check
+    if time_col and panel_group_cols and regular:
+        return ARCHETYPE_PANEL, [
+            f"'{panel_group_cols[0]}' observed at most '{time_col}' timestamps",
+            f"{time_frequency} frequency",
+        ]
+    if time_col and entity_col and regular and rows_per_entity and rows_per_entity >= 2.0:
+        return ARCHETYPE_PANEL, [
+            f"longitudinal panel: '{entity_col}' observed across {time_frequency or 'regular'} '{time_col}' periods",
+            f"{rows_per_entity:.1f} observations per entity",
+        ]
+
+    # 7. Transactional Event Stream Check
+    if time_col and entity_col and rows_per_entity and rows_per_entity > _ENTITY_REPEAT_THRESHOLD:
+        return ARCHETYPE_TRANSACTIONAL, [
+            f"{rows_per_entity:.1f} rows per {entity_col}",
+            f"'{time_col}' timestamps {time_frequency or 'sparse'}, not a shared grid across entities",
+        ]
+
+    # 8. Survey / Psychometric Ordinal Check
+    scales = ordinal_scale_columns(columns)
+    if len(scales) >= _SURVEY_MIN_ORDINALS:
+        return ARCHETYPE_SURVEY, [
+            f"{len(scales)} ordinal/rating-scale columns",
+            f"e.g. {', '.join(repr(c.name) for c in scales[:3])}",
+        ]
+    bounded_numeric = [
+        c for c in columns
+        if c.kind == "numeric" and c.stats.get("min", -999) >= 0 and c.stats.get("max", 999) <= 10
+        and 2 <= c.nunique <= 11
+    ]
+    if len(bounded_numeric) >= 3 and len(bounded_numeric) >= 0.5 * len(columns):
+        return ARCHETYPE_SURVEY, [
+            f"{len(bounded_numeric)} bounded rating/scale columns (0-10)",
+            f"e.g. {', '.join(repr(c.name) for c in bounded_numeric[:3])}",
+        ]
     low_card = [c for c in dims if 2 <= c.nunique <= _SURVEY_MAX_LEVELS]
     respondent = next((c for c in columns if c.kind == "identifier"), None)
     if (
@@ -1304,10 +1608,25 @@ def _infer_archetype(
             f"respondent key '{respondent.name}'",
         ]
 
+    # 9. Hybrid Text Check
+    text_cols = [
+        c for c in columns
+        if c.kind == "text"
+        or (c.kind in ("string", "categorical") and (c.stats.get("avg_word_count", 0) >= FREE_TEXT_AVG_WORDS or c.stats.get("avg_char_length", 0) >= 50.0) and c.nunique > 5)
+    ]
+    if text_cols and len(measures) >= 1:
+        t = text_cols[0]
+        avg_len = t.stats.get("avg_char_length") or (t.stats.get("avg_word_count", 0) * 5)
+        return ARCHETYPE_HYBRID_TEXT, [
+            f"free-text column '{t.name}' (avg {avg_len:.0f} chars)",
+            f"{len(measures)} structured measures alongside unstructured text narrative",
+        ]
+
+    # 10. Default: Cross-Sectional Snapshot
     key = next((c.name for c in columns if c.kind == "identifier" and c.nunique == row_count), None)
     evidence = [f"one row per '{key}'"] if key else []
-    evidence.append("no dominant time axis" if not time_col else f"'{time_col}' is not a regular series axis")
-    return ARCHETYPE_CROSS_SECTION, evidence
+    evidence.append("cross-sectional entity snapshot" if not time_col else f"'{time_col}' is not a regular series axis")
+    return ARCHETYPE_CROSS_SECTIONAL, evidence
 
 
 def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = None) -> DatasetProfile:
@@ -1449,16 +1768,44 @@ def _profile_dataframe_uncached(df: pd.DataFrame, target_column: str | None = No
         if not grain:
             grain = [best.name] + (datetime_cols[:1] if datetime_cols else [])
 
-    panel_group_cols = _panel_group_cols(df, columns, datetime_cols, entity_col)
+    effective_datetime_cols = list(datetime_cols)
     time_frequency = next(
         (c.stats.get("frequency") for c in columns if c.kind == "datetime"), None
     )
+    if not effective_datetime_cols:
+        int_time_cand = next(
+            (
+                c for c in columns
+                if c.kind == "numeric" and (
+                    any(c.name.lower() == t or c.name.lower().endswith(f"_{t}") for t in ("year", "period", "quarter", "month", "yr", "qtr"))
+                ) and c.nunique >= 2
+            ),
+            None,
+        )
+        if int_time_cand is not None:
+            effective_datetime_cols = [int_time_cand.name]
+            if not time_frequency:
+                name_l = int_time_cand.name.lower()
+                if "year" in name_l or "yr" in name_l:
+                    time_frequency = "yearly"
+                elif "quarter" in name_l or "qtr" in name_l:
+                    time_frequency = "quarterly"
+                elif "month" in name_l:
+                    time_frequency = "monthly"
+                else:
+                    time_frequency = "period"
+
+    if effective_datetime_cols and not datetime_cols:
+        datetime_cols = effective_datetime_cols
+        is_time_series = row_count >= MIN_TIME_SERIES_ROWS
+
+    panel_group_cols = _panel_group_cols(df, columns, effective_datetime_cols, entity_col)
 
     archetype: str | None = None
     archetype_evidence: list[str] = []
     if is_sufficient:
         archetype, archetype_evidence = _infer_archetype(
-            columns, row_count, datetime_cols, time_frequency,
+            columns, row_count, effective_datetime_cols, time_frequency,
             entity_col, rows_per_entity, panel_group_cols,
         )
 

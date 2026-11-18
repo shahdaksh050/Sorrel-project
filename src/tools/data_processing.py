@@ -34,6 +34,7 @@ from src.core.io import (
 )
 from src.core.memory import DatasetMetadata, MemorySystem
 from src.core.security import UploadValidationError, escape_csv_formulas, resolve_output_path
+from src.core.stats_utils import get_base_column_name, is_derived_pair
 from src.tools.base import BaseTool, ToolExecutionError
 
 if TYPE_CHECKING:
@@ -453,12 +454,25 @@ class CleanDataTool(BaseTool):
 
     STRATEGIES = frozenset({"none", "mean", "median", "mode", "drop", "drop_rows", "forward_fill", "mice", "knn"})
 
+    def prepare_params(
+        self, params: dict[str, Any], memory: MemorySystem, output_root: str
+    ) -> dict[str, Any]:
+        params = super().prepare_params(params, memory, output_root)
+        if not params.get("archetype"):
+            profile = memory.get_context("data_profile")
+            if isinstance(profile, dict) and profile.get("archetype"):
+                params["archetype"] = profile["archetype"]
+            elif hasattr(profile, "archetype") and profile.archetype:
+                params["archetype"] = profile.archetype
+        return params
+
     def execute(  # type: ignore[override]
         self,
         file_path: str,
         strategy: str = "none",
         target_column: str | None = None,
         output_dir: str | None = None,
+        archetype: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         if strategy not in self.STRATEGIES:
@@ -473,8 +487,21 @@ class CleanDataTool(BaseTool):
         if strategy == "drop":
             strategy = "drop_rows"
 
-        from src.core.reshaping import detect_and_strip_summary_rows
-        df, summary_notes = detect_and_strip_summary_rows(df)
+        from src.core.reshaping import (
+            auto_reshape_for_archetype,
+            detect_and_strip_summary_rows,
+            detect_wide_temporal_columns,
+            unpivot_temporal_frame,
+        )
+        summary_notes: list[str] = []
+        temporal_cols = detect_wide_temporal_columns(list(df.columns))
+        if temporal_cols:
+            df = unpivot_temporal_frame(df, temporal_cols)
+            summary_notes.append(f"Unpivoted {len(temporal_cols)} wide temporal columns.")
+        df, strip_notes = detect_and_strip_summary_rows(df)
+        summary_notes.extend(strip_notes)
+        df, arch_notes = auto_reshape_for_archetype(df, archetype or "cross_sectional")
+        summary_notes.extend(arch_notes)
         original_shape = df.shape
         n_rows = len(df)
         # One bulk pass over the whole frame, reused for both the total and
@@ -586,6 +613,12 @@ class CleanDataTool(BaseTool):
                 f"Shape: {original_shape} → {df.shape}. Saved to '{out_path}'."
             ),
             "cleaned_file_path": str(out_path),
+            "derived_dataset": {
+                "name": "cleaned_dataset",
+                "path": str(out_path),
+                "rows": len(df),
+                "columns": [str(c) for c in df.columns],
+            },
             "rows_before": original_shape[0],
             "rows_after": df.shape[0],
             "missing_before": missing_before,
@@ -596,6 +629,7 @@ class CleanDataTool(BaseTool):
             "constant_columns": constant_columns,
             "sparse_columns": sparse_columns,
             "summary_rows_quarantined": summary_notes,
+            "feature_provenance": summary_notes,
         }
 
     def findings(
@@ -659,6 +693,11 @@ class CleanDataTool(BaseTool):
             "target_column": {
                 "type": "string",
                 "description": "Column to exclude from imputation (label column).",
+                "required": False,
+            },
+            "archetype": {
+                "type": "string",
+                "description": "Dataset structural archetype for canonical pre-modeling transformations.",
                 "required": False,
             },
         }
@@ -1095,6 +1134,10 @@ def _definitional_pairs(num_df: pd.DataFrame, corr: pd.DataFrame) -> dict[frozen
 
     cols = [str(c) for c in corr.columns]
     found: dict[frozenset[str], str] = {}
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            if is_derived_pair(cols[i], cols[j]):
+                found[frozenset((cols[i], cols[j]))] = "Derived transform of same base variable"
     values_r = corr.to_numpy(dtype=float)
     with np.errstate(invalid="ignore"):
         strong = np.triu(np.abs(values_r) >= _IDENTITY_R, 1)
@@ -1543,6 +1586,9 @@ class CorrelationAnalysisTool(BaseTool):
         # pair; the pairs inside a group drop to the appendix.
         for group in (output.get("correlation_groups") or [])[:_CORR_TOP_N]:
             cols = [str(c) for c in group["columns"]]
+            bases = {get_base_column_name(c) for c in cols}
+            if len(bases) <= 1:
+                continue
             shown = cols if len(cols) <= _CORR_GROUP_NAMES else [*cols[:_CORR_GROUP_NAMES - 1], f"{len(cols) - _CORR_GROUP_NAMES + 1} more"]
             names = ", ".join(shown[:-1]) + f" and {shown[-1]}"
             lo, hi = group["min_r"], group["max_r"]
@@ -1577,6 +1623,8 @@ class CorrelationAnalysisTool(BaseTool):
             r = pair.get("correlation")
             col_a, col_b = pair.get("col_a"), pair.get("col_b")
             if r is None or col_a is None or col_b is None or abs(r) < _CORR_FINDING_THRESHOLD:
+                continue
+            if is_derived_pair(str(col_a), str(col_b)):
                 continue
             both_measures = col_a in measure_names and col_b in measure_names
             pair_method = pair.get("method", method)

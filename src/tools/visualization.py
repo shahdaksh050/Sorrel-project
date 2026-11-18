@@ -204,14 +204,17 @@ class GenerateVisualizationsTool(BaseTool):
         # from the fitted preprocessor's post-encoding output, not df.columns.
         if hasattr(loaded, "named_steps") and "model" in loaded.named_steps:
             model = loaded.named_steps["model"]
-            feature_cols = [str(c) for c in loaded.named_steps["prep"].get_feature_names_out()]
+            try:
+                feature_cols = [str(c) for c in loaded.named_steps["prep"].get_feature_names_out()]
+            except (AttributeError, ValueError, TypeError):
+                feature_cols = []
         else:
             model = loaded
             feature_cols = [str(c) for c in getattr(model, "feature_names_in_", [])]
-            if not feature_cols:
-                from src.tools.ml_pipeline import _prepare_features
-                X, _y, _t = _prepare_features(df, target_column)
-                feature_cols = [str(c) for c in X.columns]
+        if not feature_cols:
+            from src.tools.ml_pipeline import _prepare_features
+            X, _y, _t = _prepare_features(df, target_column)
+            feature_cols = [str(c) for c in X.columns]
 
         if hasattr(model, "feature_importances_"):
             # Tree-based models (RandomForest, XGBoost)

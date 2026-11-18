@@ -142,3 +142,18 @@ def test_rank_biserial_is_rewritten_in_every_spelling(text: str) -> None:
     out = plainify(f"Mann-Whitney U, {text}")
     assert "biserial" not in out
     assert "strong positive relationship" in out
+
+
+def test_plainify_rewrites_time_series_test_prefixes() -> None:
+    assert plainify('Trend grew (Mann-Kendall p=0.003).') == (
+        'Trend grew (a result unlikely to be down to chance).'
+    )
+    assert plainify('Series is stationary (ADF p=0.02).') == (
+        'Series is stationary (a result probably not down to chance).'
+    )
+    assert plainify('Result (ADF = -3.45, p=0.01).') == (
+        'Result (a result unlikely to be down to chance).'
+    )
+    assert plainify('Result (degrees of freedom = 15, p<0.05).') == (
+        'Result (a result probably not down to chance).'
+    )

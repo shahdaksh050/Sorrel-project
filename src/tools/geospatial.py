@@ -101,6 +101,10 @@ class GeospatialAnalysisTool(BaseTool):
         # stretch the grid so that everything else lands in a few cells.
         lat_lo, lat_hi = np.quantile(lat, [0.01, 0.99])
         lon_lo, lon_hi = np.quantile(lon, [0.01, 0.99])
+        if lat_lo == lat_hi:
+            lat_lo, lat_hi = float(lat_lo - 0.01), float(lat_hi + 0.01)
+        if lon_lo == lon_hi:
+            lon_lo, lon_hi = float(lon_lo - 0.01), float(lon_hi + 0.01)
         in_box = (lat >= lat_lo) & (lat <= lat_hi) & (lon >= lon_lo) & (lon <= lon_hi)
         grid_lat, grid_lon = lat[in_box], lon[in_box]
         lat_bins = np.linspace(lat_lo, lat_hi, grid_size + 1)

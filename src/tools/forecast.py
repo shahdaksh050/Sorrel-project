@@ -86,7 +86,10 @@ def _infer_alias(dates: pd.Series) -> str:
     if len(unique) < 3:
         return "D"
     med = float((unique.diff().dropna().dt.total_seconds() / 86_400).median())
+    span_days = float((unique.iloc[-1] - unique.iloc[0]).total_seconds() / 86_400)
     if med < (1 / 24) * 0.75:
+        if span_days < 14:
+            return "h"
         return "D"  # event-level timestamps: aggregate per day
     if med <= (1 / 24) * 1.5:
         return "h"
@@ -265,10 +268,22 @@ def _forecast_series(y: np.ndarray, m: int, horizon: int) -> dict[str, Any]:
     sigma = float(np.std(resid, ddof=1)) if len(resid) > 2 else float(np.std(np.diff(y)))
     if not math.isfinite(sigma):
         sigma = float(np.std(y))
-    half = 1.96 * sigma * np.sqrt(np.arange(1, horizon + 1, dtype=float))
-    lower, upper = fc - half, fc + half
-    if float(np.min(y)) >= 0:
-        fc, lower = np.maximum(fc, 0.0), np.maximum(lower, 0.0)
+
+    # Variance and uncertainty bounds
+    steps_arr = np.arange(1, horizon + 1, dtype=float)
+    if float(np.min(y)) >= 0 and float(np.mean(y)) > 0:
+        # Multiplicative log-space bounds for non-negative physical quantities
+        fc = np.maximum(fc, 0.0)
+        mu_y = float(np.mean(y))
+        rel_sigma = min(1.0, sigma / max(1e-6, mu_y))
+        z = np.clip(1.96 * rel_sigma * np.sqrt(steps_arr) * 0.5, 0.05, 1.6)
+        lower = np.maximum(fc * np.exp(-z), 0.0)
+        upper = np.maximum(fc * np.exp(z), fc + np.minimum(sigma * np.sqrt(steps_arr), mu_y))
+        upper = np.maximum(upper, lower)
+        half = (upper - lower) / 2.0
+    else:
+        half = 1.96 * sigma * np.sqrt(steps_arr)
+        lower, upper = fc - half, fc + half
     return {
         "model": best["model"], "mase": best["mase"], "smape": best["smape"], "mae": best["mae"],
         "naive_mae": naive_row["mae"], "backtest_periods": hb, "candidates": scored,
@@ -350,10 +365,10 @@ def _chart(series: list[dict[str, Any]], alias: str, value_column: str, date_col
     color = {"color": {"field": "series", "type": "nominal", "title": None}} if multi else {}
     band = {
         "transform": [{"filter": {"field": "part", "equal": "Forecast"}}],
-        "mark": {"type": "area", "opacity": 0.18},
+        "mark": {"type": "area", "opacity": 0.18, "line": False},
         "encoding": {
             "x": x_enc,
-            "y": {"field": "lower", "type": "quantitative", "title": y_title, "scale": {"zero": False}},
+            "y": {"field": "lower", "type": "quantitative", "title": y_title, "scale": {"zero": False}, "axis": {"titlePadding": 12}},
             "y2": {"field": "upper"},
             **color,
         },
@@ -362,7 +377,7 @@ def _chart(series: list[dict[str, Any]], alias: str, value_column: str, date_col
         "mark": {"type": "line"},
         "encoding": {
             "x": x_enc,
-            "y": {"field": "value", "type": "quantitative", "title": y_title, "scale": {"zero": False}},
+            "y": {"field": "value", "type": "quantitative", "title": y_title, "scale": {"zero": False}, "axis": {"titlePadding": 12}},
             "strokeDash": {
                 "field": "part", "type": "nominal", "legend": None,
                 "scale": {"domain": ["History", "Forecast"], "range": [[1, 0], [6, 4]]},
@@ -392,10 +407,18 @@ def _series_caveats(s: dict[str, Any], unit: str | None) -> list[str]:
             "flat guide, not a prediction of change."
         )
     if s["wide_interval"]:
-        out.append(
-            f"The range is wide (give or take {_num(s['interval_half_width'], unit)} by "
-            f"{s['forecast_end_period']}), so the exact figure is uncertain."
-        )
+        lower = s.get("forecast_end_lower")
+        upper = s.get("forecast_end_upper")
+        if lower is not None and upper is not None and (lower == 0.0 or s["interval_half_width"] >= abs(s["forecast_end_value"])):
+            out.append(
+                f"The range is wide ({_num(lower, unit)} to {_num(upper, unit)} by "
+                f"{s['forecast_end_period']}), so the exact figure is uncertain."
+            )
+        else:
+            out.append(
+                f"The range is wide (give or take {_num(s['interval_half_width'], unit)} by "
+                f"{s['forecast_end_period']}), so the exact figure is uncertain."
+            )
     return out
 
 
@@ -405,9 +428,18 @@ def _headline(s: dict[str, Any], grain: str, value_column: str, agg: str, unit: 
         what += f" for {group} {s['series']}"
     pct = s["pct_vs_latest"]
     pct_text = f" ({pct * 100:+.0f}% vs latest)" if pct is not None else ""
+    end_val = s["forecast_end_value"]
+    half = s["interval_half_width"]
+    lower = s.get("forecast_end_lower")
+    upper = s.get("forecast_end_upper")
+    if lower is not None and upper is not None and (lower == 0.0 or half >= abs(end_val)):
+        return (
+            f"{what} is forecast to reach {_num(end_val, unit)} by {s['forecast_end_period']}"
+            f"{pct_text} (95% range: {_num(lower, unit)} to {_num(upper, unit)})."
+        )
     return (
-        f"{what} is forecast to reach {_num(s['forecast_end_value'], unit)} by {s['forecast_end_period']}"
-        f"{pct_text}, give or take {_num(s['interval_half_width'], unit)}."
+        f"{what} is forecast to reach {_num(end_val, unit)} by {s['forecast_end_period']}"
+        f"{pct_text}, give or take {_num(half, unit)}."
     )
 
 
@@ -477,7 +509,10 @@ class ForecastAnalysisTool(BaseTool):
         agg = measure_aggregation(cp)
         unit = cp.unit_hint if cp else None
 
-        dates = pd.to_datetime(df[date_column], errors="coerce", format="mixed")
+        if pd.api.types.is_numeric_dtype(df[date_column]):
+            dates = pd.to_datetime(df[date_column].astype(str), errors="coerce", format="mixed")
+        else:
+            dates = pd.to_datetime(df[date_column], errors="coerce", format="mixed")
         if getattr(dates.dt, "tz", None) is not None:
             dates = dates.dt.tz_localize(None)
         frame = pd.DataFrame({"d": dates, "v": pd.to_numeric(df[value_column], errors="coerce")})

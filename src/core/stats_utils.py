@@ -8,6 +8,7 @@ controller or tool imports.
 from __future__ import annotations
 
 import math
+import re
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -460,4 +461,77 @@ def robust_location_dispersion(
         "is_heavy_tailed": is_heavy_tailed,
         "preferred_location": "median" if is_heavy_tailed else "mean",
     }
+
+
+_DERIVED_SUFFIX_RE = re.compile(
+    r"_(?:log_return|log_ret|return|ret|lag\d*|delta\d*|diff\d*|vol\d*|volatility|rev|"
+    r"pct_change|pct|zscore|norm|scaled|standardized|sq|squared|sqrt|log|exp|centroid|"
+    r"ma\d*|rolling\d*|mean|std|sum|count|rfm|recency|frequency|monetary|trans|transform|"
+    r"sentiment|polarity|subjectivity|tfidf(?:_[a-zA-Z0-9_]+)?)$",
+    re.IGNORECASE,
+)
+
+_DERIVED_PREFIX_RE = re.compile(
+    r"^(?:log_return_|log_ret_|return_|log_|ln_|log1p_|sqrt_|sq_|squared_|lag\d*_|"
+    r"delta\d*_|diff\d*_|pct_change_|pct_|zscore_|norm_|scaled_|std_|mean_|vol\d*_|"
+    r"volatility_|ma\d*_|rolling\d*_)",
+    re.IGNORECASE,
+)
+
+
+def get_base_column_name(col: str | None) -> str:
+    """Extract canonical base column name by stripping derived transform suffixes and prefixes."""
+    if not col or not isinstance(col, str):
+        return ""
+    col_str = col.strip()
+    if col_str.lower().startswith("dist_from_centroid"):
+        return "centroid_distance"
+    base = _DERIVED_SUFFIX_RE.sub("", col_str)
+    base = _DERIVED_PREFIX_RE.sub("", base)
+    return base.strip()
+
+
+def is_derived_pair(col_a: str | None, col_b: str | None) -> bool:
+    """Check if two column names represent a base column and its derived transform,
+    or two derived transforms of the same base variable across all 10 archetypes."""
+    if not col_a or not col_b or not isinstance(col_a, str) or not isinstance(col_b, str):
+        return False
+    a, b = col_a.strip(), col_b.strip()
+    if a.lower() == b.lower():
+        return True
+
+    # Check if one is base column and other has an attached transform suffix
+    if b.lower().startswith(a.lower() + "_"):
+        suffix = b[len(a):]
+        if _DERIVED_SUFFIX_RE.match(suffix):
+            return True
+    if a.lower().startswith(b.lower() + "_"):
+        suffix = a[len(b):]
+        if _DERIVED_SUFFIX_RE.match(suffix):
+            return True
+
+    # Check if one is base column and other has an attached transform prefix
+    if b.lower().endswith("_" + a.lower()):
+        prefix = b[:-len(a)]
+        if _DERIVED_PREFIX_RE.match(prefix):
+            return True
+    if a.lower().endswith("_" + b.lower()):
+        prefix = a[:-len(b)]
+        if _DERIVED_PREFIX_RE.match(prefix):
+            return True
+
+    base_a = get_base_column_name(a)
+    base_b = get_base_column_name(b)
+    if base_a and base_b and base_a.lower() == base_b.lower():
+        # Both share the same base variable, and at least one has a transform affix
+        if base_a.lower() != a.lower() or base_b.lower() != b.lower():
+            return True
+
+    # Centroid / geospatial coordinate pairing
+    if any("dist_from_centroid" in c.lower() for c in (a, b)):
+        other = a if "dist_from_centroid" in b.lower() else b
+        if any(geo in other.lower() for geo in ("lat", "lon", "latitude", "longitude", "centroid")):
+            return True
+    return False
+
 

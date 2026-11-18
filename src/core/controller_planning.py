@@ -18,6 +18,7 @@ from src.core.governance import (
 )
 from src.core.memory import AnalysisStep, ToolResult
 from src.core.profiler import DatasetProfile
+from src.core.prompt_manager import ARCHETYPE_CANONICAL_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,9 @@ class PlanMixin(ControllerState):
         """Count actual numeric features, excluding a target when possible."""
         profile = self.last_profile
         if profile is not None:
-            return len(profile.columns_of_kind("numeric"))
+            count = len(profile.columns_of_kind("numeric"))
+            if count > 0:
+                return count
         meta = self.memory.dataset_metadata
         return len(meta.numerical_cols) if meta is not None else 0
 
@@ -66,10 +69,18 @@ class PlanMixin(ControllerState):
         if tool_name not in self._OBJECTIVE_REQUIRED_TOOLS:
             return True
         objective = str(getattr(self, "objective", "") or "")
+        auto_obj = str(getattr(self, "autonomous_objective", "") or "")
+        combined = f"{objective} {auto_obj}".strip()
+        target = getattr(self.memory.dataset_metadata, "target_column", None)
+        if tool_name == "cluster_data" and target is None:
+            return True
         if tool_name == "scenario_simulation":
+            has_driver = any(f.kind == "driver" and f.dimension and f.measure for f in self.memory.findings)
+            if has_driver:
+                return True
             pattern = r"\b(?:what[ -]?if|scenario|sensitivity|interven|lever|optim|decision|reduce|increase|improve)\b"
-            return bool(re.search(pattern, objective, re.IGNORECASE))
-        return bool(re.search(r"\b(?:segment|cluster|cohort|persona|archetype)\b", objective, re.IGNORECASE))
+            return bool(re.search(pattern, combined, re.IGNORECASE))
+        return bool(re.search(r"\b(?:segment|cluster|cohort|persona|archetype)\b", combined, re.IGNORECASE))
 
     def _tool_hard_prerequisite_error(self, tool_name: str) -> str | None:
         """Return a deterministic reason a proposed step must not be planned."""
@@ -78,10 +89,60 @@ class PlanMixin(ControllerState):
         numeric = self._numeric_column_count()
         if tool_name in self._NUMERIC_ONLY_TOOLS and numeric == 0:
             return f"{tool_name} requires numeric columns; this dataset has none."
-        if tool_name == "cluster_data" and numeric < 2:
-            return "cluster_data requires at least two numeric columns."
+        if tool_name == "cluster_data":
+            if numeric < 2:
+                return "cluster_data requires at least two numeric columns."
+            rows = self.last_profile.row_count if self.last_profile else (
+                self.memory.dataset_metadata.row_count if self.memory.dataset_metadata else 0
+            )
+            if rows < 30:
+                return "cluster_data requires at least 30 rows."
+        if tool_name == "segment_comparison":
+            cat_count = len(self.last_profile.columns_of_kind("categorical")) if self.last_profile else (
+                len(self.memory.dataset_metadata.categorical_cols) if self.memory.dataset_metadata else 0
+            )
+            if cat_count == 0:
+                meta = self.memory.dataset_metadata
+                has_cat_derived = bool(
+                    meta and (
+                        any(c in meta.columns for c in ("day_part", "day_of_week", "hour_of_day"))
+                        or any(str(c).endswith("_quartile") for c in meta.columns)
+                    )
+                )
+                has_time_or_numeric = bool(
+                    (self.last_profile and (self.last_profile.datetime_cols or len(self.last_profile.columns_of_kind("numeric")) >= 2))
+                    or (meta and len(meta.numerical_cols) >= 2)
+                )
+                if not has_cat_derived and not has_time_or_numeric:
+                    return "segment_comparison requires at least one categorical column or numeric/temporal features to derive segments."
         if tool_name in self._OBJECTIVE_REQUIRED_TOOLS and not self._objective_allows_tool(tool_name):
-            return f"{tool_name} requires an objective that requests its decision purpose."
+            if tool_name == "scenario_simulation":
+                has_driver = any(f.kind == "driver" and f.dimension and f.measure for f in self.memory.findings)
+                if not has_driver:
+                    return f"{tool_name} requires an objective or at least one quantified driver finding."
+            else:
+                return f"{tool_name} requires an objective that requests its decision purpose."
+
+        profile = self.last_profile
+        if profile is not None and profile.archetype:
+            from src.core.profiler import (
+                ARCHETYPE_CONTINUOUS_SERIES,
+                ARCHETYPE_SENSOR,
+                ARCHETYPE_SURVIVAL,
+            )
+
+            # Safe Quantitative Routing: Archetype Anti-Pattern Guards (§4.4)
+            if profile.archetype == ARCHETYPE_SURVIVAL and tool_name == "regression_analysis":
+                meta = self.memory.dataset_metadata
+                if meta and meta.target_column and any(k in meta.target_column.lower() for k in ("churn", "status", "death", "event")):
+                    return "regression_analysis on right-censored survival data introduces survivorship bias; route to survival_analysis instead."
+
+            if profile.archetype in (ARCHETYPE_CONTINUOUS_SERIES, ARCHETYPE_SENSOR) and tool_name == "regression_analysis":
+                numeric_cols = [c.name for c in profile.columns if c.kind == "numeric"]
+                has_stationary = any("return" in c.lower() or "diff" in c.lower() or "delta" in c.lower() for c in numeric_cols)
+                if not has_stationary:
+                    return "regression_analysis on raw non-stationary time series produces spurious correlation; difference to stationary log returns or use time_series_analysis / forecast."
+
         return None
 
     @classmethod
@@ -314,38 +375,82 @@ class PlanMixin(ControllerState):
         planned = {s.tool_name for s in steps}
 
         if self.memory.iteration_count == 1:
-            if not self.tool_registry.has("segment_comparison"):
-                return steps
-            if "segment_comparison" in completed or "segment_comparison" in planned:
-                return steps
-
-            agenda = self.memory.get_context("question_agenda") or []
-            for q in agenda:
-                if isinstance(q, dict) and q.get("suggested_tool") == "segment_comparison":
-                    cols = q.get("columns") or []
-                    if len(cols) >= 2:
-                        steps.append(
-                            AnalysisStep(
-                                step_number=len(steps) + 1,
-                                tool_name="segment_comparison",
-                                parameters={
-                                    "file_path": fp,
-                                    "measure_column": cols[0],
-                                    "dimension_column": cols[1],
-                                },
-                                rationale=f"Anchor pass: test lead agenda question — {str(q.get('text', ''))[:80]}",
+            profile = self.last_profile
+            archetype = getattr(profile, "archetype", None)
+            if archetype and archetype in ARCHETYPE_CANONICAL_TOOLS:
+                canonical_tools = ARCHETYPE_CANONICAL_TOOLS[archetype]
+                anchored_count = 0
+                for tool_name in canonical_tools:
+                    if tool_name not in completed and tool_name not in planned:
+                        if (
+                            self.tool_registry.has(tool_name)
+                            and self._objective_allows_tool(tool_name)
+                            and self._tool_hard_prerequisite_error(tool_name) is None
+                        ):
+                            tool = self.tool_registry.get(tool_name)
+                            if tool.applies_to(profile, meta) <= 0.0 and getattr(profile, "archetype", None) != archetype:
+                                continue
+                            tool_params: dict[str, Any] = {"file_path": fp}
+                            try:
+                                tool_params.update(tool.default_params(profile, meta) or {})
+                            except Exception as exc:
+                                logger.debug("Failed resolving default params for %s: %s", tool_name, exc)
+                            steps.append(
+                                AnalysisStep(
+                                    step_number=len(steps) + 1,
+                                    tool_name=tool_name,
+                                    parameters=tool_params,
+                                    rationale=f"Archetype anchor pass: canonical blueprint analysis for {archetype} archetype.",
+                                )
                             )
-                        )
-                        break
+                            planned.add(tool_name)
+                            anchored_count += 1
+                            if anchored_count >= 2:
+                                break
+
+            if (
+                self.tool_registry.has("segment_comparison")
+                and "segment_comparison" not in completed
+                and "segment_comparison" not in planned
+            ):
+                agenda = self.memory.get_context("question_agenda") or []
+                for q in agenda:
+                    if isinstance(q, dict) and q.get("suggested_tool") == "segment_comparison":
+                        cols = q.get("columns") or []
+                        if len(cols) >= 2:
+                            steps.append(
+                                AnalysisStep(
+                                    step_number=len(steps) + 1,
+                                    tool_name="segment_comparison",
+                                    parameters={
+                                        "file_path": fp,
+                                        "measure_column": cols[0],
+                                        "dimension_column": cols[1],
+                                    },
+                                    rationale=f"Anchor pass: test lead agenda question — {str(q.get('text', ''))[:80]}",
+                                )
+                            )
+                            planned.add("segment_comparison")
+                            break
 
         elif self.memory.iteration_count >= 2:
             profile = self.last_profile
+            archetype = getattr(profile, "archetype", None)
             # Pillar 3: Unsupervised Archetype Discovery
+            has_supervised = any(
+                s.tool_name in ("regression_analysis", "train_model", "evaluate_model") or "target_column" in s.parameters
+                for s in steps
+            ) or bool(getattr(meta, "target_column", None) or self.memory.get_context("target_column"))
+            objective = str(getattr(self, "objective", "") or "")
+            auto_obj = str(getattr(self, "autonomous_objective", "") or "")
+            combined = f"{objective} {auto_obj}".strip()
+            explicit_clustering_ask = bool(re.search(r"\b(?:segment|cluster|cohort|persona|archetype)\b", combined, re.IGNORECASE))
             if (
                 self.tool_registry.has("cluster_data")
                 and "cluster_data" not in completed
                 and "cluster_data" not in planned
                 and self.use_ml
+                and (explicit_clustering_ask or not has_supervised)
                 and self._objective_allows_tool("cluster_data")
             ):
                 tool = self.tool_registry.get("cluster_data")
@@ -362,12 +467,14 @@ class PlanMixin(ControllerState):
                         )
                         planned.add("cluster_data")
 
-            # Pillar 4: Parametric What-If Simulation
+            # Pillar 4: Parametric What-If Simulation (Autonomous Lead-Driver Intervention)
+            drivers = [f for f in self.memory.findings if f.kind == "driver" and f.dimension]
             if (
                 self.tool_registry.has("scenario_simulation")
                 and "scenario_simulation" not in completed
                 and "scenario_simulation" not in planned
-                and self._objective_allows_tool("scenario_simulation")
+                and (self._objective_allows_tool("scenario_simulation") or bool(drivers))
+                and self._tool_hard_prerequisite_error("scenario_simulation") is None
             ):
                 sim_tool = self.tool_registry.get("scenario_simulation")
                 if sim_tool.applies_to(profile, meta) > 0.0:
@@ -376,7 +483,6 @@ class PlanMixin(ControllerState):
                         sim_params.update(sim_tool.default_params(profile, meta) or {})
                     except Exception as exc:
                         logger.debug('Failed resolving default params for scenario_simulation: %s', exc)
-                    drivers = [f for f in self.memory.findings if f.kind == "driver" and f.dimension]
                     if drivers and "driver_column" not in sim_params:
                         sim_params["driver_column"] = drivers[0].dimension
                         if drivers[0].measure:
@@ -390,6 +496,103 @@ class PlanMixin(ControllerState):
                         )
                     )
                     planned.add("scenario_simulation")
+
+            # Anchor next tier of canonical blueprint tools
+            if archetype and archetype in ARCHETYPE_CANONICAL_TOOLS:
+                for tool_name in ARCHETYPE_CANONICAL_TOOLS[archetype]:
+                    if tool_name not in completed and tool_name not in planned:
+                        if (
+                            self.tool_registry.has(tool_name)
+                            and self._objective_allows_tool(tool_name)
+                            and self._tool_hard_prerequisite_error(tool_name) is None
+                        ):
+                            tool = self.tool_registry.get(tool_name)
+                            if tool.applies_to(profile, meta) > 0.0 or getattr(profile, "archetype", None) == archetype:
+                                tool_params = {"file_path": fp}
+                                try:
+                                    tool_params.update(tool.default_params(profile, meta) or {})
+                                except Exception:
+                                    pass
+                                steps.append(
+                                    AnalysisStep(
+                                        step_number=len(steps) + 1,
+                                        tool_name=tool_name,
+                                        parameters=tool_params,
+                                        rationale=f"Autonomous depth: tier analytical tool {tool_name} for {archetype}.",
+                                    )
+                                )
+                                planned.add(tool_name)
+                                break
+
+        # Fallback to unanswered question agenda if fewer than 2 steps are planned in this cycle
+        if len(steps) < 2:
+            agenda = self.memory.get_context("question_agenda") or []
+            for q in agenda:
+                if isinstance(q, dict):
+                    tool_cand = q.get("suggested_tool")
+                    if (
+                        tool_cand
+                        and tool_cand not in completed
+                        and tool_cand not in planned
+                        and self.tool_registry.has(tool_cand)
+                        and self._objective_allows_tool(tool_cand)
+                        and self._tool_hard_prerequisite_error(tool_cand) is None
+                    ):
+                        tool_params = {"file_path": fp}
+                        cols = q.get("columns") or []
+                        if tool_cand == "segment_comparison" and len(cols) >= 2:
+                            tool_params["measure_column"] = cols[0]
+                            tool_params["dimension_column"] = cols[1]
+                        else:
+                            try:
+                                t_obj = self.tool_registry.get(tool_cand)
+                                tool_params.update(t_obj.default_params(profile, meta) or {})
+                            except Exception:
+                                pass
+                        steps.append(
+                            AnalysisStep(
+                                step_number=len(steps) + 1,
+                                tool_name=tool_cand,
+                                parameters=tool_params,
+                                rationale=f"Agenda fallback: answer top unaddressed question — {str(q.get('text', ''))[:80]}",
+                            )
+                        )
+                        planned.add(tool_cand)
+                        if len(steps) >= 3:
+                            break
+
+        # Breadth safeguard: if fewer than 2 steps planned, pull from unrun candidate tools
+        if len(steps) < 2:
+            candidate_tools = list(self.tool_registry.candidate_tools(
+                profile, meta, use_ml=self.use_ml, use_llm=self.use_llm
+            ))
+            for cand_tool in candidate_tools:
+                cand_name = getattr(cand_tool, "name", "")
+                if (
+                    cand_name
+                    and cand_name not in completed
+                    and cand_name not in planned
+                    and cand_name not in self._FALLBACK_EXCLUDED_TOOLS
+                    and self._objective_allows_tool(cand_name)
+                    and self._tool_hard_prerequisite_error(cand_name) is None
+                    and cand_tool.applies_to(profile, meta) > 0.0
+                ):
+                    c_params = {"file_path": fp}
+                    try:
+                        c_params.update(cand_tool.default_params(profile, meta) or {})
+                    except Exception:
+                        pass
+                    steps.append(
+                        AnalysisStep(
+                            step_number=len(steps) + 1,
+                            tool_name=cand_name,
+                            parameters=c_params,
+                            rationale=f"Autonomous breadth: candidate analytical tool {cand_name}.",
+                        )
+                    )
+                    planned.add(cand_name)
+                    if len(steps) >= 3:
+                        break
 
         for number, step in enumerate(steps, 1):
             step.step_number = number
@@ -712,18 +915,125 @@ class PlanMixin(ControllerState):
                     "rationale": "Fallback plan: evaluate the best model on held-out data.",
                 },
             ]
-        elif self._objective_allows_tool("cluster_data") and self._numeric_column_count() >= 2:
-            steps += [
-                {
-                    "step_number": len(steps) + 1,
-                    "tool_name": "cluster_data",
-                    "parameters": {"file_path": fp},
-                    "rationale": "Fallback plan: no target — discover natural segments.",
-                },
-            ]
+        elif (
+            self._objective_allows_tool("cluster_data")
+            and self._numeric_column_count() >= 2
+            and self._tool_hard_prerequisite_error("cluster_data") is None
+        ):
+            c_tool = self.tool_registry.get("cluster_data") if self.tool_registry.has("cluster_data") else None
+            if c_tool is not None and c_tool.applies_to(profile, meta) >= 0.4:
+                steps += [
+                    {
+                        "step_number": len(steps) + 1,
+                        "tool_name": "cluster_data",
+                        "parameters": {"file_path": fp},
+                        "rationale": "Fallback plan: no target — discover natural segments.",
+                    },
+                ]
         return {
             "status": "in_progress",
             "reasoning": "LLM unavailable — executing deterministic fallback plan.",
             "steps": steps,
             "deterministic": True,   # _parse_steps does not cap a plan the profile built
+        }
+
+    def _build_phase2_drilldown_plan(self) -> dict[str, Any]:
+        """Phase 2 Drill-Down plan: deepens exploration on anomalies and top drivers
+        discovered during Phase 1 (Broad Screening) to enforce the Two-Phase Adaptive Cadence.
+        """
+        meta = self.memory.dataset_metadata
+        if meta is None:
+            return self._build_fallback_plan()
+        fp = str(self.memory.get_context("cleaned_file_path") or meta.file_path)
+        profile = self.last_profile
+        completed = {r.tool_name for r in self.memory.tool_results if r.status == "success"}
+
+        steps: list[dict[str, Any]] = []
+
+        # 1. Drill-down on top drivers or segment differences discovered in Cycle 1
+        drivers = [f for f in self.memory.findings if f.kind in ("driver", "segment_lift") and f.measure and f.dimension]
+        if drivers and self.tool_registry.has("segment_comparison"):
+            for d in drivers[:2]:
+                steps.append({
+                    "step_number": len(steps) + 1,
+                    "tool_name": "segment_comparison",
+                    "parameters": {
+                        "file_path": fp,
+                        "measure_column": d.measure,
+                        "dimension_column": d.dimension,
+                    },
+                    "rationale": f"Phase 2 Drill-Down: deep-dive comparison on key driver '{d.dimension}' for '{d.measure}'.",
+                })
+
+        # 2. Anomaly investigation if outliers or spikes detected
+        outlier_findings = [f for f in self.memory.findings if f.kind == "outlier_scan"]
+        if (
+            outlier_findings
+            and self.tool_registry.has("anomaly_analysis")
+            and "anomaly_analysis" not in completed
+            and self._objective_allows_tool("anomaly_analysis")
+        ):
+            anomaly_tool = self.tool_registry.get("anomaly_analysis")
+            if anomaly_tool.applies_to(profile, meta) > 0.0:
+                steps.append({
+                    "step_number": len(steps) + 1,
+                    "tool_name": "anomaly_analysis",
+                    "parameters": {"file_path": fp},
+                    "rationale": "Phase 2 Drill-Down: investigate temporal and segment anomaly patterns.",
+                })
+
+        # 3. What-If Simulation on key drivers if applicable
+        if (
+            self.tool_registry.has("scenario_simulation")
+            and "scenario_simulation" not in completed
+            and self._objective_allows_tool("scenario_simulation")
+        ):
+            sim_tool = self.tool_registry.get("scenario_simulation")
+            if sim_tool.applies_to(profile, meta) > 0.0:
+                sim_params: dict[str, Any] = {"file_path": fp}
+                try:
+                    sim_params.update(sim_tool.default_params(profile, meta) or {})
+                except Exception:
+                    pass
+                if drivers and "driver_column" not in sim_params:
+                    sim_params["driver_column"] = drivers[0].dimension
+                    if drivers[0].measure:
+                        sim_params["target_column"] = drivers[0].measure
+                steps.append({
+                    "step_number": len(steps) + 1,
+                    "tool_name": "scenario_simulation",
+                    "parameters": sim_params,
+                    "rationale": "Phase 2 Drill-Down: quantify What-If driver interventions and gap closing.",
+                })
+
+        # 4. Cluster data if not yet run
+        if (
+            not steps
+            and self.tool_registry.has("cluster_data")
+            and "cluster_data" not in completed
+            and self.use_ml
+            and self._objective_allows_tool("cluster_data")
+        ):
+            c_tool = self.tool_registry.get("cluster_data")
+            if c_tool.applies_to(profile, meta) >= 0.4:
+                steps.append({
+                    "step_number": len(steps) + 1,
+                    "tool_name": "cluster_data",
+                    "parameters": {"file_path": fp},
+                    "rationale": "Phase 2 Drill-Down: discover behavioral archetype clusters.",
+                })
+
+        # 5. If still empty, fall back to remaining tools from candidate tools
+        if not steps:
+            fb = self._build_fallback_plan()
+            unrun = [s for s in fb.get("steps", []) if s.get("tool_name") not in completed]
+            steps = unrun[:3] if unrun else fb.get("steps", [])[:2]
+
+        for i, s in enumerate(steps, 1):
+            s["step_number"] = i
+
+        return {
+            "status": "in_progress",
+            "reasoning": "Two-Phase Adaptive Cadence: Phase 2 Drill-Down on anomalies, key drivers, and deeper segments.",
+            "steps": steps,
         }

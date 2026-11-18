@@ -169,8 +169,12 @@ def _adjusted_phrase(m: re.Match[str]) -> str:
 
 _P_VALUE_RE = re.compile(rf"(?<![\w.])p[\s_-]?values?\s+(?:of|is|was)\s+(?P<val>{_NUM}){_STARS}", re.IGNORECASE)
 _STAT_RE = re.compile(
-    rf"(?:(?:(?<=[(,;])|(?<=[,;] )|(?<=\( ))[tFUWz]|(?<![\w.])(?:χ²|chi2|chi-squared?|df))"
+    rf"(?:(?:(?<=[(,;])|(?<=[,;] )|(?<=\( ))[tFUWz]|(?<![\w.])(?:χ²|chi2|chi-squared?|degrees\s+of\s+freedom|df|ADF(?:\s+stat(?:istic)?)?))"
     rf"(?:\(\s*[\d.,\s]+\))?\s*=\s*{_NUM}\*{{0,3}}"
+)
+_TEST_PREFIX_RE = re.compile(
+    r"\b(?:Mann-Kendall|ADF|Augmented\s+Dickey-Fuller|Shapiro-Wilk|Kruskal-Wallis|Wilcoxon|Levene)\s+(?:test\s+(?:on\s+[^,;:]+)?[:,\s]*)?(?=p[=:<>\s]|tau[=:\s])",
+    re.IGNORECASE,
 )
 _CI_RE = re.compile(
     rf"(?:\b\d{{2}}(?:\.\d+)?\s*%\s*)?\b(?:CI|(?i:confidence interval))\s*(?:of\s*)?[=:]?\s*[\[(]?\s*"
@@ -240,6 +244,7 @@ def plainify(text: str) -> str:
         suffix = "" if has_inner_open else close
         return f"likely between {match.group('lo')} and {match.group('hi')}{suffix}"
 
+    out = _TEST_PREFIX_RE.sub("", out)
     out = _CI_RE.sub(_ci_phrase, out)
     for pattern, noun in _RATIO_RES:
         def _ratio(m: re.Match[str], noun: str = noun) -> str:

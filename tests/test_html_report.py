@@ -219,3 +219,39 @@ class TestRethemeReportHtml:
     def test_a_document_without_a_head_is_returned_with_only_the_chart_choice_fixed(self) -> None:
         out = retheme_report_html("<p>x</p>", "night")
         assert out == "<p>x</p>"
+
+    def test_academic_dossier_untruncated_html_report(self) -> None:
+        """Academic dossier ledger in HTML: all findings and all BH rows rendered without truncation."""
+        findings = [
+            {
+                "finding_id": f"find_{i}",
+                "kind": "driver",
+                "layer": "analyst",
+                "headline": f"HTML insight {i} verified finding",
+                "evidence": {"effect": 0.5},
+            }
+            for i in range(20)
+        ]
+        tests = [
+            {
+                "step_number": i,
+                "feature_column": f"feat_{i}",
+                "group_column": "segment",
+                "test_name": "T-Test",
+                "p_value": 0.01 + (i * 0.005),
+            }
+            for i in range(25)
+        ]
+        html = build_html_report(
+            "academic_html",
+            INSIGHTS,
+            [],
+            [],
+            findings=findings,
+            statistical_test_pvalues=tests,
+        )
+        for i in range(20):
+            assert f"HTML insight {i} verified finding" in html
+        for i in range(25):
+            assert f"feat_{i}" in html
+        assert "not shown" not in html

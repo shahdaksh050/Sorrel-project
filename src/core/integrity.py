@@ -122,12 +122,32 @@ def discover_logical_constraints(
 
     # 2. Additive identities (A + B == C) for small column counts
     if 3 <= len(num_cols) <= 15:
+        n_rows = len(values)
+        if n_rows > 20_000:
+            sample_idx = np.linspace(0, n_rows - 1, 20_000, dtype=int)
+            s_val = values[sample_idx]
+            s_mask = valid_mask[sample_idx]
+        else:
+            s_val = values
+            s_mask = valid_mask
+
         for i in range(len(num_cols)):
             for j in range(i + 1, len(num_cols)):
                 for k in range(len(num_cols)):
                     if k == i or k == j:
                         continue
                     ca, cb, cc = num_cols[i], num_cols[j], num_cols[k]
+
+                    # Fast pre-screen on sample for large tables
+                    if n_rows > 20_000:
+                        sm = s_mask[:, i] & s_mask[:, j] & s_mask[:, k]
+                        sn_valid = int(sm.sum())
+                        if sn_valid < 20:
+                            continue
+                        s_sum_diff = np.abs((s_val[sm, i] + s_val[sm, j]) - s_val[sm, k])
+                        if float((s_sum_diff < 1e-4).sum() / sn_valid) < min_support:
+                            continue
+
                     mask = valid_mask[:, i] & valid_mask[:, j] & valid_mask[:, k]
                     n_valid = int(mask.sum())
                     if n_valid < 20:

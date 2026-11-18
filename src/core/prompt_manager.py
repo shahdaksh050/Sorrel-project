@@ -44,7 +44,41 @@ def _redact(text: str) -> str:
 
 #: Data archetypes the profiler recognises; the planner confirms or corrects
 #: the profiler's guess in `data_understanding.archetype`.
-ARCHETYPES = ("event_log", "panel", "sensor_timeseries", "survey", "experiment", "cross_section")
+ARCHETYPES = (
+    "transactional", "continuous_series", "panel", "cross_sectional",
+    "survival", "survey", "basket", "network", "geospatial", "hybrid_text",
+    "event_log", "sensor_timeseries", "cross_section", "experiment",
+)
+
+#: Canonical tool contracts per dataset archetype.
+ARCHETYPE_CANONICAL_TOOLS: dict[str, list[str]] = {
+    "transactional": ["concentration_analysis", "basket_analysis", "cohort_analysis", "segment_comparison"],
+    "event_log": ["concentration_analysis", "cohort_analysis", "segment_comparison", "anomaly_analysis"],
+    "continuous_series": [
+        "time_series_analysis", "multi_seasonal_analysis", "anomaly_analysis",
+        "dimensionality_analysis", "correlation_analysis", "threshold_analysis", "forecast_analysis",
+    ],
+    "sensor_timeseries": [
+        "time_series_analysis", "multi_seasonal_analysis", "anomaly_analysis",
+        "dimensionality_analysis", "correlation_analysis", "threshold_analysis", "forecast_analysis",
+    ],
+    "panel": ["mixed_model_analysis", "change_analysis", "cohort_analysis", "difference_in_differences"],
+    "cross_sectional": [
+        "segment_comparison", "correlation_analysis", "cluster_data",
+        "regression_analysis", "threshold_analysis", "dimensionality_analysis",
+    ],
+    "cross_section": [
+        "segment_comparison", "correlation_analysis", "cluster_data",
+        "regression_analysis", "threshold_analysis", "dimensionality_analysis",
+    ],
+    "survival": ["survival_analysis", "segment_comparison", "correlation_analysis"],
+    "survey": ["variable_scale_analysis", "correlation_analysis", "cluster_data", "dimensionality_analysis"],
+    "basket": ["basket_analysis", "concentration_analysis", "segment_comparison"],
+    "network": ["graph_analysis", "cluster_data", "correlation_analysis"],
+    "geospatial": ["geospatial_analysis", "cluster_data", "segment_comparison", "correlation_analysis"],
+    "hybrid_text": ["text_analysis", "cluster_data", "segment_comparison", "correlation_analysis"],
+    "experiment": ["select_statistical_test", "experiment_analysis", "segment_comparison"],
+}
 
 # ---------------------------------------------------------------------------
 # System prompt — injected once per session. Placeholders are substituted
@@ -256,6 +290,11 @@ prioritize comparing group differences using `segment_comparison` rather than on
    - Ground in Question Agenda: The questions listed under 'Dataset-derived question agenda' \
 identify the highest-value analytical stories for this data. Pick tools (especially `segment_comparison`) \
 that directly answer them.
+   - Archetype Blueprint Contract: For datasets matching a data archetype, Cycle 1 MUST schedule its canonical blueprint tool: \
+transactional/event_log -> concentration_analysis; continuous_series/sensor_timeseries -> time_series_analysis; \
+panel -> mixed_model_analysis; cross_sectional -> segment_comparison; survival -> survival_analysis; \
+survey -> variable_scale_analysis; basket -> basket_analysis; network -> graph_analysis; \
+geospatial -> geospatial_analysis; hybrid_text -> text_analysis; experiment -> select_statistical_test.
    - Start from the suggested plan: keep steps that fit, drop redundant or weak analyses, \
 fix parameters (right columns, sum vs mean), and add what it misses — execute_dynamic_code for anything no tool covers.
 5. Optional `roles` in data_understanding (allowed roles: {roles}) — only for \

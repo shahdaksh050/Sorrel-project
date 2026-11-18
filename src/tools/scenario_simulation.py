@@ -225,6 +225,11 @@ class ScenarioSimulationTool(BaseTool):
                             delta_y = new_mean - base_mean
                             ci_lower = max(-base_mean, delta_y - ci_margin)
                             ci_upper = min(1.0 - base_mean, delta_y + ci_margin)
+                        elif float(target_s.min()) >= 0.0:
+                            new_mean = max(0.0, new_mean)
+                            delta_y = new_mean - base_mean
+                            ci_lower = max(-base_mean, delta_y - ci_margin)
+                            ci_upper = delta_y + ci_margin
                         else:
                             ci_lower = delta_y - ci_margin
                             ci_upper = delta_y + ci_margin

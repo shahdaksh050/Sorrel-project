@@ -168,6 +168,9 @@ class ClusterDataTool(BaseTool):
     requires_context: ClassVar[dict[str, str]] = {"target_column": "target_column"}
 
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
+        row_count = profile.row_count if profile else (metadata.row_count if metadata else 0)
+        if row_count < MIN_CLUSTER_UNITS:
+            return 0.0
         if metadata and metadata.target_column:
             # Still occasionally useful (segmenting features regardless of
             # label), but modelling the target is almost always the priority.
@@ -211,7 +214,7 @@ class ClusterDataTool(BaseTool):
             )
 
         # Median-impute then standardise — KMeans is distance-based
-        filled = features.fillna(features.median(numeric_only=True))
+        filled = features.fillna(features.median(numeric_only=True)).fillna(0.0)
         # A heavy right tail (income, spend) otherwise dominates the
         # Euclidean distance and KMeans just splits off the outliers.
         # Vectorised across all columns at once (one DataFrame.min()/.skew()

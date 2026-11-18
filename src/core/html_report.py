@@ -46,9 +46,12 @@ _BOILERPLATE_RE = re.compile(
     r"deterministic\s+run|"
     r"llm\s+was\s+(?:switched\s+off|disabled)|"
     r"plan\s+came\s+from\s+the\s+dataset\s+profile|"
-    r"successfully\s+investigated|"
+    r"successfully\s+(?:investigated|executed|completed)|"
     r"analysis\s+(?:is\s+)?complete|"
-    r"we\s+have\s+(?:successfully\s+)?(?:investigated|completed|analyzed)",
+    r"we\s+have\s+(?:successfully\s+)?(?:investigated|completed|analyzed|executed|gathered|identified)|"
+    r"(?:we\s+have\s+)?sufficient\s+(?:verified\s+)?findings\s+to\s+synthesize|"
+    r"no\s+further\s+(?:tools|analysis|investigation)\s+(?:are|is)\s+needed|"
+    r"the\s+(?:analysis|pipeline)\s+has\s+completed",
     re.IGNORECASE,
 )
 
@@ -264,8 +267,7 @@ def _evidence_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         and f.get("kind") not in _CAVEAT_FINDING_KINDS
         and not is_data_hygiene_finding(f)
     ]
-    pool = list(pool)  # keep rank_findings() order (source-diversity pass), no re-sort
-    return pool[:_MAX_EVIDENCE_FINDINGS]
+    return list(pool)  # Academic dossier: display all verified findings without truncation
 
 
 def _caveat_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -338,11 +340,17 @@ def _finding_evidence_html(finding: dict[str, Any]) -> str:
         for k, v in evidence.items():
             if isinstance(v, (int, float, str)) and not isinstance(v, bool):
                 numeric_bits.append(f"{_esc(k)}={_esc(v)}")
+    tech_details: list[str] = []
     if numeric_bits:
-        bits.append(f"<br><span style='color:var(--graphite);font-size:.85rem;'>{' · '.join(numeric_bits)}</span>")
+        tech_details.append(f"<span style='color:var(--graphite);font-size:.85rem;'>{' · '.join(numeric_bits)}</span>")
     source = finding.get("source_tool")
     if source:
-        bits.append(f"<br><span style='color:var(--graphite);font-size:.78rem;'>source: {_esc(source)}</span>")
+        tech_details.append(f"<span style='color:var(--graphite);font-size:.78rem;display:block;margin-top:.2rem;'>source: {_esc(source)}</span>")
+    if tech_details:
+        bits.append(
+            f"<details style='margin-top:.4rem;'><summary style='cursor:pointer;color:var(--pen);font-size:.82rem;font-weight:500;'>"
+            f"Technical statistical evidence</summary><div style='padding-top:.25rem;'>{''.join(tech_details)}</div></details>"
+        )
     bits.append(_check_row_html(finding.get("evidence")))
     return "".join(bits)
 
@@ -956,7 +964,7 @@ def build_html_report(
         sections.append("<h2>Limitations &amp; caveats</h2>" + _cards(limitation_cards, "warn"))
         if bh:
             ordered = _sort_bh_tests(bh)
-            shown = ordered[:_MAX_BH_ROWS]
+            shown = ordered  # Academic dossier: display all hypothesis tests without truncation
             has_group = any(t.get("group_column") for t in shown)
             bh_rows = []
             for t in shown:
@@ -972,8 +980,7 @@ def build_html_report(
                 )
             rows = "".join(bh_rows)
             group_header = "<th>Group</th>" if has_group else ""
-            remaining = len(ordered) - len(shown)
-            trailer = f"<p>… {remaining} more test(s) not shown.</p>" if remaining > 0 else ""
+            trailer = ""
             sections.append(
                 f"<p>{len(bh)} statistical test(s) ran this session — "
                 "Benjamini-Hochberg-corrected significance (FDR, α=0.05):</p>"

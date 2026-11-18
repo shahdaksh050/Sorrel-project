@@ -151,7 +151,10 @@ class GraphAnalysisTool(BaseTool):
                     "Please specify 'source_column' and 'target_column'."
                 )
 
-        edges_df = df[[src_col, dst_col]].dropna()
+        cols_to_keep = [src_col, dst_col]
+        if weight_column and weight_column in df.columns:
+            cols_to_keep.append(weight_column)
+        edges_df = df[cols_to_keep].dropna(subset=[src_col, dst_col])
         if edges_df.empty:
             raise ToolExecutionError("No valid edges found after dropping missing values.")
 
@@ -165,8 +168,8 @@ class GraphAnalysisTool(BaseTool):
         src_ids = edges_df[src_col].map(node_to_id).values
         dst_ids = edges_df[dst_col].map(node_to_id).values
 
-        if weight_column and weight_column in df.columns:
-            weights = pd.to_numeric(df[weight_column], errors="coerce").fillna(1.0).values
+        if weight_column and weight_column in edges_df.columns:
+            weights = pd.to_numeric(edges_df[weight_column], errors="coerce").fillna(1.0).values
         else:
             weights = np.ones(num_edges, dtype=float)
 

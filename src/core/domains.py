@@ -511,7 +511,93 @@ PRODUCT_CATALOG = DomainSpec(
     structural=_product_catalog_structure,
 )
 
-for _spec in (FINANCIAL, TRANSACTIONAL, WORKFORCE, PRODUCT_CATALOG):
+
+def _saas_structure(
+    df: pd.DataFrame, profile: DatasetProfile, roles: dict[str, str]
+) -> tuple[float, list[str]]:
+    evidence: list[str] = []
+    delta = 0.0
+    cols_by_name = {c.name: c for c in profile.columns}
+    cust_name = roles.get("customer")
+    if cust_name and cust_name in cols_by_name:
+        c_prof = cols_by_name[cust_name]
+        if c_prof.kind in ("identifier", "categorical"):
+            delta += 0.15
+            evidence.append(f"customer key '{cust_name}'")
+    churn_name = roles.get("churn")
+    if churn_name and churn_name in cols_by_name:
+        c_prof = cols_by_name[churn_name]
+        if c_prof.nunique == 2:
+            delta += 0.15
+            evidence.append(f"binary churn indicator '{churn_name}'")
+    mrr_name = roles.get("mrr")
+    if mrr_name and mrr_name in cols_by_name:
+        c_prof = cols_by_name[mrr_name]
+        if c_prof.kind == "numeric":
+            delta += 0.10
+            evidence.append(f"recurring revenue '{mrr_name}'")
+    return delta, evidence
+
+
+SAAS = DomainSpec(
+    name="saas",
+    description=(
+        "Subscription & SaaS accounts — recurring revenue, customer churn, and contract tenure. "
+        "Cohort retention, churn drivers, and LTV are the primary analytical targets."
+    ),
+    roles=(
+        RoleSpec("customer", ("customer_id", "account_id", "user_id", "subscriber_id", "client_id", "customer"),
+                 ("identifier", "categorical", "numeric"), required=True),
+        RoleSpec("churn", ("churn", "is_churn", "churned", "status", "cancelled", "active"),
+                 ("boolean", "categorical", "numeric"), required=True),
+        RoleSpec("mrr", ("mrr", "arr", "monthly_charges", "recurring_revenue", "spend", "revenue"),
+                 ("numeric",)),
+        RoleSpec("tenure", ("tenure", "tenure_months", "months_active", "duration", "contract_length"),
+                 ("numeric",)),
+        RoleSpec("plan", ("plan", "tier", "subscription_type", "contract", "package"),
+                 ("categorical",)),
+    ),
+    structural=_saas_structure,
+)
+
+
+def _clinical_structure(
+    df: pd.DataFrame, profile: DatasetProfile, roles: dict[str, str]
+) -> tuple[float, list[str]]:
+    evidence: list[str] = []
+    delta = 0.0
+    cols_by_name = {c.name: c for c in profile.columns}
+    patient_name = roles.get("patient")
+    if patient_name and patient_name in cols_by_name:
+        delta += 0.15
+        evidence.append(f"patient identifier '{patient_name}'")
+    outcome_name = roles.get("outcome")
+    if outcome_name and outcome_name in cols_by_name:
+        delta += 0.15
+        evidence.append(f"clinical outcome '{outcome_name}'")
+    return delta, evidence
+
+
+CLINICAL = DomainSpec(
+    name="clinical",
+    description=(
+        "Clinical trials and patient health records — patient vitals, diagnostic indicators, "
+        "and treatment outcomes. Treatment efficacy, risk factors, and biomarker thresholds are primary."
+    ),
+    roles=(
+        RoleSpec("patient", ("patient_id", "subject_id", "case_id", "participant_id", "patient"),
+                 ("identifier", "categorical", "numeric"), required=True),
+        RoleSpec("outcome", ("outcome", "response", "event", "status", "diagnosis", "disease_free", "mortality"),
+                 ("boolean", "categorical", "numeric"), required=True),
+        RoleSpec("treatment", ("treatment", "arm", "drug", "dose", "intervention", "protocol"),
+                 ("categorical",)),
+        RoleSpec("biomarker", ("glucose", "blood_pressure", "cholesterol", "bmi", "hba1c", "heart_rate"),
+                 ("numeric",)),
+    ),
+    structural=_clinical_structure,
+)
+
+for _spec in (FINANCIAL, TRANSACTIONAL, WORKFORCE, PRODUCT_CATALOG, SAAS, CLINICAL):
     register_domain(_spec)
 
 

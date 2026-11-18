@@ -336,7 +336,22 @@ class BaseTool(ABC):
         still apply.
         """
         params = dict(params)
-        if "file_path" in params:
+        needs_file_path = "file_path" in params
+        if not needs_file_path:
+            try:
+                schema = self.get_schema()
+                if isinstance(schema, dict) and "file_path" in schema:
+                    needs_file_path = True
+            except Exception:
+                pass
+        if needs_file_path and (not params.get("file_path")):
+            candidate = memory.get_context("cleaned_file_path") or (
+                memory.dataset_metadata.file_path if memory.dataset_metadata is not None else None
+            )
+            if candidate:
+                params["file_path"] = str(candidate)
+
+        if params.get("file_path"):
             target, is_derived = _confine_file_path(params["file_path"], memory)
             params["file_path"] = str(target)
             cleaned = memory.get_context("cleaned_file_path")

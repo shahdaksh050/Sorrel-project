@@ -118,15 +118,17 @@ def _gini(values: np.ndarray) -> float:
     equality, approaching 1 = maximal concentration. Assumes non-negative
     values, which every measure this tool is pointed at (revenue, spend,
     counts) is expected to be."""
-    sorted_vals = np.sort(values.astype(float))
+    clean = values[np.isfinite(values) & (values >= 0)]
+    sorted_vals = np.sort(clean.astype(float))
     n = len(sorted_vals)
     if n == 0:
         return 0.0
     total = float(sorted_vals.sum())
-    if total == 0:
+    if total <= 0:
         return 0.0
     index = np.arange(1, n + 1)
-    return float((2.0 * np.sum(index * sorted_vals) / (n * total)) - (n + 1.0) / n)
+    raw_gini = float((2.0 * np.sum(index * sorted_vals) / (n * total)) - (n + 1.0) / n)
+    return max(0.0, min(1.0, raw_gini))
 
 
 class ConcentrationAnalysisTool(BaseTool):

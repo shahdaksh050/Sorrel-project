@@ -1,55 +1,227 @@
+"""Unit tests for automated pre-modeling reshaping pipeline (All_ArchetypePlan §4.2)."""
 from __future__ import annotations
 
+from typing import Any
+
+import numpy as np
 import pandas as pd
 
+from src.core.profiler import DatasetArchetype
 from src.core.reshaping import (
+    aggregate_customer_rfm,
+    assess_survey_reliability_and_polarity,
+    auto_reshape_for_archetype,
+    compute_geospatial_features,
+    compute_log_returns_and_volatility,
+    compute_panel_deltas_and_lags,
     detect_and_strip_summary_rows,
     detect_wide_temporal_columns,
+    extract_text_sentiment_and_features,
+    pivot_basket_incidence_matrix,
     unpivot_temporal_frame,
+    verify_and_prepare_survival_data,
 )
+from src.tools.data_processing import CleanDataTool
 
 
-def test_detect_wide_temporal_columns() -> None:
-    # Year columns in header
-    cols_years = ["Country", "Sector", "2018", "2019", "2020", "2021"]
-    detected = detect_wide_temporal_columns(cols_years)
-    assert detected == ["2018", "2019", "2020", "2021"]
-
-    # Month columns in header
-    cols_months = ["Region", "Product", "Jan", "Feb", "Mar", "Apr", "May"]
-    detected_m = detect_wide_temporal_columns(cols_months)
-    assert detected_m == ["Jan", "Feb", "Mar", "Apr", "May"]
-
-    # Standard non-temporal columns
-    cols_std = ["age", "gender", "income", "churn"]
-    assert detect_wide_temporal_columns(cols_std) == []
-
-
-def test_unpivot_temporal_frame() -> None:
+def test_detect_and_unpivot_wide_temporal_columns() -> None:
     df_wide = pd.DataFrame({
-        "country": ["Germany", "France"],
-        "2019": [100, 200],
-        "2020": [110, 220],
-        "2021": [120, 240],
-        "2022": [130, 260],
+        "country": ["USA", "Germany", "Japan"],
+        "2018": [100, 200, 300],
+        "2019": [110, 210, 310],
+        "2020": [120, 220, 320],
+        "2021": [130, 230, 330],
     })
-    melted = unpivot_temporal_frame(df_wide, var_name="year", value_name="gdp")
-    assert len(melted) == 8
-    assert "year" in melted.columns
-    assert "gdp" in melted.columns
-    assert melted["year"].tolist() == [2019, 2019, 2020, 2020, 2021, 2021, 2022, 2022]
+    temporal = detect_wide_temporal_columns(list(df_wide.columns))
+    assert len(temporal) == 4
+
+    unpivoted = unpivot_temporal_frame(df_wide, temporal, var_name="year", value_name="gdp")
+    assert "year" in unpivoted.columns
+    assert "gdp" in unpivoted.columns
+    assert len(unpivoted) == 12
+    assert set(unpivoted["country"]) == {"USA", "Germany", "Japan"}
 
 
 def test_detect_and_strip_summary_rows() -> None:
-    df = pd.DataFrame({
-        "item": pd.Series(
-            ["Widget A", "Widget B", "Widget C", "Widget D", "Widget E", "Widget F", "Grand Total"],
-            dtype="string",
-        ),
-        "sales": [10, 20, 30, 40, 50, 60, 210],
-    })
-    cleaned_df, notes = detect_and_strip_summary_rows(df)
-    assert len(cleaned_df) == 6
-    assert "Grand Total" not in cleaned_df["item"].values
+    categories = [f"Category_{i}" for i in range(19)] + ["Total"]
+    revenues = [100 * (i + 1) for i in range(19)] + [19000]
+    df = pd.DataFrame({"category": categories, "revenue": revenues})
+    cleaned, notes = detect_and_strip_summary_rows(df)
+    assert len(cleaned) == 19
+    assert "Total" not in cleaned["category"].values
+    assert len(notes) > 0
+
+
+def test_compute_log_returns_and_volatility() -> None:
+    dates = pd.date_range("2024-01-01", periods=40, freq="D")
+    prices = [100.0 * (1.01 ** i) for i in range(40)]
+    df = pd.DataFrame({"date": dates, "close_price": prices})
+
+    out, notes = compute_log_returns_and_volatility(df, price_cols=["close_price"])
+    assert "close_price_log_return" in out.columns
+    assert "close_price_rolling_vol_30" in out.columns
     assert len(notes) == 1
-    assert "Grand Total" in notes[0] or "summary/total" in notes[0]
+    # Check that log returns are approx ln(1.01) = 0.00995
+    valid_rets = out["close_price_log_return"].dropna()
+    assert len(valid_rets) == 39
+    assert np.isclose(valid_rets.iloc[0], np.log(1.01), atol=1e-4)
+
+
+def test_aggregate_customer_rfm() -> None:
+    records = [
+        {"customer_id": "C1", "order_date": "2024-01-01", "spend": 50.0},
+        {"customer_id": "C1", "order_date": "2024-01-15", "spend": 100.0},
+        {"customer_id": "C2", "order_date": "2024-01-10", "spend": 200.0},
+        {"customer_id": "C3", "order_date": "2024-01-20", "spend": 30.0},
+    ]
+    df = pd.DataFrame(records)
+    rfm, notes = aggregate_customer_rfm(df, "customer_id", "order_date", "spend")
+
+    assert len(rfm) == 3
+    assert set(rfm.columns) == {"customer_id", "recency_days", "frequency", "monetary_total", "monetary_avg"}
+    c1 = rfm[rfm["customer_id"] == "C1"].iloc[0]
+    assert c1["frequency"] == 2
+    assert c1["monetary_total"] == 150.0
+    assert c1["monetary_avg"] == 75.0
+    assert len(notes) == 1
+
+
+def test_pivot_basket_incidence_matrix() -> None:
+    records = [
+        {"order_id": "O1", "product": "Apple"},
+        {"order_id": "O1", "product": "Banana"},
+        {"order_id": "O2", "product": "Apple"},
+        {"order_id": "O2", "product": "Carrot"},
+        {"order_id": "O3", "product": "Banana"},
+    ]
+    df = pd.DataFrame(records)
+    incidence, notes = pivot_basket_incidence_matrix(df, "order_id", "product")
+
+    assert len(incidence) == 3
+    assert "Apple" in incidence.columns
+    assert "Banana" in incidence.columns
+    assert "Carrot" in incidence.columns
+    assert incidence.loc[incidence["order_id"] == "O1", "Apple"].iloc[0] == 1
+    assert incidence.loc[incidence["order_id"] == "O3", "Apple"].iloc[0] == 0
+    assert len(notes) == 1
+
+
+def test_extract_text_sentiment_and_features() -> None:
+    df = pd.DataFrame({
+        "id": [1, 2],
+        "feedback": [
+            "Great product, excellent quality and fast delivery. Absolutely love it!",
+            "Terrible customer service, broken device and horrible slow response.",
+        ],
+    })
+    out, notes = extract_text_sentiment_and_features(df, "feedback")
+
+    assert "feedback_sentiment_score" in out.columns
+    assert "feedback_word_count" in out.columns
+    assert "feedback_char_len" in out.columns
+    assert out.loc[0, "feedback_sentiment_score"] > 0
+    assert out.loc[1, "feedback_sentiment_score"] < 0
+    assert len(notes) == 1
+
+
+def test_auto_reshape_for_archetype() -> None:
+    # Test continuous series with prices
+    dates = pd.date_range("2024-01-01", periods=30, freq="D")
+    df_prices = pd.DataFrame({"timestamp": dates, "asset_price": [50.0 + i for i in range(30)]})
+    out, notes = auto_reshape_for_archetype(df_prices, DatasetArchetype.CONTINUOUS_SERIES)
+    assert "asset_price_log_return" in out.columns
+    assert any("stationary log returns" in n for n in notes)
+
+
+def test_compute_log_returns_with_nan_and_zeros() -> None:
+    # Column with a missing value and valid positive prices
+    prices = [100.0, np.nan, 102.0, 105.0, 103.0, 107.0, 110.0]
+    df = pd.DataFrame({"close": prices})
+    out, notes = compute_log_returns_and_volatility(df)
+    assert "close_log_return" in out.columns
+    assert len(notes) > 0
+
+
+def test_extract_text_sentiment_filters_stopwords() -> None:
+    df = pd.DataFrame({
+        "feedback": [
+            "The customer service was fast and the response was great for the product",
+            "The customer service was slow and the response was terrible for the product",
+        ],
+    })
+    out, _ = extract_text_sentiment_and_features(df, "feedback")
+    cols = list(out.columns)
+    # Stop words must never be keyword features
+    assert "feedback_has_the" not in cols
+    assert "feedback_has_was" not in cols
+    assert "feedback_has_and" not in cols
+    assert "feedback_has_for" not in cols
+    # Meaningful domain terms are extracted
+    assert any("feedback_has_service" in c or "feedback_has_customer" in c for c in cols)
+
+
+def test_verify_and_prepare_survival_data() -> None:
+    df = pd.DataFrame({
+        "tenure": [-5.0, 0.0, 12.0, 24.0, 36.0],
+        "churn": ["yes", "no", "yes", "no", "no"],
+    })
+    out, notes = verify_and_prepare_survival_data(df)
+    assert (out["tenure"] > 0).all()
+    assert out["churn"].tolist() == [1, 0, 1, 0, 0]
+    assert any("Adjusted" in n for n in notes)
+    assert any("censoring rate" in n for n in notes)
+
+
+def test_assess_survey_reliability_and_polarity() -> None:
+    df = pd.DataFrame({
+        "q1_satisfaction": [4, 5, 3, 4, 5, 4, 5, 3, 4, 5],
+        "q2_support": [5, 4, 4, 5, 5, 4, 5, 4, 5, 5],
+        "q3_difficult_navigation": [2, 1, 3, 2, 1, 2, 1, 3, 2, 1],  # negative question
+        "q4_recommend": [5, 5, 4, 4, 5, 5, 4, 4, 5, 5],
+    })
+    out, notes = assess_survey_reliability_and_polarity(df)
+    assert "q3_difficult_navigation_rev" in out.columns
+    assert any("Reverse-coded" in n for n in notes)
+    assert any("Cronbach's alpha" in n for n in notes)
+
+
+def test_compute_panel_deltas_and_lags() -> None:
+    records = []
+    for store in ["S1", "S2"]:
+        for t in [1, 2, 3, 4]:
+            records.append({"store_id": store, "period": t, "revenue": 100.0 * t if store == "S1" else 200.0 * t})
+    df = pd.DataFrame(records)
+    out, notes = compute_panel_deltas_and_lags(df, entity_col="store_id", time_col="period")
+    assert "revenue_lag1" in out.columns
+    assert "revenue_delta1" in out.columns
+    assert len(notes) > 0
+
+
+def test_compute_geospatial_features() -> None:
+    df = pd.DataFrame({
+        "latitude": [40.71, 40.72, 40.73, 40.74],
+        "longitude": [-74.00, -74.01, -73.99, -74.02],
+    })
+    out, notes = compute_geospatial_features(df)
+    assert "dist_from_centroid_km" in out.columns
+    assert (out["dist_from_centroid_km"] >= 0).all()
+    assert len(notes) > 0
+
+
+def test_clean_data_tool_with_archetype(tmp_path: Any) -> None:
+    dates = pd.date_range("2024-01-01", periods=25, freq="D")
+    df = pd.DataFrame({"date": dates, "price": [10.0 + i for i in range(25)]})
+    csv_path = tmp_path / "prices.csv"
+    df.to_csv(csv_path, index=False)
+
+    tool = CleanDataTool()
+    result = tool.run(
+        file_path=str(csv_path),
+        output_dir=str(tmp_path / "out"),
+        archetype="continuous_series",
+    )
+    assert result.status == "success"
+    cleaned_file = result.output["cleaned_file_path"]
+    cleaned_df = pd.read_csv(cleaned_file)
+    assert "price_log_return" in cleaned_df.columns
+

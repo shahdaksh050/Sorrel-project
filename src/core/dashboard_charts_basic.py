@@ -1178,6 +1178,10 @@ def _driver_tornado_chart(
     col_by_name: dict[str, ColumnProfile] | None = None,
 ) -> ChartSpec | None:
     """Driver Sensitivity Tornado Chart showing standardized coefficients or effect sizes centered at 0."""
+    from src.core.findings import _is_actionable_feature
+    from src.core.stats_utils import is_derived_pair
+
+    measure = finding.get("measure") or "Target Outcome"
     drivers_data: list[dict[str, Any]] = []
 
     for r in results:
@@ -1186,8 +1190,13 @@ def _driver_tornado_chart(
             coeffs = out.get("coefficients") or out.get("feature_importance") or {}
             if isinstance(coeffs, dict) and coeffs:
                 for feat, val in coeffs.items():
+                    feat_str = str(feat)
+                    if measure and is_derived_pair(feat_str, str(measure)):
+                        continue
+                    if not _is_actionable_feature(feat_str):
+                        continue
                     if isinstance(val, (int, float)) and not np.isnan(val):
-                        drivers_data.append({"feature": str(feat), "effect": round(float(val), 4)})
+                        drivers_data.append({"feature": feat_str, "effect": round(float(val), 4)})
                 if drivers_data:
                     break
 
@@ -1195,12 +1204,19 @@ def _driver_tornado_chart(
         ev = finding.get("evidence") or {}
         if isinstance(ev, dict) and ev.get("coefficients"):
             for feat, val in ev["coefficients"].items():
+                feat_str = str(feat)
+                if measure and is_derived_pair(feat_str, str(measure)):
+                    continue
+                if not _is_actionable_feature(feat_str):
+                    continue
                 if isinstance(val, (int, float)):
-                    drivers_data.append({"feature": str(feat), "effect": round(float(val), 4)})
+                    drivers_data.append({"feature": feat_str, "effect": round(float(val), 4)})
         elif finding.get("dimension") and finding.get("effect") is not None:
             eff = finding.get("effect")
-            if isinstance(eff, (int, float)):
-                drivers_data.append({"feature": str(finding["dimension"]), "effect": round(float(eff), 4)})
+            feat_str = str(finding["dimension"])
+            if (not measure or not is_derived_pair(feat_str, str(measure))) and _is_actionable_feature(feat_str):
+                if isinstance(eff, (int, float)):
+                    drivers_data.append({"feature": feat_str, "effect": round(float(eff), 4)})
 
     if not drivers_data:
         return None

@@ -95,6 +95,112 @@ def test_domain_pack_null() -> None:
     assert len(findings) == 0
 
 
+def test_retail_ecommerce_domain_pack() -> None:
+    df = pd.DataFrame({
+        "order_id": [f"ORD_{i // 2}" for i in range(20)],
+        "customer_id": [f"CUST_{i % 5}" for i in range(20)],
+        "revenue": [50.0 + i * 5 for i in range(19)] + [-25.0],  # 1 refund
+        "discount": [0.10] * 18 + [0.60, 0.70],  # 2 exceedances (> 0.50)
+    })
+    pack = detect_domain_pack(df, objective="Retail e-commerce revenue and order metrics")
+    assert pack is not None
+    assert pack.name == "retail_ecommerce"
+
+    findings = evaluate_domain_pack(df, pack=pack)
+    assert any("average order value" in f.headline.lower() for f in findings)
+    assert any("repeat purchase rate" in f.headline.lower() for f in findings)
+    assert any("negative transactions" in f.headline.lower() for f in findings)
+    assert any("discount" in f.headline.lower() for f in findings)
+
+
+def test_retail_disambiguation_unit_price_and_quantity() -> None:
+    """When only unit_price and quantity exist, synthesize line total for accurate volume and AOV."""
+    df = pd.DataFrame({
+        "invoice_no": [f"INV_{i // 2}" for i in range(10)],
+        "unit_price": [10.0] * 10,
+        "quantity": [2] * 10,  # line total is 20.0 each, total volume 200.0, 5 orders -> AOV $40.00
+    })
+    pack = detect_domain_pack(df, objective="Retail shopping basket analysis")
+    assert pack is not None
+    findings = evaluate_domain_pack(df, pack=pack)
+    aov_finding = next((f for f in findings if "average order value" in f.headline.lower()), None)
+    assert aov_finding is not None
+    assert "$40.00" in aov_finding.headline
+    assert "synthesized" in aov_finding.headline
+    assert aov_finding.evidence["total_revenue"] == 200.0
+
+
+def test_retail_disambiguation_unit_price_and_total_amount() -> None:
+    """When both unit_price and total_amount exist, prioritize explicit total_amount."""
+    df = pd.DataFrame({
+        "invoice_no": [f"INV_{i // 2}" for i in range(10)],
+        "unit_price": [10.0] * 10,
+        "quantity": [2] * 10,
+        "total_amount": [25.0] * 10,  # explicit line total (e.g. after taxes/fees)
+    })
+    pack = detect_domain_pack(df, objective="Retail sales analysis")
+    assert pack is not None
+    findings = evaluate_domain_pack(df, pack=pack)
+    aov_finding = next((f for f in findings if "average order value" in f.headline.lower()), None)
+    assert aov_finding is not None
+    assert "$50.00" in aov_finding.headline
+    assert aov_finding.evidence["total_revenue"] == 250.0
+    assert "synthesized" not in aov_finding.headline
+
+
+def test_retail_disambiguation_unit_price_only() -> None:
+    """When only unit_price exists without quantity, report Average Unit Price rather than gross sum."""
+    df = pd.DataFrame({
+        "product_id": [f"P_{i}" for i in range(10)],
+        "unit_price": [15.0 + i for i in range(10)],  # mean = 19.50
+    })
+    pack = detect_domain_pack(df, objective="Retail product catalog and store sales")
+    assert pack is not None
+    findings = evaluate_domain_pack(df, pack=pack)
+    price_finding = next((f for f in findings if "average unit price" in f.headline.lower()), None)
+    assert price_finding is not None
+    assert "$19.50" in price_finding.headline
+    assert not any("average order value" in f.headline.lower() for f in findings)
+
+
+def test_retail_disambiguation_all_nan_amount_no_spurious_aov() -> None:
+    """When transaction value or unit rate is entirely NaN, no artificial $0.00 AOV is generated."""
+    nan_val = float("nan")
+    df = pd.DataFrame({
+        "order_id": ["ORD_1", "ORD_2", "ORD_3"],
+        "total_amount": [nan_val, nan_val, nan_val],
+    })
+    pack = detect_domain_pack(df, objective="Retail sales and transactions")
+    assert pack is not None
+    findings = evaluate_domain_pack(df, pack=pack)
+    assert not any("average order value" in f.headline.lower() for f in findings)
+
+    df2 = pd.DataFrame({
+        "order_id": ["ORD_1", "ORD_2", "ORD_3"],
+        "unit_price": [nan_val, nan_val, nan_val],
+        "quantity": [nan_val, nan_val, nan_val],
+    })
+    findings2 = evaluate_domain_pack(df2, pack=pack)
+    assert not any("average order value" in f.headline.lower() for f in findings2)
+    assert not any("average unit price" in f.headline.lower() for f in findings2)
+
+
+def test_saas_subscription_domain_pack() -> None:
+    df = pd.DataFrame({
+        "subscriber_id": [f"SUB_{i:03d}" for i in range(50)],
+        "churn": [0] * 40 + [1] * 10,  # 20% churn rate
+        "mrr": [100.0] * 50,
+        "tenure_months": [12.0] * 50,
+    })
+    pack = detect_domain_pack(df, objective="Analyze SaaS subscription churn and ARR")
+    assert pack is not None
+    assert pack.name == "saas_subscription"
+
+    findings = evaluate_domain_pack(df, pack=pack)
+    assert any("churn rate" in f.headline.lower() for f in findings)
+    assert any("mrr" in f.headline.lower() or "monthly recurring revenue" in f.headline.lower() for f in findings)
+
+
 @pytest.fixture
 def graph_csv(tmp_path: Path) -> str:
     # Star graph: hub 'Node_A' connected to 5 other nodes

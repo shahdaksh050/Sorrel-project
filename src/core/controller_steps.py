@@ -69,6 +69,44 @@ class StepMixin(ControllerState):
     #: Concurrent-safe tools that write a fixed-name output file.
     _FILE_WRITING_TOOLS: frozenset[str] = frozenset({"detect_outliers"})
 
+    def _activate_cleaned_dataset(self, cleaned_path: str, summary_notes: list[str]) -> None:
+        """Activate cleaned and archetype-reshaped dataset so downstream tools see new columns."""
+        self.memory.set_context("cleaned_file_path", cleaned_path)
+        try:
+            from src.core.analysis_io import read_analysis_df
+            from src.core.domains import infer_domains
+            from src.core.profiler import profile_dataframe
+            from src.core.question_router import route_question
+
+            df = read_analysis_df(cleaned_path)
+            target = getattr(self.memory.dataset_metadata, "target_column", None)
+            profile = profile_dataframe(df, target_column=target)
+            try:
+                profile.domains = infer_domains(df, profile)
+            except Exception:
+                profile.domains = []
+            self.last_profile = profile
+            if self.memory.dataset_metadata is not None:
+                self.memory.dataset_metadata.row_count = len(df)
+                self.memory.dataset_metadata.missing_values = {col: int(df[col].isna().sum()) for col in df.columns}
+                self.memory.dataset_metadata.columns = {col: str(dtype) for col, dtype in df.dtypes.items()}
+                self.memory.dataset_metadata.column_count = len(df.columns)
+                self.memory.dataset_metadata.numerical_cols = [c.name for c in profile.columns_of_kind("numeric")]
+                self.memory.dataset_metadata.categorical_cols = [c.name for c in profile.columns_of_kind("categorical")]
+            self.memory.set_context("data_profile", profile.to_dict())
+            self.memory.set_context("data_profile_summary", profile.to_prompt_string())
+            self.memory.set_context("cleaned_feature_provenance", summary_notes)
+            decision = self.memory.get_context("analysis_decision")
+            if hasattr(self, "_build_question_agenda"):
+                agenda = self._build_question_agenda(profile, decision)
+                self.memory.set_context("question_agenda", [question.to_dict() for question in agenda])
+            effective_objective = getattr(self, "objective", "") or self.memory.get_context("autonomous_objective") or ""
+            if effective_objective:
+                self.question_routing = route_question(effective_objective, profile=profile)
+                self.memory.set_context("question_routing", self.question_routing)
+        except Exception as exc:
+            logger.debug("Failed to re-profile cleaned dataset: %s", exc)
+
     def _activate_structured_dataset(self, output: dict[str, Any]) -> None:
         """Promote a successful extraction artifact to the analysis dataset.
 
@@ -666,9 +704,14 @@ class StepMixin(ControllerState):
         if step.tool_name == "clean_data" and result.status == "success":
             cleaned_path = result.output.get("cleaned_file_path")
             if cleaned_path:
-                self.memory.set_context("cleaned_file_path", cleaned_path)
+                self._activate_cleaned_dataset(
+                    cleaned_path,
+                    result.output.get("feature_provenance")
+                    or result.output.get("summary_rows_quarantined")
+                    or [],
+                )
                 console.print(
-                    f"  [dim]Cleaned file stored → {cleaned_path}[/]"
+                    f"  [dim]Cleaned file stored & activated → {cleaned_path}[/]"
                 )
 
         if self.on_step_callback:

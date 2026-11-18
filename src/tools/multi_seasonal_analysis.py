@@ -8,6 +8,7 @@ game server concurrencies) via Fast Fourier Transform (FFT) spectral decompositi
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
@@ -26,6 +27,20 @@ logger = logging.getLogger(__name__)
 _MIN_TIME_SERIES_N = 48
 _MAX_HARMONICS = 4
 
+_DEMOGRAPHIC_OR_STATIC_RE = re.compile(
+    r"\b(?:age|dob|birth|gender|sex|customer|user|account|client|patient|member|"
+    r"id|key|code|guid|uuid|ssn|zip|postal|lat|lon|latitude|longitude|height|weight|"
+    r"blood|ethnicity|race|nationality|tenure|seniority|salary|income|credit_score|"
+    r"education|marital|household|experience)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_demographic_or_static(col: str | None) -> bool:
+    if not col or not isinstance(col, str):
+        return False
+    return bool(_DEMOGRAPHIC_OR_STATIC_RE.search(col.lower().strip()))
+
 
 class MultiSeasonalAnalysisTool(BaseTool):
     """Detect multiple overlapping periodic cycles and harmonic frequencies."""
@@ -42,13 +57,15 @@ class MultiSeasonalAnalysisTool(BaseTool):
     def applies_to(self, profile: DatasetProfile | None, metadata: DatasetMetadata | None) -> float:
         if profile is None or profile.row_count < _MIN_TIME_SERIES_N:
             return 0.0
+        has_dt = any(c.kind == "datetime" for c in profile.columns)
+        if not (profile.is_time_series or has_dt):
+            return 0.0
+        valid_measures = [m.name for m in profile.measures() if not _is_demographic_or_static(m.name)]
+        if not valid_measures:
+            return 0.0
         if profile.is_time_series:
             return 0.85
-        # Can also apply if row count is large and there is at least one datetime column
-        has_dt = any(c.kind == "datetime" for c in profile.columns)
-        if has_dt and profile.row_count >= _MIN_TIME_SERIES_N:
-            return 0.70
-        return 0.0
+        return 0.70
 
     def default_params(
         self, profile: DatasetProfile | None, metadata: DatasetMetadata | None
@@ -56,7 +73,9 @@ class MultiSeasonalAnalysisTool(BaseTool):
         if profile is None:
             return {}
         time_cols = [c.name for c in profile.columns if c.kind == "datetime"]
-        measures = [m.name for m in profile.measures()]
+        measures = [m.name for m in profile.measures() if not _is_demographic_or_static(m.name)]
+        if not measures:
+            measures = [m.name for m in profile.measures()]
         params: dict[str, Any] = {}
         if time_cols:
             params["time_column"] = time_cols[0]
@@ -119,9 +138,20 @@ class MultiSeasonalAnalysisTool(BaseTool):
             else:
                 # Look for string date-like columns
                 for c in df.columns:
-                    if any(t in c.lower() for t in ("date", "time", "timestamp", "hour", "day")):
-                        time_column = c
-                        break
+                    if any(t in c.lower() for t in ("date", "time", "timestamp")):
+                        try:
+                            pd.to_datetime(df[c].dropna().iloc[:20])
+                            time_column = c
+                            break
+                        except Exception:
+                            continue
+
+        if not time_column or time_column not in df.columns:
+            is_pure_univariate = len(df.columns) == 1
+            if not isinstance(df.index, pd.DatetimeIndex) and not is_pure_univariate:
+                raise ToolExecutionError(
+                    "Multi-seasonal analysis requires a valid datetime or monotonic temporal axis."
+                )
 
         numeric_cols = [
             c for c in df.columns
@@ -130,8 +160,17 @@ class MultiSeasonalAnalysisTool(BaseTool):
         if not numeric_cols:
             raise ToolExecutionError("Multi-seasonal analysis requires at least one continuous measure column.")
 
+        if value_column and _is_demographic_or_static(value_column):
+            raise ToolExecutionError(
+                f"Multi-seasonal analysis cannot evaluate static demographic attribute '{value_column}'. "
+                "Requires a time-varying continuous metric."
+            )
+
         if value_column not in df.columns or value_column == time_column:
-            value_column = numeric_cols[0]
+            valid_num = [c for c in numeric_cols if not _is_demographic_or_static(c)]
+            if not valid_num:
+                raise ToolExecutionError("Multi-seasonal analysis requires at least one non-demographic continuous measure.")
+            value_column = valid_num[0]
 
         cols_to_use = [value_column]
         if time_column:

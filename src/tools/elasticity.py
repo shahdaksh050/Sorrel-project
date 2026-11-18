@@ -93,7 +93,10 @@ def _fit(y: np.ndarray, x: np.ndarray, absorbed: int = 0) -> dict[str, float] | 
     dof = n - k - absorbed
     if dof < 1 or np.linalg.matrix_rank(x) < k:
         return None
-    xtx_inv = np.linalg.inv(x.T @ x)
+    try:
+        xtx_inv = np.linalg.inv(x.T @ x)
+    except np.linalg.LinAlgError:
+        return None
     beta = xtx_inv @ (x.T @ y)
     resid = y - x @ beta
     meat = (x * (resid**2)[:, None]).T @ x

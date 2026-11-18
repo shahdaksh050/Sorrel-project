@@ -488,10 +488,10 @@ class TestLLMClientParseJson:
 
 
 class TestMinIterationsOrchestration:
-    def test_min_iterations_defaults_to_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_min_iterations_defaults_to_two(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MIN_ITERATIONS", raising=False)
         agent = AgentController()
-        assert agent.min_iterations == 1
+        assert agent.min_iterations == 2
 
     def test_min_iterations_reads_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MIN_ITERATIONS", "4")
@@ -519,6 +519,18 @@ class TestMinIterationsOrchestration:
         }
         # First call: complete (early!). Second call (reprompt): step1. Third call (iter 2): FINAL_RESPONSE.
         agent.llm_client = _ScriptedLLM([FINAL_RESPONSE, step1, FINAL_RESPONSE])  # type: ignore[assignment]
+        agent.load_dataset(sample_csv, target_hint="label", interactive=False)
+        final = agent.analyze()
+        assert final["status"] in {"partial", "succeeded_with_warnings"}
+        assert agent.memory.iteration_count >= 2
+
+    def test_two_phase_cadence_injects_drilldown_when_reprompt_confirms_complete(
+        self, sample_csv: str, tmp_path: pytest.TempPathFactory
+    ) -> None:
+        """Two-phase adaptive cadence: Cycle 1 never terminates early; repeats complete triggers drill-down."""
+        agent = AgentController(max_iterations=3, enable_rlm=False)
+        agent._output_dir = str(tmp_path / "output")
+        agent.llm_client = _ScriptedLLM([FINAL_RESPONSE, FINAL_RESPONSE, FINAL_RESPONSE])  # type: ignore[assignment]
         agent.load_dataset(sample_csv, target_hint="label", interactive=False)
         final = agent.analyze()
         assert final["status"] in {"partial", "succeeded_with_warnings"}

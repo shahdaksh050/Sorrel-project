@@ -83,8 +83,8 @@ def _max_drawdown(prices: pd.Series) -> tuple[float, float]:
     """(max drawdown as a negative fraction, peak value it fell from)."""
     running_peak = prices.cummax()
     drawdown = prices / running_peak - 1.0
-    trough_idx = drawdown.idxmin()
-    return float(drawdown.min()), float(running_peak.loc[trough_idx])
+    argmin = int(np.argmin(drawdown.to_numpy()))
+    return float(drawdown.iloc[argmin]), float(running_peak.iloc[argmin])
 
 
 def _series_metrics(
@@ -124,10 +124,13 @@ def _series_metrics(
         "mean_period_return_pct": round(float(returns.mean()) * 100, 6),
     }
 
-    if years > 0 and (1.0 + total_return) > 0:
-        metrics["annualised_return_pct"] = round(
-            ((1.0 + total_return) ** (1.0 / years) - 1.0) * 100, 4
-        )
+    if 0.05 <= years <= 100.0 and (1.0 + total_return) > 0:
+        try:
+            metrics["annualised_return_pct"] = round(
+                ((1.0 + total_return) ** (1.0 / years) - 1.0) * 100, 4
+            )
+        except (OverflowError, ValueError):
+            pass
     metrics["period_years"] = round(years, 3)
 
     if len(returns) >= _MIN_RETURNS_FOR_ANNUALISATION:

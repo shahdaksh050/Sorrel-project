@@ -53,9 +53,12 @@ _BOILERPLATE_RE = re.compile(
     r"deterministic\s+run|"
     r"llm\s+was\s+(?:switched\s+off|disabled)|"
     r"plan\s+came\s+from\s+the\s+dataset\s+profile|"
-    r"successfully\s+investigated|"
+    r"successfully\s+(?:investigated|executed|completed)|"
     r"analysis\s+(?:is\s+)?complete|"
-    r"we\s+have\s+(?:successfully\s+)?(?:investigated|completed|analyzed)",
+    r"we\s+have\s+(?:successfully\s+)?(?:investigated|completed|analyzed|executed|gathered|identified)|"
+    r"(?:we\s+have\s+)?sufficient\s+(?:verified\s+)?findings\s+to\s+synthesize|"
+    r"no\s+further\s+(?:tools|analysis|investigation)\s+(?:are|is)\s+needed|"
+    r"the\s+(?:analysis|pipeline)\s+has\s+completed",
     re.IGNORECASE,
 )
 
@@ -422,8 +425,7 @@ def _evidence_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         and f.get("kind") not in _CAVEAT_FINDING_KINDS
         and not is_data_hygiene_finding(f)
     ]
-    pool = list(pool)  # keep rank_findings() order (source-diversity pass), no re-sort
-    return pool[:_MAX_EVIDENCE_FINDINGS]
+    return list(pool)  # Academic dossier: display all verified findings without truncation
 
 
 def _caveat_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -571,7 +573,7 @@ def _format_limitations(
         )
         lines.append("")
         ordered = _sort_bh_tests(bh)
-        shown = ordered[:_MAX_BH_ROWS]
+        shown = ordered  # Academic dossier: display all hypothesis tests without truncation
         has_group = any(t.get("group_column") for t in shown)
         if has_group:
             lines.append("| Feature | Group | Test | p-value | BH-adjusted p | Significant after correction |")
@@ -589,10 +591,6 @@ def _format_limitations(
                 f"{'Yes' if t.get('significant_after_correction') else 'No'} |"
             )
             lines.append(row)
-        remaining = len(ordered) - len(shown)
-        if remaining > 0:
-            lines.append("")
-            lines.append(f"… {remaining} more test(s) not shown.")
         lines.append("")
 
     if unverified_claims:
@@ -769,6 +767,11 @@ class GenerateReportTool(BaseTool):
         params.setdefault("degradations", memory.get_context("degradations"))
         params.setdefault("findings", [f.to_dict() for f in memory.ranked_findings()])
         params.setdefault("analysis_decision", memory.get_context("analysis_decision"))
+        params.setdefault("coverage", memory.get_context("coverage"))
+        params.setdefault("domain_analysis", memory.get_context("domain_analysis"))
+        params.setdefault("causal_design", memory.get_context("causal_design"))
+        params.setdefault("governance", memory.get_context("governance"))
+        params.setdefault("active_domain_pack", memory.get_context("active_domain_pack"))
         return params
 
     def execute(
@@ -787,6 +790,11 @@ class GenerateReportTool(BaseTool):
         degradations: list[str] | None = None,
         findings: list[dict[str, Any]] | None = None,
         analysis_decision: dict[str, Any] | None = None,
+        coverage: dict[str, Any] | None = None,
+        domain_analysis: dict[str, Any] | None = None,
+        causal_design: dict[str, Any] | None = None,
+        governance: dict[str, Any] | None = None,
+        active_domain_pack: str | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         if llm_insights is None:
@@ -819,14 +827,19 @@ class GenerateReportTool(BaseTool):
         tool_results: list[dict[str, Any]] = _parsed if isinstance(_parsed, list) else []
 
         # Build Markdown
+        user_obj = llm_insights.get("user_objective")
         auto_obj = llm_insights.get("autonomous_objective")
+        if not user_obj and not auto_obj:
+            user_obj = llm_insights.get("objective")
         md_lines: list[str] = [
             "# Sorrel analysis report",
             "",
             f"**Dataset**: {dataset_name}  ",
             f"**Generated**: {timestamp}  ",
         ]
-        if auto_obj:
+        if user_obj:
+            md_lines.append(f"**Objective**: {user_obj}  ")
+        if auto_obj and auto_obj != user_obj:
             md_lines.append(f"**Mission**: {auto_obj}  ")
         md_lines += [
             "",
@@ -964,6 +977,11 @@ class GenerateReportTool(BaseTool):
                     "degradations": degradations,
                     "findings": findings,
                     "analysis_decision": analysis_decision,
+                    "coverage": coverage,
+                    "domain_analysis": domain_analysis,
+                    "causal_design": causal_design,
+                    "governance": governance,
+                    "active_domain_pack": active_domain_pack,
                 },
                 indent=2,
             ),

@@ -159,7 +159,10 @@ def _level_shifts(y: np.ndarray) -> list[dict[str, Any]]:
 def _series_anomalies(
     df: pd.DataFrame, date_column: str, value_column: str, agg: str, time_hint: str | None
 ) -> dict[str, Any]:
-    dates = pd.to_datetime(df[date_column], errors="coerce", format="mixed")
+    if pd.api.types.is_numeric_dtype(df[date_column]):
+        dates = pd.to_datetime(df[date_column].astype(str), errors="coerce", format="mixed")
+    else:
+        dates = pd.to_datetime(df[date_column], errors="coerce", format="mixed")
     if getattr(dates.dt, "tz", None) is not None:
         dates = dates.dt.tz_localize(None)
     frame = pd.DataFrame({"d": dates, "v": pd.to_numeric(df[value_column], errors="coerce")}).dropna()

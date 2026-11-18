@@ -249,6 +249,8 @@ def vega_config(dark: bool = False) -> dict[str, Any]:
             "labelFontSize": 11,
             "titleFont": FONT_HEADING,
             "titleFontWeight": 600,
+            "titleLimit": 360,
+            "titlePadding": 10,
         },
         "legend": {
             "labelColor": ink,
@@ -266,7 +268,7 @@ def vega_config(dark: bool = False) -> dict[str, Any]:
         # The main line is the pen green, not ink: near-white lines on the Night surface glare. Night
         # strokes are 0.5px heavier and fills lighter, so thin marks and tints keep their weight there.
         "line": {"color": pen, "strokeWidth": 2.5 if dark else 2},
-        "area": {"color": pen, "opacity": 0.28 if dark else 0.35, "line": {"color": pen}},
+        "area": {"color": pen, "opacity": 0.28 if dark else 0.35, "line": False},
         "circle": {"color": pen},
         "point": {"color": pen},
         "tick": {"color": ink},

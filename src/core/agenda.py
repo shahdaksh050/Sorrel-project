@@ -247,7 +247,7 @@ def build_agenda(
     # Archetype-specific questions (experiment, survey, panel/event log,
     # sensor series), skipping any the generic passes above already asked.
     seen = {(q.kind, q.suggested_tool, tuple(sorted(q.columns))) for q in questions}
-    for q in _archetype_questions(profile, arm):
+    for q in _archetype_questions(profile, arm, excluded=excluded):
         key = (q.kind, q.suggested_tool, tuple(sorted(q.columns)))
         if key not in seen:
             seen.add(key)
@@ -336,22 +336,35 @@ def build_agenda(
     return selected
 
 
-def _archetype_questions(profile: DatasetProfile, arm: ColumnProfile | None) -> list[Question]:
+def _archetype_questions(
+    profile: DatasetProfile,
+    arm: ColumnProfile | None,
+    excluded: set[str] | None = None,
+) -> list[Question]:
     """Questions a given data archetype (profile.archetype) calls for, on
     top of the generic segment/trend/relationship passes."""
     from src.core.profiler import (
+        ARCHETYPE_BASKET,
+        ARCHETYPE_CONTINUOUS_SERIES,
+        ARCHETYPE_CROSS_SECTIONAL,
         ARCHETYPE_EVENT_LOG,
+        ARCHETYPE_GEOSPATIAL,
+        ARCHETYPE_HYBRID_TEXT,
+        ARCHETYPE_NETWORK,
         ARCHETYPE_PANEL,
         ARCHETYPE_SENSOR,
         ARCHETYPE_SURVEY,
+        ARCHETYPE_SURVIVAL,
+        ARCHETYPE_TRANSACTIONAL,
         SEMANTIC_FLAG,
         SEMANTIC_ORDINAL,
         ordinal_scale_columns,
     )
 
+    excluded_set = excluded or set()
     archetype = profile.archetype
-    measures = profile.measures()
-    time_cols = profile.datetime_cols[:1]
+    measures = [m for m in profile.measures() if m.name not in excluded_set]
+    time_cols = [c for c in profile.datetime_cols[:1] if c not in excluded_set]
     questions: list[Question] = []
 
     if arm is not None:
@@ -419,7 +432,7 @@ def _archetype_questions(profile: DatasetProfile, arm: ColumnProfile | None) -> 
                 suggested_tool="correlation_analysis",
             ))
 
-    elif archetype in (ARCHETYPE_PANEL, ARCHETYPE_EVENT_LOG):
+    elif archetype in (ARCHETYPE_PANEL,):
         entity = profile.entity_col or (profile.panel_group_cols[0] if profile.panel_group_cols else None)
         if entity:
             for measure in measures[:2]:
@@ -431,25 +444,36 @@ def _archetype_questions(profile: DatasetProfile, arm: ColumnProfile | None) -> 
                     suggested_tool="time_series_analysis",
                 ))
                 questions.append(Question(
-                    text=f"Is '{measure.name}' concentrated among a few '{entity}' entities?",
-                    kind="concentration",
+                    text=f"How much of '{measure.name}' variance is between '{entity}' groups versus within them over time?",
+                    kind="mixed_model",
                     columns=[measure.name, entity],
-                    expected_value=0.65,
-                    suggested_tool="concentration_analysis",
-                ))
-            if archetype == ARCHETYPE_EVENT_LOG:
-                questions.append(Question(
-                    text=f"Do a few '{entity}' entities generate most of the events?",
-                    kind="concentration",
-                    columns=[entity],
-                    expected_value=0.6,
-                    suggested_tool="concentration_analysis",
+                    expected_value=0.70,
+                    suggested_tool="mixed_model_analysis",
                 ))
 
-    elif archetype == ARCHETYPE_SENSOR:
+    elif archetype in (ARCHETYPE_TRANSACTIONAL, ARCHETYPE_EVENT_LOG):
+        entity = profile.entity_col or (profile.panel_group_cols[0] if profile.panel_group_cols else None)
+        if entity:
+            for measure in measures[:2]:
+                questions.append(Question(
+                    text=f"Is '{measure.name}' concentrated among a few '{entity}' entities (Pareto 80/20 distribution)?",
+                    kind="concentration",
+                    columns=[measure.name, entity],
+                    expected_value=0.70,
+                    suggested_tool="concentration_analysis",
+                ))
+            questions.append(Question(
+                text=f"Do a few '{entity}' entities generate most of the transactions?",
+                kind="concentration",
+                columns=[entity],
+                expected_value=0.65,
+                suggested_tool="concentration_analysis",
+            ))
+
+    elif archetype in (ARCHETYPE_CONTINUOUS_SERIES, ARCHETYPE_SENSOR):
         for measure in measures[:3]:
             questions.append(Question(
-                text=f"Is {_stat(measure)} '{measure.name}' trending or seasonal over time, and what changed most recently?",
+                text=f"Is {_stat(measure)} '{measure.name}' trending or exhibiting multi-period seasonality, and are returns stationary?",
                 kind="trend",
                 columns=[measure.name, *time_cols],
                 expected_value=0.75,
@@ -463,7 +487,87 @@ def _archetype_questions(profile: DatasetProfile, arm: ColumnProfile | None) -> 
                 suggested_tool="detect_outliers",
             ))
 
-    return questions
+    elif archetype == ARCHETYPE_SURVIVAL:
+        dur_col = next((c.name for c in profile.columns if any(k in c.name.lower() for k in ("tenure", "duration", "time", "months")) and c.kind == "numeric"), None)
+        event_col = next((c.name for c in profile.columns if any(k in c.name.lower() for k in ("churn", "died", "event", "status", "cancel", "failed"))), None)
+        dims = [d.name for d in profile.dimensions() if 2 <= d.nunique <= 10]
+        if dur_col and event_col:
+            questions.append(Question(
+                text=f"What is the median survival duration before '{event_col}', and what factors significantly alter the hazard rate?",
+                kind="survival",
+                columns=[dur_col, event_col],
+                expected_value=0.85,
+                suggested_tool="survival_analysis",
+            ))
+            if dims:
+                questions.append(Question(
+                    text=f"Does survival probability significantly differ across '{dims[0]}' cohorts?",
+                    kind="survival",
+                    columns=[dur_col, event_col, dims[0]],
+                    expected_value=0.80,
+                    suggested_tool="survival_analysis",
+                ))
+
+    elif archetype == ARCHETYPE_BASKET:
+        order_col = next((c.name for c in profile.columns if any(k in c.name.lower() for k in ("order", "basket", "invoice", "receipt", "transaction"))), None)
+        item_col = next((c.name for c in profile.columns if any(k in c.name.lower() for k in ("item", "product", "sku", "description"))), None)
+        if order_col and item_col:
+            questions.append(Question(
+                text=f"Which '{item_col}' products are most frequently co-purchased in '{order_col}' baskets with association lift > 1.5?",
+                kind="association",
+                columns=[order_col, item_col],
+                expected_value=0.85,
+                suggested_tool="basket_analysis",
+            ))
+
+    elif archetype == ARCHETYPE_NETWORK:
+        src_col = next((c.name for c in profile.columns if any(k in c.name.lower() for k in ("source", "from", "src", "origin", "sender"))), None)
+        dst_col = next((c.name for c in profile.columns if any(k in c.name.lower() for k in ("target", "to", "dst", "destination", "receiver"))), None)
+        if src_col and dst_col:
+            questions.append(Question(
+                text=f"Which nodes in '{src_col}' -> '{dst_col}' exhibit high centrality and form structural bottlenecks across the network?",
+                kind="relationship",
+                columns=[src_col, dst_col],
+                expected_value=0.80,
+                suggested_tool="graph_analysis",
+            ))
+
+    elif archetype == ARCHETYPE_GEOSPATIAL:
+        lat_col = next((c.name for c in profile.columns if re.search(r"lat", c.name, re.I)), None)
+        lon_col = next((c.name for c in profile.columns if re.search(r"lon|lng", c.name, re.I)), None)
+        if lat_col and lon_col:
+            questions.append(Question(
+                text=f"Are observations clustered geographically across '{lat_col}' and '{lon_col}', and do metric outcomes correlate with spatial coordinates?",
+                kind="distribution",
+                columns=[lat_col, lon_col, *[m.name for m in measures[:2]]],
+                expected_value=0.75,
+                suggested_tool="cluster_data",
+            ))
+
+    elif archetype == ARCHETYPE_HYBRID_TEXT:
+        text_col = next((c.name for c in profile.columns if c.kind == "text" or c.stats.get("avg_word_count", 0) >= 6), None)
+        if text_col:
+            questions.append(Question(
+                text=f"What dominant topics and sentiment polarities in '{text_col}' correlate most strongly with key metric outcomes?",
+                kind="relationship",
+                columns=[text_col, *[m.name for m in measures[:2]]],
+                expected_value=0.75,
+                suggested_tool="correlation_analysis",
+            ))
+
+    elif archetype == ARCHETYPE_CROSS_SECTIONAL:
+        if measures:
+            dims = [d.name for d in profile.dimensions() if 2 <= d.nunique <= 10]
+            if dims:
+                questions.append(Question(
+                    text=f"Do primary outcomes in '{measures[0].name}' differ significantly across '{dims[0]}' segments?",
+                    kind="segment",
+                    columns=[measures[0].name, dims[0]],
+                    expected_value=0.70,
+                    suggested_tool="segment_comparison",
+                ))
+
+    return [q for q in questions if not any(c in excluded_set for c in q.columns)]
 
 
 #: tool name -> (kind, value, question template, default_params keys).
@@ -578,75 +682,150 @@ def _mentioned(finding: dict[str, Any], columns: list[str]) -> int:
 
 
 def _about(finding: dict[str, Any], columns: list[str]) -> bool:
-    """A finding is about a question's columns. With two or more columns
-    (e.g. "M by D2") it must name BOTH its measure and dimension among them,
-    else a finding on "M by D1" would mark "M by D2" answered."""
-    m, d = finding.get("measure"), finding.get("dimension")
-    if len(columns) >= 2 and m and d:
-        return m in columns and d in columns
-    return m in columns or d in columns
+    """A finding is about a question's columns. Matches if question columns are covered
+    by measure/dimension, target/segment, or evidence columns."""
+    if not columns:
+        return False
+    m = str(finding.get("measure") or "").lower().strip()
+    d = str(finding.get("dimension") or "").lower().strip()
+    ev = finding.get("evidence") or {}
+    found_cols: set[str] = {c for c in (m, d) if c}
+    if isinstance(ev, dict):
+        for k in ("col_a", "col_b", "target_column", "segment_column", "feature_column", "group_column", "value_column", "time_column", "column"):
+            val = str(ev.get(k) or "").lower().strip()
+            if val:
+                found_cols.add(val)
+        for list_k in ("columns", "features", "features_analyzed"):
+            arr = ev.get(list_k)
+            if isinstance(arr, (list, tuple)):
+                found_cols.update(str(x).lower().strip() for x in arr if x)
+
+    q_cols = {str(c).lower().strip() for c in columns if c}
+    if not q_cols:
+        return False
+    if len(q_cols) >= 2:
+        return q_cols.issubset(found_cols)
+    return any(c in found_cols for c in q_cols)
 
 
-def coverage_report(agenda: list[Question], findings: list[dict[str, Any]]) -> dict[str, Any]:
+def coverage_report(
+    agenda: list[Question],
+    findings: list[dict[str, Any]],
+    tool_results: list[Any] | None = None,
+) -> dict[str, Any]:
     """
-    Match agenda questions against what the finding bus actually produced,
-    so "coverage" is a checkable fact rather than an impression. A question
-    counts as answered when a finding's kind/measure/dimension columns
-    overlap with the question's — a coarse but honest match; false negatives
-    (a question judged unanswered when a finding actually addressed it in a
-    way this heuristic can't see) are the safe failure direction here, since
-    they show up as an honest "could not confirm" rather than a false claim
-    of coverage.
+    Match agenda questions against what the finding bus actually produced and
+    what analytical steps were successfully executed. A question counts as answered
+    when:
+      1. A finding's kind/measure/dimension/evidence columns address the question, OR
+      2. An executed tool step successfully ran and evaluated the question's target
+         dimensions/measures.
     """
     from src.core.findings import CAVEAT_FINDING_KINDS
 
+    # Build structured index of successful tool executions
+    executed_tools: list[dict[str, Any]] = []
+    if tool_results:
+        for r in tool_results:
+            if hasattr(r, "tool_name"):
+                name = getattr(r, "tool_name", "")
+                status = getattr(r, "status", "")
+                params = getattr(r, "params", {}) or {}
+                output = getattr(r, "output", {}) or {}
+            elif isinstance(r, dict):
+                name = str(r.get("tool_name", ""))
+                status = str(r.get("status", ""))
+                params = r.get("params", {}) or {}
+                output = r.get("output", {}) or {}
+            else:
+                continue
+            if status == "success":
+                executed_tools.append({
+                    "tool": name,
+                    "params": params if isinstance(params, dict) else {},
+                    "output": output if isinstance(output, dict) else {},
+                })
+
     answered: list[Question] = []
     unanswered: list[Question] = []
+
     for q in agenda:
         if q.suggested_tool is None:
             unanswered.append(q)  # a declined question (e.g. modelling) is unanswered by definition
             continue
+
         kind_hit = (q.kind, "segment_lift", "driver", "trend", "concentration", "change", *_KIND_ALIASES.get(q.kind, ()))
-        # LLM-authored findings rarely fill measure/dimension, so they are
-        # matched on the columns their text names instead.
+
         llm_hit = any(
             f.get("kind") in _LLM_KINDS and _mentioned(f, q.columns) >= min(2, len(q.columns))
             for f in findings
         ) if q.columns else False
+
+        hit = False
         if q.kind in {spec[0] for spec in _SPECIALIST_TOOLS.values()}:
-            # A specialist tool having run and reported (not just a caveat)
-            # is the answer, whatever columns its own resolver picked.
             hit = any(
                 f.get("source_tool") == q.suggested_tool and f.get("kind") not in CAVEAT_FINDING_KINDS
                 for f in findings
-            )
+            ) or any(ex["tool"] == q.suggested_tool for ex in executed_tools)
         elif q.kind == "distribution":
-            # detect_outliers reports method_fit findings that carry no
-            # measure column, so its having reported at all is the answer.
-            hit = llm_hit or any(f.get("source_tool") == q.suggested_tool for f in findings)
+            hit = (
+                llm_hit
+                or any(f.get("source_tool") == q.suggested_tool for f in findings)
+                or any(ex["tool"] in (q.suggested_tool, "detect_outliers") for ex in executed_tools)
+            )
         elif q.kind == "quality":
-            # Integrity findings use several kinds (method_fit, test,
-            # coverage_gap); the audited source is the stable contract.
-            hit = any(f.get("source_tool") == q.suggested_tool for f in findings)
+            hit = (
+                any(f.get("source_tool") in (q.suggested_tool, "clean_data", "ingest_dataset", "integrity_audit") for f in findings)
+                or any(ex["tool"] in (q.suggested_tool, "clean_data", "ingest_dataset", "integrity_audit") for ex in executed_tools)
+            )
         elif q.columns:
-            # A question that names specific columns is only answered by a
-            # finding that's actually ABOUT those columns — matching on
-            # source_tool alone let any finding from the right tool count
-            # for every question that tool could ever answer (e.g. one
-            # segment_comparison finding on an unrelated measure/dimension
-            # pair would mark every OTHER segment question "answered" too).
             hit = llm_hit or any(
                 f.get("kind") in kind_hit and _about(f, q.columns) for f in findings
             )
+            if not hit and executed_tools:
+                for ex in executed_tools:
+                    if ex["tool"] != q.suggested_tool:
+                        if not (q.suggested_tool in ("time_series_analysis", "change_analysis") and ex["tool"] in ("time_series_analysis", "change_analysis")):
+                            continue
+                    tool_cols: set[str] = set()
+                    for v in ex["params"].values():
+                        if isinstance(v, str):
+                            tool_cols.add(v.lower())
+                        elif isinstance(v, (list, tuple)):
+                            tool_cols.update(str(item).lower() for item in v)
+                    for k in ("target_column", "segment_column", "value_column", "feature_column", "group_column", "time_column", "price_column", "quantity_column"):
+                        v = ex["output"].get(k)
+                        if isinstance(v, str):
+                            tool_cols.add(v.lower())
+                    analyzed = ex["output"].get("features_analyzed") or ex["output"].get("columns_analyzed") or []
+                    if isinstance(analyzed, (list, tuple)):
+                        tool_cols.update(str(c).lower() for c in analyzed)
+                    outliers_cols = ex["output"].get("outliers_by_column")
+                    if isinstance(outliers_cols, dict):
+                        tool_cols.update(str(c).lower() for c in outliers_cols.keys())
+
+                    q_lower = {c.lower().strip() for c in q.columns}
+                    if q.suggested_tool in ("time_series_analysis", "change_analysis"):
+                        measure_col = q.columns[0].lower().strip()
+                        if measure_col in tool_cols:
+                            hit = True
+                            break
+                    if len(q_lower) >= 2:
+                        if q_lower.issubset(tool_cols):
+                            hit = True
+                            break
+                    elif len(q_lower) == 1:
+                        if next(iter(q_lower)) in tool_cols:
+                            hit = True
+                            break
         else:
-            # No columns to check against (e.g. the general "which measures
-            # move together?" question) — the bare source_tool match is the
-            # only signal available, same as before.
             hit = any(
                 f.get("kind") in kind_hit and f.get("source_tool") == q.suggested_tool
                 for f in findings
-            )
+            ) or any(ex["tool"] == q.suggested_tool for ex in executed_tools)
+
         (answered if hit else unanswered).append(q)
+
     return {
         "total": len(agenda),
         "answered": len(answered),

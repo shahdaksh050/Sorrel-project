@@ -199,8 +199,8 @@ class CohortAnalysisTool(BaseTool):
         if order_column and order_column in work.columns:
             order_totals = work.groupby(order_column)[amount_column].sum()
             result["order_count"] = int(order_totals.size)
-            result["average_order_value"] = round(float(order_totals.mean()), 2)
-            result["median_order_value"] = round(float(order_totals.median()), 2)
+            result["average_order_value"] = round(float(order_totals.mean()), 2) if not order_totals.empty else 0.0
+            result["median_order_value"] = round(float(order_totals.median()), 2) if not order_totals.empty else 0.0
             # Lines with a missing order id belong to no order (groupby drops
             # them), so they must not inflate the lines-per-order numerator.
             result["mean_lines_per_order"] = round(
@@ -276,9 +276,9 @@ class CohortAnalysisTool(BaseTool):
             result["repeat_purchase_rate_pct"] = round(
                 repeat_customers / customer_count * 100, 2
             ) if customer_count else 0.0
-            result["mean_revenue_per_customer"] = round(float(rfm["monetary"].mean()), 2)
-            result["median_revenue_per_customer"] = round(float(rfm["monetary"].median()), 2)
-            result["mean_orders_per_customer"] = round(float(rfm["frequency"].mean()), 3)
+            result["mean_revenue_per_customer"] = round(float(rfm["monetary"].mean()), 2) if customer_count else 0.0
+            result["median_revenue_per_customer"] = round(float(rfm["monetary"].median()), 2) if customer_count else 0.0
+            result["mean_orders_per_customer"] = round(float(rfm["frequency"].mean()), 3) if customer_count else 0.0
 
             # Revenue concentration — how much of the business rests on the
             # best customers (the practical read on Pareto). Shares are of

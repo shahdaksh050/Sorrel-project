@@ -27,7 +27,12 @@ from scipy import stats
 from src.core.findings import Finding
 from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.profiler import is_identifier_like, profile_dataframe
-from src.core.stats_utils import aggregate_to_entity, measure_aggregation, repeated_entity
+from src.core.stats_utils import (
+    aggregate_to_entity,
+    is_derived_pair,
+    measure_aggregation,
+    repeated_entity,
+)
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
 
@@ -453,6 +458,8 @@ class SelectStatisticalTestTool(BaseTool):
             for c in profile.dimensions():
                 if c.name == feature_column or c.name not in df.columns:
                     continue
+                if is_derived_pair(feature_column, c.name):
+                    continue
                 if 2 <= c.nunique <= MAX_DIMENSION_CARDINALITY:
                     counts = df[c.name].value_counts(dropna=True)
                     if int((counts >= MIN_RELIABLE_GROUP_SIZE).sum()) >= 2:
@@ -461,7 +468,7 @@ class SelectStatisticalTestTool(BaseTool):
             # Defensive fallback if profiling itself failed above — mirrors
             # the categorical/boolean heuristic this tool used before 7.6.
             for col in df.columns:
-                if col == feature_column:
+                if col == feature_column or is_derived_pair(feature_column, col):
                     continue
                 series = df[col]
                 nunique = int(series.nunique(dropna=True))
@@ -943,10 +950,44 @@ class SelectStatisticalTestTool(BaseTool):
 
         results: list[Finding] = []
         for c in candidates:
+            if is_derived_pair(c.get("feature_column"), c.get("group_column")):
+                continue
             p_adj, effect, effect_kind = c["p_adjusted"], c["effect_size"], c["effect_kind"]
             if p_adj is None or effect is None or effect_kind is None:
                 continue
             if p_adj >= _FINDING_P_THRESHOLD:
+                n_obs = c.get("n")
+                if n_obs is None or n_obs >= 20:
+                    measure, dimension = c["feature_column"], c["group_column"]
+                    results.append(Finding(
+                        finding_id=f"{self.name}:invariance:{measure}:{dimension}",
+                        kind="invariance",
+                        headline=(
+                            f"'{measure}' shows empirical invariance across '{dimension}' "
+                            f"({c['test_name']}, {effect_kind}={effect:.3f}, p_adj={p_adj:.4f} — no significant difference)."
+                        ),
+                        detail=(
+                            f"Empirical invariance confirmed: no statistically significant difference in '{measure}' "
+                            f"across '{dimension}' groups ({c['test_name']}, p_adj={p_adj:.4f} >= 0.05)."
+                        ),
+                        evidence={
+                            "test_name": c["test_name"],
+                            "p_value": c["p_value"],
+                            "p_adjusted": p_adj,
+                            "n": n_obs,
+                            "unit_of_analysis": c.get("unit_of_analysis"),
+                            "post_hoc": c.get("post_hoc"),
+                            "invariance": True,
+                        },
+                        source_tool=self.name,
+                        measure=measure,
+                        dimension=dimension,
+                        effect=effect,
+                        effect_kind=effect_kind,
+                        p_value=c["p_value"],
+                        p_adjusted=p_adj,
+                        confidence=0.75,
+                    ))
                 continue
             threshold = _EFFECT_KIND_THRESHOLDS.get(effect_kind, PRACTICAL_THRESHOLD_D)
             if abs(effect) < threshold:

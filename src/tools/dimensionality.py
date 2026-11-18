@@ -134,7 +134,7 @@ class DimensionalityAnalysisTool(BaseTool):
         if len(features) > analysis_sample_rows():
             sampled = sample_note(len(features), analysis_sample_rows())
             features = features.sample(n=analysis_sample_rows(), random_state=0)
-        filled = features.fillna(features.median(numeric_only=True))
+        filled = features.fillna(features.median(numeric_only=True)).fillna(0.0)
         policy = ComputePolicy.from_env()
         if compute_backend is not None:
             try:

@@ -335,7 +335,7 @@ class ChangeAnalysisTool(BaseTool):
         # unknown, not a move to or from zero.
         comparison_missing = bool(np.isnan(latest_value) or np.isnan(prior_value))
         pct_change = (
-            (latest_value - prior_value) / prior_value
+            (latest_value - prior_value) / abs(prior_value)
             if not comparison_missing and prior_value != 0
             else None
         )
@@ -368,14 +368,14 @@ class ChangeAnalysisTool(BaseTool):
             if raw is not None and not np.isnan(raw):
                 yoy_value = float(raw)
                 if not comparison_missing and yoy_value != 0:
-                    yoy_change_pct = (latest_value - yoy_value) / yoy_value
+                    yoy_change_pct = (latest_value - yoy_value) / abs(yoy_value)
         if pct_change is not None and yoy_change_pct is not None:
             seasonal_move = abs(yoy_change_pct) < _SEASONAL_YOY_RATIO * abs(pct_change) or (
                 typical_volatility is not None and abs(yoy_change_pct) < typical_volatility
             )
         trailing_avg = float(trailing.mean()) if trailing.notna().any() else None
         pct_change_vs_trailing = (
-            (latest_value - trailing_avg) / trailing_avg
+            (latest_value - trailing_avg) / abs(trailing_avg)
             if trailing_avg is not None and trailing_avg != 0 and not np.isnan(latest_value)
             else None
         )

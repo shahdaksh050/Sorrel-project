@@ -57,19 +57,23 @@ def test_early_complete_reprompts_and_uses_new_plan(agent: AgentController) -> N
     assert engine.calls == ["s:deepen_exploration"]
 
 
-def test_early_complete_confirmed_on_reprompt_ends_loop(agent: AgentController) -> None:
+def test_early_complete_confirmed_on_reprompt_injects_phase2_drilldown(agent: AgentController) -> None:
     _with_engine(agent, [{"status": "complete", "summary": "done"}])
     agent._llm_budget_exhausted = lambda: False  # type: ignore[method-assign]
+    agent._build_phase2_drilldown_plan = lambda: {"status": "in_progress", "steps": [{"step_number": 1, "tool_name": "segment_comparison"}]}  # type: ignore[method-assign]
     out, final = agent._handle_completion(1, "p", "s", {"status": "complete"})
-    assert final is out and final["summary"] == "done"
+    assert final is None
+    assert out["status"] == "in_progress"
 
 
-def test_reprompt_failure_accepts_original_completion(agent: AgentController) -> None:
+def test_reprompt_failure_injects_phase2_drilldown(agent: AgentController) -> None:
     _with_engine(agent, [RuntimeError("boom")])
     agent._llm_budget_exhausted = lambda: False  # type: ignore[method-assign]
+    agent._build_phase2_drilldown_plan = lambda: {"status": "in_progress", "steps": [{"step_number": 1, "tool_name": "segment_comparison"}]}  # type: ignore[method-assign]
     first = {"status": "complete"}
     out, final = agent._handle_completion(1, "p", "s", first)
-    assert out is first and final is first
+    assert final is None
+    assert out["status"] == "in_progress"
 
 
 def test_request_plan_returns_reply(agent: AgentController) -> None:
@@ -506,6 +510,40 @@ def test_agenda_anchor_ensures_lead_segment_comparison_in_cycle_one(agent: Agent
     seg_step = next(s for s in anchored if s.tool_name == "segment_comparison")
     assert seg_step.parameters["measure_column"] == "price"
     assert seg_step.parameters["dimension_column"] == "platform"
+
+
+def test_archetype_anchor_ensures_canonical_blueprint_tool_in_cycle_one(agent: AgentController) -> None:
+    """Archetype Blueprint Skeleton: ensure Cycle 1 anchors the canonical tool for detected archetype."""
+    agent.memory.store_dataset_metadata(
+        DatasetMetadata(
+            file_path="survival.csv",
+            row_count=100,
+            column_count=3,
+            columns={"time": "float", "event": "int", "group": "str"},
+            missing_values={"time": 0, "event": 0, "group": 0},
+            numerical_cols=["time", "event"],
+            categorical_cols=["group"],
+        )
+    )
+    from src.core.profiler import DatasetProfile
+    # Mock profile with survival archetype
+    agent.last_profile = DatasetProfile(
+        row_count=100,
+        column_count=3,
+        duplicate_rows=0,
+        memory_mb=0.1,
+        columns=[],
+        warnings=[],
+        quality_score=95,
+        archetype="survival",
+    )
+    agent.memory.iteration_count = 1
+    steps = [
+        AnalysisStep(step_number=1, tool_name="clean_data", parameters={}, rationale="clean"),
+    ]
+    anchored = agent._ensure_agenda_anchor_steps(steps)
+    tools = [s.tool_name for s in anchored]
+    assert "survival_analysis" in tools
 
 
 def test_build_fallback_plan_handles_all_registered_tools(agent: AgentController, tmp_path: Any) -> None:

@@ -347,3 +347,40 @@ class TestGenerateReportTool:
         content = Path(result.output["markdown_path"]).read_text(encoding="utf-8")
         assert "degraded mode" in content
         assert "could not parse file" in content
+
+    def test_academic_dossier_untruncated_findings_and_bh_table(self, report_dir: str) -> None:
+        """Academic dossier ledger: all findings and all BH tests rendered without truncation."""
+        findings = [
+            {
+                "finding_id": f"find_{i}",
+                "kind": "driver",
+                "layer": "analyst",
+                "headline": f"Verified insight number {i} with distinct finding",
+                "evidence": {"effect": 0.5},
+            }
+            for i in range(20)
+        ]
+        tests = [
+            {
+                "step_number": i,
+                "feature_column": f"feat_{i}",
+                "group_column": "segment",
+                "test_name": "T-Test",
+                "p_value": 0.01 + (i * 0.005),
+            }
+            for i in range(25)
+        ]
+        result = GenerateReportTool().run(
+            dataset_name="academic_dossier",
+            tool_results_json=json.dumps(TOOL_RESULTS),
+            llm_insights=LLM_INSIGHTS,
+            output_dir=report_dir,
+            findings=findings,
+            statistical_test_pvalues=tests,
+        )
+        content = Path(result.output["markdown_path"]).read_text(encoding="utf-8")
+        for i in range(20):
+            assert f"Verified insight number {i} with distinct finding" in content
+        for i in range(25):
+            assert f"feat_{i}" in content
+        assert "not shown" not in content

@@ -29,49 +29,109 @@ def render_actions_tab(
     findings = list(run_view.findings) if run_view and hasattr(run_view, "findings") else (report.get("findings") or [])
     matrix = classify_action_matrix(findings)
 
-    quadrants = [
-        ("quick_wins", "⚡ Quick Wins", "High Impact · High Feasibility", "var(--pen)"),
-        ("strategic_bets", "🎯 Strategic Bets", "High Impact · Structural / Complex", "var(--accent)"),
-        ("pilot", "🧪 Pilot / A/B Tests", "High Opportunity · Test Before Scaling", "var(--ink-muted)"),
-        ("incremental", "🔧 Incremental Gains", "Moderate Impact · High Feasibility", "var(--ink-faint)"),
-        ("watch_caveats", "⚠️ Guardrails & Watch", "Confounders / Sensitive / Fragile", "var(--risk)"),
+    qw_items = matrix.get("quick_wins", [])
+    sb_items = matrix.get("strategic_bets", [])
+    pilot_items = matrix.get("pilot", [])
+    inc_items = matrix.get("incremental", [])
+    watch_items = matrix.get("watch_caveats", [])
+
+    total_actionable = len(qw_items) + len(sb_items) + len(pilot_items) + len(inc_items)
+    top_lever = qw_items[0].get("lever") if qw_items else (pilot_items[0].get("lever") if pilot_items else (sb_items[0].get("lever") if sb_items else "Review audit"))
+
+    # Top Executive Action Ribbon
+    st.markdown(
+        f"""<div class="trust-strip" style="margin-bottom:1.25rem;">
+<div class="trust-cell"><div class="k">Actionable Levers</div><div class="v">{total_actionable} Levers</div></div>
+<div class="trust-cell"><div class="k">Primary Execution Candidate</div><div class="v">{html.escape(str(top_lever)[:36])}</div></div>
+<div class="trust-cell"><div class="k">Validation Pilots</div><div class="v">{len(pilot_items)} Recommended</div></div>
+<div class="trust-cell"><div class="k">Monitored Risk Guardrails</div><div class="v">{len(watch_items)} Boundaries</div></div>
+</div>""",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### Action Prioritization Matrix (2x2)")
+    st.caption("Strategic levers categorized by business impact and operational execution feasibility.")
+
+    # 2x2 Grid Layout: Row 1 = High Impact, Row 2 = Moderate / Empirical Impact
+    quad_defs = [
+        # Row 1: High Impact
+        [
+            ("quick_wins", "⚡ Quick Wins", "High Impact · High Feasibility", "var(--pen)", qw_items, "Immediate Execution Candidate"),
+            ("strategic_bets", "🎯 Strategic Bets", "High Impact · Structural / Complex", "var(--accent)", sb_items, "Requires Cross-Functional Alignment"),
+        ],
+        # Row 2: Moderate Impact / Empirical Validation
+        [
+            ("pilot", "🧪 Pilot / A/B Tests", "High Opportunity · Test Before Scaling", "var(--ink-muted)", pilot_items, "Validate Via A/B Trial First"),
+            ("incremental", "🔧 Incremental Gains", "Moderate Impact · High Feasibility", "var(--ink-faint)", inc_items, "Routine Operational Tuning"),
+        ],
     ]
 
-    has_matrix_items = any(matrix.get(k) for k, _, _, _ in quadrants)
-
-    if has_matrix_items:
-        st.markdown("### Action Prioritization Matrix (2x2)")
-        st.caption("Strategic levers prioritized by statistical impact and operational implementation feasibility.")
-
+    for row_quads in quad_defs:
         cols = st.columns(2, gap="medium")
-        for idx, (key, title, subtitle, accent_color) in enumerate(quadrants):
-            items = matrix.get(key, [])
-            if not items:
-                continue
-            target_col = cols[idx % 2]
-            with target_col:
+        for c_idx, (_, title, subtitle, accent_color, items, badge_text) in enumerate(row_quads):
+            with cols[c_idx]:
                 with st.container(border=True):
                     st.markdown(
-                        f'<div style="font-weight:700;font-size:1.05rem;color:{accent_color};margin-bottom:0.15rem;">{html.escape(title)}</div>'
-                        f'<div style="font-size:0.75rem;color:var(--ink-muted);margin-bottom:0.6rem;text-transform:uppercase;letter-spacing:0.04em;">{html.escape(subtitle)}</div>',
+                        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.15rem;">'
+                        f'<div style="font-weight:700;font-size:1.02rem;color:{accent_color};">{html.escape(title)}</div>'
+                        f'<span class="mono-badge" style="font-size:0.7rem;padding:0.15rem 0.45rem;">{html.escape(badge_text)}</span>'
+                        f'</div>'
+                        f'<div style="font-size:0.75rem;color:var(--ink-muted);margin-bottom:0.65rem;text-transform:uppercase;letter-spacing:0.04em;">{html.escape(subtitle)}</div>',
                         unsafe_allow_html=True,
                     )
-                    for it in items[:4]:
-                        lever = html.escape(str(it.get("lever", it.get("headline", ""))))
-                        rationale = html.escape(str(it.get("rationale", "")))
-                        eff = it.get("effect")
-                        eff_badge = f' <span style="font-size:0.8rem;color:var(--pen);font-weight:600;">({eff:+0.1%})</span>' if isinstance(eff, (int, float)) and abs(eff) < 10 else ""
+                    if items:
+                        for it in items[:3]:
+                            lever = html.escape(str(it.get("lever", it.get("headline", ""))))
+                            rationale = html.escape(str(it.get("rationale", "")))
+                            eff = it.get("effect")
+                            eff_badge = f' <span style="font-size:0.8rem;color:var(--pen);font-weight:700;">({eff:+0.1%})</span>' if isinstance(eff, (int, float)) and abs(eff) < 10 else ""
+                            samp = it.get("sample_size")
+                            samp_str = f' <span style="font-size:0.75rem;color:var(--ink-faint);">(n={samp:,})</span>' if isinstance(samp, (int, float)) else ""
+
+                            st.markdown(
+                                f'<div style="margin-bottom:0.65rem;border-left:3px solid {accent_color};padding-left:0.6rem;">'
+                                f'<div style="font-weight:600;font-size:0.88rem;line-height:1.35;">{lever}{eff_badge}{samp_str}</div>'
+                                f'<div style="font-size:0.8rem;color:var(--ink-muted);margin-top:0.2rem;line-height:1.4;">{rationale}</div>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+                    else:
                         st.markdown(
-                            f'<div style="margin-bottom:0.6rem;border-left:2px solid {accent_color};padding-left:0.5rem;">'
-                            f'<div style="font-weight:600;font-size:0.9rem;">{lever}{eff_badge}</div>'
-                            f'<div style="font-size:0.82rem;color:var(--ink-muted);margin-top:0.15rem;">{rationale}</div>'
-                            f'</div>',
+                            '<div style="font-size:0.82rem;color:var(--ink-faint);font-style:italic;padding:0.4rem 0;">'
+                            'No findings currently meet the threshold for this quadrant.'
+                            '</div>',
                             unsafe_allow_html=True,
                         )
-    else:
-        st.caption("No multivariate levers met the threshold for the 2x2 prioritization matrix.")
 
-    # 2. What-If Scenario Simulations
+    # 2. Risk Management & Guardrails Section
+    if watch_items:
+        st.markdown("")
+        with st.container(border=True):
+            st.markdown(
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">'
+                '<div style="font-weight:700;font-size:1.02rem;color:var(--risk);">🛡️ Operational Risk Guardrails & Monitored Covariates</div>'
+                '<span class="mono-badge" style="font-size:0.7rem;padding:0.15rem 0.45rem;">RISK MANAGEMENT</span>'
+                '</div>'
+                '<div style="font-size:0.78rem;color:var(--ink-muted);margin-bottom:0.65rem;">'
+                'External covariates, non-controllable factors, and sensitivity boundaries to monitor in operational governance.'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            w_cols = st.columns(min(len(watch_items), 2), gap="medium")
+            for w_idx, it in enumerate(watch_items[:4]):
+                target_col = w_cols[w_idx % len(w_cols)]
+                with target_col:
+                    lever = html.escape(str(it.get("lever", it.get("headline", ""))))
+                    rationale = html.escape(str(it.get("rationale", "")))
+                    st.markdown(
+                        f'<div style="margin-bottom:0.5rem;border-left:2px solid var(--risk);padding-left:0.5rem;">'
+                        f'<div style="font-weight:600;font-size:0.85rem;">{lever}</div>'
+                        f'<div style="font-size:0.78rem;color:var(--ink-muted);margin-top:0.15rem;">{rationale}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+    # 3. What-If Counterfactual Scenario Simulations
     scenario_out = find_tool(tool_results, "scenario_simulation")
     if scenario_out and isinstance(scenario_out, dict):
         st.divider()
@@ -95,12 +155,12 @@ def render_actions_tab(
                     c2.markdown(f"Baseline: `{base_str}` → Simulated: `{new_str}`")
                     c3.markdown(f"Net Shift: **{delta_str}**")
 
-    # 3. Operational Directives
+    # 4. Operational Directives Roadmap
     st.divider()
     st.markdown("### Operational Directives")
     recs = (run_view.recommendations if run_view and hasattr(run_view, "recommendations") else None) or report.get("recommendations") or []
     if recs:
-        for rec in recs:
+        for idx, rec in enumerate(recs, start=1):
             rec_plain = plainify(str(rec))
             rec_lower = rec_plain.lower()
             if any(rec_lower.startswith(p) for p in ("pilot", "test", "validate", "evaluate")):
@@ -112,8 +172,9 @@ def render_actions_tab(
             else:
                 badge = "Do"
             st.markdown(
-                f'<div class="rc"><span class="mk">{badge}</span>{html.escape(rec_plain)}</div>',
+                f'<div class="rc"><span class="mk">{badge}</span><b>{idx}.</b> {html.escape(rec_plain)}</div>',
                 unsafe_allow_html=True,
             )
     else:
         st.caption("No operational directives recorded for this run.")
+

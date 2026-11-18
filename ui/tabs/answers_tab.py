@@ -13,10 +13,9 @@ from typing import Any
 
 import streamlit as st
 
-from src.core.plain_language import plainify
+from src.core.plain_language import business_headline, plainify
 from src.core.run_view import RunView, build_run_view
 from ui.components.cards import (
-    analyst_figures,
     find_chart_by_id,
     find_tool,
     finding_state,
@@ -26,11 +25,11 @@ from ui.components.cards import (
     render_data_understanding,
     render_defect_stamp,
     render_evidence_html,
+    render_methodology_drawer,
     render_run_compare,
     round_for_reading,
     search_findings,
     state_label,
-    tech_note_html,
 )
 
 
@@ -45,7 +44,7 @@ def _evidence_inspector(
     if st.session_state.get("selected_finding") not in ids:
         st.session_state["selected_finding"] = ids[0]
     labels = {
-        fid: f"{round_for_reading(plainify(str(f.get('headline', ''))))} ({state_label(finding_state(f))})"
+        fid: f"{round_for_reading(business_headline(f))} ({state_label(finding_state(f))})"
         for fid, f in zip(ids, findings, strict=True)
     }
     left, right = st.columns([5, 7], gap="large")
@@ -67,16 +66,15 @@ def _evidence_inspector(
     marker = f'<span class="{came_from}"></span>' if came_from else ""
     with right:
         with st.container(border=True, key=f"evidence_panel_{position}"):
-            st.markdown(marker + render_evidence_html(finding, with_figures=False), unsafe_allow_html=True)
+            st.markdown(marker + render_evidence_html(finding, with_figures=False, business_first=True), unsafe_allow_html=True)
             chart = chart_by_finding.get(str(finding.get("finding_id") or ""))
             if chart:
                 # Unframed (the pane is the frame) and at the common chart height.
                 render_dashboard_chart(chart, vega_cfg, framed=False, height=260)
             else:
-                st.caption("This finding has no chart. The checks above are its evidence.")
-            figures = tech_note_html(analyst_figures(finding))
-            if figures:
-                st.markdown(figures, unsafe_allow_html=True)
+                st.caption("This finding has no chart. The statistical methodology below provides the evidence.")
+            st.markdown(render_methodology_drawer(finding), unsafe_allow_html=True)
+
 
 
 def render_answers_tab(
@@ -171,6 +169,22 @@ def render_answers_tab(
             f"{lead_verdict}"
             + "".join(f'<span class="sub">{html.escape(s)}</span>' for s in sub_lines)
             + "</div>",
+            unsafe_allow_html=True,
+        )
+
+        row_count = (
+            (meta.row_count if meta else None)
+            or (prof.get("row_count") if prof else None)
+            or (len(preview_df) if preview_df is not None else None)
+        )
+        row_str = f"{row_count:,} records" if isinstance(row_count, int) else "100% of data"
+        st.markdown(
+            f"""<div class="trust-strip" style="margin-top:0.85rem;margin-bottom:1.4rem;">
+<div class="trust-cell"><div class="k">Audited Population</div><div class="v">{row_str}</div></div>
+<div class="trust-cell"><div class="k">Audited Hypotheses</div><div class="v">{held} of {total} Held Up</div></div>
+<div class="trust-cell"><div class="k">Data Reliability Score</div><div class="v">{q}/100</div></div>
+<div class="trust-cell"><div class="k">Multiplicity Control</div><div class="v">FDR q=0.05</div></div>
+</div>""",
             unsafe_allow_html=True,
         )
 

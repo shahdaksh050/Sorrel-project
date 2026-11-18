@@ -769,7 +769,17 @@ def classify_action_matrix(
             if sample_sizes
             else (checks.get("records") is not False)
         )
-        is_observational_disclaimer_only = all(
+        sample_size_val = min(sample_sizes) if sample_sizes else None
+        entry["sample_size"] = sample_size_val
+
+        # Detect data defect caveats (imputed data, flatlines, extreme skew)
+        has_data_defect = any(
+            any(phrase in c.lower() for phrase in ("imputed", "missing data", "zero variance", "flatline", "extreme skew"))
+            for c in caveats
+        )
+
+        # Observational disclaimers that suggest prospective pilot validation
+        has_observational_disclaimer = bool(caveats) and any(
             any(phrase in c.lower() for phrase in (
                 "proof of cause", "adjusted association", "observational", "unadjusted",
                 "selection effect", "confounding", "additive driver",
@@ -785,8 +795,8 @@ def classify_action_matrix(
             and not is_fragile
             and has_adequate_sample
             and conf >= 0.50
-            and kind in ("segment_lift", "decision_scenario")
-            and is_observational_disclaimer_only
+            and (kind in ("segment_lift", "decision_scenario") or evidence_tier == "pilot")
+            and (has_observational_disclaimer or evidence_tier == "pilot")
         )
         if is_observational_segment_contrast and evidence_tier != "causal_action":
             entry["lever"] = f"Pilot A/B test: {lever}" if not lever.startswith("Pilot") else lever
@@ -794,6 +804,9 @@ def classify_action_matrix(
                 f"High-contrast observational segment ({int(conf * 100)}% confidence); "
                 f"validate via prospective A/B test or pilot before scaling."
             )
+            entry["quadrant"] = "pilot"
+            entry["impact_level"] = "High"
+            entry["feasibility_level"] = "Pilot Validation"
             matrix["pilot"].append(entry)
             continue
 
@@ -802,43 +815,52 @@ def classify_action_matrix(
         if raw_source in ("correlation_analysis",):
             is_correlation = True
 
-        # Observational confidence is not intervention validity. Only an
-        # explicitly identified causal/experimental finding may enter an
-        # action quadrant; every other evidence tier remains a monitoring,
-        # investigation, or pilot item.
-        material_caveats = list(caveats)
+        # Non-actionable or fatal risk items route to watch_caveats:
+        # Reversals, fragility, data defects, non-controllable factors, correlations, or sub-threshold confidence.
+        has_fatal_caveat = any(
+            any(p in c.lower() for p in (
+                "direction reverses", "possible confounding", "does not hold within",
+                "sensitive to outlier trimming", "fragile", "extreme skew",
+                "zero variance", "flatline", "imputed", "missing data",
+                "overfit", "memorised", "leakage", "parallel trends violated", "positivity violated",
+            ))
+            for c in caveats
+        )
+
         if (
             not primary_eligible
-            or evidence_tier != "causal_action"
             or is_caveat_kind
             or has_paradox
             or is_fragile
-            or len(material_caveats) > 0
+            or has_data_defect
+            or has_fatal_caveat
             or conf < 0.45
             or is_correlation
             or (not is_controllable and not is_appendix)
+            or (sample_sizes and not has_adequate_sample)
         ):
             reason = []
             reason.extend(eligibility_reasons)
             if is_correlation:
                 reason.append("Observational correlation — monitor as context or covariate, not an intervention lever")
-            if evidence_tier != "causal_action":
-                reason.append(
-                    f"{evidence_tier.replace('_', ' ').title()} evidence — monitor or test; do not treat as a causal lever"
-                )
             if not is_controllable:
                 reason.append(f"External non-controllable factor ('{target_feature}') — monitor as risk/context, not direct lever")
             if has_paradox:
                 reason.append("Subgroup reversal detected (Simpson's paradox)")
             if is_fragile:
                 reason.append("Sensitive to outlier trimming")
-            if material_caveats:
-                reason.extend(material_caveats)
-            if not has_adequate_sample:
+            if has_data_defect:
+                reason.append("Data hygiene/imputation caveat — review data quality before action")
+            if sample_sizes and not has_adequate_sample:
                 reason.append("Small sample size (n < 100) for observational contrast")
+            if caveats:
+                reason.extend([c for c in caveats if c not in reason])
             if not reason:
                 reason.append("Low statistical confidence or caveat kind")
             entry["rationale"] = "; ".join(reason)
+            entry["quadrant"] = "watch_caveats"
+            entry["impact_level"] = "Context"
+            entry["feasibility_level"] = "Monitoring"
             matrix["watch_caveats"].append(entry)
             continue
 
@@ -846,30 +868,48 @@ def classify_action_matrix(
             continue
 
         # 2. Impact evaluation
+        # High impact requires substantial normalized effect, raw lift >= 15%, high importance >= 0.40,
+        # or targeted structural synergies/scenarios with measurable magnitude.
         is_high_impact = (
-            norm_eff >= 0.18
+            norm_eff >= 0.15
             or (isinstance(effect, (int, float)) and abs(effect) >= 0.15)
-            or imp >= 0.45
-            or kind in ("decision_scenario", "interaction_synergy", "driver")
+            or imp >= 0.40
+            or (kind in ("decision_scenario", "interaction_synergy") and (effect is None or abs(effect or 0) >= 0.08))
+            or (kind == "driver" and (norm_eff >= 0.10 or abs(effect or 0) >= 0.10 or imp >= 0.35))
         )
 
         # 3. Feasibility evaluation
+        # High feasibility means high confidence and direct operational controllability without
+        # cross-functional structural alignment.
         is_high_feasibility = (
-            conf >= 0.65
-            and kind in ("segment_lift", "driver", "concentration", "decision_scenario", "interaction_synergy")
+            conf >= 0.55
+            and kind in ("segment_lift", "driver", "concentration", "decision_scenario")
+            and kind != "interaction_synergy"  # synergies are structural bets
         )
 
         if is_high_impact and is_high_feasibility:
-            entry["rationale"] = f"High lift with robust statistical confidence ({int(conf * 100)}%)."
+            entry["rationale"] = f"High lift with robust statistical confidence ({int(conf * 100)}%). Direct operational execution candidate."
+            entry["quadrant"] = "quick_wins"
+            entry["impact_level"] = "High"
+            entry["feasibility_level"] = "Immediate Execution"
             matrix["quick_wins"].append(entry)
         elif is_high_impact:
             entry["rationale"] = "High potential upside; requires structural or cross-dimensional alignment."
+            entry["quadrant"] = "strategic_bets"
+            entry["impact_level"] = "High"
+            entry["feasibility_level"] = "Structural Initiative"
             matrix["strategic_bets"].append(entry)
         elif is_high_feasibility:
             entry["rationale"] = "Low-risk operational tuning with clear evidence."
+            entry["quadrant"] = "incremental"
+            entry["impact_level"] = "Moderate"
+            entry["feasibility_level"] = "Operational Optimization"
             matrix["incremental"].append(entry)
         else:
             entry["rationale"] = "Moderate effect with standard feasibility."
+            entry["quadrant"] = "incremental"
+            entry["impact_level"] = "Moderate"
+            entry["feasibility_level"] = "Operational Optimization"
             matrix["incremental"].append(entry)
 
     return matrix

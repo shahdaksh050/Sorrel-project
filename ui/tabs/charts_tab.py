@@ -62,7 +62,7 @@ def render_charts_tab(
                 report=report,
                 findings=findings,
                 run_view=run_view,
-                height=880,
+                vega_cfg=vega_cfg,
             )
             return
 

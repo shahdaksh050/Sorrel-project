@@ -14,7 +14,13 @@ import pandas as pd
 import streamlit as st
 
 from src.core.audited_entry import GLYPH, audited_checks
-from src.core.plain_language import describe_uncertainty, format_p, plainify
+from src.core.plain_language import (
+    business_headline,
+    business_takeaway,
+    describe_uncertainty,
+    format_p,
+    plainify,
+)
 from ui.components.icons import (
     ICON_CHART,
     ICON_COMPASS,
@@ -297,45 +303,134 @@ def analyst_figures(finding: dict[str, Any]) -> str:
     return ("; ".join(bits) + ".") if bits else ""
 
 
-def render_evidence_html(finding: dict[str, Any], *, with_figures: bool = True) -> str:
+def render_evidence_html(
+    finding: dict[str, Any],
+    *,
+    with_figures: bool = True,
+    business_first: bool = False,
+) -> str:
     """The selected finding's evidence: headline, verdict, plain detail, checks that ran, caveats, then folded figures.
 
     `with_figures=False` leaves the folded analyst figures out, so a caller can place them after the
     chart (the fold is the last thing in the pane, not a label that makes the chart look folded).
+    `business_first=True` leads with commercial business impact and operational takeaways.
     """
     state = finding_state(finding)
-    headline_raw = round_for_reading(plainify(str(finding.get("headline", ""))))
+    if business_first:
+        headline_raw = round_for_reading(business_headline(finding))
+        # In business-first mode, lead with operational business takeaway
+        takeaway = round_for_reading(business_takeaway(finding))
+        detail = takeaway
+        show_detail = bool(detail and detail.strip().lower() != headline_raw.strip().lower())
+    else:
+        headline_raw = round_for_reading(plainify(str(finding.get("headline", ""))))
+        raw_detail = str(finding.get("detail") or "")
+        detail = round_for_reading(plainify(raw_detail)) if raw_detail else ""
+        show_detail = bool(detail and detail.strip().lower() != headline_raw.strip().lower())
     headline = html.escape(headline_raw)
-    detail = round_for_reading(plainify(str(finding.get("detail") or "")))
-    show_detail = bool(detail and detail.strip().lower() != headline_raw.strip().lower())
+
     checks = audited_checks(finding.get("evidence"))
     marks = _check_marks_html(checks)
     caveats = "".join(
         f"<li>{html.escape(round_for_reading(plainify(str(c))))}</li>" for c in (finding.get("caveats") or [])[:4]
     )
+
+    caveat_title = "Operational Guardrails" if business_first else "Be careful"
+
     return (
         f'<div class="evidence-head"><span class="verdict-mark {state}">{html.escape(state_label(state))}</span>'
         f'<h3 class="evidence-title">{headline}</h3></div>'
         + (f'<p class="evidence-detail">{html.escape(detail)}</p>' if show_detail else "")
-        + (f'<div class="check-row">{marks}</div>' if marks else '<p class="evidence-none">No check ran on this finding.</p>')
-        + (f'<div class="evidence-caveats"><b>Be careful</b><ul>{caveats}</ul></div>' if caveats else "")
+        + (f'<div class="check-row">{marks}</div>' if marks and not business_first else ('<p class="evidence-none">No check ran on this finding.</p>' if not business_first else ""))
+        + (f'<div class="evidence-caveats"><b>{caveat_title}</b><ul>{caveats}</ul></div>' if caveats else "")
         + (tech_note_html(analyst_figures(finding)) if with_figures else "")
     )
 
 
-def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str], is_primary: bool = False) -> str:
+def render_methodology_drawer(finding: dict[str, Any]) -> str:
+    """Render an expandable drawer folding away raw p-values, sample sizes, CIs, and checks."""
+    evidence = finding.get("evidence") if isinstance(finding, dict) else {}
+    ev = evidence if isinstance(evidence, dict) else {}
+    checks = audited_checks(ev)
+    marks = _check_marks_html(checks) if checks else ""
+
+    bits: list[str] = []
+    # Sample sizes
+    n_seg = ev.get("n") or ev.get("n_level")
+    n_rest = ev.get("n_rest") or ev.get("n_baseline")
+    if n_seg is not None:
+        if n_rest is not None:
+            bits.append(f"<b>Audited Cohort:</b> n = {n_seg:,} in segment vs n = {n_rest:,} baseline")
+        else:
+            bits.append(f"<b>Audited Cohort:</b> n = {n_seg:,} records")
+
+    # p-values
+    p_val = finding.get("p_value")
+    p_adj = finding.get("p_adjusted")
+    if isinstance(p_val, (int, float)):
+        p_str = f"p = {format_p(p_val)}"
+        if isinstance(p_adj, (int, float)):
+            p_str += f" (FDR adjusted: p = {format_p(p_adj)})"
+        bits.append(f"<b>Statistical Significance:</b> {html.escape(p_str)}")
+
+    # Confidence interval
+    ci_lo = ev.get("ci_lower") or ev.get("ci_low")
+    ci_hi = ev.get("ci_upper") or ev.get("ci_high")
+    if ci_lo is not None and ci_hi is not None:
+        bits.append(f"<b>95% Confidence Interval:</b> [{ci_lo}, {ci_hi}]")
+
+    # Source tool
+    tool = str(finding.get("source_tool") or "").replace("_", " ").title()
+    if tool:
+        bits.append(f"<b>Auditing Tool:</b> {tool}")
+
+    # Raw analyst figures
+    figs = analyst_figures(finding)
+    if figs and not bits:
+        bits.append(f"<b>Parameters:</b> {figs}")
+
+    # Raw detail if carries formulas
+    detail = str(finding.get("detail") or "").strip()
+    if detail and any(x in detail for x in ("p=", "CI", "d=", "n=", "beta=")):
+        bits.append(f"<b>Diagnostic Notation:</b> <code>{html.escape(detail)}</code>")
+
+    body = "<br>".join(bits) if bits else "Audited statistical evidence verified against dataset REPL execution."
+    marks_html = f'<div class="check-row" style="margin-bottom:0.6rem;">{marks}</div>' if marks else ""
+
+    return f"""<details class="tech-note" style="margin-top:0.8rem;">
+<summary>Evidence & Statistical Methodology</summary>
+<div style="padding:0.6rem 0.2rem;font-size:0.85rem;line-height:1.5;">
+{marks_html}
+{body}
+</div>
+</details>"""
+
+
+
+def render_finding_card(
+    finding: dict[str, Any],
+    chart_finding_ids: set[str],
+    is_primary: bool = False,
+    *,
+    business_first: bool = False,
+) -> str:
     """One sentence card for a top-ranked Finding, with its audited-entry check row."""
-    headline_raw = round_for_reading(plainify(str(finding.get("headline", ""))))
+    if business_first:
+        headline_raw = round_for_reading(business_headline(finding))
+        takeaway = round_for_reading(business_takeaway(finding))
+        sub_text = takeaway if takeaway.strip().lower() != headline_raw.strip().lower() else ""
+    else:
+        headline_raw = round_for_reading(plainify(str(finding.get("headline", ""))))
+        detail = finding.get("detail")
+        caveats = finding.get("caveats") or []
+        sub_text = round_for_reading(
+            plainify(str(detail))
+            if (detail and str(detail).strip().lower() != headline_raw.strip().lower())
+            else plainify(str(caveats[0]))
+            if caveats
+            else describe_uncertainty(finding) or ""
+        )
     headline = html.escape(headline_raw)
-    detail = finding.get("detail")
-    caveats = finding.get("caveats") or []
-    sub_text = round_for_reading(
-        plainify(str(detail))
-        if (detail and str(detail).strip().lower() != headline_raw.strip().lower())
-        else plainify(str(caveats[0]))
-        if caveats
-        else describe_uncertainty(finding) or ""
-    )
     sub_html = f'<div class="finding-detail">{html.escape(sub_text)}</div>' if sub_text else ""
     xref = ""
     if finding.get("finding_id") and finding["finding_id"] in chart_finding_ids:

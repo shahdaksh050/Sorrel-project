@@ -1,5 +1,5 @@
 """
-AgentController mixin: Stage 7 — final synthesis, dashboard, HTML/JSON report and claim verification.
+AgentController mixin: Stage 5 — final synthesis, dashboard, HTML/JSON report and claim verification.
 
 Split out of controller.py; `AgentController` inherits it, so the methods keep
 their `self.*` state. Shared constants live in controller_common.
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 
 class ReportMixin(ControllerState):
-    """Stage 7 — final synthesis, dashboard, HTML/JSON report and claim verification."""
+    """Stage 5 — final synthesis, dashboard, HTML/JSON report and claim verification."""
 
     def _primary_findings(self) -> list[Finding]:
         """Return the single audited projection used by primary surfaces."""
@@ -734,7 +734,7 @@ class ReportMixin(ControllerState):
         if result.status == "success":
             console.print(
                 Panel(
-                    f"[bold green]Stage 7 — Report Generated[/]\n"
+                    f"[bold green]Stage 5 — Report Generated[/]\n"
                     f"Markdown: {result.output.get('markdown_path')}\n"
                     f"JSON:     {result.output.get('json_path')}",
                     border_style="green",

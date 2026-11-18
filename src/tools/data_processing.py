@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import numpy as np
 import pandas as pd
 
-from src.core.analysis_io import read_analysis_df
+from src.core.analysis_io import read_analysis_df, seed_analysis_df
 from src.core.compute_policy import (
     BackendDecision,
     ComputeBackend,
@@ -31,6 +31,7 @@ from src.core.io import (
     DatasetReadError,
     invalidate_read_cache,
     read_any,
+    write_csv,
 )
 from src.core.memory import DatasetMetadata, MemorySystem
 from src.core.security import UploadValidationError, escape_csv_formulas, resolve_output_path
@@ -596,10 +597,9 @@ class CleanDataTool(BaseTool):
         # quoted-string repair would break exact-value matching for any
         # tool that re-reads this file expecting the original values.
         out_path = _resolve_write_path(out_dir, f"{path.stem}_cleaned.csv")  # always CSV
-        df.to_csv(out_path, index=False)
-        # This path may already be in the read cache from an earlier
-        # step (a re-planned or retried run rewrites the same name).
+        write_csv(df, out_path)
         invalidate_read_cache(str(out_path))
+        seed_analysis_df(str(out_path), df)
 
         return {
             "summary": (
@@ -992,7 +992,7 @@ class DetectOutliersTool(BaseTool):
         out_dir = Path(output_dir) if output_dir else path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = _resolve_write_path(out_dir, f"{path.stem}_outliers_flagged.csv")  # always CSV
-        escape_csv_formulas(df).to_csv(out_path, index=False)
+        write_csv(escape_csv_formulas(df), out_path)
         # This path may already be in the read cache from an earlier
         # step (a re-planned or retried run rewrites the same name).
         invalidate_read_cache(str(out_path))

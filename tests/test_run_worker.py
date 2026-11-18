@@ -23,7 +23,7 @@ from ui.run import (
 from src.core.run_config import RunConfig
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGES = tuple((str(i), f"Stage {i}") for i in range(1, 8))
+STAGES = tuple((str(i), f"Stage {i}") for i in range(1, 6))
 
 
 @pytest.fixture(autouse=True)
@@ -90,12 +90,12 @@ def test_a_run_completes_with_a_view_and_truthful_stages(tmp_path: Path) -> None
     assert out.run_view.objective == "Does value differ by group?"
     assert out.run_view.how.no_ai is True
     assert out.tool_results
-    assert {e[0]: e[1] for e in snap.stage_log}["7"] == "done"
+    assert {e[0]: e[1] for e in snap.stage_log}["5"] == "done"
     assert snap.progress_lines, "progress lines feed the Details run trace"
     durable = run.registry_status
     assert durable is not None
     assert durable.status == "succeeded"
-    assert durable.stage == "7:done"
+    assert durable.stage == "5:done"
     assert "reports/data_report.md" in durable.artifacts
     # A replacement Streamlit session can still fold a run that completed
     # while the original browser was disconnected.
@@ -177,7 +177,7 @@ def test_stop_requested_up_front_gives_a_stopped_partial_result(tmp_path: Path) 
     assert out.final["stopped"] is True
     stages = {e[0]: e[1] for e in run.snapshot().stage_log}
     assert stages["3"] == "done"
-    assert stages["4"] == "skipped" and stages["5"] == "skipped"
+    assert stages["4"] == "skipped" and stages["5"] == "done"
     assert "stopped" in {e[0]: e[2] for e in run.snapshot().stage_log}["3"]
     assert any("stopped" in n.lower() for n in out.run_view.how.fallbacks)
 

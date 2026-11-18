@@ -1061,19 +1061,23 @@ def _profile_column(name: str, series: pd.Series, row_count: int) -> ColumnProfi
         kind = "numeric"
         clean = series.dropna()
         if not clean.empty:
+            stats_sample = (
+                clean if len(clean) <= 50_000
+                else clean.iloc[::max(1, len(clean) // 50_000)]
+            )
             stats = {
                 "mean": round(float(clean.mean()), 4),
                 "std": round(float(clean.std()), 4) if len(clean) > 1 else 0.0,
                 "min": round(float(clean.min()), 4),
                 "max": round(float(clean.max()), 4),
-                "median": round(float(clean.median()), 4),
-                "q1": round(float(clean.quantile(0.25)), 4),
-                "q3": round(float(clean.quantile(0.75)), 4),
+                "median": round(float(stats_sample.median()), 4),
+                "q1": round(float(stats_sample.quantile(0.25)), 4),
+                "q3": round(float(stats_sample.quantile(0.75)), 4),
                 "zero_pct": round(100.0 * float((clean == 0).mean()), 2),
                 "negative_pct": round(100.0 * float((clean < 0).mean()), 2),
             }
             if len(clean) > 2:
-                skew = float(clean.skew())
+                skew = float(stats_sample.skew())
                 stats["skew"] = round(skew, 4)
                 if abs(skew) >= SEVERE_SKEW_THRESHOLD:
                     flags.append("severe_skew")

@@ -253,6 +253,33 @@ class TestChartSelection:
         assert "Non-stationary" in ts_chart.description
         assert "7" in ts_chart.description
 
+    def test_forecast_chart_from_tool_results(self, churn_df: pd.DataFrame) -> None:
+        forecast_result = {
+            "tool_name": "forecast_analysis",
+            "status": "success",
+            "output": {
+                "value_column": "monthly_charge",
+                "period_grain": "month",
+                "model": "exponential_smoothing",
+                "mase": 0.82,
+                "chart": {
+                    "type": "vega_lite",
+                    "title": "Monthly charge: history and forecast",
+                    "vega_lite": {
+                        "data": {"values": [{"period": "2023-01", "value": 100.0, "part": "History"}]},
+                        "layer": [],
+                    },
+                },
+            },
+        }
+        profile = profile_dataframe(churn_df)
+        charts = build_dashboard(churn_df, profile, tool_results=[forecast_result])
+        ids = _ids(charts)
+        assert "forecast_trajectory" in ids
+        fc_chart = next(c for c in charts if c.chart_id == "forecast_trajectory")
+        assert fc_chart.size == "wide"
+        assert "MASE 0.82" in fc_chart.description
+
 
 class TestSpecQuality:
     def test_all_specs_json_serialisable(

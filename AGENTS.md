@@ -22,6 +22,8 @@ agentic systems using a recursive task-decomposition paradigm.
 | **Always Do** | Maintain strict separation between reasoning (LLM logic in `src/core/`) and execution (Python tools in `src/tools/`). |
 | **Always Do** | Use `BaseTool.run()` — never call `BaseTool.execute()` directly from the controller. |
 | **Always Do** | Return a `"summary"` key from every `execute()` method. |
+| **Always Do** | Background subprocess runners must emit an early bootstrap progress event before importing heavy libraries so UI steppers never freeze in "Waiting". |
+| **Always Do** | Finding cards must never duplicate the headline text as an identical body paragraph. |
 | **Always Do** | Store cleaned file paths in `MemorySystem.set_context("cleaned_file_path", ...)` after `clean_data` succeeds. |
 | **Ask First** | Before modifying the RLM core engine (`src/rlm/engine.py`) or task decomposition logic. |
 | **Ask First** | Before changing the `MemorySystem` schema or deleting existing source files. |
@@ -150,7 +152,7 @@ Each agent task must satisfy all of the following before marking complete:
 1. `ruff check .` passes with zero violations.
 2. `mypy src/` passes with zero type errors.
 3. All unit tests in `tests/` pass (`pytest tests/ -v`).
-4. The 7-stage workflow executes end-to-end without uncaught exceptions on a sample CSV.
+4. The 5-stage workflow executes end-to-end without uncaught exceptions on a sample CSV.
 5. The `output/reports/` directory contains a populated Markdown report after a run.
 6. No API keys appear anywhere in tracked files.
 

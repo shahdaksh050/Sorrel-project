@@ -168,6 +168,7 @@ from ui.run import (
 )
 from ui.styles import inject_theme_css as _inject_theme_css
 from ui.tabs import (
+    render_actions_tab,
     render_answers_tab,
     render_charts_tab,
     render_details_tab,
@@ -383,7 +384,7 @@ def _run_progress() -> None:
     _prov_html = build_provisional_html(snap.provisional, st.session_state["seen_provs"])
     if _prov_html:
         st.markdown(_prov_html, unsafe_allow_html=True)
-    if st.button("Stop", key="stop_run", disabled=snap.stop_requested or snap.discard):
+    if st.button("■ Stop analysis", key="stop_run", disabled=snap.stop_requested or snap.discard):
         run.request_stop()
         st.rerun(scope="fragment")
     st.caption("Stop is cooperative: a step that is already running finishes before the run ends.")
@@ -1210,7 +1211,7 @@ if (run_clicked or _sample_run) and st.session_state.get("_run") is None:
     run_target: str | None = "churn" if _sample_run else (target_col.strip() or None)
     _reset_pipeline()
     for num, _ in STAGE_DEFS:
-        _set_stage(num, "pending")
+        _set_stage(num, "active" if num == "1" else "pending", "Initializing analytical sandbox…" if num == "1" else "")
 
     # Save dataset to a temp file
     tmp = tempfile.mkdtemp(prefix=_RUN_DIR_PREFIX)
@@ -1371,6 +1372,9 @@ _cells = [
     ("File", st.session_state.get("preview_name") or "None loaded"),
     ("Analysis", _model_cell),
 ]
+if preview_df is not None:
+    _cells.append(("Rows", f"{len(preview_df):,}"))
+    _cells.append(("Cols", str(len(preview_df.columns))))
 if _workspace_state or st.session_state.get("preview_name"):
     datum_slot.markdown(_datum(_cells), unsafe_allow_html=True)
 else:
@@ -1419,9 +1423,10 @@ if st.session_state.get("analysis_done"):
             "(data/sample_customer_churn.csv), run without the AI narrative. "
             "It is not your data."
         )
-    (tab_brief, tab_dash, tab_lab, tab_vault) = st.tabs([
+    (tab_brief, tab_dash, tab_action, tab_lab, tab_vault) = st.tabs([
         "Answers",
         "Charts",
+        "Actions",
         "Details",
         "Downloads",
     ])
@@ -1447,6 +1452,15 @@ if st.session_state.get("analysis_done"):
             report=report,
             vega_cfg=vega_cfg,
             findings=list(_rv.findings) if _rv is not None else None,
+            run_view=_rv,
+        )
+
+    with tab_action:
+        _rv = st.session_state.get("run_view")
+        render_actions_tab(
+            report=report,
+            tool_results=tool_results,
+            run_view=_rv,
         )
 
     with tab_lab:

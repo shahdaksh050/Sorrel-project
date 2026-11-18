@@ -69,6 +69,7 @@ from src.core.dashboard_charts_basic import (
     _correlation_chart,
     _driver_tornado_chart,
     _five_number_summary,
+    _forecast_chart,
     _geospatial_chart,
     _histogram_charts,
     _is_near_uniform,
@@ -191,6 +192,7 @@ __all__ = [
     "_finding_fits_chart",
     "_five_number_summary",
     "_fmt_value",
+    "_forecast_chart",
     "_geospatial_chart",
     "_group_ci_chart",
     "_has_data",
@@ -681,6 +683,7 @@ def build_dashboard(
     corr_out = _find_tool_output(results, "correlation_analysis")
     cluster_out = _find_tool_output(results, "cluster_data")
     ts_out = _find_tool_output(results, "time_series_analysis")
+    forecast_out = _find_tool_output(results, "forecast_analysis")
     geo_out = _find_tool_output(results, "geospatial_analysis")
     dim_out = _find_tool_output(results, "dimensionality_analysis")
     cohort_out = _find_tool_output(results, "cohort_analysis")
@@ -690,6 +693,7 @@ def build_dashboard(
     model_out = eval_out or train_out
 
     candidates: list[ChartSpec | None] = [
+        _safe(_forecast_chart, forecast_out),
         _safe(_drivers_chart, model_out),
         _safe(_model_comparison_chart, train_out),
         _safe(_confusion_matrix_chart, eval_out),

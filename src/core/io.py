@@ -550,15 +550,35 @@ def _read_delimited(
             "(e.g. 'a' -> 'a.1')."
         )
 
-    try:
-        df = pd.read_csv(
-            io.StringIO(text),
-            sep=delimiter,
-            keep_default_na=False,
-            na_values=NA_VALUES_KEEP_NONE_STRING,
-        )
-    except pd.errors.EmptyDataError as exc:
-        raise DatasetReadError(f"'{path.name}' has no columns to parse.") from exc
+    df: pd.DataFrame | None = None
+    if (
+        header_offset == 0
+        and trailing_trim == 0
+        and compression is None
+        and not duplicate_headers
+        and encoding.lower() in ("utf-8", "ascii")
+    ):
+        try:
+            df = pd.read_csv(
+                path,
+                sep=delimiter,
+                engine="pyarrow",
+                keep_default_na=False,
+                na_values=NA_VALUES_KEEP_NONE_STRING,
+            )
+        except Exception:
+            df = None
+
+    if df is None:
+        try:
+            df = pd.read_csv(
+                io.StringIO(text),
+                sep=delimiter,
+                keep_default_na=False,
+                na_values=NA_VALUES_KEEP_NONE_STRING,
+            )
+        except pd.errors.EmptyDataError as exc:
+            raise DatasetReadError(f"'{path.name}' has no columns to parse.") from exc
 
     report = ReadReport(
         path=str(path),
@@ -1018,6 +1038,49 @@ def invalidate_read_cache(file_path: str) -> None:
     with _READ_CACHE_LOCK:
         for key in [k for k in _READ_CACHE if k[0] == resolved]:
             del _READ_CACHE[key]
+
+
+def write_csv(df: pd.DataFrame, path: Path | str) -> None:
+    """
+    Write DataFrame to CSV using fast multi-threaded PyArrow if available,
+    falling back to pandas to_csv.
+    """
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import pyarrow as pa
+        import pyarrow.csv as pv
+
+        table = pa.Table.from_pandas(df)
+        pv.write_csv(table, str(dest))  # type: ignore[attr-defined]
+    except Exception:
+        df.to_csv(dest, index=False)
+
+
+def seed_read_cache(file_path: str, df: pd.DataFrame, report: ReadReport | None = None) -> None:
+    """Populate read cache with an in-memory frame for an existing file path."""
+    p = Path(file_path)
+    try:
+        stat = p.stat()
+        key = (str(p.resolve()), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return
+    if report is None:
+        report = ReadReport(
+            path=str(p),
+            format="csv",
+            encoding="utf-8",
+            encoding_confident=True,
+            delimiter=",",
+            delimiter_sniffed=False,
+            duplicate_headers=[],
+            notes=["In-memory pipeline frame"],
+            header_row_offset=0,
+        )
+    with _READ_CACHE_LOCK:
+        _READ_CACHE[key] = (df.copy(), report)
+        while len(_READ_CACHE) > _READ_CACHE_MAX_ENTRIES:
+            _READ_CACHE.popitem(last=False)
 
 
 def read_any(file_path: str) -> tuple[pd.DataFrame, ReadReport]:

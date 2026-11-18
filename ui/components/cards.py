@@ -31,9 +31,7 @@ STAGE_DEFS: list[tuple[str, str]] = [
     ("2", "Understanding Your Question"),
     ("3", "Running the Numbers"),
     ("4", "Making Sense of It"),
-    ("5", "Double-Checking"),
-    ("6", "Solving the Tricky Parts"),
-    ("7", "Writing Your Report"),
+    ("5", "Writing Your Report"),
 ]
 
 
@@ -306,8 +304,10 @@ def render_evidence_html(finding: dict[str, Any], *, with_figures: bool = True) 
     chart (the fold is the last thing in the pane, not a label that makes the chart look folded).
     """
     state = finding_state(finding)
-    headline = html.escape(round_for_reading(plainify(str(finding.get("headline", "")))))
+    headline_raw = round_for_reading(plainify(str(finding.get("headline", ""))))
+    headline = html.escape(headline_raw)
     detail = round_for_reading(plainify(str(finding.get("detail") or "")))
+    show_detail = bool(detail and detail.strip().lower() != headline_raw.strip().lower())
     checks = audited_checks(finding.get("evidence"))
     marks = _check_marks_html(checks)
     caveats = "".join(
@@ -316,7 +316,7 @@ def render_evidence_html(finding: dict[str, Any], *, with_figures: bool = True) 
     return (
         f'<div class="evidence-head"><span class="verdict-mark {state}">{html.escape(state_label(state))}</span>'
         f'<h3 class="evidence-title">{headline}</h3></div>'
-        + (f'<p class="evidence-detail">{html.escape(detail)}</p>' if detail else "")
+        + (f'<p class="evidence-detail">{html.escape(detail)}</p>' if show_detail else "")
         + (f'<div class="check-row">{marks}</div>' if marks else '<p class="evidence-none">No check ran on this finding.</p>')
         + (f'<div class="evidence-caveats"><b>Be careful</b><ul>{caveats}</ul></div>' if caveats else "")
         + (tech_note_html(analyst_figures(finding)) if with_figures else "")
@@ -325,12 +325,13 @@ def render_evidence_html(finding: dict[str, Any], *, with_figures: bool = True) 
 
 def render_finding_card(finding: dict[str, Any], chart_finding_ids: set[str], is_primary: bool = False) -> str:
     """One sentence card for a top-ranked Finding, with its audited-entry check row."""
-    headline = html.escape(round_for_reading(plainify(str(finding.get("headline", "")))))
+    headline_raw = round_for_reading(plainify(str(finding.get("headline", ""))))
+    headline = html.escape(headline_raw)
     detail = finding.get("detail")
     caveats = finding.get("caveats") or []
     sub_text = round_for_reading(
         plainify(str(detail))
-        if detail
+        if (detail and str(detail).strip().lower() != headline_raw.strip().lower())
         else plainify(str(caveats[0]))
         if caveats
         else describe_uncertainty(finding) or ""
@@ -462,7 +463,7 @@ def render_agent_grid(
             "name": "Double-Checker",
             "role": "Goes back for another pass",
             "desc": "Looks at what's been found so far, and if there are loose ends or your question isn't fully answered yet, sends the work back for another round.",
-            "stage": "5",
+            "stage": "4",
             "tool": "Another pass",
         },
         {
@@ -470,7 +471,7 @@ def render_agent_grid(
             "name": "Detail Handler",
             "role": "Handles the tricky, many-part questions",
             "desc": "When a question has too many moving parts to answer in one go, this splits it into smaller pieces, solves each one separately, and brings the answers back together.",
-            "stage": "6",
+            "stage": "4",
             "tool": "Splitting up work",
         },
         {
@@ -478,7 +479,7 @@ def render_agent_grid(
             "name": "Report Writer",
             "role": "Builds your charts and report",
             "desc": "Builds charts that fit your data, then puts everything together into the report you can download and share.",
-            "stage": "7",
+            "stage": "5",
             "tool": "Charts & report",
         },
     ]

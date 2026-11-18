@@ -250,15 +250,34 @@ class ClusterDataTool(BaseTool):
             candidates = list(range(2, upper + 1))
 
         best_k, best_score, best_model, best_labels = -1, -2.0, None, None
+        FIT_SAMPLE_CAP = 25_000
+        is_large = len(X) > FIT_SAMPLE_CAP
+        fit_idx = (
+            rng.choice(len(X), size=FIT_SAMPLE_CAP, replace=False)
+            if is_large
+            else np.arange(len(X))
+        )
+        X_fit = X[fit_idx]
+
         for k in candidates:
             model = KMeans(n_clusters=k, random_state=42, n_init="auto")
-            labels = model.fit_predict(X)
-            if len(set(labels[sil_idx])) < 2:
+            if is_large:
+                model.fit(X_fit)
+                labels_eval = model.predict(X[sil_idx])
+                labels_to_save = None
+            else:
+                labels = model.fit_predict(X)
+                labels_eval = labels[sil_idx]
+                labels_to_save = labels
+            if len(set(labels_eval)) < 2:
                 continue
-            score = float(silhouette_score(X[sil_idx], labels[sil_idx]))
+            score = float(silhouette_score(X[sil_idx], labels_eval))
             k_scores[k] = round(score, 4)
             if score > best_score:
-                best_k, best_score, best_model, best_labels = k, score, model, labels
+                best_k, best_score, best_model, best_labels = k, score, model, labels_to_save
+
+        if best_model is not None and best_labels is None:
+            best_labels = best_model.predict(X)
 
         if best_model is None or best_labels is None:
             raise ToolExecutionError("KMeans failed to produce 2+ distinct clusters.")

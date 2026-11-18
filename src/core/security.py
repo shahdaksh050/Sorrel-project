@@ -393,10 +393,12 @@ def escape_csv_formulas(df: pd.DataFrame) -> pd.DataFrame:
     """
     out = df.copy()
     for col in out.columns:
-        if not pd.api.types.is_numeric_dtype(out[col]) and not pd.api.types.is_bool_dtype(out[col]):
-            out[col] = out[col].map(
-                lambda v: f"'{v}" if isinstance(v, str) and v.startswith(_FORMULA_PREFIXES) else v
-            )
+        s = out[col]
+        if not pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
+            s_str = s.astype(str)
+            mask = s.notna() & s_str.str.startswith(_FORMULA_PREFIXES)
+            if mask.any():
+                out.loc[mask, col] = "'" + s_str[mask]
     return out
 
 

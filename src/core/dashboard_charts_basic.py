@@ -677,6 +677,29 @@ def _time_series_chart(
     )
 
 
+def _forecast_chart(forecast_output: dict[str, Any] | None) -> ChartSpec | None:
+    """Build a wide multi-horizon forecast chart with shaded 95% predictive interval."""
+    if not forecast_output or not isinstance(forecast_output, dict):
+        return None
+    raw_chart = forecast_output.get("chart")
+    if not isinstance(raw_chart, dict):
+        return None
+    vl = raw_chart.get("vega_lite") or raw_chart
+    title = str(raw_chart.get("title") or "Forecast Analysis (95% Interval)")
+    val_col = str(forecast_output.get("value_column", ""))
+    grain = str(forecast_output.get("period_grain", "period"))
+    model_name = str(forecast_output.get("model", "best model")).replace("_", " ")
+    mase = forecast_output.get("mase")
+    mase_str = f" (MASE {mase:.2f})" if isinstance(mase, (int, float)) else ""
+    return ChartSpec(
+        chart_id="forecast_trajectory",
+        title=title,
+        description=f"Multi-period forecast for {humanize_label(val_col)} per {grain} using {model_name}{mase_str} with shaded 95% predictive interval.",
+        spec=vl,
+        size="wide",
+    )
+
+
 def _cluster_chart(cluster_output: dict[str, Any] | None) -> ChartSpec | None:
     if not cluster_output:
         return None

@@ -22,6 +22,7 @@ def render_charts_tab(
     report: dict[str, Any],
     vega_cfg: dict[str, Any],
     findings: list[dict[str, Any]] | None = None,
+    run_view: Any | None = None,
 ) -> None:
     """Render Tier 3: Dynamic Visual Dashboard."""
     by_id = {str(f["finding_id"]): f for f in (findings or []) if f.get("finding_id")}
@@ -39,10 +40,31 @@ def render_charts_tab(
 
     tab_head("Charts", "The charts, most important", "first")
     if dashboard:
-        st.caption(
-            "Charts are chosen to fit your data, most important first. "
-            "A chart tied to a finding says which one and whether it held up."
-        )
+        c_left, c_right = st.columns([0.65, 0.35], vertical_alignment="center")
+        with c_left:
+            st.caption(
+                "Charts are chosen to fit your data, most important first. "
+                "A chart tied to a finding says which one and whether it held up."
+            )
+        with c_right:
+            view_style = st.radio(
+                "Cockpit View",
+                ["Standard Grid", "Autonomous Swarm Cockpit"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="dash_view_style",
+            )
+        if view_style == "Autonomous Swarm Cockpit":
+            from ui.components.swarm_dashboard import render_swarm_dashboard
+
+            render_swarm_dashboard(
+                dashboard=dashboard,
+                report=report,
+                findings=findings,
+                run_view=run_view,
+                height=880,
+            )
+            return
 
         lone_cards = itertools.count()  # `flush` runs more than once: each card key must stay unique
 

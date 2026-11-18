@@ -159,7 +159,9 @@ def _level_shifts(y: np.ndarray) -> list[dict[str, Any]]:
 def _series_anomalies(
     df: pd.DataFrame, date_column: str, value_column: str, agg: str, time_hint: str | None
 ) -> dict[str, Any]:
-    if pd.api.types.is_numeric_dtype(df[date_column]):
+    if pd.api.types.is_datetime64_any_dtype(df[date_column]):
+        dates = df[date_column]
+    elif pd.api.types.is_numeric_dtype(df[date_column]):
         dates = pd.to_datetime(df[date_column].astype(str), errors="coerce", format="mixed")
     else:
         dates = pd.to_datetime(df[date_column], errors="coerce", format="mixed")
@@ -217,7 +219,11 @@ def _series_anomalies(
 
 
 def _unusual_segments(df: pd.DataFrame, value_column: str, dimension: str) -> dict[str, Any] | None:
-    work = pd.DataFrame({"g": df[dimension].astype(str), "v": pd.to_numeric(df[value_column], errors="coerce")})
+    g_col = df[dimension]
+    g = g_col if g_col.dtype == object or isinstance(g_col.dtype, pd.CategoricalDtype) else g_col.astype(str)
+    v_col = df[value_column]
+    v = v_col if pd.api.types.is_numeric_dtype(v_col) else pd.to_numeric(v_col, errors="coerce")
+    work = pd.DataFrame({"g": g, "v": v})
     work = work[df[dimension].notna()].dropna()
     grouped = work.groupby("g")["v"].agg(["mean", "std", "size"])
     grouped = grouped[grouped["size"] >= _MIN_GROUP_N]

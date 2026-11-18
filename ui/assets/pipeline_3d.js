@@ -94,11 +94,10 @@ function markEntrancePlayed(signature) {
 /* ------------------------------------------------------------------ *
  * Drawing geometry & layout constants
  * ------------------------------------------------------------------ */
-const GAP = 2.1;               // Spacing between modules along rail
+const GAP = 2.3;               // Spacing between modules along rail
 const CAGE = 0.95;              // Wireframe module bounding size
-const REFINE_FROM = 4;          // Stage 5 (0-indexed)
+const REFINE_FROM = 3;          // Stage 4 (0-indexed)
 const REFINE_TO = 2;            // Loops back to Stage 3
-const RLM_INDEX = 5;            // Stage 6 recursive decomposition
 const STROKE_SAMPLES = 28;      // Line sample points for pen reveal
 
 const xFor = (i) => (i - (STAGES.length - 1) / 2) * GAP;
@@ -243,18 +242,11 @@ function coreGeometries(index) {
         [new THREE.BoxGeometry(0.48, 0.48, 0.48), 0, 0, 0],
         [new THREE.CylinderGeometry(0.12, 0.12, 0.52, 16), 0, 0, 0],
       ];
-    case 3: // Interpretation: faceted geodesic sphere
-      return [
-        [new THREE.IcosahedronGeometry(0.38, 1), 0, 0, 0],
-      ];
-    case 4: // Refinement: gyroscopic dual-ring torus
+    case 3: // Making Sense & Checking: gyroscopic dual-ring torus encircling inner geodesic core
       return [
         [new THREE.TorusGeometry(0.30, 0.07, 12, 28), 0, 0, 0],
+        [new THREE.IcosahedronGeometry(0.18, 1), 0, 0, 0],
       ];
-    case 5: // RLM Decomposition: 4 recursive sub-task cubes
-      return [-0.16, 0.16].flatMap((x) =>
-        [-0.16, 0.16].map((z) => [new THREE.BoxGeometry(0.22, 0.22, 0.22), x, 0, z])
-      );
     default: // Report: final bound specification sheets
       return [
         [new THREE.BoxGeometry(0.62, 0.05, 0.52), 0, 0.08, 0],
@@ -386,47 +378,8 @@ const refineArcCurve = new THREE.QuadraticBezierCurve3(
 );
 const refineArc = makeStroke(refineArcCurve.getPoints(64), GRAPHITE, 0.35);
 
-// Stage 6 RLM recursive satellites
-const satellites = [-1, 1].map((side) => {
-  const pos = new THREE.Vector3(xFor(RLM_INDEX), 0.15, side * 1.35);
-  const geo = keep(new THREE.BoxGeometry(0.24, 0.24, 0.24));
-
-  const fillMat = keep(
-    new THREE.MeshStandardMaterial({
-      color: new THREE.Color(SHEET),
-      roughness: 0.28,
-      metalness: 0.35,
-      transparent: true,
-      opacity: 0.1,
-      polygonOffset: true,
-      polygonOffsetFactor: 1,
-      polygonOffsetUnits: 1,
-    })
-  );
-  const edgeMat = keep(
-    new THREE.LineBasicMaterial({
-      color: new THREE.Color(GRAPHITE),
-      transparent: true,
-      opacity: 0.5,
-    })
-  );
-
-  const fill = new THREE.Mesh(geo, fillMat);
-  fill.position.copy(pos);
-  drawing.add(fill);
-
-  const edges = new THREE.LineSegments(keep(new THREE.EdgesGeometry(geo)), edgeMat);
-  edges.position.copy(pos);
-  drawing.add(edges);
-
-  const tether = makeStroke(
-    straight(new THREE.Vector3(xFor(RLM_INDEX), 0, side * (CAGE / 2)), pos.clone()),
-    GRAPHITE,
-    0.3
-  );
-
-  return { fillMat, edgeMat, fill, edges, tether, position: pos };
-});
+// Satellites array (reserved for optional stage overlays, empty in 5-stage workflow)
+const satellites = [];
 
 // Bench grid plane
 const gridColor = new THREE.Color(C.grid || C.ink || "#1a1a17");
@@ -517,9 +470,6 @@ STAGES.forEach((_, i) => {
   }
 });
 fitPoints.push(new THREE.Vector3((xFor(REFINE_FROM) + xFor(REFINE_TO)) / 2, 2.7, 0));
-for (const side of [-1, 1]) {
-  fitPoints.push(new THREE.Vector3(xFor(RLM_INDEX), 0.3, side * 1.5));
-}
 
 const FIT_MARGIN = 0.88;
 const orbit = { theta: 0.42, phi: 1.16, radius: 12.5 };
@@ -1066,21 +1016,11 @@ renderer.setAnimationLoop(() => {
         core.rotation.y = Math.sin(t * 1.5) * 0.35;
         core.rotation.z = Math.sin(t * 4) * 0.08;
         break;
-      case 3: // Interpretation: a gentle rock
-        core.rotation.y = Math.sin(t * 0.7) * 0.5;
-        core.rotation.z = Math.sin(t * 0.45) * 0.3;
-        break;
-      case 4: // Refinement: the ring tips both ways
+      case 3: // Making Sense & Checking: the ring tips both ways
         core.rotation.x = Math.sin(t * 1.2) * 0.6;
         core.rotation.y = Math.sin(t * 0.8) * 0.6;
         break;
-      case 5: // RLM Decomposition: satellite breathing
-        satellites.forEach((sat, si) => {
-          sat.fill.position.y = sat.position.y + Math.sin(t * 3 + si) * 0.08;
-          sat.edges.position.y = sat.fill.position.y;
-        });
-        break;
-      case 6: // Report: gentle float
+      case 4: // Report: gentle float
         core.position.y = Math.sin(t * 2) * 0.03;
         break;
     }

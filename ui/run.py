@@ -446,7 +446,10 @@ class ActiveRun:
         self._stop_event = threading.Event()
         self._discard = False
         self._state: RunState = "running"
-        self._stage_log: list[StageEntry] = [(num, "pending", "") for num, _ in spec.stage_names]
+        self._stage_log: list[StageEntry] = [
+            (num, "active" if num == "1" else "pending", "Initializing analytical sandbox…" if num == "1" else "")
+            for num, _ in spec.stage_names
+        ]
         self._progress_lines: list[str] = []
         self._note = ""
         self._provisional: list[ProvisionalFinding] = []
@@ -973,9 +976,6 @@ def _public_artifact_paths(output_dir: str) -> tuple[str, ...]:
 
 def _execute(run: ActiveRun | _WorkerRun) -> None:
     """The analysis itself: the work the Run click handler used to do inline."""
-    # Imported here, like the script did: `src` is loaded after the console stub.
-    from src.core.controller import AgentController
-
     spec = run.spec
     names = dict(spec.stage_names)
 
@@ -986,7 +986,11 @@ def _execute(run: ActiveRun | _WorkerRun) -> None:
             + (f"  {detail}" if detail else "")
         )
 
-    upd("1", "active", "ingesting…")
+    upd("1", "active", "Initializing analytical modules…")
+    # Imported here, like the script did: `src` is loaded after the console stub.
+    from src.core.controller import AgentController
+
+    upd("1", "active", "Reading and profiling dataset…")
     agent = AgentController(
         min_iterations=spec.min_iterations,
         max_iterations=spec.max_iterations,
@@ -1014,6 +1018,7 @@ def _execute(run: ActiveRun | _WorkerRun) -> None:
         interactive=False,
         related_files=list(spec.related_paths) or None,
         join_overrides=spec.join_overrides or None,
+        progress_callback=lambda msg: upd("1", "active", msg),
     )
     run.set_metadata(meta)
     upd(
@@ -1029,12 +1034,10 @@ def _execute(run: ActiveRun | _WorkerRun) -> None:
     upd("2", "active", plan_detail)
     for num in ("3", "4", "5"):
         upd(num, "pending")
-    upd("6", "skipped", "not needed")
-    upd("7", "pending")
 
     # What the controller reports maps onto one moving "you are here": plan (2), run the planned
-    # steps (3), and on later cycles interpret and refine (4, 5) before running again; the
-    # decomposition (6) and the report (7) follow. `advance` keeps exactly one stage active.
+    # steps (3), and on later cycles interpret and refine (4) before running again; the report (5)
+    # follows. `advance` keeps exactly one stage active.
     cycle = {"iteration": 1, "planned": False, "ran": 0}
 
     def on_step(tool_name: str, status: str, detail: str) -> None:
@@ -1047,7 +1050,7 @@ def _execute(run: ActiveRun | _WorkerRun) -> None:
             closing = (
                 {"2": "plan ready"}
                 if iteration == 1
-                else {"4": f"iter {iteration}: results interpreted", "5": f"iter {iteration}: plan refined"}
+                else {"4": f"iter {iteration}: results interpreted & plan refined"}
             )
             run.advance("3", label, closing=closing)
         else:
@@ -1059,28 +1062,24 @@ def _execute(run: ActiveRun | _WorkerRun) -> None:
             run.set_note("Still working. Training models can take a few minutes depending on the data size.")
 
     def on_iter(iteration: int, stage: str) -> None:
-        if "stage6" not in stage and "stage7" not in stage:
+        if "stage7" not in stage and "stage5" not in stage and "report" not in stage:
             cycle["iteration"] = iteration
             cycle["planned"] = False
         ran = f"{cycle['ran']} step(s) run"
-        if "stage7" in stage:
-            run.advance("7", "writing the report…", closing={"3": ran})
+        if "stage7" in stage or "stage5" in stage or "report" in stage or "synthesis" in stage:
+            run.advance("5", "writing the report…", closing={"3": ran, "4": "refinement converged"})
             run.add_progress("[run ] Writing the report")
-        elif "stage6" in stage:
-            run.advance("6", "splitting the question into sub-tasks…", closing={"3": ran})
-            run.add_progress("[run ] Splitting the question into sub-tasks")
         elif "stage2" in stage:
             run.advance("2", plan_detail if iteration == 1 else f"iter {iteration}: LLM reasoning…")
             run.add_progress(f"[run ] Iteration {iteration}: model reasoning")
-        elif "stage4" in stage or "stage5" in stage:
+        elif "stage4" in stage or "stage5:iter" in stage or "stage4-5" in stage or "refine" in stage or "adversarial" in stage:
             run.advance(
                 "4",
                 f"iter {iteration}: interpreting results and refining the plan…",
                 closing={"3": ran},
-                reopen=("5",),
             )
             run.add_progress(f"[run ] Iteration {iteration}: interpreting and refining")
-        if iteration > 1 and "stage7" not in stage:
+        if iteration > 1 and "report" not in stage and "stage7" not in stage and "stage5" not in stage:
             run.set_note("Still working. Refining answers can take a few minutes.")
 
     agent.on_step_callback = on_step
@@ -1106,15 +1105,11 @@ def _execute(run: ActiveRun | _WorkerRun) -> None:
     if stopped:
         upd("3", "done", f"stopped early: {len(tool_results)} tools executed")
         upd("4", "skipped", "stopped")
-        upd("5", "skipped", "stopped")
-        upd("6", "skipped", "stopped")
-        upd("7", "done", "partial report saved")
+        upd("5", "done", "partial report saved")
     else:
         upd("3", "done", f"{len(tool_results)} tools executed: {', '.join(tool_names[:5])}")
-        upd("4", "done", "results interpreted")
-        upd("5", "done", f"{agent.memory.iteration_count} iteration(s)")
-        upd("6", "skipped", "not needed")
-        upd("7", "done", "report saved")
+        upd("4", "done", f"results interpreted & verified ({agent.memory.iteration_count} iteration{'s' if agent.memory.iteration_count != 1 else ''})")
+        upd("5", "done", "report saved")
 
     dashboard: list[dict[str, Any]] | None = None
     dash_path = Path(spec.output_dir) / "reports" / "dashboard.json"

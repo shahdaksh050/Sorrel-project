@@ -412,12 +412,13 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         interactive: bool = True,
         related_files: list[str] | None = None,
         join_overrides: dict[str, dict[str, Any]] | None = None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> DatasetMetadata:
         """Stage 1: see `_load_dataset`. Runs with this run's objective in scope,
         so the profile-driven tools never read another run's question."""
         with objective_scope(self.objective):
             return self._load_dataset(
-                file_path, target_hint, interactive, related_files, join_overrides
+                file_path, target_hint, interactive, related_files, join_overrides, progress_callback
             )
 
     def _load_dataset(
@@ -427,6 +428,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         interactive: bool = True,
         related_files: list[str] | None = None,
         join_overrides: dict[str, dict[str, Any]] | None = None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> DatasetMetadata:
         """
         Stage 1: Ingest the dataset and store metadata in Memory.
@@ -459,6 +461,14 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # Override target from CLI hint or environment
         target = target_hint or os.getenv("TARGET_COLUMN_HINT")
 
+        def _prog(msg: str) -> None:
+            if progress_callback is not None:
+                try:
+                    progress_callback(msg)
+                except Exception:
+                    pass
+
+        _prog("Reading file format & encoding…")
         join_notes: list[str] = []
         if related_files:
             file_path, join_notes = self._join_related_files(file_path, related_files, join_overrides)
@@ -479,13 +489,16 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # decision function below degrades to name-only reasoning when
         # self.last_profile is still None. ----
         try:
+            _prog("Parsing table rows & structure…")
             df, read_report = read_any(file_path)
+            _prog("Validating and coercing column types…")
             df, coercions = coerce_types(df, delimiter=read_report.delimiter)
             self._pending_df = df
 
 
             self.study_design = classify_study_design(df, self.objective)
             self.memory.set_context("study_design", self.study_design)
+            _prog("Profiling feature distributions & metrics…")
             profile = profile_dataframe(df, target_column=None)
             try:
                 profile.domains = infer_domains(df, profile)
@@ -497,6 +510,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             self.memory.set_context("data_profile_summary", profile.to_prompt_string())
 
             # ---- Domain Pack Evaluation (Phase 5) ----
+            _prog("Detecting domain archetype & domain pack…")
             pack = detect_domain_pack(df, self.objective)
             if pack:
                 self.memory.set_context("active_domain_pack", pack.name)
@@ -506,6 +520,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     console.print(f"  [cyan]🏛 Domain Pack '{pack.display_name}': {len(pack_findings)} contextual finding(s) generated.[/]")
 
             # ---- Data Integrity & Constraint Audit (Phase 6) ----
+            _prog("Running data integrity & constraint checks…")
             integrity_findings = evaluate_data_integrity(df)
             if integrity_findings:
                 self.memory.add_findings(integrity_findings)
@@ -684,6 +699,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # both settled. Stored in context so the report's methodology
         # section can show real coverage ("N questions, M answered") rather
         # than only ever listing which tools ran.
+        _prog("Generating prioritized question agenda…")
         try:
             agenda = self._build_question_agenda(
                 self.last_profile, self.memory.get_context("analysis_decision")
@@ -965,7 +981,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     stage_label = "stage2:initial_reasoning"
                 else:
                     user_prompt = self._prompt_manager.get_iteration_user_prompt()
-                    stage_label = f"stage4-5:iteration_{iteration}"
+                    stage_label = f"stage4:iteration_{iteration}"
 
                 if self.on_iteration_callback:
                     self.on_iteration_callback(iteration, stage_label)
@@ -1023,7 +1039,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                     console.print(
                         f"[yellow]⚠ No valid steps on iteration {iteration} — synthesising final report.[/]"
                     )
-                    final_result = self._final_synthesis("stage7:no_steps_synthesis")
+                    final_result = self._final_synthesis("stage5:no_steps_synthesis")
                     break
                 # ---- No-progress exit: the planner only repeats work already done ----
                 if iteration >= max(2, self.min_iterations) and self._all_steps_cached(steps):
@@ -1031,7 +1047,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                         f"\n[bold green]✅ Iteration {iteration} re-planned only completed steps — "
                         "analysis has converged.[/]"
                     )
-                    final_result = self._final_synthesis("stage7:converged_synthesis")
+                    final_result = self._final_synthesis("stage5:converged_synthesis")
                     break
                 self.memory.store_analysis_plan(steps)
 
@@ -1051,7 +1067,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             else:
                 # Max iterations reached
                 console.print("[yellow]⚠ Max iterations reached — generating final report.[/]")
-                final_result = self._final_synthesis("stage7:max_iter_synthesis")
+                final_result = self._final_synthesis("stage5:max_iter_synthesis")
 
         return final_result
 
@@ -1615,9 +1631,9 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                         f.caveats.append(c)
 
     def _finalize_analysis(self, final_result: dict[str, Any]) -> dict[str, Any]:
-        """Stage 7: attach metadata, build the dashboard, audit, and write reports."""
+        """Stage 5: attach metadata, build the dashboard, audit, and write reports."""
         if self.on_iteration_callback:
-            self.on_iteration_callback(self.memory.iteration_count, "stage7:report")
+            self.on_iteration_callback(self.memory.iteration_count, "stage5:report")
         self._attach_run_metadata(final_result)
         audit_df = self._run_post_hoc_audits(final_result)
         self._rebuild_primary_synthesis(final_result)

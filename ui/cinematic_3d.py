@@ -122,13 +122,9 @@ def extract_cinematic_state(session_state: Any) -> dict[str, Any]:
     stage_log = stage_log_raw if isinstance(stage_log_raw, list) else []
     log_map = {num: (status, detail) for num, status, detail in stage_log}
 
-    stage_defs = [
-        ("1", "Dataset Ingestion & Profiling"),
-        ("2", "Hypothesis & Action Plan"),
-        ("3", "Tool Execution & Verification"),
-        ("4", "Refinement & Adversarial Review"),
-        ("5", "Audits & Dossier Generation"),
-    ]
+    from ui.components.cards import STAGE_DEFS
+
+    stage_defs = STAGE_DEFS
 
     stages = [
         {

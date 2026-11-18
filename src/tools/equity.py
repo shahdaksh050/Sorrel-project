@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
     from src.core.profiler import ColumnProfile, DatasetProfile
 
-_MAX_ROWS = 50_000
+_MAX_ROWS = 10_000_000
 _MIN_ROWS = 100
 _MAX_GROUPS = 8
 _MAX_CONTROLS = 6

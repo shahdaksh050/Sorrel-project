@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from src.core.profiler import ColumnProfile, DatasetProfile
 
 _ALPHA = 0.05
-_MAX_ROWS = 100_000
+_MAX_ROWS = 10_000_000
 _MIN_ROWS = 40
 _MIN_EVENTS = 15
 _MAX_FEATURES = 8

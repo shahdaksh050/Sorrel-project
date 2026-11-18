@@ -24,8 +24,8 @@ class ComputePolicy:
     mode: ComputeBackend = "auto"
     gpu_min_cells: int = 200_000
     gpu_memory_fraction: float = 0.60
-    max_stat_rows: int = 50_000
-    max_corr_rows: int = 20_000
+    max_stat_rows: int = 10_000_000
+    max_corr_rows: int = 10_000_000
     max_corr_columns: int = 64
     tool_timeout_s: float = 120.0
 
@@ -58,8 +58,8 @@ class ComputePolicy:
             mode=cast(ComputeBackend, mode),
             gpu_min_cells=integer("GPU_MIN_CELLS", 200_000),
             gpu_memory_fraction=fraction("GPU_MEMORY_FRACTION", 0.60),
-            max_stat_rows=integer("MAX_STAT_ROWS", 50_000),
-            max_corr_rows=integer("MAX_CORR_ROWS", 20_000),
+            max_stat_rows=integer("MAX_STAT_ROWS", 10_000_000),
+            max_corr_rows=integer("MAX_CORR_ROWS", 10_000_000),
             max_corr_columns=integer("MAX_CORR_COLUMNS", 64, minimum=2),
             tool_timeout_s=float(integer("TOOL_TIMEOUT_S", 120)),
         )

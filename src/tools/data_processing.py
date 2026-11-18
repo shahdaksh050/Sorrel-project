@@ -60,7 +60,7 @@ _CORR_FINDING_THRESHOLD = 0.3
 
 #: Cap on how many top correlation pairs become Findings per run.
 _CORR_TOP_N = 3
-_CORR_PVALUE_ROWS = 200_000
+_CORR_PVALUE_ROWS = 10_000_000
 _CORR_MAX_REPORTED_PAIRS = 25
 
 #: Columns linked by |r| >= this form a "group" (one shared driver reported
@@ -114,9 +114,9 @@ def analysis_sample_rows() -> int:
     """Row count above which exploratory statistics run on a seeded random
     sample (env DSA_ANALYSIS_SAMPLE_ROWS, default 200,000)."""
     try:
-        return max(1_000, int(os.environ.get("DSA_ANALYSIS_SAMPLE_ROWS", "200000")))
+        return max(1_000, int(os.environ.get("DSA_ANALYSIS_SAMPLE_ROWS", "10000000")))
     except ValueError:
-        return 200_000
+        return 10_000_000
 
 
 def correlation_work_budget() -> int:
@@ -127,9 +127,9 @@ def correlation_work_budget() -> int:
     can safely retain more rows, while a wide frame must be bounded sooner.
     """
     try:
-        return max(1_000, int(os.environ.get("DSA_CORR_WORK_BUDGET", "40000000")))
+        return max(1_000, int(os.environ.get("DSA_CORR_WORK_BUDGET", "1000000000")))
     except ValueError:
-        return 40_000_000
+        return 1_000_000_000
 
 
 def correlation_max_columns() -> int:

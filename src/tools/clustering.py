@@ -250,7 +250,7 @@ class ClusterDataTool(BaseTool):
             candidates = list(range(2, upper + 1))
 
         best_k, best_score, best_model, best_labels = -1, -2.0, None, None
-        FIT_SAMPLE_CAP = 25_000
+        FIT_SAMPLE_CAP = 1_000_000
         is_large = len(X) > FIT_SAMPLE_CAP
         fit_idx = (
             rng.choice(len(X), size=FIT_SAMPLE_CAP, replace=False)

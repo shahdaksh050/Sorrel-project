@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from src.core.memory import DatasetMetadata
     from src.core.profiler import DatasetProfile
 
-_MAX_ROWS = 50_000
+_MAX_ROWS = 10_000_000
 _MAX_PRODUCTS = 15
 _MIN_OBS = 8
 _MIN_PRICE_CV = 0.05

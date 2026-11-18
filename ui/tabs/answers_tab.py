@@ -47,7 +47,7 @@ def _evidence_inspector(
         fid: f"{round_for_reading(business_headline(f))} ({state_label(finding_state(f))})"
         for fid, f in zip(ids, findings, strict=True)
     }
-    left, right = st.columns([5, 7], gap="large")
+    left, right = st.columns([0.40, 0.60], gap="medium")
     with left:
         chosen = st.radio(
             "Findings, most important first",

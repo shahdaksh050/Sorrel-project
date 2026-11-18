@@ -1017,16 +1017,16 @@ def correlation_heatmap(
 
     r_field = {"field": "r", "type": "quantitative", "title": "r"}
     x_enc: dict[str, Any] = {"field": "feature_x", "type": "nominal", "sort": ordered, "title": None,
-                             "axis": {"labelAngle": -45, "labelLimit": 180, "labelOverlap": False,
+                             "axis": {"labelAngle": -45, "labelLimit": 130, "labelOverlap": False,
                                       "orient": "bottom"}}
     y_enc: dict[str, Any] = {"field": "feature_y", "type": "nominal", "sort": ordered, "title": None,
-                             "axis": {"labelLimit": 180}}
+                             "axis": {"labelLimit": 130}}
     layers: list[dict[str, Any]] = [{
         "mark": {"type": "rect", "stroke": "#dcd7cc", "strokeWidth": 1},
         "encoding": {
             "x": x_enc, "y": y_enc,
             "color": {**r_field, "scale": {"scheme": "blueorange", "domainMid": 0, "domain": [-1, 1]},
-                      "legend": {"format": ".1f"}},
+                      "legend": {"format": ".1f", "orient": "right", "title": "r", "offset": 6}},
             "tooltip": [{"field": "feature_x", "title": "Column A"}, {"field": "feature_y", "title": "Column B"},
                         {**r_field, "format": ".2f", "title": "Correlation (r)"}],
         },
@@ -1041,11 +1041,12 @@ def correlation_heatmap(
             ("black", {"and": [{"field": "abs_r", "gte": HEATMAP_TEXT_MIN_ABS_R}, {"field": "abs_r", "lt": 0.6}]}),
         ):
             layers.append({
-                "mark": {"type": "text", "fontSize": 10, "color": colour},
+                "mark": {"type": "text", "fontSize": 9, "color": colour},
                 "transform": [{"filter": text_filter}],
                 "encoding": {"x": x_enc, "y": y_enc, "text": {**r_field, "format": ".2f"}},
             })
-    return rows, {"width": {"step": 36}, "height": {"step": 36}, "autosize": {"type": "pad", "contains": "padding"}, "layer": layers}, caption
+    step_size = max(18, min(30, int(200 / max(n, 1))))
+    return rows, {"width": {"step": step_size}, "height": {"step": step_size}, "autosize": {"type": "pad", "contains": "padding"}, "layer": layers}, caption
 
 
 def _correlation_chart(

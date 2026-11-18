@@ -62,26 +62,35 @@ def build_swarm_payload(
         or rep.get("run_id")
         or "1042"
     )
-    if str(actual_run_id).startswith("#"):
-        actual_run_id = str(actual_run_id)[1:]
+    actual_run_id_str = str(actual_run_id)
+    if actual_run_id_str.startswith("#"):
+        actual_run_id_str = actual_run_id_str[1:]
+    if len(actual_run_id_str) > 8:
+        actual_run_id = actual_run_id_str[:8]
+    else:
+        actual_run_id = actual_run_id_str
     title = getattr(run_view, "objective", None) or rep.get("objective") or "Autonomous Executive Briefing"
 
     headline_finding = finds[0] if finds else {}
     rep_lead = rep.get("lead_narrative") or rep.get("summary")
-    if rep_lead and "robust sd" not in str(rep_lead).lower():
+    if rep_lead and not any(k in str(rep_lead).lower() for k in ("robust sd", "rolling_median", "z-score")):
         lead_narrative = str(rep_lead)
     else:
         from src.core.plain_language import business_headline, business_takeaway
         biz_hl = business_headline(headline_finding) if headline_finding else ""
         biz_takeaway = business_takeaway(headline_finding) if headline_finding else ""
-        lead_narrative = (
-            biz_takeaway
-            or biz_hl
-            or headline_finding.get("headline")
-            or "Autonomous multi-agent analytical convergence completed."
-        )
-    if "robust sd" in lead_narrative.lower() and headline_finding.get("headline"):
-        lead_narrative = headline_finding["headline"]
+        if biz_hl and biz_takeaway and not biz_takeaway.lower().startswith(biz_hl.lower()):
+            lead_narrative = f"{biz_hl}. {biz_takeaway}"
+        else:
+            lead_narrative = (
+                biz_takeaway
+                or biz_hl
+                or headline_finding.get("headline")
+                or "Autonomous multi-agent analytical convergence completed."
+            )
+    if any(k in lead_narrative.lower() for k in ("robust sd", "rolling_median", "z-score")):
+        from src.core.plain_language import business_takeaway
+        lead_narrative = business_takeaway(headline_finding) if headline_finding else "Autonomous multi-agent analytical convergence completed."
 
     headline_badge = (
         f"✓ {len(finds)} Findings Verified"

@@ -455,12 +455,41 @@ def business_headline(finding: dict[str, Any] | Any) -> str:
             clean_m = plainify(str(measure)).replace("_", " ").title()
             return f"{cluster_name} Shows Distinct Pattern in {clean_m}"
 
+    if kind in ("outlier_scan", "anomaly") and (level or dimension or measure):
+        ev_obj = finding.get("evidence") if isinstance(finding, dict) else getattr(finding, "evidence", {})
+        ev_map: dict[str, Any] = ev_obj if isinstance(ev_obj, dict) else {}
+        clean_lvl = str(level or ev_map.get("level") or ev_map.get("period") or "").strip("'\"")
+        clean_dim = str(dimension or ev_map.get("dimension") or "").strip("'\"")
+        clean_meas = str(measure or ev_map.get("value_column") or "").strip("'\"")
+        eff = finding.get("effect") if isinstance(finding, dict) else getattr(finding, "effect", None)
+        dev_pct = ev_map.get("deviation_pct") or eff
+        target_name = clean_lvl or clean_dim
+        if target_name and clean_meas:
+            label_name = target_name.replace("_", " ").title()
+            meas_name = clean_meas.replace("_", " ").title()
+            direction = "Surge" if (isinstance(dev_pct, (int, float)) and dev_pct >= 0) or "above" in raw_hl.lower() or "spike" in raw_hl.lower() else "Drop"
+            pct_str = ""
+            if isinstance(dev_pct, (int, float)) and 0 < abs(dev_pct) < 10:
+                pct_str = f"with {dev_pct:+.0f}% "
+            elif isinstance(dev_pct, (int, float)) and abs(dev_pct) >= 10:
+                pct_str = f"with {dev_pct:+.0f}% "
+            return f"{label_name} Shows {pct_str}{direction} in {meas_name} Over Baseline"
+
     if kind in ("correlation", "association"):
+        ev_corr = finding.get("evidence") if isinstance(finding, dict) else getattr(finding, "evidence", {})
+        ev_corr_map: dict[str, Any] = ev_corr if isinstance(ev_corr, dict) else {}
         meas = finding.get("measure") if isinstance(finding, dict) else getattr(finding, "measure", None)
         dim = finding.get("dimension") if isinstance(finding, dict) else getattr(finding, "dimension", None)
-        if meas and dim:
-            clean_m = plainify(str(meas)).replace("_", " ").title()
-            clean_d = plainify(str(dim)).replace("_", " ").title()
+        col_a = ev_corr_map.get("col_a") or meas
+        col_b = ev_corr_map.get("col_b") or dim
+        if not col_a or not col_b:
+            pair_m = re.match(r"^([\w\s_]+?)\s+and\s+([\w\s_]+?)\s+move together", raw_hl, re.IGNORECASE)
+            if pair_m:
+                col_a = col_a or pair_m.group(1).strip()
+                col_b = col_b or pair_m.group(2).strip()
+        if col_a and col_b:
+            clean_m = plainify(str(col_a)).replace("_", " ").title()
+            clean_d = plainify(str(col_b)).replace("_", " ").title()
             eff = finding.get("effect") if isinstance(finding, dict) else getattr(finding, "effect", None)
             rel = "Positive" if (isinstance(eff, (int, float)) and eff >= 0) or "positive" in raw_hl.lower() else "Inverse"
             return f"{clean_m} and {clean_d} Move in {rel} Alignment"
@@ -505,9 +534,13 @@ def business_takeaway(finding: dict[str, Any] | Any) -> str:
             f"Incorporate this parameter into executive planning to systematically optimize performance."
         )
     elif kind == "interaction_synergy":
+        clean_dim = plainify(str(dimension)).replace("_", " ").title() if dimension else "Key Dimensions"
+        clean_meas = plainify(str(measure)).replace("_", " ").title() if measure else "the primary outcome"
+        eff = finding.get("effect") if isinstance(finding, dict) else getattr(finding, "effect", None)
+        eff_str = f" ({eff:+.1%} synergy lift)" if isinstance(eff, (int, float)) and abs(eff) < 10 else ""
         return (
-            "Operational Takeaway: Compound multi-factor synergy detected. "
-            "Coordinating joint interventions across both dimensions produces greater ROI than individual factor tuning."
+            f"Operational Takeaway: Compound synergy between '{clean_dim}' detected{eff_str}. "
+            f"Coordinating joint interventions across both factors produces greater ROI on {clean_meas} than individual tuning."
         )
     elif kind == "decision_scenario":
         meas = f"'{measure}'" if measure else "the primary outcome"
@@ -517,8 +550,17 @@ def business_takeaway(finding: dict[str, Any] | Any) -> str:
             "Conduct a phased pilot rollout to capture projected gains."
         )
     elif kind in ("correlation", "association"):
+        col_a = ev.get("col_a") or measure or "Variable A"
+        col_b = ev.get("col_b") or dimension or "Variable B"
+        raw_hl = str(finding.get("headline", "") if isinstance(finding, dict) else getattr(finding, "headline", "") or "")
+        pair_m = re.match(r"^([\w\s_]+?)\s+and\s+([\w\s_]+?)\s+move together", raw_hl, re.IGNORECASE)
+        if pair_m:
+            col_a = ev.get("col_a") or measure or pair_m.group(1).strip()
+            col_b = ev.get("col_b") or dimension or pair_m.group(2).strip()
+        clean_a = plainify(str(col_a)).replace("_", " ").title()
+        clean_b = plainify(str(col_b)).replace("_", " ").title()
         return (
-            f"Operational Takeaway: High co-movement observed between '{dimension}' and '{measure}'. "
+            f"Operational Takeaway: High co-movement observed between '{clean_b}' and '{clean_a}'. "
             "Align operational capacity and forecasting models to track both variables jointly."
         )
     elif kind in ("outlier_scan", "anomaly", "change"):

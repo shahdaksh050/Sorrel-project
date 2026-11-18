@@ -641,6 +641,9 @@ def _is_actionable_feature(col: str | None) -> bool:
     # Environmental / weather conditions
     if any(w in norm for w in ("weather", "temperature", "humidity", "rainfall", "wind", "precipitation", "celsius", "fahrenheit")):
         return False
+    # Synthetic cluster/segment labels from unsupervised ML
+    if norm.startswith("cluster") or norm.startswith("segment"):
+        return False
     return True
 
 

@@ -1327,6 +1327,19 @@ div[data-testid="stButtonGroup"] [aria-checked="true"] * {{
 .verdict-mark.needs_more {{ color: var(--risk-text); }}
 .verdict-mark.unchecked {{ color: var(--graphite); border-style: dashed; }}
 
+/* ── Vega-Lite container containment ── */
+div[data-testid="stVegaLiteChart"] {{
+    max-width: 100% !important;
+    overflow-x: auto !important;
+}}
+div[data-testid="stVegaLiteChart"] > div {{
+    max-width: 100% !important;
+}}
+div[data-testid="stVegaLiteChart"] svg {{
+    max-width: 100% !important;
+    height: auto !important;
+}}
+
 /* ── Accessibility states ── */
 /* Touch: every control is at least 44 px tall. */
 @media (pointer: coarse) {{

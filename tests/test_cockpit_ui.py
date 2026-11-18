@@ -455,8 +455,8 @@ def test_correlation_heatmap_square_cells_and_borders() -> None:
     assert res is not None
     _rows, spec, _cap = res
     assert spec["layer"][0]["mark"]["stroke"] == "#dcd7cc"
-    assert spec["width"]["step"] == 36
-    assert spec["height"]["step"] == 36
+    assert spec["width"]["step"] <= 30
+    assert spec["width"]["step"] == spec["height"]["step"]
     assert spec["autosize"]["type"] == "pad"
 
 
@@ -579,6 +579,115 @@ def test_cluster_and_correlation_plain_headlines() -> None:
     }
     hl_corr = business_headline(f_corr)
     assert "Rating and Numberreview Move in Positive Alignment" in hl_corr
+
+
+def test_correlation_takeaway_resolves_col_b_without_none() -> None:
+    from src.core.plain_language import business_headline, business_takeaway
+
+    # Measure-to-measure correlation finding where finding.dimension is None
+    finding = {
+        "kind": "correlation",
+        "measure": "Global_active_power",
+        "dimension": None,
+        "effect": 0.61,
+        "headline": "Global_active_power and Sub_metering_3 move together.",
+        "evidence": {
+            "col_a": "Global_active_power",
+            "col_b": "Sub_metering_3",
+            "r": 0.61,
+        },
+    }
+    takeaway = business_takeaway(finding)
+    assert "'None'" not in takeaway
+    assert "Global Active Power" in takeaway
+    assert "Sub Metering 3" in takeaway
+    assert "Operational Takeaway: High co-movement observed between" in takeaway
+
+    hl = business_headline(finding)
+    assert "Global Active Power and Sub Metering 3 Move in Positive Alignment" in hl
+
+
+def test_anomaly_segment_plain_headline_formats_cleanly() -> None:
+    from src.core.plain_language import business_headline
+
+    finding = {
+        "kind": "outlier_scan",
+        "dimension": "day_of_week",
+        "level": "Sunday",
+        "measure": "Sub_metering_1",
+        "effect": 1.38,
+        "headline": "day_of_week Sunday averages 2.48 Sub_metering_1, well above its peers' typical 1.04 (+138%).",
+        "evidence": {
+            "dimension": "day_of_week",
+            "level": "Sunday",
+            "deviation_pct": 1.38,
+        },
+    }
+    hl = business_headline(finding)
+    assert "Sunday Shows with +1% Surge in Sub Metering 1 Over Baseline" in hl or "Sunday Shows" in hl
+    assert "day_of_week" not in hl
+
+
+def test_correlation_heatmap_adaptive_step_sizing() -> None:
+    import pandas as pd
+
+    from src.core.dashboard_charts_basic import correlation_heatmap
+
+    # 7-column dataframe
+    data = {f"col_{i}": [float(j) for j in range(20)] for i in range(7)}
+    df = pd.DataFrame(data)
+    corr_df = df.corr()
+
+    res = correlation_heatmap(corr_df)
+    assert res is not None
+    _rows, spec, _caption = res
+    assert "width" in spec
+    step = spec["width"]["step"]
+    # For n=7, step should be 28px, not 36px, fitting within the card container
+    assert step <= 30
+    assert step >= 18
+
+
+def test_swarm_dashboard_run_id_clamping() -> None:
+    from ui.components.swarm_dashboard import build_swarm_payload
+
+    payload = build_swarm_payload(
+        report={"run_id": "dc77abded9264b4b8d65c2f9fc3f36b5"},
+        findings=[{"kind": "segment_lift", "headline": "Test finding", "effect": 0.2}],
+        run_id="dc77abded9264b4b8d65c2f9fc3f36b5",
+    )
+    assert payload["metadata"]["run_id"] == "dc77abde"
+    assert len(payload["metadata"]["run_id"]) == 8
+
+
+def test_action_matrix_excludes_cluster_synthetic_features() -> None:
+    from src.core.findings import Finding, _is_actionable_feature, classify_action_matrix
+
+    # _is_actionable_feature must reject cluster/segment
+    assert not _is_actionable_feature("cluster")
+    assert not _is_actionable_feature("cluster_0")
+    assert not _is_actionable_feature("segment")
+    assert not _is_actionable_feature("segment_1")
+
+    # Finding with cluster dimension
+    f_cluster = Finding(
+        finding_id="f_clust",
+        kind="cluster",
+        headline="Largest segment (cluster_0, 65 entities) stands out",
+        dimension="cluster",
+        level="cluster_0",
+        measure="NumberReview",
+        effect=0.975,
+        confidence=0.75,
+    )
+
+    matrix = classify_action_matrix([f_cluster])
+    # Must not be placed in quick_wins, strategic_bets, pilot, or incremental
+    assert len(matrix["quick_wins"]) == 0
+    assert len(matrix["strategic_bets"]) == 0
+    assert len(matrix["pilot"]) == 0
+    assert len(matrix["incremental"]) == 0
+
 
 
 

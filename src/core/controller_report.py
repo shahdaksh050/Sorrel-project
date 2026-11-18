@@ -450,6 +450,10 @@ class ReportMixin(ControllerState):
 
             # Case 1: Controllable operational lever (dimension is actionable)
             if lever and _is_actionable_feature(lever):
+                if finding.kind == "cluster" or (finding.dimension and finding.dimension.lower().startswith(("cluster", "segment"))):
+                    continue
+                if finding.level and str(finding.level).lower().startswith(("cluster_", "segment_")):
+                    continue
                 norm_lever = f"{lever}_{finding.level}".lower().strip()
                 if norm_lever in seen_levers:
                     continue

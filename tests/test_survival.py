@@ -73,6 +73,24 @@ def test_yes_no_event_column(tmp_path: Path) -> None:
     assert out["median_survival"]["median"] == base["median_survival"]["median"]
 
 
+def test_risk_set_includes_zero_time_and_excludes_unknowns(tmp_path: Path) -> None:
+    df = pd.DataFrame({
+        "duration": [0] * 10 + [5] * 30 + [-1, 10, 10],
+        "status": ["yes"] * 10 + ["no"] * 30 + ["yes", "unknown", None],
+    })
+    out = _run(tmp_path, df, duration_column="duration", event_column="status")
+    assert (out["n_examined"], out["n_rows"], out["n_excluded"]) == (43, 40, 3)
+    assert out["survival_at_end"] == pytest.approx(0.75)
+
+
+def test_nonbinary_numeric_event_requires_mapping(tmp_path: Path) -> None:
+    df = pd.DataFrame({"duration": np.arange(40), "status": [1, 2] * 20})
+    result = SurvivalAnalysisTool().run(
+        file_path=str(_csv(tmp_path, df)), duration_column="duration", event_column="status"
+    )
+    assert "0/1 mapping" in (result.error_message or "")
+
+
 def test_censored_column_is_read_inverted(tmp_path: Path) -> None:
     df = _lifetimes()
     base = _run(tmp_path, df, group_column="plan")
@@ -136,3 +154,24 @@ def test_concurrent_runs_are_identical(tmp_path: Path) -> None:
     with ThreadPoolExecutor(4) as pool:
         outs = list(pool.map(go, range(4)))
     assert len(set(outs)) == 1
+
+
+def test_survival_curve_exact_known_answer(tmp_path: Path) -> None:
+    # Exact analytical Kaplan-Meier verification:
+    # 40 subjects total:
+    # - 10 events at t=0: S(0) = 1 - 10/40 = 0.75
+    # - 10 censored at t=5: S(5) = 0.75
+    # - 10 events at t=10: risk set = 20, S(10) = 0.75 * (1 - 10/20) = 0.375
+    # - 10 censored at t=20: S(20) = 0.375
+    # Exact median survival is t=10.0
+    times = [0.0] * 10 + [5.0] * 10 + [10.0] * 10 + [20.0] * 10
+    statuses = ["yes"] * 10 + ["no"] * 10 + ["yes"] * 10 + ["no"] * 10
+    df = pd.DataFrame({"duration": times, "status": statuses})
+
+    out = _run(tmp_path, df, duration_column="duration", event_column="status")
+    assert out["n_examined"] == 40
+    assert out["n_rows"] == 40
+    assert out["n_excluded"] == 0
+    assert out["n_events"] == 20
+    assert out["survival_at_end"] == pytest.approx(0.375, abs=1e-4)
+    assert out["median_survival"]["median"] == pytest.approx(10.0, abs=1e-4)

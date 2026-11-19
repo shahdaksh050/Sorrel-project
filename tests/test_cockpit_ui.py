@@ -182,7 +182,8 @@ def test_classify_action_matrix_populates_all_four_quadrants() -> None:
         measure="spend",
         effect=1.40,
         confidence=0.88,
-        evidence={"n": 240, "checks": {"robust": True, "paradox_free": True}},
+        evidence_tier="causal_action",
+        evidence={"feasibility_supported": True, "n": 240, "checks": {"robust": True, "paradox_free": True}},
     )
 
     # 2. Strategic Bet: High impact, multi-factor synergy / complex feasibility
@@ -195,7 +196,8 @@ def test_classify_action_matrix_populates_all_four_quadrants() -> None:
         measure="conversion",
         effect=0.65,
         confidence=0.70,
-        evidence={"n": 180, "checks": {"robust": True, "paradox_free": True}},
+        evidence_tier="causal_action",
+        evidence={"feasibility_supported": True, "n": 180, "checks": {"robust": True, "paradox_free": True}},
     )
 
     # 3. Pilot / A/B Test: High opportunity observational contrast with disclaimer
@@ -222,7 +224,8 @@ def test_classify_action_matrix_populates_all_four_quadrants() -> None:
         measure="session_time",
         effect=0.04,
         confidence=0.82,
-        evidence={"n": 500, "checks": {"robust": True, "paradox_free": True}},
+        evidence_tier="causal_action",
+        evidence={"feasibility_supported": True, "n": 500, "checks": {"robust": True, "paradox_free": True}},
     )
 
     # 5. Risk Guardrail / Watch: Paradox reversal or fragile
@@ -341,7 +344,7 @@ def test_classify_action_matrix_benign_caveats_not_fatal() -> None:
         level="Enterprise",
         effect=0.45,
         confidence=0.85,
-        evidence={"checks": {"robust": True, "paradox_free": True}},
+        evidence={"feasibility_supported": True, "checks": {"robust": True, "paradox_free": True}},
         evidence_tier="causal_action",
         caveats=["Two-tailed t-test with Welch correction.", "FDR Benjamini-Hochberg adjusted."],
     )
@@ -380,6 +383,7 @@ def test_classify_action_matrix_low_impact_driver_is_incremental() -> None:
         measure="churn",
         dimension="feature_x",
         effect=0.015,
+        evidence={"feasibility_supported": True},
         confidence=0.85,
         evidence_tier="causal_action",
     )
@@ -394,10 +398,8 @@ def test_swarm_dashboard_dynamic_agent_telemetry_and_kpis() -> None:
     # With no findings and empty report: no hardcoded mock numbers
     p_empty = build_swarm_payload()
     assert p_empty["telemetry"]["records"] == "N/A"
-    assert p_empty["kpis"][0]["target"] == 0.0
-    assert p_empty["kpis"][1]["badge"] == "AUDITED"
-    assert p_empty["kpis"][2]["target"] == 0
-    assert p_empty["kpis"][2]["badge"] == "INVARIANT"
+    assert p_empty["kpis"] == []
+    assert p_empty["audit"]["ledger_text"] == "No finding checks recorded"
 
     # With paradox finding: KPI 3 must flag reversal
     p_paradox = build_swarm_payload(
@@ -405,12 +407,13 @@ def test_swarm_dashboard_dynamic_agent_telemetry_and_kpis() -> None:
             {
                 "finding_id": "f_px",
                 "headline": "Reversal finding",
+                "evidence": {"checks": {"paradox_free": False}},
                 "caveats": ["Subgroup reversal detected (Simpson's paradox)."],
             }
         ]
     )
-    assert p_paradox["kpis"][2]["target"] == 1
-    assert p_paradox["kpis"][2]["badge"] == "CAUTION"
+    reversal = next(k for k in p_paradox["kpis"] if k["label"] == "Subgroup reversals")
+    assert reversal["target"] == 1 and reversal["badge"] == "CAUTION"
 
 
 def test_forecast_chart_preserves_data_points_and_layers() -> None:
@@ -490,12 +493,12 @@ def test_swarm_dashboard_telemetry_hydration_and_lead_narrative() -> None:
     assert p["telemetry"]["dimensions"] == "10 Cols"
     # The lead narrative must NOT leak raw z-score equations
     assert "robust sds" not in p["metadata"]["lead_narrative"].lower()
-    assert p["kpis"][1]["label"] == "Statistical Deviation"
-    assert p["kpis"][1]["target"] == 7.4
-    assert p["kpis"][1]["prefix"] == "z = "
+    deviation = next(k for k in p["kpis"] if k["label"] == "Statistical Deviation")
+    assert deviation["target"] == 7.4
+    assert deviation["prefix"] == "z = "
 
 
-def test_entity_aggregated_finding_reaches_quick_wins_and_strategic_bets() -> None:
+def test_entity_contrasts_preserve_evidence_disposition_for_either_sign() -> None:
     from src.core.findings import Finding, classify_action_matrix
 
     # Category='Delivery': +196.9% lift, n=68 states vs 121
@@ -534,19 +537,10 @@ def test_entity_aggregated_finding_reaches_quick_wins_and_strategic_bets() -> No
 
     matrix = classify_action_matrix([f_delivery, f_plumbing])
 
-    # Delivery should reach Pilot / A/B Test validation rather than getting dumped in watch_caveats
-    assert len(matrix["pilot"]) == 1
-    assert matrix["pilot"][0]["finding_id"] == "f_del"
-    assert "Delivery" in matrix["pilot"][0]["lever"]
-
-    # Plumbing should reach Strategic Bets as a remediation bet
-    assert len(matrix["strategic_bets"]) == 1
-    assert matrix["strategic_bets"][0]["finding_id"] == "f_plumb"
-    assert "Plumbing" in matrix["strategic_bets"][0]["lever"]
-    assert "Remediation" in matrix["strategic_bets"][0]["feasibility_level"]
-
-    # Neither should be rejected into watch_caveats
-    assert len(matrix["watch_caveats"]) == 0
+    assert not matrix["strategic_bets"] and not matrix["quick_wins"]
+    assert not matrix["pilot"]
+    assert {record["finding_id"] for record in matrix["watch_caveats"]} == {"f_del", "f_plumb"}
+    assert f_plumbing.desired_direction is None
 
 
 def test_cluster_and_correlation_plain_headlines() -> None:

@@ -15,6 +15,10 @@ and domain pack evaluation across all 10 canonical data archetypes:
 """
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +49,31 @@ from src.core.reshaping import (
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 
+def test_cli_routes_censored_churn_to_survival_with_ml_enabled(tmp_path: Path) -> None:
+    dataset = DATA_DIR / "sample_customer_churn.csv"
+    subprocess.run(
+        [
+            sys.executable, str(DATA_DIR.parent / "main.py"),
+            "--dataset", str(dataset), "--target", "churn", "--no-llm",
+            "--output-dir", str(tmp_path),
+        ],
+        cwd=DATA_DIR.parent,
+        env={**os.environ, "PYTHONUTF8": "1", "CHART_DESIGN": "false"},
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        check=True, timeout=120,
+    )
+    reports = tmp_path / "reports"
+    raw = json.loads((reports / "sample_customer_churn_raw.json").read_text(encoding="utf-8"))
+    outputs = {r["tool_name"]: r["output"] for r in raw["tool_results"] if r["status"] == "success"}
+    assert outputs["survival_analysis"]["event_column"] == "churn"
+    assert outputs["survival_analysis"]["n_events"] == 333
+    assert outputs["survival_analysis"]["n_censored"] == 1167
+    assert "train_model" not in outputs
+    assert "evaluate_model" not in outputs
+    assert not list((tmp_path / "models").glob("*.pkl"))
+    assert "censor" in (reports / "sample_customer_churn_report.md").read_text(encoding="utf-8").lower()
+
+
 def test_reference_air_quality_dataset_classification() -> None:
     csv_path = DATA_DIR / "AirQualityUCI.csv"
     if not csv_path.exists():
@@ -69,6 +98,7 @@ def test_reference_churn_dataset_classification() -> None:
     df = pd.read_csv(csv_path, nrows=300)
     profile = profile_dataframe(df)
     assert profile.archetype == ARCHETYPE_SURVIVAL
+    assert any("binary event flag 'churn'" in reason for reason in profile.archetype_evidence)
     questions = build_agenda(profile, {"mode": "describe"})
     assert any(q.kind == "survival" for q in questions)
 

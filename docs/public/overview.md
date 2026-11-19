@@ -1,7 +1,7 @@
 # Sorrel Overview
 
 Version: 1.0.1
-Last Updated: 2026-10-16
+Last Updated: 2026-11-19
 Canonical: /docs/overview.md
 
 Sorrel is a local exploratory data-analysis application for tabular datasets.
@@ -22,12 +22,10 @@ or automatic 24-hour retention. Those subjects remain roadmap work; see the
 status pages for [REST](/docs/api-quickstart.md), [MCP](/docs/mcp.md), and
 [result format](/docs/result-schema.md).
 
-## Seven-stage workflow
+## Five-stage workflow
 
 1. Dataset ingestion and profiling
 2. Initial reasoning
 3. Tool execution and sandbox verification
-4. Result interpretation
-5. Iterative refinement and adversarial review
-6. RLM workflow management
-7. Synthesis, post-hoc audits, and dossier generation
+4. Interpretation, iterative refinement, and adversarial review
+5. Synthesis, post-hoc audits, and dossier generation

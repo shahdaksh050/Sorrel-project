@@ -105,6 +105,7 @@ class ControllerState:
     _tool_failure_counts: dict[str, int]
     _hypothesis_parent_by_key: dict[tuple[str, str], str]
     _hypothesis_parent_by_tool: dict[str, str]
+    _invalid_steps: set[str]
 
     if TYPE_CHECKING:
 
@@ -117,3 +118,9 @@ class ControllerState:
             decision: dict[str, Any] | None,
             excluded_columns: set[str] | None = None,
         ) -> list[Any]: ...
+
+
+def _step_signature(tool_name: str, params: dict[str, Any]) -> str:
+    """Compute deterministic canonical signature for a tool execution step."""
+    norm_params = tuple(sorted((k, str(v)) for k, v in params.items() if k not in ("file_path", "output_dir", "_worker_env")))
+    return f"{tool_name}:{norm_params}"

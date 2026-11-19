@@ -161,10 +161,15 @@ class DimensionalityAnalysisTool(BaseTool):
         X = scaler.fit_transform(filled)
         n_components = min(X.shape[0], X.shape[1])
         gpu_explained, backend_decision = _gpu_pca_explained_variance(X, policy)
+        component_top_features: list[str] = []
         if gpu_explained is None:
             pca = PCA(n_components=n_components, random_state=42)
             pca.fit(X)
             explained_values = pca.explained_variance_ratio_
+            if hasattr(pca, "components_"):
+                for comp in pca.components_:
+                    idx = int(np.argmax(np.abs(comp)))
+                    component_top_features.append(str(features.columns[idx]))
         else:
             explained_values = gpu_explained
 
@@ -186,6 +191,7 @@ class DimensionalityAnalysisTool(BaseTool):
             "features_used": list(features.columns),
             "explained_variance_ratio": explained,
             "cumulative_variance": [round(float(v), 4) for v in cumulative],
+            "component_top_features": component_top_features,
             "n_components_for_threshold": n_for_threshold,
             "variance_threshold": variance_threshold,
             "high_correlation_pairs": high_corr_pairs,

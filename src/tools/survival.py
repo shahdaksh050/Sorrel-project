@@ -167,28 +167,25 @@ def _encode_event(series: pd.Series, column: str) -> tuple[pd.Series, str]:
         values = sorted({float(v) for v in series.dropna().unique()})
         if not values:
             raise ToolExecutionError(f"Event column '{column}' has no values.")
-        if len(values) > 2:
+        if not set(values) <= {0.0, 1.0}:
             raise ToolExecutionError(
-                f"Event column '{column}' has {len(values)} distinct values; it must be two-valued "
+                f"Event column '{column}' needs an explicit 0/1 mapping "
                 "(1 = event happened, 0 = censored)."
             )
-        top = 1.0 if set(values) <= {0.0, 1.0} else values[-1]
-        coded = (series.astype("float64") == top).astype("float64").where(series.notna())
+        coded = series.astype("float64")
     else:
         present = series.notna()
         text = series[present].astype(str).str.strip().str.lower()
         lookup = {u: _WORD_MAP.get(u, float("nan")) for u in text.unique()}
         mapped = text.map(lookup).astype("float64")
-        unknown = text[mapped.isna()]
-        if len(unknown):
-            shown = ", ".join(repr(str(v)) for v in list(unknown.unique())[:4])
+        if not mapped.notna().any():
             raise ToolExecutionError(
-                f"Event column '{column}' has values I cannot read as event/no-event ({shown}). "
+                f"Event column '{column}' has no recognized event/no-event observations. "
                 "Recode it as 1 = event happened, 0 = censored."
             )
         coded = pd.Series(np.nan, index=series.index, dtype="float64")
         coded.loc[text.index] = mapped
-        plain = set(text.unique()) <= _PLAIN_WORDS
+        plain = set(text[mapped.notna()].unique()) <= _PLAIN_WORDS
     note = "1 / yes = event happened"
     if plain and _tokens(column) & {"censor", "censored"}:
         coded = 1.0 - coded
@@ -561,6 +558,8 @@ class SurvivalAnalysisTool(BaseTool):
         for d in _duration_candidates(profile):
             events = _event_candidates(profile, {d.name})
             if events:
+                if metadata and metadata.target_column:
+                    events.sort(key=lambda event: event.name != metadata.target_column)
                 params: dict[str, Any] = {"duration_column": d.name, "event_column": events[0].name}
                 taken = {d.name, events[0].name}
                 groups = [
@@ -621,12 +620,13 @@ class SurvivalAnalysisTool(BaseTool):
         if duration.notna().sum() == 0:
             raise ToolExecutionError(f"'{duration_column}' is not numeric.")
         event, coding = _encode_event(df[event_column], event_column)
-        keep = duration.notna() & event.notna() & (duration > 0)
+        # The Kaplan-Meier risk set includes events observed at time zero.
+        keep = np.isfinite(duration) & event.notna() & (duration >= 0)
         if group_column:
             keep &= df[group_column].notna()
         n_dropped = int(len(df) - keep.sum())
         if n_dropped:
-            notes.append(f"{n_dropped:,} rows with a missing or non-positive duration/event were left out.")
+            notes.append(f"Excluded {n_dropped:,} rows with invalid duration, unknown event status, or missing group.")
         work = pd.DataFrame({"t": duration, "e": event})[keep]
         work["e"] = work["e"].astype(bool)
         if group_column:
@@ -655,6 +655,7 @@ class SurvivalAnalysisTool(BaseTool):
             "duration_column": duration_column, "event_column": event_column,
             "group_column": None, "covariate_columns": covs, "event_coding": coding,
             "time_unit": unit, "event_words": list(words), "n_rows": n, "n_events": n_events,
+            "n_examined": len(df), "n_excluded": n_dropped,
             "n_censored": n - n_events, "censored_share": round(censored_pct, 4),
             "max_follow_up": round(tmax, 4),
             "median_survival": _round_median(_median(km_all)),

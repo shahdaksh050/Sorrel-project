@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from src.core.findings import Finding
+from src.core.geo_stats import spherical_center
 from src.core.profiler import is_lat_name, is_lon_name
 from src.tools.base import BaseTool, ToolExecutionError
 from src.tools.data_processing import _read_df
@@ -34,10 +35,9 @@ def _autodetect_geo_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
         clean = df[col].dropna()
         if clean.empty:
             continue
-        lo, hi = float(clean.min()), float(clean.max())
-        if lat_col is None and is_lat_name(str(col)) and -90.0 <= lo and hi <= 90.0:
+        if lat_col is None and is_lat_name(str(col)) and clean.between(-90, 90).any():
             lat_col = str(col)
-        elif lon_col is None and is_lon_name(str(col)) and -180.0 <= lo and hi <= 180.0:
+        elif lon_col is None and is_lon_name(str(col)) and clean.between(-180, 180).any():
             lon_col = str(col)
     return lat_col, lon_col
 
@@ -75,7 +75,7 @@ class GeospatialAnalysisTool(BaseTool):
                 "No usable lat/lon column pair found. Pass lat_column and lon_column explicitly."
             )
 
-        coords = df[[lat_column, lon_column]].dropna()
+        coords = df[[lat_column, lon_column]].apply(pd.to_numeric, errors="coerce").dropna()
         coords = coords[
             coords[lat_column].between(-90, 90) & coords[lon_column].between(-180, 180)
         ]
@@ -93,20 +93,24 @@ class GeospatialAnalysisTool(BaseTool):
             "min_lon": round(float(lon.min()), 5),
             "max_lon": round(float(lon.max()), 5),
         }
-        centroid = {"lat": round(float(lat.mean()), 5), "lon": round(float(lon.mean()), 5)}
+        center = spherical_center(lat, lon)
+        centroid = {"lat": round(center[0], 5), "lon": round(center[1], 5)} if center else None
 
         grid_size = max(2, int(grid_size))
         # Grid over the 1st-99th percentile box: a handful of stray points
         # (a mistyped coordinate, one overseas office) would otherwise
         # stretch the grid so that everything else lands in a few cells.
         lat_lo, lat_hi = np.quantile(lat, [0.01, 0.99])
-        lon_lo, lon_hi = np.quantile(lon, [0.01, 0.99])
+        # Put the longitude seam opposite the observed center for date-line clusters.
+        origin = center[1] if center else 0.0
+        local_lon = (lon - origin + 180.0) % 360.0 - 180.0
+        lon_lo, lon_hi = np.quantile(local_lon, [0.01, 0.99])
         if lat_lo == lat_hi:
             lat_lo, lat_hi = float(lat_lo - 0.01), float(lat_hi + 0.01)
         if lon_lo == lon_hi:
             lon_lo, lon_hi = float(lon_lo - 0.01), float(lon_hi + 0.01)
-        in_box = (lat >= lat_lo) & (lat <= lat_hi) & (lon >= lon_lo) & (lon <= lon_hi)
-        grid_lat, grid_lon = lat[in_box], lon[in_box]
+        in_box = (lat >= lat_lo) & (lat <= lat_hi) & (local_lon >= lon_lo) & (local_lon <= lon_hi)
+        grid_lat, grid_lon = lat[in_box], local_lon[in_box]
         lat_bins = np.linspace(lat_lo, lat_hi, grid_size + 1)
         lon_bins = np.linspace(lon_lo, lon_hi, grid_size + 1)
         lat_idx = np.clip(np.digitize(grid_lat, lat_bins) - 1, 0, grid_size - 1)
@@ -121,7 +125,7 @@ class GeospatialAnalysisTool(BaseTool):
         densest_cells = [
             {
                 "lat_range": [round(float(lat_bins[li]), 5), round(float(lat_bins[li + 1]), 5)],
-                "lon_range": [round(float(lon_bins[lo_i]), 5), round(float(lon_bins[lo_i + 1]), 5)],
+                "lon_range": [round(float((v + origin + 180) % 360 - 180), 5) for v in lon_bins[lo_i:lo_i + 2]],
                 "count": count,
             }
             for (li, lo_i), count in densest
@@ -138,6 +142,7 @@ class GeospatialAnalysisTool(BaseTool):
             "lat_column": lat_column,
             "lon_column": lon_column,
             "n_points": len(coords),
+            "n_excluded": len(df) - len(coords),
             "bounding_box": bounding_box,
             "centroid": centroid,
             "grid_size": grid_size,
@@ -147,7 +152,7 @@ class GeospatialAnalysisTool(BaseTool):
             # data, so 1/grid² makes every dataset look like a hotspot.
             "grid_points": int(in_box.sum()),
             "occupied_cells": len(cell_counts),
-            "uniform_share": round(1.0 / len(cell_counts), 6),
+            "uniform_share": round(1.0 / len(cell_counts), 6) if cell_counts else None,
         }
 
     def findings(

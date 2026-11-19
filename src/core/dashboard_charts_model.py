@@ -20,10 +20,11 @@ def _model_comparison_chart(train_output: dict[str, Any] | None) -> ChartSpec | 
     if not isinstance(models, dict) or not models:
         return None
     task = str(train_output.get("task_type", "classification"))
-    metric = "accuracy" if task == "classification" else "r2"
-    # Accuracy reads as a percentage; R² stays on its own scale (it can be
-    # negative, and the y domain fits the data rather than clipping it).
-    scale, metric_title = (100, "Accuracy %") if metric == "accuracy" else (1, "R²")
+    if task not in ("classification", "regression"):
+        return None
+    metric = "f1_score" if task == "classification" else "r2"
+    scale, metric_title = (100, "Weighted F1 %") if task == "classification" else (1, "R²")
+
 
     rows: list[dict[str, Any]] = []
     for name, m in models.items():
@@ -36,7 +37,7 @@ def _model_comparison_chart(train_output: dict[str, Any] | None) -> ChartSpec | 
             ("CV mean", m.get("cv_mean")),
         ):
             if isinstance(raw, (int, float)) and not isinstance(raw, bool) and np.isfinite(raw):
-                rows.append({"model": str(name), "metric": label, "score": round(float(raw) * scale, 4)})
+                rows.append({"model": humanize_label(str(name)), "metric": label, "score": round(float(raw) * scale, 4)})
     if not rows:
         return None
     return ChartSpec(

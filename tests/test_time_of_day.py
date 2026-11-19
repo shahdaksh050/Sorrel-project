@@ -44,6 +44,11 @@ def test_daily_cycle_and_weekend_dip(tmp_path: Path) -> None:
     assert w["weekend_gap"] < 0 and abs(w["weekend_gap"] + 0.3) < 0.05
     assert len(w["means"]) == 7
     assert out["charts"] and "average by hour of day" in out["charts"][0]["title"]
+    hc = out["charts"][0]
+    assert hc["x"] == "hour_label"
+    assert hc["x_title"] == "Time of Day"
+    assert hc["data"][0]["hour_label"] == "12 AM"
+    assert hc["data"][13]["hour_label"] == "1 PM"
     # a second measure with its own hour effect is picked up; the flat one is not
     assert "NOx" in out["diurnal"] and "flat" not in out["diurnal"]
 

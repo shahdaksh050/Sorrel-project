@@ -36,7 +36,6 @@ _TOP_ITEMS = 60
 _MAX_RULES = 10
 _MAX_FINDINGS = 5
 _MIN_ORDERS = 20
-_MIN_ROWS_TO_APPLY = 200
 _MIN_ROWS_PER_ORDER = 1.5
 _ORDER_TOKENS = role_tokens("order")
 _ITEM_TOKENS = role_tokens("item")
@@ -59,7 +58,7 @@ def _priority(name: str, vocabulary: tuple[str, ...]) -> int | None:
 def _detect_columns(profile: DatasetProfile | None) -> tuple[str, str] | None:
     """(order id column, item column) when the profile clearly looks like
     line-item transaction data, else None. Whole-token name matching only."""
-    if profile is None or profile.row_count < _MIN_ROWS_TO_APPLY:
+    if profile is None or profile.row_count < _MIN_ORDERS:
         return None
     orders: list[tuple[int, str]] = []
     items: list[tuple[int, str]] = []
@@ -70,7 +69,8 @@ def _detect_columns(profile: DatasetProfile | None) -> tuple[str, str] | None:
         if _tokens(c.name) & _NOT_AN_ID_TOKENS or column_role(profile, c.name, "date"):
             continue
         rank = -1 if overrides.get(c.name) == "order" else _priority(c.name, _ORDER_TOKENS)
-        if rank is not None and c.semantic_role != "measure" and profile.row_count / c.nunique >= _MIN_ROWS_PER_ORDER:
+        if (rank is not None and c.semantic_role != "measure" and c.nunique >= _MIN_ORDERS
+                and profile.row_count / c.nunique >= _MIN_ROWS_PER_ORDER):
             orders.append((rank, c.name))
         rank = -1 if overrides.get(c.name) == "item" else _priority(c.name, _ITEM_TOKENS)
         if rank is not None and c.kind != "numeric" and c.nunique >= 3:
@@ -133,10 +133,9 @@ class BasketAnalysisTool(BaseTool):
 
         from scipy import sparse
 
-        order_codes, order_names = pd.factorize(df[order_column])
-        item_codes, item_names = pd.factorize(df[item_column])
-        keep = (order_codes >= 0) & (item_codes >= 0)
-        order_codes, item_codes = order_codes[keep], item_codes[keep]
+        eligible = df[[order_column, item_column]].dropna()
+        order_codes, order_names = pd.factorize(eligible[order_column])
+        item_codes, item_names = pd.factorize(eligible[item_column])
         if len(order_codes) == 0:
             raise ToolExecutionError("No rows with both an order id and an item.")
 
@@ -227,6 +226,7 @@ class BasketAnalysisTool(BaseTool):
             "n_items_considered": len(top), "mean_items_per_order": round(mean_items, 2),
             "min_support_orders": int(support_floor), "sampled": sampled,
             "n_orders_before_sampling": int(n_orders_total),
+            "n_excluded_lines": len(df) - len(eligible),
             "rules": rules, "top_pair": top_pair,
         }
         chart = self._chart(rules, order_column, item_column)
@@ -296,8 +296,8 @@ class BasketAnalysisTool(BaseTool):
                 finding_id=f"basket_{a}_{b}".replace(" ", "_")[:120],
                 kind="association",
                 headline=(
-                    f"Customers who buy {_short(a, 60)} also buy {_short(b, 60)} {_pct(r['confidence'])} of the time, "
-                    f"{r['lift']:.1f}x more often than the average customer."
+                    f"{_pct(r['confidence'])} of orders containing {_short(a, 60)} also contain {_short(b, 60)}, "
+                    f"{r['lift']:.1f} times its share across all orders."
                 ),
                 detail=(
                     f"{r['orders']:,} of {n_orders:,} orders contain both; {_pct(r['consequent_base_rate'])} of all orders "

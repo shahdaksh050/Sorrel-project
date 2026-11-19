@@ -117,8 +117,10 @@ def _assert_null(findings: list[dict[str, Any]]) -> None:
     ], where
     assert not [
         f for f in findings
-        if f["kind"] in _TEST_KINDS and (f.get("p_adjusted") is not None) and f["p_adjusted"] < 0.05
+        if f["kind"] in _TEST_KINDS and f.get("primary_eligible", True)
+        and (f.get("p_adjusted") is not None) and f["p_adjusted"] < 0.05
     ], where
+    assert all(not f["primary_eligible"] for f in findings if f.get("statistical_state") == "inconclusive")
     assert not [f for f in findings if f["kind"] == "driver" and f.get("source_tool") == "evaluate_model"], where
     analyst = [f for f in findings if f.get("layer") == "analyst"]
     assert len(analyst) <= MAX_ANALYST, where

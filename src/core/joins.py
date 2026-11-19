@@ -19,7 +19,6 @@ import pandas as pd
 
 _SAMPLE_UNIQUES = 5_000
 _MIN_CONTAINMENT = 0.6
-_MIN_RIGHT_UNIQUE = 0.99
 _MAX_MANY_TO_MANY_GROWTH = 1.05
 _NEAR_CONSTANT = 0.95
 _TMP_KEY = "__dsa_join_key__"
@@ -153,8 +152,8 @@ def _evaluate(
         lu = lu.sample(_SAMPLE_UNIQUES, random_state=0)
     containment = float(lu.isin(rset).mean())
 
-    left_unique = (lvals.nunique() / len(lvals)) >= _MIN_RIGHT_UNIQUE
-    right_unique = (len(rset) / len(rvals)) >= _MIN_RIGHT_UNIQUE
+    left_unique = lvals.is_unique
+    right_unique = rvals.is_unique
 
     if left_unique and right_unique:
         card = "one_to_one"
@@ -281,15 +280,15 @@ def join_frames(left: pd.DataFrame, right: pd.DataFrame, plan: JoinPlan, max_row
             )
         )
     )
+    lkey, rkey = _aligned(left[plan.left_key], right[plan.right_key])
     if should_aggregate:
-        r_to_merge = _aggregate_table_to_key(right, plan.right_key, name)
+        keyed_right = right.assign(**{plan.right_key: rkey}).dropna(subset=[plan.right_key])
+        r_to_merge = _aggregate_table_to_key(keyed_right, plan.right_key, name)
+        rkey = r_to_merge[plan.right_key]
         was_aggregated = True
 
-    lkey, rkey = _aligned(left[plan.left_key], r_to_merge[plan.right_key])
     r = r_to_merge.drop(columns=[plan.right_key]).assign(**{_TMP_KEY: rkey.to_numpy()})
     r = r[rkey.notna().to_numpy()]
-    if plan.cardinality in ("many_to_one", "one_to_one") or was_aggregated:
-        r = r.drop_duplicates(_TMP_KEY)
     taken = set(left.columns)
     rename: dict[str, str] = {}
     for c in r.columns:
@@ -299,7 +298,8 @@ def join_frames(left: pd.DataFrame, right: pd.DataFrame, plan: JoinPlan, max_row
                 new += "_"
             rename[c] = new
     out = left.assign(**{_TMP_KEY: lkey.to_numpy()}).merge(
-        r.rename(columns=rename), on=_TMP_KEY, how=plan.how
+        r.rename(columns=rename), on=_TMP_KEY, how=plan.how,
+        validate="many_to_one" if was_aggregated or plan.cardinality.endswith("_one") else None,
     ).drop(columns=[_TMP_KEY])
     on = plan.left_key if plan.left_key == plan.right_key else f"{plan.left_key} = {plan.right_key}"
     left_stem_name = Path(plan.left_name).stem or "the main table"
@@ -313,6 +313,13 @@ def join_frames(left: pd.DataFrame, right: pd.DataFrame, plan: JoinPlan, max_row
             f"Joined {name} to {left_stem_name} on {on} "
             f"({card_label}, {plan.coverage:.0%} of rows matched)."
         ]
+    matched = int(lkey.isin(r[_TMP_KEY]).sum())
+    notes.append(
+        f"Join reconciliation: {len(left):,} left rows, {len(right):,} right rows, "
+        f"{len(out):,} output rows before sampling; {len(left) - matched:,} unmatched left rows."
+    )
+    if len(out) > len(left):
+        notes.append("The join repeats parent values across child rows. Sum parent measures once per parent.")
     if len(out) > max_rows:
         out = out.sample(n=max_rows, random_state=0).sort_index()
         notes.append(f"Joined table exceeded {max_rows:,} rows; a random sample was kept.")

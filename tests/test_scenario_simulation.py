@@ -147,7 +147,8 @@ def test_scenario_simulation_segment_opportunity(tmp_path: Path) -> None:
     assert opp["dimension"] == "region"
     assert opp["segment"] == "East"
     assert opp["gap_per_unit"] > 25.0
-    assert opp["recoverable_total"] > 1500.0
+    assert opp["cohort_gap_total"] > 1500.0
+    assert opp["recoverable_total"] is None
 
 
 def test_scenario_simulation_findings(tmp_path: Path) -> None:
@@ -293,5 +294,119 @@ def test_backward_compatible_aliases_present(tmp_path: Path) -> None:
     if out.get("segment_opportunity"):
         assert "recoverable_total" in out["segment_opportunity"]
         assert "cohort_gap_total" in out["segment_opportunity"]
-        assert out["segment_opportunity"]["recoverable_total"] == out["segment_opportunity"]["cohort_gap_total"]
+        assert out["segment_opportunity"]["recoverable_total"] is None
+        assert out["segment_opportunity"]["cohort_gap_total"] > 0.0
 
+
+@pytest.mark.parametrize("levels", [(10.0, 20.0), (10.0, 10.0), (0.0, 1.0)])
+def test_zero_driver_shift_preserves_observed_units(tmp_path: Path, levels: tuple[float, float]) -> None:
+    path = tmp_path / "costs.csv"
+    pd.DataFrame({"service_cost": list(levels) * 30, "volume": np.arange(60)}).to_csv(path, index=False)
+    result = ScenarioSimulationTool().run(file_path=str(path), target_column="service_cost",
+                                          driver_column="volume", shifts=[0.0])
+    assert result.status == "success"
+    assert result.output["bounded_target"] == (levels == (0.0, 1.0))
+    scenario = result.output["scenarios"][0]
+    assert scenario["projected_mean"] == sum(levels) / 2
+    assert scenario["delta_target"] == scenario["projected_total_impact"] == 0.0
+    assert scenario["ci_lower"] == scenario["ci_upper"] == 0.0
+
+
+@pytest.mark.parametrize("goal", ["minimize", "maximize", "sensitivity_only", "hold"])
+def test_cohort_benchmark_respects_goal(tmp_path: Path, goal: str) -> None:
+    path = tmp_path / "costs.csv"
+    pd.DataFrame({"plan": ["A"] * 30 + ["B"] * 30,
+                  "service_cost": [10, 11] * 15 + [20, 21] * 15}).to_csv(path, index=False)
+    tool = ScenarioSimulationTool()
+    result = tool.run(file_path=str(path), target_column="service_cost", segment_column="plan", target_goal=goal)
+    assert result.status == "success"
+    benchmark = result.output["segment_opportunity"]
+    if goal in {"sensitivity_only", "hold"}:
+        assert benchmark is None
+        return
+    minimize = goal == "minimize"
+    assert benchmark["segment"] == ("B" if minimize else "A")
+    assert benchmark["gap_per_unit"] == (-10.0 if minimize else 10.0)
+    assert benchmark["cohort_gap_total"] == (-300.0 if minimize else 300.0)
+    assert benchmark["recoverable_total"] is None
+    assert f"{benchmark['cohort_gap_total']:+,.2f} across the cohort" in result.output["decision_table"]
+    finding, = tool.findings(result.output, None, None)
+    assert ("10.00 higher" if minimize else "10.00 lower") in finding.headline
+
+
+def test_scenario_simulation_population_separation(tmp_path: Path) -> None:
+    csv_path = tmp_path / "pop_sep.csv"
+    n = 100
+    df = pd.DataFrame({
+        "revenue": np.linspace(100, 200, n),
+        "marketing_cost": np.linspace(10, 50, n),
+    })
+    df.to_csv(csv_path, index=False)
+    tool = ScenarioSimulationTool()
+    res = tool.execute(
+        file_path=str(csv_path),
+        target_column="revenue",
+        driver_column="marketing_cost",
+        projection_population=50000,
+    )
+    assert res["estimation_population"] == 100
+    assert res["projection_population"] == 50000
+    top_scenario = res["scenarios"][0]
+    expected_tot = round(top_scenario["delta_target"] * 50000, 2)
+    assert top_scenario["projected_total_impact"] == expected_tot
+
+
+def test_scenario_simulation_intensive_target_omits_total(tmp_path: Path) -> None:
+    csv_path = tmp_path / "satisfaction.csv"
+    n = 80
+    np.random.seed(42)
+    wait_time = np.linspace(5, 60, n)
+    # Satisfaction score on 1-5 scale (intensive measure)
+    sat = 5.0 - 0.05 * wait_time + np.random.normal(0, 0.2, n)
+    df = pd.DataFrame({"support_wait_time": wait_time, "satisfaction_score": sat})
+    df.to_csv(csv_path, index=False)
+
+    tool = ScenarioSimulationTool()
+    res = tool.execute(
+        file_path=str(csv_path),
+        target_column="satisfaction_score",
+        driver_column="support_wait_time",
+    )
+    assert res["is_additive_target"] is False
+    top_scenario = res["scenarios"][0]
+    assert top_scenario["projected_total_impact"] is None
+    assert top_scenario["sensitivity_total"] is None
+    assert "N/A (Intensive Measure)" in res["decision_table"]
+    assert "Total impact omitted" in res["summary"]
+
+    findings = tool.findings(res, None, None)
+    assert len(findings) > 0
+    f = findings[0]
+    assert "Total impact omitted: 'satisfaction_score' is an intensive/non-additive measure" in f.detail
+    assert "Observational linear sensitivity benchmark under stated counterfactual assumption" in f.detail
+    assert f.evidence["is_additive"] is False
+
+
+def test_scenario_simulation_extrapolation_detection(tmp_path: Path) -> None:
+    csv_path = tmp_path / "extrap.csv"
+    # Tight range of driver: 10 to 12
+    n = 50
+    spend = np.linspace(10.0, 12.0, n)
+    revenue = 2.0 * spend + 10.0
+    pd.DataFrame({"spend": spend, "revenue": revenue}).to_csv(csv_path, index=False)
+
+    tool = ScenarioSimulationTool()
+    # A +50% shift on mean 11.0 is 16.5, which far exceeds driver max of 12.0
+    res = tool.execute(
+        file_path=str(csv_path),
+        target_column="revenue",
+        driver_column="spend",
+        shifts=[50.0],
+    )
+    scenario = res["scenarios"][0]
+    assert scenario["is_extrapolation"] is True
+    assert scenario["simulated_driver_value"] > scenario["driver_max"]
+
+    findings = tool.findings(res, None, None)
+    assert len(findings) > 0
+    assert "[Extrapolation]" in findings[0].headline

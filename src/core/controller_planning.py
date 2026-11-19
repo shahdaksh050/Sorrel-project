@@ -12,7 +12,12 @@ import logging
 import re
 from typing import Any
 
-from src.core.controller_common import _MAX_STEPS_PER_CYCLE, ControllerState, console
+from src.core.controller_common import (
+    _MAX_STEPS_PER_CYCLE,
+    ControllerState,
+    _step_signature,
+    console,
+)
 from src.core.governance import (
     code_execution_available,
 )
@@ -128,14 +133,13 @@ class PlanMixin(ControllerState):
             from src.core.profiler import (
                 ARCHETYPE_CONTINUOUS_SERIES,
                 ARCHETYPE_SENSOR,
-                ARCHETYPE_SURVIVAL,
             )
 
             # Safe Quantitative Routing: Archetype Anti-Pattern Guards (§4.4)
-            if profile.archetype == ARCHETYPE_SURVIVAL and tool_name == "regression_analysis":
+            if tool_name in {"train_model", "evaluate_model", "regression_analysis"}:
                 meta = self.memory.dataset_metadata
-                if meta and meta.target_column and any(k in meta.target_column.lower() for k in ("churn", "status", "death", "event")):
-                    return "regression_analysis on right-censored survival data introduces survivorship bias; route to survival_analysis instead."
+                if meta and (reason := profile.censoring_rationale(meta.target_column)):
+                    return reason
 
             if profile.archetype in (ARCHETYPE_CONTINUOUS_SERIES, ARCHETYPE_SENSOR) and tool_name == "regression_analysis":
                 numeric_cols = [c.name for c in profile.columns if c.kind == "numeric"]
@@ -513,11 +517,16 @@ class PlanMixin(ControllerState):
                                     tool_params.update(tool.default_params(profile, meta) or {})
                                 except Exception:
                                     pass
+                                prepared, _reason = self._validate_and_prepare_fallback_params(
+                                    tool, tool_params, profile, meta
+                                )
+                                if not prepared:
+                                    continue
                                 steps.append(
                                     AnalysisStep(
                                         step_number=len(steps) + 1,
                                         tool_name=tool_name,
-                                        parameters=tool_params,
+                                        parameters=prepared,
                                         rationale=f"Autonomous depth: tier analytical tool {tool_name} for {archetype}.",
                                     )
                                 )
@@ -549,11 +558,20 @@ class PlanMixin(ControllerState):
                                 tool_params.update(t_obj.default_params(profile, meta) or {})
                             except Exception:
                                 pass
+                        t_obj = self.tool_registry.get(tool_cand)
+                        prepared, reason = self._validate_and_prepare_fallback_params(
+                            t_obj, tool_params, profile, meta, question=q
+                        )
+                        if not prepared:
+                            if isinstance(q, dict):
+                                q["blocked"] = True
+                                q["blocked_reason"] = reason or "Required parameters missing"
+                            continue
                         steps.append(
                             AnalysisStep(
                                 step_number=len(steps) + 1,
                                 tool_name=tool_cand,
-                                parameters=tool_params,
+                                parameters=prepared,
                                 rationale=f"Agenda fallback: answer top unaddressed question — {str(q.get('text', ''))[:80]}",
                             )
                         )
@@ -582,11 +600,16 @@ class PlanMixin(ControllerState):
                         c_params.update(cand_tool.default_params(profile, meta) or {})
                     except Exception:
                         pass
+                    prepared, _reason = self._validate_and_prepare_fallback_params(
+                        cand_tool, c_params, profile, meta
+                    )
+                    if not prepared:
+                        continue
                     steps.append(
                         AnalysisStep(
                             step_number=len(steps) + 1,
                             tool_name=cand_name,
-                            parameters=c_params,
+                            parameters=prepared,
                             rationale=f"Autonomous breadth: candidate analytical tool {cand_name}.",
                         )
                     )
@@ -651,6 +674,93 @@ class PlanMixin(ControllerState):
             if group:
                 return group[0]
         return None
+
+    def _resolve_target_from_question(
+        self, question: Any, profile: DatasetProfile | None, meta: Any
+    ) -> str | None:
+        """Resolve a target column from a question agenda item or profile/metadata.
+        Returns the resolved column name if unambiguous, else None."""
+        if meta and getattr(meta, "target_column", None):
+            return str(meta.target_column)
+
+        if isinstance(question, dict):
+            cols = question.get("columns") or []
+            text = str(question.get("text", "")).lower()
+        else:
+            cols = getattr(question, "columns", []) or []
+            text = str(getattr(question, "text", "")).lower()
+
+        # Check explicit columns in question
+        numeric_cols = []
+        if profile:
+            col_map = {c.name.lower(): c.name for c in profile.columns}
+            for col in cols:
+                real_col = col_map.get(str(col).lower())
+                if real_col:
+                    cp = next((c for c in profile.columns if c.name == real_col), None)
+                    if cp and cp.kind == "numeric" and cp.nunique > 1:
+                        numeric_cols.append(real_col)
+
+        if len(numeric_cols) == 1:
+            return numeric_cols[0]
+
+        # Check measures in profile that match question text
+        if profile:
+            matched_measures = []
+            for m in profile.measures():
+                if m.name.lower() in text and m.nunique > 1:
+                    matched_measures.append(m.name)
+            if len(matched_measures) == 1:
+                return matched_measures[0]
+
+        return None
+
+    def _validate_and_prepare_fallback_params(
+        self,
+        tool: Any,
+        raw_params: dict[str, Any],
+        profile: DatasetProfile | None,
+        meta: Any,
+        question: Any = None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Validate parameters for a tool in the fallback plan.
+        Resolves missing target_column from question or profile if unambiguous.
+        Returns (prepared_params, blocked_reason) — (None, reason) if parameter resolution fails."""
+        tool_params = dict(raw_params)
+        schema = tool.get_schema() if hasattr(tool, "get_schema") else {}
+        required = [
+            k for k, spec in schema.items()
+            if isinstance(spec, dict) and spec.get("required") and k not in ("file_path", "df", "dataset")
+        ]
+
+        # Resolve target_column if required and missing
+        if "target_column" in required and not tool_params.get("target_column"):
+            target = self._resolve_target_from_question(question, profile, meta)
+            if target:
+                tool_params["target_column"] = target
+            else:
+                return None, f"Missing required parameter 'target_column' for {getattr(tool, 'name', '')}"
+
+        # Resolve feature_column / measure_column if required and missing
+        for col_param in ("feature_column", "measure_column"):
+            if col_param in required and not tool_params.get(col_param):
+                target = self._resolve_target_from_question(question, profile, meta)
+                if target:
+                    tool_params[col_param] = target
+                else:
+                    return None, f"Missing required parameter '{col_param}' for {getattr(tool, 'name', '')}"
+
+        # Check all required parameters
+        missing = [k for k in required if not tool_params.get(k)]
+        if missing:
+            return None, f"Missing required parameter(s): {', '.join(missing)}"
+
+        # Check signature against known invalid steps
+        tool_name = getattr(tool, "name", "")
+        if _step_signature(tool_name, tool_params) in self._invalid_steps:
+            return None, f"Step signature '{tool_name}' previously failed validation"
+
+        return tool_params, None
 
     def _build_fallback_plan(self) -> dict[str, Any]:
         """
@@ -892,6 +1002,15 @@ class PlanMixin(ControllerState):
             # clustering fallback. The profile-driven analyses above already
             # ran, so the plan is complete and genuinely ML-free.
             pass
+        elif meta.task_type == "survival":
+            if self.tool_registry.has("survival_analysis") and "survival_analysis" not in already:
+                tool = self.tool_registry.get("survival_analysis")
+                steps.append({
+                    "step_number": len(steps) + 1,
+                    "tool_name": "survival_analysis",
+                    "parameters": {"file_path": fp, **tool.default_params(profile, meta), "event_column": meta.target_column},
+                    "rationale": "Account for censoring and differing observation times.",
+                })
         elif meta.target_column and meta.task_type in ("classification", "regression"):
             steps += [
                 {

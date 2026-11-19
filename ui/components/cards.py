@@ -475,31 +475,17 @@ def search_findings(query: str, findings: list[dict[str, Any]]) -> list[dict[str
 
 
 def render_defect_stamp(gap_val: float | None) -> str:
-    """Render authentic engineering defect stamp or certification seal for generalization."""
+    """Show the observed gap without inferring accuracy or baseline lift."""
     if gap_val is None:
         return ""
-    if gap_is_risky(gap_val):
-        return f"""
-        <div class="defect-stamp">
-            <span class="stamp-tag">⚠ Heads up: this might not hold up</span>
-            <div class="stamp-title">The model memorised the examples ({gap_val*100:.1f}% gap)</div>
-            <div class="stamp-desc">
-                It did noticeably better on the data it trained on than on data it hadn't seen.
-                A sign it memorised quirks rather than learning the real pattern.
-                We've ranked it lower because of this.
-            </div>
-        </div>
-        """
-    return f"""
-    <div class="cert-stamp">
-        <span class="stamp-tag">✓ Good news: this should hold up</span>
-        <div class="stamp-title">The model performed consistently ({gap_val*100:.1f}% gap)</div>
-        <div class="stamp-desc">
-            It did about as well on new data as on the data it trained on.
-            A good sign the pattern it found is real, not a fluke.
-        </div>
-    </div>
-    """
+    risk = gap_is_risky(gap_val)
+    label = "Overfitting warning" if risk else "Generalization check"
+    return (
+        f'<div class="{"defect-stamp" if risk else "cert-stamp"}">'
+        f'<div class="stamp-tag">{label}</div>'
+        f'<div class="stamp-title">Train minus test score: {gap_val:+.3f}</div></div>'
+    )
+
 
 
 def render_agent_grid(

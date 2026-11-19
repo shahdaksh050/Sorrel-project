@@ -20,6 +20,7 @@ from src.core.controller_common import (
     MAX_STEP_RETRIES,
     ControllerState,
     _PreparedStep,
+    _step_signature,
     console,
 )
 from src.core.findings import Finding, score_objective_fit
@@ -816,6 +817,12 @@ class StepMixin(ControllerState):
                     step.tool_name, "error", f"{idx}/{total_steps} — {message[:80]}"
                 )
             return None
+        # Check if identical invalid step was previously flagged
+        step_sig = _step_signature(step.tool_name, step.parameters)
+        if step_sig in self._invalid_steps:
+            logger.info("Skipping identical invalid step: %s", step_sig)
+            return None
+
         # Plan validation: an invalid step never runs (and never spends
         # code-execution budget); its error — with close column matches —
         # goes back to the planner and counts against the retry budget.
@@ -827,6 +834,7 @@ class StepMixin(ControllerState):
             console.print(f"  [dim]Step {step.step_number}: {step.tool_name} — {normalised}[/]")
             dropped_note = f"{dropped_note} {normalised}.".strip()
         if plan_errors:
+            self._invalid_steps.add(step_sig)
             message = " ".join(["Plan validation failed, step not run:", *plan_errors, dropped_note]).strip()
             console.print(f"  [yellow]✗ Step {step.step_number}: {step.tool_name} — {message}[/]")
             self._record_step(step, ToolResult(

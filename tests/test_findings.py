@@ -40,12 +40,13 @@ def test_invariance_confidence_and_normalized_effect() -> None:
         p_value=0.25,
         p_adjusted=0.25,
     )
-    assert inv.effective_confidence() >= 0.75
-    assert inv.normalized_effect() >= 0.8  # near-zero effect means high invariance
+    assert inv.effective_confidence() == 0
+    assert inv.normalized_effect() == 0
+
 
     # Invariance finding with effect=0.0 and effect_kind=None returns 1.0 (not 0.0)
     zero_inv = Finding(finding_id="t", kind="invariance", headline="h", effect=0.0, effect_kind=None)
-    assert zero_inv.normalized_effect() == 1.0
+    assert zero_inv.normalized_effect() == 0
 
 
 def test_invariance_passes_checks() -> None:
@@ -62,13 +63,14 @@ def test_invariance_passes_checks() -> None:
     )
     attach_finding_checks([inv])
     checks = inv.evidence["checks"]
-    assert checks["not_luck"] is True
-    assert checks["invariance_verified"] is True
-    assert inv.primary_eligible is True
+    assert checks["not_luck"] is False
+    assert checks["invariance_verified"] is False
+    assert inv.primary_eligible is False
+
 
 
 def test_statistical_test_elevates_non_significant_result_to_invariance() -> None:
-    """SelectStatisticalTestTool elevates p >= 0.05 tests with adequate n into invariance findings."""
+    """SelectStatisticalTestTool distinguishes inconclusive vs demonstrated equivalence."""
     tool = SelectStatisticalTestTool()
     output = {
         "feature_column": "metric",
@@ -83,7 +85,24 @@ def test_statistical_test_elevates_non_significant_result_to_invariance() -> Non
     }
     findings = tool.findings(output, None, None)
     assert len(findings) == 1
-    f = findings[0]
-    assert f.kind == "invariance"
-    assert "empirical invariance" in f.headline.lower()
-    assert f.p_value == 0.42
+    assert findings[0].statistical_state == "inconclusive"
+    assert "inconclusive" in findings[0].headline.lower()
+
+    equiv_output = {
+        "feature_column": "metric",
+        "group_column": "treatment",
+        "test_name": "Independent T-Test",
+        "effect_size": 0.015,
+        "effect_size_metric": "cohens_d",
+        "p_value": 0.04,
+        "n": 50000,
+        "statistical_state": "demonstrated_equivalence",
+        "practical_margin": 0.20,
+        "effect_ci": [0.005, 0.025],
+        "interpretation": "Equivalence demonstrated within practical margin.",
+        "summary": "T-Test: stat=0.5, p=0.04",
+    }
+    equiv_findings = tool.findings(equiv_output, None, None)
+    assert len(equiv_findings) == 1
+    assert equiv_findings[0].kind == "invariance"
+    assert equiv_findings[0].statistical_state == "demonstrated_equivalence"

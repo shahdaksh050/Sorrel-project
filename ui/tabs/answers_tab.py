@@ -67,6 +67,11 @@ def _evidence_inspector(
     with right:
         with st.container(border=True, key=f"evidence_panel_{position}"):
             st.markdown(marker + render_evidence_html(finding, with_figures=False, business_first=True), unsafe_allow_html=True)
+            ev = finding.get("evidence") if isinstance(finding, dict) else {}
+            if isinstance(ev, dict):
+                n_obs = ev.get("n") or ev.get("sample_size") or ev.get("n_total")
+                if isinstance(n_obs, (int, float)):
+                    st.caption(f"Audited sample: {int(n_obs):,} usable observations for this finding.")
             chart = chart_by_finding.get(str(finding.get("finding_id") or ""))
             if chart:
                 # Unframed (the pane is the frame) and at the common chart height.
@@ -96,8 +101,8 @@ def render_answers_tab(
     corr_out = find_tool(tool_results, "correlation_analysis")
 
     best_model = report.get("best_model") or "N/A"
-    best_cv = "0"
-    best_gap_str = "0"
+    best_cv = "Unavailable"
+    best_gap_str = "Unavailable"
     gap_val: float | None = None
 
     if train_out:
@@ -105,9 +110,11 @@ def render_answers_tab(
         best = train_out.get("best_model", "")
         if best and best in mt_map:
             bm = mt_map[best]
-            best_cv = f"{bm.get('cv_mean', 0)*100:.1f}"
+            if isinstance(bm.get("cv_mean"), (float, int)):
+                best_cv = f"{bm['cv_mean']:.3f}"
             gap_val = bm.get("train_test_gap")
-            best_gap_str = f"{gap_val*100:.1f}" if gap_val is not None else "0"
+            if gap_val is not None:
+                best_gap_str = f"{gap_val:.3f}"
 
     task_type = (
         (train_out.get("task_type") if train_out else None)
@@ -116,7 +123,9 @@ def render_answers_tab(
     )
 
     prof = prof or {}
-    q = int(prof.get("quality_score", 0))
+    q = prof.get("quality_score")
+    quality_label = f"{q}/100" if isinstance(q, (int, float)) else "Unavailable"
+    row_count = meta.row_count if meta is not None else prof.get("row_count")
 
     # 1. The question as the heading, the answer under it.
     answer = html.escape(plainify(view.reasoning)) if view.reasoning else ""
@@ -146,45 +155,33 @@ def render_answers_tab(
     held = sum(1 for x in states if x == "held")
     needs_more = sum(1 for x in states if x == "needs_more")
     not_checked = len(states) - checked
+
+    eligible_count = sum(1 for f in headline if f.get("primary_eligible", True)) or total
+    k_tests = len(report.get("statistical_test_pvalues") or report.get("statistical_test_pvalues_bh_corrected") or [])
+
     if checked:
         sub_lines = []
         if needs_more:
             sub_lines.append(f"{needs_more} need{'s' if needs_more == 1 else ''} more data.")
-        if gap_val is not None:
-            sub_lines.append(
-                "The model held up on new data."
-                if not gap_is_risky(gap_val)
-                else "The model may have memorised examples, see below."
-            )
+        if gap_val is not None and gap_is_risky(gap_val):
+            sub_lines.append("Training performance exceeded held-out performance.")
+        lift = train_out.get("lift_over_baseline") if train_out else None
+        if train_out and isinstance(lift, (float, int)) and not train_out.get("model_training_gated"):
+            sub_lines.append(f"Cross-validation score minus baseline: {lift:+.3f}.")
+        adj_str = f" (evaluated with Benjamini-Hochberg FDR at α=0.05 across {k_tests} tests)" if k_tests > 0 else ""
         if not_checked == 0:
-            lead_verdict = f"{held} of {total} finding{'s' if total != 1 else ''} held up."
+            lead_verdict = f"{held} of {checked} audited finding{'s' if checked != 1 else ''} held up (out of {eligible_count} eligible findings){adj_str}."
         else:
             plural_obs = "s" if not_checked != 1 else ""
             lead_verdict = (
                 f"{held} of {checked} audited finding{'s' if checked != 1 else ''} held up "
-                f"(out of {total} headline findings; {not_checked} exploratory observation{plural_obs} without statistical checks)."
+                f"(out of {eligible_count} eligible findings; {not_checked} exploratory observation{plural_obs} without statistical checks){adj_str}."
             )
         st.markdown(
             f'<div class="run-banner{" ok" if needs_more == 0 else " caution"}">'
             f"{lead_verdict}"
             + "".join(f'<span class="sub">{html.escape(s)}</span>' for s in sub_lines)
             + "</div>",
-            unsafe_allow_html=True,
-        )
-
-        row_count = (
-            (meta.row_count if meta else None)
-            or (prof.get("row_count") if prof else None)
-            or (len(preview_df) if preview_df is not None else None)
-        )
-        row_str = f"{row_count:,} records" if isinstance(row_count, int) else "100% of data"
-        st.markdown(
-            f"""<div class="trust-strip" style="margin-top:0.85rem;margin-bottom:1.4rem;">
-<div class="trust-cell"><div class="k">Audited Population</div><div class="v">{row_str}</div></div>
-<div class="trust-cell"><div class="k">Audited Hypotheses</div><div class="v">{held} of {total} Held Up</div></div>
-<div class="trust-cell"><div class="k">Data Reliability Score</div><div class="v">{q}/100</div></div>
-<div class="trust-cell"><div class="k">Multiplicity Control</div><div class="v">FDR q=0.05</div></div>
-</div>""",
             unsafe_allow_html=True,
         )
 
@@ -224,6 +221,8 @@ def render_answers_tab(
 
     # 4. Caveats, in one always-visible block. The model stamp is never hidden.
     unanswered = view.coverage.get("unanswered") or []
+    answered_q = view.coverage.get("answered", 0)
+    total_q = view.coverage.get("total", 0)
     small_notes = list(
         dict.fromkeys(
             str(c)
@@ -233,15 +232,21 @@ def render_answers_tab(
         )
     )
     du_html = render_data_understanding(report.get("data_understanding") or {})
-    if gap_val is not None or unanswered or small_notes or du_html:
+    if gap_val is not None or unanswered or small_notes or du_html or total_q:
         st.markdown("## Be careful about")
         if gap_val is not None:
             st.markdown(render_defect_stamp(gap_val), unsafe_allow_html=True)
+        if total_q > 0:
+            st.markdown(
+                f"**Business question coverage:** {answered_q} of {total_q} questions answered "
+                f"({len(unanswered)} remain open)."
+            )
         if unanswered:
             st.caption(f"⚠ {len(unanswered)} question(s) considered, not answered.")
-            with st.expander("What wasn't answered, and why"):
+            with st.expander(f"What wasn't answered, and why ({len(unanswered)} open)", expanded=True):
                 for u in unanswered:
-                    st.markdown(f"- {md_text(u.get('text', ''))}")
+                    reason = u.get("reason") or u.get("blocked_reason") or "Not answered by executed steps"
+                    st.markdown(f"- **{md_text(u.get('text', ''))}** — *reason: {reason}*")
         if small_notes:
             st.caption("Small groups combined. " + " ".join(small_notes[:3]))
         if du_html:
@@ -253,15 +258,7 @@ def render_answers_tab(
     if view.recommendations:
         for rec in view.recommendations:
             rec_plain = plainify(rec)
-            rec_lower = rec_plain.lower()
-            if any(rec_lower.startswith(p) for p in ("pilot", "test", "validate", "evaluate")):
-                badge = "Test"
-            elif any(rec_lower.startswith(p) for p in ("monitor", "watch", "track")):
-                badge = "Watch"
-            elif any(rec_lower.startswith(p) for p in ("investigate", "explore", "research")):
-                badge = "Explore"
-            else:
-                badge = "Do"
+            badge = "Next step"
             st.markdown(
                 f'<div class="rc"><span class="mk">{badge}</span>{html.escape(rec_plain)}</div>',
                 unsafe_allow_html=True,
@@ -271,17 +268,16 @@ def render_answers_tab(
 
     # 6. Supporting context.
     st.markdown("## At a glance")
-    row_count = (
-        (meta.row_count if meta else None)
-        or (prof.get("row_count") if prof else None)
-        or (len(preview_df) if preview_df is not None else None)
-    )
     caveat_count = sum(
         1 for f in view.findings if f.get("kind") in ("method_fit", "coverage_gap")
     )
+    clean_tool = find_tool(tool_results, "clean_data")
+    raw_rows = clean_tool.get("rows_before") if clean_tool else row_count
+    analyzed_rows = clean_tool.get("rows_after") if clean_tool else row_count
     trust_cells = [
-        ("Data quality", f"{q}/100"),
-        ("Rows analyzed", f"{row_count:,}" if isinstance(row_count, int) else "N/A"),
+        ("Data quality", quality_label),
+        ("Source rows", f"{raw_rows:,}" if isinstance(raw_rows, int) else "Unavailable"),
+        ("Analyzed rows", f"{analyzed_rows:,}" if isinstance(analyzed_rows, int) else "Unavailable"),
         ("Caveats flagged", str(caveat_count)),
     ]
     st.markdown(
@@ -324,41 +320,10 @@ def render_answers_tab(
     with st.expander("Details for analysts"):
         # A low data-quality score is a warning (amber), not a "this may not hold" verdict: the
         # score is printed in the ring, so the colour only adds to the number.
-        radial_color = "var(--positive)" if q >= 80 else "var(--accent)"
-        gap_flag = gap_val is not None and gap_is_risky(gap_val)
-        st.markdown(
-            f"""<div class="kpi-row">
-<div class="kpi-gauge-card">
-<div class="kpi-gauge-label">Data Quality</div>
-<div class="kpi-ring-wrap">
-<svg class="kpi-ring-svg" width="140" height="140" viewBox="0 0 140 140">
-<circle cx="70" cy="70" r="56" fill="none" stroke="var(--rule-faint)" stroke-width="12" />
-<circle cx="70" cy="70" r="56" fill="none" stroke="{radial_color}" stroke-width="12" stroke-linecap="round" stroke-dasharray="351.86" stroke-dashoffset="{351.86 - (351.86 * q / 100)}" class="anime-gauge" data-q="{q}" />
-</svg>
-<div class="kpi-ring-value">
-<div class="kpi-ring-num count-up" data-value="{q}" data-suffix="">{q}</div>
-<div class="kpi-ring-sub">Score</div>
-</div>
-</div>
-</div>
-<div class="kpi-tiles">
-<div class="kpi-tile">
-<div class="k">Best Model</div>
-<div class="v">{html.escape(best_model)}</div>
-<div class="s">Task: {html.escape(str(task_type))}</div>
-</div>
-<div class="kpi-tile">
-<div class="k">CV Score</div>
-<div class="v big count-up" data-value="{best_cv}" data-suffix="%">{best_cv}%</div>
-</div>
-<div class="kpi-tile{' flagged' if gap_flag else ''}">
-<div class="k">Train-Test Gap</div>
-<div class="v big{' risk' if gap_flag else ''} count-up" data-value="{best_gap_str}" data-suffix="%">{best_gap_str}%</div>
-</div>
-</div>
-</div>""",
-            unsafe_allow_html=True,
-        )
+        st.write(f"Data quality: {quality_label}")
+        if train_out and task_type in ("classification", "regression"):
+            metric = "weighted F1" if task_type == "classification" else "R²"
+            st.write(f"Selected model: {best_model} · CV {metric}: {best_cv} · Train–test gap: {best_gap_str}")
 
         for w in train_out.get("overfit_warnings", []) if train_out else []:
             st.markdown(

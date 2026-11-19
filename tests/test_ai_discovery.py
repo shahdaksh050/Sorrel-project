@@ -59,7 +59,9 @@ def test_public_docs_use_root_relative_canonicals_and_truthful_boundaries() -> N
         assert "localhost" not in content.lower()
         assert "file:///" not in content.lower()
 
-    assert "seven stages" in (DOCS_PUBLIC_DIR / "workflow.md").read_text(encoding="utf-8").lower()
+    workflow = (DOCS_PUBLIC_DIR / "workflow.md").read_text(encoding="utf-8").lower()
+    assert "five stages" in workflow
+    assert "local analysis worker" in workflow
     safety = (DOCS_PUBLIC_DIR / "safety.md").read_text(encoding="utf-8").lower()
     assert "mutable local files" in safety
     for name in ROADMAP_DOCS:

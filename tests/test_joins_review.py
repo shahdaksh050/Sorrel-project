@@ -183,6 +183,16 @@ def test_large_one_to_many_child_table_aggregated_safely() -> None:
     assert any("aggregated child table to avoid Cartesian fan-out" in n for n in notes)
 
 
+def test_single_repeated_order_key_preserves_both_line_amounts() -> None:
+    orders = pd.DataFrame({"order_id": range(201)})
+    items = pd.DataFrame({"order_id": [*range(200), 0], "amount": [10] * 200 + [-4]})
+    merged, notes = join_related(orders, [("items", items)], 1000, "orders")
+    assert len(merged) == 202
+    assert merged["amount"].sum() == 1996
+    assert merged.loc[merged["order_id"] == 0, "amount"].tolist() == [10.0, -4.0]
+    assert any("1 unmatched left rows" in note for note in notes)
+
+
 def test_transitive_join_column_ownership() -> None:
     """A 3rd table joining onto a column introduced by a 2nd table attributes ownership to the 2nd table."""
     orders = pd.DataFrame({"order_id": [1, 2, 3], "product_id": [10, 20, 30]})

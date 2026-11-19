@@ -33,7 +33,12 @@ from src.core.dashboard import (
     merge_designed,
 )
 from src.core.dependence import check_simpsons_paradox, intraclass_correlation
-from src.core.findings import Finding, _is_actionable_feature, _is_self_derived_finding
+from src.core.findings import (
+    Finding,
+    _is_actionable_feature,
+    _is_self_derived_finding,
+    is_sensor_telemetry_feature,
+)
 from src.core.json_normalization import strict_json_dumps
 from src.core.profiler import DatasetProfile, profile_dataframe
 from src.core.prompt_manager import (
@@ -166,10 +171,17 @@ class ReportMixin(ControllerState):
             times: dict[str, float] = {}
             for r in self.memory.tool_results:
                 times[r.tool_name] = times.get(r.tool_name, 0.0) + float(r.execution_time_ms or 0.0) / 1000.0
+            source: dict[str, Any] = next(
+                (r.output.get("metadata", {}) for r in self.memory.tool_results
+                 if r.tool_name == "ingest_dataset" and r.status == "success"),
+                {},
+            )
             summary = {
                 "schema_version": final_result.get("schema_version", "2.0"),
                 "status": final_result.get("status", "partial"),
-                "dataset": {"name": Path(meta.file_path).stem, "rows": meta.row_count, "cols": meta.column_count},
+                "dataset": {"name": Path(meta.file_path).stem,
+                            "rows": source.get("row_count", meta.row_count),
+                            "cols": source.get("column_count", meta.column_count)},
                 "objective": self.objective,
                 "llm": {"enabled": bool(self.use_llm), "model": self.llm_client.model if self.use_llm else None},
                 "created": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -440,13 +452,66 @@ class ReportMixin(ControllerState):
             lever = finding.dimension
             measure = finding.measure
 
+            # Check for sensor telemetry first:
+            is_telemetry = (
+                finding.controllability == "sensor_telemetry"
+                or is_sensor_telemetry_feature(lever)
+                or is_sensor_telemetry_feature(measure)
+            )
+            if is_telemetry:
+                norm_telemetry = (lever or measure or "").lower().strip()
+                if norm_telemetry in seen_levers:
+                    continue
+                seen_levers.add(norm_telemetry)
+                # Household power fixture: must identify meters' relationship as sensor telemetry / additive components of active power,
+                # and MUST NEVER recommend raising consumption or changing meter readings.
+                tel_name = lever or measure or "sensor telemetry"
+                action = (
+                    f"Monitor '{tel_name}' telemetry readouts as an additive component of active power load to detect sub-system anomalies."
+                    if any(term in str(tel_name).lower() for term in ("meter", "power", "watt", "voltage", "intensity"))
+                    else f"Monitor '{tel_name}' sensor telemetry trends for anomaly detection."
+                )
+                outcome_records.append(
+                    {
+                        "recommendation_id": f"rec_{finding.finding_id}",
+                        "finding_ids": [finding.finding_id],
+                        "disposition": "monitor",
+                        "action": action,
+                        "rationale": finding.headline,
+                        "claims": [],
+                        "limitations": [*list(finding.caveats), "Sensor telemetry represents passive electrical/physical readouts; do not treat as an intervention lever or attempt to alter meter readings."],
+                    }
+                )
+                continue
+
+            # Descriptive finding with actionable business advice (e.g. duplicate billing)
+            if finding.controllability == "descriptive" and any(
+                k in (finding.headline + " " + finding.detail).lower()
+                for k in ("duplicate", "billing", "anomaly", "mismatch", "defect", "cluster", "leakage", "hygiene")
+            ):
+                norm_desc = (lever or measure or "descriptive").lower().strip()
+                if norm_desc in seen_levers:
+                    continue
+                seen_levers.add(norm_desc)
+                action = f"Investigate data integrity and potential duplicate billing clusters in '{lever or measure}' before making operational changes."
+                actionable_records.append(
+                    {
+                        "recommendation_id": f"rec_{finding.finding_id}",
+                        "finding_ids": [finding.finding_id],
+                        "disposition": "investigate",
+                        "action": action,
+                        "rationale": finding.headline,
+                        "claims": [],
+                        "limitations": list(finding.caveats),
+                    }
+                )
+                continue
+
             # Determine candidate outcome metric if no actionable lever
             target_metric: str | None = None
             if not (lever and _is_actionable_feature(lever)):
                 if measure and not _is_actionable_feature(measure):
                     target_metric = measure
-                elif lever and not _is_actionable_feature(lever):
-                    target_metric = lever
 
             # Case 1: Controllable operational lever (dimension is actionable)
             if lever and _is_actionable_feature(lever):
@@ -467,13 +532,10 @@ class ReportMixin(ControllerState):
                 )
 
                 disposition = finding.recommendation_disposition()
-                eff = finding.effect
-                if isinstance(eff, (int, float)) and eff < -0.15:
-                    action = f"Remediate underperformance in {level_name} to close the {measure or 'performance'} deficit."
-                elif disposition == "act":
-                    action = f"Capitalize on {level_name} to capture projected {measure or 'performance'} lift."
+                if disposition == "act":
+                    action = f"Apply the evaluated intervention for {level_name} and track its effect on '{measure}'."
                 elif disposition == "pilot":
-                    action = f"Pilot a controlled test of {level_name} to validate projected lift on {measure or 'performance'}."
+                    action = f"Test whether changing {level_name} affects '{measure}' in a controlled pilot."
                 elif disposition == "investigate":
                     action = f"Investigate {level_name} operational dynamics before changing policy."
                 else:
@@ -500,6 +562,9 @@ class ReportMixin(ControllerState):
                     continue
                 seen_levers.add(norm_metric)
 
+                selected_target = self.memory.get_context("target_column")
+                if selected_target and selected_target != target_metric:
+                    continue
                 action = f"Track '{target_metric}' as a key outcome metric across operational reporting cycles."
                 outcome_records.append(
                     {

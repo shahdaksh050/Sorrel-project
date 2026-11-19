@@ -220,7 +220,7 @@ def test_build_swarm_payload_from_dashboard_and_report() -> None:
     assert payload["metadata"]["run_id"] == "9042"
     assert payload["metadata"]["title"] == "Energy Optimization Briefing"
     assert "load shifting" in payload["metadata"]["lead_narrative"]
-    assert "1 Findings Verified" in payload["metadata"]["headline_badge"]
+    assert payload["metadata"]["headline_badge"] == "1 findings · 0 checked"
 
     # Telemetry verified
     assert payload["telemetry"]["records"] == "52,500"
@@ -229,7 +229,7 @@ def test_build_swarm_payload_from_dashboard_and_report() -> None:
     assert payload["telemetry"]["missingness"] == "0.12%"
 
     # KPIs verified
-    assert len(payload["kpis"]) == 3
+    assert len(payload["kpis"]) == 2
     assert payload["kpis"][0]["target"] == 24.5
     assert payload["kpis"][0]["prefix"] == "+"
     assert payload["kpis"][0]["suffix"] == "%"
@@ -247,6 +247,18 @@ def test_build_swarm_payload_from_dashboard_and_report() -> None:
     assert len(payload["models"]["model_list"]) == 1
     assert payload["action_matrix"]["has_action_matrix"] is True
     assert payload["audit"]["checksum"] == "8f2a...9042"
+
+
+def test_empty_report_has_no_fabricated_audit_or_telemetry() -> None:
+    with patch("streamlit.session_state", {"preview_df": [1, 2]}):
+        payload = build_swarm_payload(report={"models": [{"name": "untested"}]})
+    assert payload["telemetry"]["records"] == "N/A"
+    assert payload["telemetry"]["quality_score"] == "Unavailable"
+    assert payload["telemetry"]["missingness"] == "Unavailable"
+    assert payload["kpis"] == []
+    assert payload["audit"]["checksum"] is None
+    assert payload["audit"]["ledger_text"] == "No finding checks recorded"
+    assert payload["models"]["model_list"][0]["cv_mean"] == "Unavailable"
 
 
 def test_get_swarm_dashboard_html_with_payload_injection() -> None:
@@ -342,3 +354,36 @@ def test_swarm_payload_chart_fallback_behavior() -> None:
     p_eda = build_swarm_payload(report={"models": []})
     assert p_eda["models"]["has_models"] is False
     assert p_eda["models"]["model_list"] == []
+
+
+def test_build_swarm_payload_question_coverage_and_statistical_states() -> None:
+    """Verify that build_swarm_payload includes question coverage and statistical states in headline_badge."""
+    mock_report = {
+        "coverage": {"answered": 4, "total": 15},
+    }
+    mock_findings = [
+        {
+            "finding_id": "f_equiv",
+            "headline": "Equivalence demonstrated",
+            "statistical_state": "demonstrated_equivalence",
+            "evidence": {"checks": {"claim_verified": True}},
+        },
+        {
+            "finding_id": "f_diff",
+            "headline": "Difference detected",
+            "statistical_state": "detected_difference",
+            "evidence": {"checks": {"claim_verified": True}},
+        },
+        {
+            "finding_id": "f_inconc",
+            "headline": "Inconclusive comparison",
+            "statistical_state": "inconclusive",
+            "evidence": {"checks": {"claim_verified": True}},
+        },
+    ]
+    payload = build_swarm_payload(report=mock_report, findings=mock_findings)
+    badge = payload["metadata"]["headline_badge"]
+    assert "4/15 questions answered" in badge
+    assert "1 equiv" in badge
+    assert "1 diff" in badge
+    assert "1 inconclusive" in badge

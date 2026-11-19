@@ -84,22 +84,29 @@ class EvaluateModelTool(BaseTool):
         # missing or doesn't exist — it may legitimately name a different
         # saved model on a re-evaluation step.
         best_path = memory.get_context("best_model_path")
-        if best_path:
-            raw_mp = params.get("model_path", "")
-            if not raw_mp or not Path(raw_mp).exists():
-                params["model_path"] = best_path
         # Pin model_path under the run's output directory before it reaches
         # execute()'s unsandboxed pickle.load() — a planner step naming any
         # other existing file path (e.g. from prompt-injected dataset
         # content) must not be honoured as-is; fall back to the trusted
         # best_model_path, or fail closed via a path execute() will reject.
         from src.core.security import UploadValidationError, resolve_output_path
-        raw_mp = params.get("model_path", "")
-        if raw_mp:
-            try:
-                params["model_path"] = str(resolve_output_path(output_root, raw_mp))
-            except UploadValidationError:
-                params["model_path"] = best_path or ""
+        requested_path = params.get("model_path")
+        params["model_path"] = ""
+        for value in (requested_path, best_path):
+            if not value:
+                continue
+            # Saved paths in older runs can include the relative output root.
+            # Both interpretations must still resolve inside this run.
+            for candidate in (str(value), str(Path(value).resolve())):
+                try:
+                    resolved = resolve_output_path(output_root, candidate)
+                except UploadValidationError:
+                    continue
+                if resolved.is_file():
+                    params["model_path"] = str(resolved)
+                    break
+            if params["model_path"]:
+                break
         # evaluate_model's whole purpose is to recreate train_model's exact
         # split ("held-out data only") — a different test_size, or a
         # different split_strategy/time_column/group_column, produces a
@@ -223,7 +230,7 @@ class EvaluateModelTool(BaseTool):
         df, split_strategy, _notes = _resolve_split_strategy(
             df, split_strategy, time_column, group_column
         )
-        X, y, _treatments = _prepare_features(df, target_column)
+        X, y, _treatments = _prepare_features(df, target_column, supervised=True)
         class_labels: list[str] = []
         if task_type == "classification":
             y, class_labels = _encode_target(y, target_words)

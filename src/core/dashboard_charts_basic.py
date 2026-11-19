@@ -718,14 +718,18 @@ def _cluster_chart(cluster_output: dict[str, Any] | None) -> ChartSpec | None:
     n = cluster_output.get("n_clusters", "?")
     sil = cluster_output.get("silhouette_score", "?")
 
-    # PCA explained variance on axis labels if available
+    # PCA explained variance & feature drivers on axis labels if available
+    pca_drivers = cluster_output.get("pca_top_features") or []
+    c1_lead = f": {humanize_label(pca_drivers[0])}" if len(pca_drivers) >= 1 and pca_drivers[0] else ""
+    c2_lead = f": {humanize_label(pca_drivers[1])}" if len(pca_drivers) >= 2 and pca_drivers[1] else ""
+
     exp_var = cluster_output.get("pca_explained_variance")
-    x_title = "PC 1"
-    y_title = "PC 2"
+    x_title = f"Component 1{c1_lead}"
+    y_title = f"Component 2{c2_lead}"
     if isinstance(exp_var, (list, tuple)) and len(exp_var) >= 2:
         try:
-            x_title = f"PC 1 ({float(exp_var[0]) * 100:.0f}% var)"
-            y_title = f"PC 2 ({float(exp_var[1]) * 100:.0f}% var)"
+            x_title = f"Component 1{c1_lead} ({float(exp_var[0]) * 100:.0f}% var)"
+            y_title = f"Component 2{c2_lead} ({float(exp_var[1]) * 100:.0f}% var)"
         except (ValueError, TypeError):
             pass
 
@@ -790,8 +794,8 @@ def _cluster_chart(cluster_output: dict[str, Any] | None) -> ChartSpec | None:
                         "tooltip": [
                             {"field": "cluster_label", "title": "Segment"},
                             {"field": "cluster", "title": "Cluster ID"},
-                            {"field": "x", "title": "PC 1", "format": ".2f"},
-                            {"field": "y", "title": "PC 2", "format": ".2f"},
+                            {"field": "x", "title": "Component 1", "format": ".2f"},
+                            {"field": "y", "title": "Component 2", "format": ".2f"},
                         ],
                     },
                 },
@@ -890,15 +894,20 @@ def _scree_chart(dim_output: dict[str, Any] | None) -> ChartSpec | None:
     cumulative = dim_output.get("cumulative_variance", [])
     if not isinstance(explained, list) or not explained:
         return None
-    values = [
-        {
-            "component": f"PC{i + 1}",
-            "order": i,
-            "explained": round(float(e) * 100, 2),
-            "cumulative": round(float(cumulative[i]) * 100, 2) if i < len(cumulative) else None,
-        }
-        for i, e in enumerate(explained[:SCREE_MAX_COMPONENTS])
-    ]
+    top_loadings = dim_output.get("component_top_features", [])
+    values = []
+    for i, e in enumerate(explained[:SCREE_MAX_COMPONENTS]):
+        comp_name = f"Component {i + 1}"
+        if i < len(top_loadings) and top_loadings[i]:
+            comp_name += f" ({humanize_label(top_loadings[i])})"
+        values.append(
+            {
+                "component": comp_name,
+                "order": i,
+                "explained": round(float(e) * 100, 2),
+                "cumulative": round(float(cumulative[i]) * 100, 2) if i < len(cumulative) else None,
+            }
+        )
     n_needed = dim_output.get("n_components_for_threshold")
     threshold = dim_output.get("variance_threshold")
     description = "Share of the data's variance each principal component captures (bars) and the running total (line)."
@@ -926,8 +935,11 @@ def _scree_chart(dim_output: dict[str, Any] | None) -> ChartSpec | None:
                         "x": x_enc,
                         "y": {"field": "explained", "type": "quantitative", "scale": y_scale,
                               "title": "Share of variance (%)"},
-                        "tooltip": [{"field": "component"}, {"field": "explained", "title": "Component %"},
-                                    {"field": "cumulative", "title": "Cumulative %"}],
+                        "tooltip": [
+                            {"field": "component", "title": "Component"},
+                            {"field": "explained", "title": "Share of Variance (%)"},
+                            {"field": "cumulative", "title": "Cumulative Variance (%)"},
+                        ],
                     },
                 },
                 {

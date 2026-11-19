@@ -30,6 +30,7 @@ thresholds); the chart surface is `sheet` in both modes, since that is the Vega
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from src.core.design_tokens import (
@@ -185,6 +186,27 @@ _ACRONYMS: frozenset[str] = frozenset(
     {"id", "usd", "eur", "gbp", "inr", "kpi", "roi", "gdp", "pca", "rfm", "url", "sku", "ltv", "cac", "aov"}
 )
 
+_MODEL_DISPLAY_NAMES: dict[str, str] = {
+    "random_forest": "Random Forest",
+    "xgboost": "XGBoost",
+    "lightgbm": "LightGBM",
+    "catboost": "CatBoost",
+    "logistic_regression": "Logistic Regression",
+    "linear_regression": "Linear Regression",
+    "ridge": "Ridge Regression",
+    "elastic_net": "Elastic Net",
+    "kmeans": "K-Means",
+    "dbscan": "DBSCAN",
+    "gradient_boosting": "Gradient Boosting",
+    "decision_tree": "Decision Tree",
+}
+
+_POLLUTANT_DISPLAY_NAMES: dict[str, str] = {
+    "pm1": "Particulate Matter (PM1)",
+    "pm2.5": "Particulate Matter (PM2.5)",
+    "pm10": "Particulate Matter (PM10)",
+}
+
 
 def humanize_label(name: str) -> str:
     """Raw column/field name -> readable label: `revenue_usd` -> "Revenue USD".
@@ -193,7 +215,28 @@ def humanize_label(name: str) -> str:
     author already cased (`MRR`, `iPhone`) are left alone. The one helper for
     every chart title, axis title and tooltip title.
     """
-    words = str(name).replace("_", " ").split()
+    raw_str = str(name).strip()
+    if not raw_str:
+        return ""
+
+    low = raw_str.lower()
+    if low in _MODEL_DISPLAY_NAMES:
+        return _MODEL_DISPLAY_NAMES[low]
+    if low in _POLLUTANT_DISPLAY_NAMES:
+        return _POLLUTANT_DISPLAY_NAMES[low]
+
+    # Sensor code format e.g. PT08.S1(CO) -> CO Sensor (PT08.S1)
+    m_sensor = re.match(r"^(PT08\.S\d+)\((.*?)\)$", raw_str, re.IGNORECASE)
+    if m_sensor:
+        sensor_code, gas = m_sensor.group(1), m_sensor.group(2)
+        return f"{gas.upper()} Sensor ({sensor_code})"
+
+    # Principal component shorthand: PC1, PC 1, pc_1 -> Principal Component 1
+    m_pc = re.match(r"^PC[_\s]*(\d+)$", raw_str, re.IGNORECASE)
+    if m_pc:
+        return f"Principal Component {m_pc.group(1)}"
+
+    words = raw_str.replace("_", " ").split()
     return " ".join(
         w.upper() if w.lower() in _ACRONYMS else (w.capitalize() if w.islower() else w)
         for w in words

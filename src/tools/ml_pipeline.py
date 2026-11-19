@@ -750,14 +750,17 @@ class TrainModelTool(BaseTool):
         df, split_strategy, split_notes = _resolve_split_strategy(
             df, split_strategy, time_column, group_column
         )
-        X, y, treatments = _prepare_features(df, target_column)
+        X, y, treatments = _prepare_features(df, target_column, supervised=task_type != "clustering")
         treatments.extend(split_notes)
 
         if task_type == "auto":
             task_type = self._infer_task_type(y)
 
-        leakage_warnings = _detect_target_leakage(X, y, task_type)
-        leakage_warnings += _detect_formula_leakage(df, target_column, list(X.columns))
+        leakage_warnings: list[str] = []
+        if task_type in {"classification", "regression"}:
+            leakage_warnings = _detect_target_leakage(X, y, task_type)
+            leakage_warnings += _detect_formula_leakage(df, target_column, list(X.columns))
+
 
         suspect_features: set[str] = set()
         for w in leakage_warnings:
@@ -819,6 +822,36 @@ class TrainModelTool(BaseTool):
             )
         else:
             run = self._train_clustering(X, models, task_type, max_depth, output_dir)
+            best_res = run.results.get(run.best_model, {})
+            sil = best_res.get("silhouette_score")
+            sil_str = f" (silhouette: {sil:.3f})" if sil is not None else ""
+            return {
+                "summary": f"Fitted {len(run.results)} clustering models on {len(X)} rows{sil_str}.",
+                "task_type": task_type,
+                "models_trained": run.results,
+                "best_model": None,
+                "baseline_cv_mean": None,
+                "lift_over_baseline": None,
+                "split_strategy": "n/a",
+                "train_samples": len(X),
+                "test_samples": 0,
+                "test_size": None,
+                "n_cv_folds": None,
+                "cv_scheme": "unsupervised_clustering",
+                "treatments_applied": treatments,
+                "model_training_gated": False,
+                "is_leaked": False,
+                "overfit_warnings": [],
+                "leakage_warnings": [],
+                "clustering_diagnostics": {
+                    "fit_population": len(X),
+                    "best_model": run.best_model,
+                    "silhouette_score": sil,
+                    "inertia": best_res.get("inertia"),
+                    "cluster_sizes": best_res.get("cluster_sizes"),
+                    "cluster_shares": best_res.get("cluster_shares"),
+                },
+            }
         results, best_model, baseline_cv_mean = run.results, run.best_model, run.baseline_cv_mean
         overfit_warnings, X_train, X_test = run.overfit_warnings, run.X_train, run.X_test
 
@@ -1235,6 +1268,7 @@ class TrainModelTool(BaseTool):
         results: dict[str, Any] = {}
         build_errors: list[str] = []
         X_train, X_test = X, X
+        fit_population = len(X_train)
         for model_name in models:
             try:
                 from sklearn.pipeline import Pipeline
@@ -1248,7 +1282,49 @@ class TrainModelTool(BaseTool):
                 model.fit(X_train)
                 model_path = Path(output_dir) / f"{model_name}.pkl"
                 save_model(model, model_path)
-                results[model_name] = {"model_path": str(model_path)}
+
+                est = model.named_steps["model"]
+                labels = getattr(est, "labels_", None)
+                if labels is None and hasattr(est, "predict"):
+                    try:
+                        transformed_X = model.named_steps["prep"].transform(X_train)
+                        labels = est.predict(transformed_X)
+                    except Exception:
+                        labels = None
+
+                sil_val: float | None = None
+                sizes: dict[str, int] = {}
+                shares: dict[str, float] = {}
+                if labels is not None and len(set(labels)) > 1:
+                    unique_labels, counts = np.unique(labels, return_counts=True)
+                    sizes = {str(lbl): int(cnt) for lbl, cnt in zip(unique_labels, counts, strict=True)}
+                    shares = {str(lbl): round(float(cnt / fit_population), 4) for lbl, cnt in zip(unique_labels, counts, strict=True)}
+                    try:
+                        from sklearn.metrics import silhouette_score
+                        transformed_X = model.named_steps["prep"].transform(X_train)
+                        if fit_population > 2000:
+                            sil_val = round(float(silhouette_score(transformed_X, labels, sample_size=2000, random_state=42)), 4)
+                        else:
+                            sil_val = round(float(silhouette_score(transformed_X, labels)), 4)
+                    except Exception:
+                        sil_val = None
+
+                inertia_val = getattr(est, "inertia_", None)
+                if inertia_val is not None:
+                    try:
+                        inertia_val = round(float(inertia_val), 4)
+                    except (ValueError, TypeError):
+                        inertia_val = None
+
+                results[model_name] = {
+                    "model_path": str(model_path),
+                    "fit_population": fit_population,
+                    "silhouette_score": sil_val,
+                    "inertia": inertia_val,
+                    "cluster_sizes": sizes,
+                    "cluster_shares": shares,
+                    "n_clusters": len(set(labels)) if labels is not None else None,
+                }
             except Exception as exc:
                 build_errors.append(f"{model_name}: {exc}")
 
@@ -1257,8 +1333,15 @@ class TrainModelTool(BaseTool):
                 f"No clustering models could be trained. "
                 f"Errors: {'; '.join(build_errors)}"
             )
-        best_model = next(iter(results))
-        return _TrainRun(results, best_model, None, [], X_train, X_test, None, "n/a", None)
+        best_model = max(
+            results.keys(),
+            key=lambda m: (
+                results[m].get("silhouette_score") is not None,
+                results[m].get("silhouette_score") or -999.0,
+            ),
+        )
+        best_score = results[best_model].get("silhouette_score")
+        return _TrainRun(results, best_model, best_score, [], X_train, X_test, None, "unsupervised_clustering", None)
 
     # ------------------------------------------------------------------
     # Internal helpers

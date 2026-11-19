@@ -35,11 +35,11 @@ if TYPE_CHECKING:
 #: whole underscore-delimited token so "source_data" doesn't match either.
 _SRC_PATTERNS = (
     re.compile(r"^(?:source|src|from|sender|parent|origin|caller|user1|node1)$", re.I),
-    re.compile(r"(?:^|_)(?:from_id|sender_id)(?:$|_)", re.I),
+    re.compile(r"(?:^|_)(?:from_id|sender_id|source_id|src_id)(?:$|_)", re.I),
 )
 _DST_PATTERNS = (
     re.compile(r"^(?:target|dst|to|receiver|recipient|child|dest|destination|callee|user2|node2)$", re.I),
-    re.compile(r"(?:^|_)(?:to_id|recipient_id)(?:$|_)", re.I),
+    re.compile(r"(?:^|_)(?:to_id|recipient_id|target_id|dst_id)(?:$|_)", re.I),
 )
 
 
@@ -182,40 +182,83 @@ class GraphAnalysisTool(BaseTool):
         largest_comp_size = int(np.max(comp_counts))
         largest_comp_pct = round(largest_comp_size / num_nodes * 100.0, 1)
 
-        # Degree calculation
-        out_degrees = np.asarray(adj.sum(axis=1)).flatten()
-        in_degrees = np.asarray(adj.sum(axis=0)).flatten()
+        # 1. Unweighted Degree calculation (neighbor count)
+        adj_unweighted = csr_matrix((np.ones(num_edges, dtype=float), (src_ids, dst_ids)), shape=(num_nodes, num_nodes))
+        adj_unweighted.data = np.ones_like(adj_unweighted.data, dtype=float)  # deduplicate multi-edges
+        out_degrees = np.asarray(adj_unweighted.sum(axis=1)).flatten()
+        in_degrees = np.asarray(adj_unweighted.sum(axis=0)).flatten()
         total_degrees = out_degrees + in_degrees
 
         top_hub_idx = int(np.argmax(total_degrees))
         top_hub_node = str(id_to_node[top_hub_idx])
-        top_hub_degree = float(total_degrees[top_hub_idx])
+        top_hub_degree = int(total_degrees[top_hub_idx])
 
-        # PageRank via power iteration
+        # 2. Weighted Strength calculation (sum of edge weights)
+        out_strength = np.asarray(adj.sum(axis=1)).flatten()
+        in_strength = np.asarray(adj.sum(axis=0)).flatten()
+        total_strength = out_strength + in_strength
+
+        top_strength_idx = int(np.argmax(total_strength))
+        top_strength_node = str(id_to_node[top_strength_idx])
+        top_strength_val = round(float(total_strength[top_strength_idx]), 4)
+        top_strength_degree = int(total_degrees[top_strength_idx])
+        top_hub_strength = round(float(total_strength[top_hub_idx]), 4)
+
+        # 3. PageRank via power iteration with dangling node (sink) mass redistribution
         d = 0.85
-        p = np.full(num_nodes, 1.0 / num_nodes)
-        out_deg_safe = np.maximum(out_degrees, 1.0)
-        norm_adj = adj.copy().astype(float)
-        norm_adj.data /= out_deg_safe[norm_adj.nonzero()[0]]
+        p = np.full(num_nodes, 1.0 / num_nodes, dtype=float)
+        sinks = (out_strength == 0.0)
 
-        for _step in range(25):
-            p = d * (norm_adj.T.dot(p)) + (1.0 - d) / num_nodes
+        # Row-stochastic transition matrix M: normalize each row by out_strength where > 0
+        norm_adj = adj.copy().astype(float)
+        row_indices, _ = norm_adj.nonzero()
+        norm_adj.data /= out_strength[row_indices]
+        transposed_m = norm_adj.T.tocsr()
+
+        for _step in range(100):
+            p_last = p
+            dangling_mass = float(p[sinks].sum())
+            p = d * (transposed_m.dot(p) + (dangling_mass / num_nodes)) + (1.0 - d) / num_nodes
+            if np.sum(np.abs(p - p_last)) < 1e-10:
+                break
+
+        # Guarantee exact mass conservation (sum(p) == 1.0)
+        p_sum = float(p.sum())
+        if p_sum > 0:
+            p /= p_sum
 
         top_pagerank_idx = int(np.argmax(p))
         top_pagerank_node = str(id_to_node[top_pagerank_idx])
         top_pagerank_val = round(float(p[top_pagerank_idx]), 5)
+        top_pagerank_degree = int(total_degrees[top_pagerank_idx])
+        top_pagerank_strength = round(float(total_strength[top_pagerank_idx]), 4)
+        top_hub_pagerank = round(float(p[top_hub_idx]), 5)
 
         findings: list[Finding] = []
 
-        # Finding: Hub identification
+        # Finding: Hub identification with distinct metric attribution
+        if top_hub_node == top_pagerank_node:
+            hub_headline = (
+                f"Top network hub is '{top_hub_node}' with {top_hub_degree} connections "
+                f"(strength={top_hub_strength:.1f}, PageRank={top_pagerank_val:.4f})"
+            )
+        else:
+            hub_headline = (
+                f"Top network hub by degree is '{top_hub_node}' with {top_hub_degree} connections; "
+                f"highest PageRank influence is '{top_pagerank_node}' ({top_pagerank_val:.4f})"
+            )
+
         findings.append(
             Finding(
                 finding_id="graph_top_hub",
                 kind="network",
-                headline=f"Top network hub is '{top_hub_node}' with {int(top_hub_degree)} connections (PageRank={top_pagerank_val})",
+                headline=hub_headline,
                 detail=(
                     f"Graph contains {num_nodes} nodes and {num_edges} edges across {n_components} connected component(s). "
-                    f"Largest connected component contains {largest_comp_pct}% of all nodes."
+                    f"Largest connected component contains {largest_comp_pct}% of all nodes. "
+                    f"Top hub '{top_hub_node}' has degree={top_hub_degree}, strength={top_hub_strength:.1f}, PageRank={top_hub_pagerank:.4f}. "
+                    f"Top PageRank node '{top_pagerank_node}' has score={top_pagerank_val:.4f}, degree={top_pagerank_degree}. "
+                    f"Top weighted strength node '{top_strength_node}' has strength={top_strength_val:.1f}, degree={top_strength_degree}."
                 ),
                 importance=0.8,
                 effect=top_hub_degree / max(1.0, float(num_nodes)),
@@ -223,8 +266,17 @@ class GraphAnalysisTool(BaseTool):
                 evidence={
                     "top_hub": top_hub_node,
                     "degree": top_hub_degree,
+                    "hub_strength": top_hub_strength,
+                    "hub_pagerank": top_hub_pagerank,
                     "top_pagerank_node": top_pagerank_node,
                     "pagerank": top_pagerank_val,
+                    "top_pagerank_degree": top_pagerank_degree,
+                    "top_pagerank_strength": top_pagerank_strength,
+                    "top_strength_node": top_strength_node,
+                    "top_strength": top_strength_val,
+                    "top_strength_degree": top_strength_degree,
+                    "top_strength_pagerank": round(float(p[top_strength_idx]), 5),
+                    "pagerank_mass_sum": round(float(p.sum()), 6),
                     "nodes": num_nodes,
                     "edges": num_edges,
                     "components": n_components,
@@ -255,7 +307,8 @@ class GraphAnalysisTool(BaseTool):
 
         summary = (
             f"Graph analysis of {num_nodes} nodes and {num_edges} edges across {n_components} component(s). "
-            f"Top hub: '{top_hub_node}' (degree={int(top_hub_degree)})."
+            f"Top hub: '{top_hub_node}' (degree={top_hub_degree}, strength={top_hub_strength:.1f}, PageRank={top_hub_pagerank:.4f}); "
+            f"top PageRank: '{top_pagerank_node}' ({top_pagerank_val:.4f})."
         )
 
         results = {
@@ -264,8 +317,25 @@ class GraphAnalysisTool(BaseTool):
             "num_components": n_components,
             "largest_component_size": largest_comp_size,
             "largest_component_pct": largest_comp_pct,
-            "top_hub": {"node": top_hub_node, "degree": top_hub_degree},
-            "top_pagerank": {"node": top_pagerank_node, "score": top_pagerank_val},
+            "top_hub": {
+                "node": top_hub_node,
+                "degree": top_hub_degree,
+                "strength": top_hub_strength,
+                "pagerank": top_hub_pagerank,
+            },
+            "top_pagerank": {
+                "node": top_pagerank_node,
+                "score": top_pagerank_val,
+                "degree": top_pagerank_degree,
+                "strength": top_pagerank_strength,
+            },
+            "top_strength": {
+                "node": top_strength_node,
+                "strength": top_strength_val,
+                "degree": top_strength_degree,
+                "pagerank": round(float(p[top_strength_idx]), 5),
+            },
+            "pagerank_mass_sum": round(float(p.sum()), 6),
         }
 
         return {

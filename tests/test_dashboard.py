@@ -104,7 +104,7 @@ class TestChartSelection:
         assert ids[0] == "model_comparison"  # results charts lead the dashboard
         chart = charts[0]
         scores = {v["model"] for v in chart.spec["data"]["values"]}
-        assert scores == {"logistic_regression", "random_forest"}
+        assert scores == {"Logistic Regression", "Random Forest"}
 
     def test_correlation_chart_from_tool_results(self, churn_df: pd.DataFrame) -> None:
         corr_result = {
@@ -206,6 +206,50 @@ class TestChartSelection:
         chart = next(c for c in charts if c.chart_id == "pca_scree")
         assert len(chart.spec["data"]["values"]) == 3
         assert "2 component(s)" in chart.description
+        assert chart.spec["data"]["values"][0]["component"] == "Component 1"
+
+    def test_scree_chart_with_component_top_features(self, churn_df: pd.DataFrame) -> None:
+        dim_result = {
+            "tool_name": "dimensionality_analysis",
+            "status": "success",
+            "output": {
+                "explained_variance_ratio": [0.5, 0.3, 0.2],
+                "cumulative_variance": [0.5, 0.8, 1.0],
+                "component_top_features": ["monthly_charge", "age", "support_calls"],
+                "n_components_for_threshold": 2,
+                "variance_threshold": 0.8,
+            },
+        }
+        profile = profile_dataframe(churn_df)
+        charts = build_dashboard(churn_df, profile, tool_results=[dim_result])
+        chart = next(c for c in charts if c.chart_id == "pca_scree")
+        assert chart.spec["data"]["values"][0]["component"] == "Component 1 (Monthly Charge)"
+        assert chart.spec["data"]["values"][1]["component"] == "Component 2 (Age)"
+
+    def test_cluster_chart_with_pca_drivers_and_variance(self, churn_df: pd.DataFrame) -> None:
+        cluster_result = {
+            "tool_name": "cluster_data",
+            "status": "success",
+            "output": {
+                "n_clusters": 3,
+                "silhouette_score": 0.61,
+                "pca_explained_variance": [0.45, 0.25],
+                "pca_top_features": ["monthly_charge", "age"],
+                "pca_points": [
+                    {"x": float(i), "y": float(-i), "cluster": f"cluster_{i % 3}"}
+                    for i in range(30)
+                ],
+            },
+        }
+        df = churn_df.drop(columns=["churn"])
+        profile = profile_dataframe(df)
+        charts = build_dashboard(df, profile, task_type="eda", tool_results=[cluster_result])
+        spec = next(c for c in charts if c.chart_id == "cluster_scatter").spec
+        assert spec["layer"][0]["encoding"]["x"]["title"] == "Component 1: Monthly Charge (45% var)"
+        assert spec["layer"][0]["encoding"]["y"]["title"] == "Component 2: Age (25% var)"
+        tt = {t["field"]: t["title"] for t in spec["layer"][0]["encoding"]["tooltip"]}
+        assert tt["x"] == "Component 1"
+        assert tt["y"] == "Component 2"
 
     def test_scree_chart_skipped_without_variance_ratio(self, churn_df: pd.DataFrame) -> None:
         dim_result = {

@@ -104,6 +104,7 @@ NON_ANALYTICAL_TOOLS: frozenset[str] = frozenset({
 def _synthesize_autonomous_objective(
     profile: DatasetProfile | None,
     agenda: list[Any] | None,
+    target_column: str | None = None,
 ) -> str:
     """Synthesize a high-value analytical mission when the user enters no question."""
     if profile is None:
@@ -111,12 +112,15 @@ def _synthesize_autonomous_objective(
 
     measures = profile.measures()
     dimensions = profile.dimensions()
-    if not measures:
+    selected = next((c for c in profile.columns if c.name == target_column), None)
+    if not measures and selected is None:
         return "Autonomous Investigation: Evaluate categorical distributions, segment associations, and data integrity."
 
     # Select primary business outcome (money, count, conversion, or top measure)
-    north_star = measures[0]
+    north_star = selected or measures[0]
     for m in measures:
+        if selected is not None:
+            break
         name_l = m.name.lower()
         if any(t in name_l for t in ("revenue", "sales", "price", "profit", "amount", "cost", "spend", "arr", "gmv", "income")):
             north_star = m
@@ -125,7 +129,7 @@ def _synthesize_autonomous_objective(
             north_star = m
             break
 
-    top_dim = dimensions[0].name if dimensions else None
+    top_dim = next((d.name for d in dimensions if d.name != north_star.name), None)
     lead_q = ""
     if agenda and len(agenda) > 0:
         first_q = agenda[0]
@@ -261,6 +265,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # burning time and — for train_model — silently overwriting an
         # already-referenced model file with a fresh random draw.
         self._step_cache: dict[str, ToolResult] = {}
+        self._invalid_steps: set[str] = set()
         # Optional callback fired after each tool: (tool_name, status, detail) -> None
         self.on_step_callback: Any = None
         # Optional callback fired after each LLM iteration: (iteration, stage) -> None
@@ -692,6 +697,13 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             except Exception as exc:
                 logger.debug('Reprofiling after target selection failed: %s', exc)
         self._pending_df = None
+        if self.last_profile and (reason := self.last_profile.censoring_rationale(metadata.target_column)):
+            metadata.task_type = "survival"
+            self.memory.set_context("analysis_decision", {
+                "mode": "survival", "target": metadata.target_column,
+                "candidate": metadata.target_column, "rationale": reason,
+                "alternatives_rejected": ["ordinary classification of the raw event flag"],
+            })
         self._stash_profile_context()
 
         # 7.5 — question agenda: what a human analyst would ask of this
@@ -712,7 +724,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # When no user question is supplied, synthesize an autonomous mission
         # and elevate the top agenda question as the lead investigative hypothesis.
         if not self.objective and self.last_profile:
-            auto_obj = _synthesize_autonomous_objective(self.last_profile, agenda)
+            auto_obj = _synthesize_autonomous_objective(self.last_profile, agenda, metadata.target_column)
             self.autonomous_objective = auto_obj
             self.memory.set_context("autonomous_objective", auto_obj)
             console.print(f"  [cyan]🧭 {auto_obj}[/]")
@@ -880,7 +892,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
 
         self._prepare_reasoning()
 
-        console.print("\n[bold magenta]🚀 Starting Autonomous Analysis — Stages 2-7[/]\n")
+        console.print("\n[bold magenta]🚀 Starting Autonomous Analysis — Stages 2–5[/]\n")
         final_result = self._reasoning_loop()
         final_result = self._finalize_analysis(final_result)
         return final_result
@@ -1656,6 +1668,14 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                 "quarantined from the final synthesis.[/]"
             )
         self._resolve_public_status(final_result)
+        # All public surfaces, including older readers of "reasoning", consume
+        # the same post-audit answer. Planner narration remains in the run trace.
+        coverage = final_result.get("coverage") or {}
+        summary_parts = [str(item) for item in (final_result.get("insights") or [])[:2]]
+        if coverage.get("total"):
+            summary_parts.insert(0, f"Answered {coverage['answered']} of {coverage['total']} analysis questions.")
+        final_result["executive_summary"] = " ".join(summary_parts)
+        final_result["reasoning"] = final_result["executive_summary"]
 
         # ---- Stage 5: Dossier Generation ----
         self._generate_dashboard()

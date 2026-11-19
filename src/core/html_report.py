@@ -73,6 +73,8 @@ def _build_executive_summary(
     """Build the executive summary from `reasoning` (with internal-plumbing jargon
     and process boilerplate stripped sentence-by-sentence). Replace process commentary
     with the strongest actionable findings if no substantive reasoning remains."""
+    if "executive_summary" in llm_insights:
+        return str(llm_insights["executive_summary"] or "")
     clean_reasoning = _strip_jargon_sentences(str(llm_insights.get("reasoning", "") or ""))
     grounded = ""
     if findings:
@@ -739,10 +741,22 @@ def build_html_report(
     execution_issues = llm_insights.get("execution_issues") or []
     if isinstance(coverage, dict) or execution_issues:
         status_rows: list[tuple[str, Any]] = []
+        open_questions_html = ""
         if isinstance(coverage, dict):
             status_rows.append(
                 ("Questions answered", f"{coverage.get('answered', 0)} of {coverage.get('total', 0)}")
             )
+            unanswered = coverage.get("unanswered") or []
+            if unanswered:
+                items = []
+                for q in unanswered:
+                    q_text = q.get("text", "") if isinstance(q, dict) else str(q)
+                    q_reason = (q.get("blocked_reason") or q.get("reason") or "Unaddressed in planned analysis steps") if isinstance(q, dict) else "Unaddressed"
+                    items.append(f"<li><strong>{_esc(q_text)}</strong><br><small style='color:var(--ink-secondary);'>{_esc(q_reason)}</small></li>")
+                open_questions_html = (
+                    f"<div style='margin-top:0.85rem;'><p><strong>Open business questions ({len(unanswered)}):</strong></p>"
+                    f"<ul style='margin-left:1.2rem;line-height:1.6;'>{''.join(items)}</ul></div>"
+                )
         if execution_issues:
             status_rows.append(("Execution issues", len(execution_issues)))
         sections.append(
@@ -752,6 +766,7 @@ def build_html_report(
                 for label, value in status_rows
             )
             + "</table>"
+            + open_questions_html
         )
     # 3a — prefer `insights` over the LLM's raw `reasoning` scratch text,
     # which has leaked internal plumbing into shipped reports; strip any

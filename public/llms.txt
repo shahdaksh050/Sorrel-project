@@ -5,7 +5,7 @@
 ## Start Here
 
 - [Product overview](/docs/overview.md): Shipped capabilities and boundaries.
-- [Analysis workflow](/docs/workflow.md): The canonical seven-stage local workflow.
+- [Analysis workflow](/docs/workflow.md): The five stages of a local analysis.
 - [Safety and privacy](/docs/safety.md): Local data handling and sandbox safeguards.
 
 ## Integrate

@@ -197,12 +197,13 @@ class TestAnalyzeWorkflow:
         agent.load_dataset(sample_csv, target_hint="label", interactive=False)
         agent.analyze()
 
-        statuses = [
-            r.status for r in agent.memory.tool_results
+        attempts = [
+            r for r in agent.memory.tool_results
             if r.tool_name == "select_statistical_test"
         ]
-        assert statuses.count("error") == 2, "two real attempts allowed"
-        assert "skipped" in statuses, "third attempt must be skipped, not executed"
+        assert len(attempts) == 1
+        assert attempts[0].status == "error"
+        assert "step not run" in (attempts[0].error_message or "")
 
     def test_analyze_without_dataset_raises(self, agent: AgentController) -> None:
         with pytest.raises(RuntimeError, match="No dataset loaded"):
@@ -414,7 +415,8 @@ class TestObjectiveAndProfile:
         agent.llm_client = _ScriptedLLM([RuntimeError("api down")])  # type: ignore[assignment]
         agent.load_dataset(sample_csv, target_hint="label", interactive=False)
         final = agent.analyze()
-        assert "find churn drivers" in final["reasoning"]
+        assert final["objective"] == "find churn drivers"
+        assert final["reasoning"] == final["executive_summary"]
 
     def test_dashboard_json_written_after_analyze(
         self, agent: AgentController, sample_csv: str

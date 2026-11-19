@@ -12,6 +12,7 @@ import pandas as pd
 from src.core.agenda import Question, coverage_report
 from src.core.controller_report import ReportMixin
 from src.core.findings import Finding
+from src.core.memory import MemorySystem
 from src.core.profiler import profile_dataframe
 from src.tools.multi_seasonal_analysis import MultiSeasonalAnalysisTool
 from src.tools.threshold_analysis import ThresholdAnalysisTool
@@ -187,16 +188,9 @@ def test_agenda_coverage_does_not_falsely_credit_unexecuted_dimensions() -> None
 
 
 def test_report_mixin_deduplicates_recommendations() -> None:
-    class MockMemory:
-        def __init__(self, findings: list[Finding]) -> None:
-            self._findings = findings
-
-        def ranked_findings(self) -> list[Finding]:
-            return self._findings
-
     class DummyController(ReportMixin):
-        def __init__(self, memory: MockMemory) -> None:
-            self.memory = memory  # type: ignore[assignment]
+        def __init__(self, memory: MemorySystem) -> None:
+            self.memory = memory
 
         def _primary_findings(self) -> list[Finding]:
             return self.memory.ranked_findings()
@@ -224,7 +218,10 @@ def test_report_mixin_deduplicates_recommendations() -> None:
         ),
     ]
 
-    controller = DummyController(MockMemory(findings))
+    memory = MemorySystem()
+    memory.add_findings(findings)
+    memory.set_context("target_column", "Total Amount")
+    controller = DummyController(memory)
     final_result: dict[str, object] = {}
     controller._rebuild_primary_synthesis(final_result)
 

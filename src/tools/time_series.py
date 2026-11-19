@@ -487,12 +487,19 @@ def _hour_eta_squared(frame: pd.DataFrame, hours: np.ndarray) -> pd.Series:
     return (between / total.where(total > 0)).dropna()
 
 
+def _format_hour_label(h: int) -> str:
+    h_mod = h % 24
+    period = "AM" if h_mod < 12 else "PM"
+    clock = 12 if h_mod % 12 == 0 else h_mod % 12
+    return f"{clock} {period}"
+
+
 def _tod_charts(name: str, hours: dict[int, float], weekdays: dict[str, float] | None, mean: float) -> tuple[Any, Any]:
     from src.core.chart_spec import validate_chart_spec
 
     hour_chart, _ = validate_chart_spec({
-        "type": "line", "x": "hour", "y": "average", "x_title": "Hour of day", "y_title": name,
-        "data": [{"hour": h, "average": v} for h, v in hours.items()],
+        "type": "line", "x": "hour_label", "y": "average", "x_title": "Time of Day", "y_title": name,
+        "data": [{"hour": h, "hour_label": _format_hour_label(h), "average": v} for h, v in sorted(hours.items())],
         "title": f"When {name} is highest: average by hour of day",
         "annotations": [{"y": round(mean, 4), "label": "overall average"}],
     })

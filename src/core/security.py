@@ -39,7 +39,7 @@ from src.core.io import (
 ALLOWED_EXTENSIONS: frozenset[str] = SUPPORTED_EXTENSIONS
 
 #: Default upload ceiling in megabytes (override with MAX_UPLOAD_MB env var).
-DEFAULT_MAX_UPLOAD_MB = 200
+DEFAULT_MAX_UPLOAD_MB = 250
 
 #: Default uncompressed container size ceiling in megabytes (override with MAX_UNCOMPRESSED_MB).
 DEFAULT_MAX_UNCOMPRESSED_MB = IO_DEFAULT_MAX_UNCOMPRESSED_MB

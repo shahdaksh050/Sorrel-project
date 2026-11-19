@@ -98,6 +98,9 @@ def test_dimensionality_cpu_telemetry_and_cuda_parity(tmp_path, monkeypatch) -> 
     cpu = DimensionalityAnalysisTool().execute(str(path), compute_backend="cpu")
     assert cpu["compute_backend"] == "cpu"
     assert cpu["backend_reason"] == "forced_cpu"
+    assert "component_top_features" in cpu
+    assert len(cpu["component_top_features"]) == 3
+    assert all(f in ("a", "b", "c") for f in cpu["component_top_features"])
 
     monkeypatch.setitem(sys.modules, "cupy", _fake_cupy())
     monkeypatch.setattr(

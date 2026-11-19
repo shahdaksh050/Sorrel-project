@@ -413,6 +413,7 @@ class SelectStatisticalTestTool(BaseTool):
             result, _n = self._run_single_test(
                 df, feature_column, group_column, alpha, profile, bin_numeric_group
             )
+            result["n"] = _n
             return result
 
         return self._execute_family(
@@ -565,6 +566,10 @@ class SelectStatisticalTestTool(BaseTool):
                 "interpretation": r.get("interpretation", ""),
                 "unit_of_analysis": r.get("unit_of_analysis", "row"),
                 "post_hoc": r.get("post_hoc"),
+                "statistical_state": r.get("statistical_state", "unperformed"),
+                "practical_margin": r.get("practical_margin"),
+                "effect_ci": r.get("effect_ci"),
+                "mean_diff_ci": r.get("mean_diff_ci_95"),
             }
             for dim, r in raw_results.items()
         ]
@@ -705,6 +710,7 @@ class SelectStatisticalTestTool(BaseTool):
         )
 
         mean_diff_ci: tuple[float, float] | None = None
+        effect_ci: tuple[float, float] | None = None
 
         if n_groups == 2:
             g1, g2 = group_arrays[0], group_arrays[1]
@@ -723,12 +729,20 @@ class SelectStatisticalTestTool(BaseTool):
                     effect_metric = "hedges_g"
                 mean_diff_ci = _mean_diff_ci(g1, g2, equal_var, alpha)
                 threshold = PRACTICAL_THRESHOLD_D
+                if n1 > 1 and n2 > 1:
+                    se_d = ((n1 + n2) / (n1 * n2) + (effect_value ** 2) / (2 * (n1 + n2))) ** 0.5
+                    z_crit = float(stats.norm.ppf(1 - alpha / 2))
+                    effect_ci = (float(effect_value - z_crit * se_d), float(effect_value + z_crit * se_d))
             else:
                 stat, p_val = stats.mannwhitneyu(g1, g2, alternative="two-sided")
                 test_name = "Mann-Whitney U"
                 effect_value = _rank_biserial(float(stat), n1, n2)
                 effect_metric = "rank_biserial"
                 threshold = PRACTICAL_THRESHOLD_R
+                if n1 > 1 and n2 > 1:
+                    se_r = ((n1 + n2 + 1) / (3 * n1 * n2)) ** 0.5
+                    z_crit = float(stats.norm.ppf(1 - alpha / 2))
+                    effect_ci = (float(effect_value - z_crit * se_r), float(effect_value + z_crit * se_r))
         else:
             if is_normal:
                 stat, p_val = stats.f_oneway(*group_arrays)
@@ -756,6 +770,21 @@ class SelectStatisticalTestTool(BaseTool):
         )
         sample_size_note = _sample_size_note(group_sizes, significant, practical)
 
+        # Distinguish 4 statistical states: detected_difference, demonstrated_equivalence, inconclusive, unperformed
+        if effect_ci is not None:
+            ci_low, ci_high = effect_ci
+            if ci_low >= -threshold and ci_high <= threshold:
+                statistical_state = "demonstrated_equivalence"
+            elif significant and practical:
+                statistical_state = "detected_difference"
+            else:
+                statistical_state = "inconclusive"
+        else:
+            if significant and practical:
+                statistical_state = "detected_difference"
+            else:
+                statistical_state = "inconclusive"
+
         result: dict[str, Any] = {
             "summary": f"{test_name}: {'stat=N/A' if np.isnan(stat) else f'stat={stat:.4f}'}, {_p_text(p_val)}. {interpretation}",
             "test_name": test_name,
@@ -773,7 +802,11 @@ class SelectStatisticalTestTool(BaseTool):
             "practical_significance": practical,
             "practical_threshold": threshold,
             "unit_of_analysis": unit_of_analysis,
+            "statistical_state": statistical_state,
+            "practical_margin": threshold,
         }
+        if effect_ci is not None:
+            result["effect_ci"] = [round(effect_ci[0], 6), round(effect_ci[1], 6)]
         if post_hoc:
             result["post_hoc"] = post_hoc
             top = post_hoc[0]
@@ -821,6 +854,16 @@ class SelectStatisticalTestTool(BaseTool):
         )
         sample_size_note = _sample_size_note([n], significant, practical)
 
+        se_v = (1.0 / (2 * n)) ** 0.5 if n > 0 else 0.5
+        z_crit = float(stats.norm.ppf(1 - alpha / 2))
+        cramers_v_ci = (max(0.0, float(cramers_v - z_crit * se_v)), min(1.0, float(cramers_v + z_crit * se_v)))
+        if cramers_v_ci[1] <= PRACTICAL_THRESHOLD_V:
+            stat_state = "demonstrated_equivalence"
+        elif significant and practical:
+            stat_state = "detected_difference"
+        else:
+            stat_state = "inconclusive"
+
         result: dict[str, Any] = {
             "summary": f"{test_name}: stat={stat:.4f}, {_p_text(p_val)}. {interpretation}",
             "test_name": test_name,
@@ -834,6 +877,9 @@ class SelectStatisticalTestTool(BaseTool):
             "effect_size_metric": "cramers_v",
             "practical_significance": practical,
             "practical_threshold": PRACTICAL_THRESHOLD_V,
+            "statistical_state": stat_state,
+            "practical_margin": PRACTICAL_THRESHOLD_V,
+            "effect_ci": [round(cramers_v_ci[0], 6), round(cramers_v_ci[1], 6)],
         }
         if expected_frequency_warning:
             result["expected_frequency_warning"] = expected_frequency_warning
@@ -925,6 +971,10 @@ class SelectStatisticalTestTool(BaseTool):
                     "interpretation": p.get("interpretation", ""),
                     "post_hoc": p.get("post_hoc"),
                     "unit_of_analysis": p.get("unit_of_analysis", "row"),
+                    "statistical_state": p.get("statistical_state", "unperformed"),
+                    "practical_margin": p.get("practical_margin"),
+                    "effect_ci": p.get("effect_ci"),
+                    "mean_diff_ci": p.get("mean_diff_ci"),
                 }
                 for p in family
             ]
@@ -942,87 +992,169 @@ class SelectStatisticalTestTool(BaseTool):
                 # Falling back to the raw p_value keeps this tool's own
                 # significance bar consistent with `significant` above.
                 "p_adjusted": output.get("p_value"),
-                "n": None,
+                "n": output.get("n"),
                 "interpretation": output.get("interpretation", ""),
                 "post_hoc": output.get("post_hoc"),
                 "unit_of_analysis": output.get("unit_of_analysis", "row"),
+                "statistical_state": output.get("statistical_state", "unperformed"),
+                "practical_margin": output.get("practical_margin"),
+                "effect_ci": output.get("effect_ci"),
+                "mean_diff_ci": output.get("mean_diff_ci_95"),
             }]
 
         results: list[Finding] = []
         for c in candidates:
             if is_derived_pair(c.get("feature_column"), c.get("group_column")):
                 continue
-            p_adj, effect, effect_kind = c["p_adjusted"], c["effect_size"], c["effect_kind"]
-            if p_adj is None or effect is None or effect_kind is None:
+            measure = c.get("feature_column")
+            dimension = c.get("group_column")
+            if not measure or not dimension:
                 continue
-            if p_adj >= _FINDING_P_THRESHOLD:
-                n_obs = c.get("n")
-                if n_obs is None or n_obs >= 20:
-                    measure, dimension = c["feature_column"], c["group_column"]
-                    results.append(Finding(
-                        finding_id=f"{self.name}:invariance:{measure}:{dimension}",
-                        kind="invariance",
-                        headline=(
-                            f"'{measure}' shows empirical invariance across '{dimension}' "
-                            f"({c['test_name']}, {effect_kind}={effect:.3f}, p_adj={p_adj:.4f} — no significant difference)."
-                        ),
-                        detail=(
-                            f"Empirical invariance confirmed: no statistically significant difference in '{measure}' "
-                            f"across '{dimension}' groups ({c['test_name']}, p_adj={p_adj:.4f} >= 0.05)."
-                        ),
-                        evidence={
-                            "test_name": c["test_name"],
-                            "p_value": c["p_value"],
-                            "p_adjusted": p_adj,
-                            "n": n_obs,
-                            "unit_of_analysis": c.get("unit_of_analysis"),
-                            "post_hoc": c.get("post_hoc"),
-                            "invariance": True,
-                        },
-                        source_tool=self.name,
-                        measure=measure,
-                        dimension=dimension,
-                        effect=effect,
-                        effect_kind=effect_kind,
-                        p_value=c["p_value"],
-                        p_adjusted=p_adj,
-                        confidence=0.75,
-                    ))
+            effect = c.get("effect_size")
+            effect_kind = c.get("effect_kind")
+            if effect is None or effect_kind is None:
                 continue
-            threshold = _EFFECT_KIND_THRESHOLDS.get(effect_kind, PRACTICAL_THRESHOLD_D)
-            if abs(effect) < threshold:
-                continue  # negligible effect — the large-n trap, not a finding
-            measure, dimension = c["feature_column"], c["group_column"]
-            headline = (
-                f"'{measure}' differs meaningfully across '{dimension}' "
-                f"({c['test_name']}, {effect_kind}={effect:.3f}, p_adj={p_adj:.4f})."
-            )
-            top_pair = (c.get("post_hoc") or [None])[0]
-            if top_pair and top_pair["significant"]:
-                headline += (
-                    f" Most different: '{top_pair['group_a']}' vs '{top_pair['group_b']}' "
-                    f"(mean diff {top_pair['mean_diff']:+.4g})."
+            p_val = c.get("p_value")
+            p_adj = c.get("p_adjusted")
+            threshold = float(c.get("practical_margin") or _EFFECT_KIND_THRESHOLDS.get(effect_kind, PRACTICAL_THRESHOLD_D))
+            stat_state = c.get("statistical_state")
+            ci = c.get("effect_ci")
+
+            # Determine stat_state if not already populated or if unperformed
+            if not stat_state or stat_state == "unperformed":
+                if ci is not None:
+                    ci_low, ci_high = ci
+                    if ci_low >= -threshold and ci_high <= threshold:
+                        stat_state = "demonstrated_equivalence"
+                    elif (p_adj is not None and p_adj < _FINDING_P_THRESHOLD) and abs(effect) >= threshold:
+                        stat_state = "detected_difference"
+                    else:
+                        stat_state = "inconclusive"
+                else:
+                    if (p_adj is not None and p_adj < _FINDING_P_THRESHOLD) and abs(effect) >= threshold:
+                        stat_state = "detected_difference"
+                    else:
+                        stat_state = "inconclusive"
+
+            if stat_state == "unperformed":
+                continue
+
+            p_adj_val = p_adj if p_adj is not None else p_val
+            p_adj_str = f", p_adj={p_adj_val:.4f}" if p_adj_val is not None else ""
+            ci_str = f" [{ci[0]:.3f}, {ci[1]:.3f}]" if ci else ""
+
+            if stat_state == "demonstrated_equivalence":
+                headline = (
+                    f"'{measure}' demonstrates practical equivalence across '{dimension}' "
+                    f"({c['test_name']}, {effect_kind}={effect:.3f}{ci_str} within +/-{threshold:.2f}{p_adj_str})."
                 )
-            results.append(Finding(
-                finding_id=f"{self.name}:{measure}:{dimension}",
-                kind="test",
-                headline=headline,
-                detail=c["interpretation"],
-                evidence={
+                detail = (
+                    f"{c['interpretation']} The 95% confidence interval is entirely contained within the practical "
+                    f"equivalence margin of +/-{threshold:.2f}, demonstrating no material difference."
+                )
+                evidence = {
                     "test_name": c["test_name"],
-                    "p_value": c["p_value"],
+                    "p_value": p_val,
                     "p_adjusted": p_adj,
                     "n": c["n"],
                     "unit_of_analysis": c["unit_of_analysis"],
                     "post_hoc": c["post_hoc"],
-                },
-                source_tool=self.name,
-                measure=measure,
-                dimension=dimension,
-                effect=effect,
-                effect_kind=effect_kind,
-                p_value=c["p_value"],
-                p_adjusted=p_adj,
-                confidence=0.7,
-            ))
+                    "statistical_state": "demonstrated_equivalence",
+                    "practical_margin": threshold,
+                    "effect_ci": ci,
+                }
+                results.append(Finding(
+                    finding_id=f"{self.name}:{measure}:{dimension}:equivalence",
+                    kind="invariance",
+                    headline=headline,
+                    detail=detail,
+                    evidence=evidence,
+                    source_tool=self.name,
+                    measure=measure,
+                    dimension=dimension,
+                    effect=effect,
+                    effect_kind=effect_kind,
+                    p_value=p_val,
+                    p_adjusted=p_adj,
+                    confidence=0.85,
+                    statistical_state="demonstrated_equivalence",
+                    practical_margin=threshold,
+                ))
+            elif stat_state == "detected_difference":
+                headline = (
+                    f"'{measure}' differs meaningfully across '{dimension}' "
+                    f"({c['test_name']}, {effect_kind}={effect:.3f}{ci_str}{p_adj_str})."
+                )
+                top_pair = (c.get("post_hoc") or [None])[0]
+                if top_pair and top_pair.get("significant"):
+                    headline += (
+                        f" Most different: '{top_pair['group_a']}' vs '{top_pair['group_b']}' "
+                        f"(mean diff {top_pair['mean_diff']:+.4g})."
+                    )
+                evidence = {
+                    "test_name": c["test_name"],
+                    "p_value": p_val,
+                    "p_adjusted": p_adj,
+                    "n": c["n"],
+                    "unit_of_analysis": c["unit_of_analysis"],
+                    "post_hoc": c["post_hoc"],
+                    "statistical_state": "detected_difference",
+                    "practical_margin": threshold,
+                    "effect_ci": ci,
+                }
+                results.append(Finding(
+                    finding_id=f"{self.name}:{measure}:{dimension}",
+                    kind="test",
+                    headline=headline,
+                    detail=c["interpretation"],
+                    evidence=evidence,
+                    source_tool=self.name,
+                    measure=measure,
+                    dimension=dimension,
+                    effect=effect,
+                    effect_kind=effect_kind,
+                    p_value=p_val,
+                    p_adjusted=p_adj,
+                    confidence=0.7,
+                    statistical_state="detected_difference",
+                    practical_margin=threshold,
+                ))
+            elif stat_state == "inconclusive":
+                headline = (
+                    f"Comparison of '{measure}' across '{dimension}' is inconclusive "
+                    f"({c['test_name']}, {effect_kind}={effect:.3f}{ci_str}{p_adj_str})."
+                )
+                detail = (
+                    f"{c['interpretation']} Data cannot establish difference or equivalence with current sample size / noise level. "
+                    f"Confidence interval spans outside practical margin +/-{threshold:.2f}."
+                )
+                evidence = {
+                    "test_name": c["test_name"],
+                    "p_value": p_val,
+                    "p_adjusted": p_adj,
+                    "n": c["n"],
+                    "unit_of_analysis": c["unit_of_analysis"],
+                    "post_hoc": c["post_hoc"],
+                    "statistical_state": "inconclusive",
+                    "practical_margin": threshold,
+                    "effect_ci": ci,
+                }
+                results.append(Finding(
+                    finding_id=f"{self.name}:{measure}:{dimension}:inconclusive",
+                    kind="test",
+                    headline=headline,
+                    detail=detail,
+                    evidence=evidence,
+                    source_tool=self.name,
+                    measure=measure,
+                    dimension=dimension,
+                    effect=effect,
+                    effect_kind=effect_kind,
+                    p_value=p_val,
+                    p_adjusted=p_adj,
+                    confidence=0.35,
+                    layer="appendix",
+                    statistical_state="inconclusive",
+                    practical_margin=threshold,
+                ))
         return results

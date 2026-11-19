@@ -342,6 +342,11 @@ class ClusterDataTool(BaseTool):
 
         pca = PCA(n_components=2, random_state=42)
         coords = pca.fit_transform(X)
+        pca_top_features: list[str] = []
+        if hasattr(pca, "components_") and len(pca.components_) >= 1:
+            for c_comp in pca.components_:
+                lead_idx = int(np.argmax(np.abs(c_comp)))
+                pca_top_features.append(str(features.columns[lead_idx]))
         point_idx = (
             rng.choice(len(coords), size=PCA_POINT_CAP, replace=False)
             if len(coords) > PCA_POINT_CAP
@@ -394,6 +399,7 @@ class ClusterDataTool(BaseTool):
             "log1p_features": log_features,
             "pca_points": pca_points,
             "pca_explained_variance": [round(float(v), 4) for v in pca.explained_variance_ratio_],
+            "pca_top_features": pca_top_features,
             "model_path": str(model_path),
         }
 

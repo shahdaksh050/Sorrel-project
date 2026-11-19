@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
+from src.core.geo_stats import haversine_distance, spherical_center
+
 if TYPE_CHECKING:
     from src.core.profiler import DatasetArchetype
 
@@ -48,6 +50,20 @@ _STOPWORDS = frozenset(
     "analyze analysis data dataset any most more less much many should can could would "
     "there their them".split()
 )
+
+_SURVIVAL_WORD_MAP: dict[str, float] = {
+    **dict.fromkeys(
+        ("1", "1.0", "yes", "y", "true", "t", "event", "observed", "died", "dead", "death", "deceased",
+         "churned", "churn", "left", "failed", "failure", "converted", "relapsed", "relapse",
+         "terminated", "dropped", "dropout", "attrited", "attrition"),
+        1.0,
+    ),
+    **dict.fromkeys(
+        ("0", "0.0", "no", "n", "false", "f", "alive", "active", "retained", "stayed", "censored",
+         "survived", "ongoing", "current", "none"),
+        0.0,
+    ),
+}
 
 
 def detect_wide_temporal_columns(columns: list[str]) -> list[str]:
@@ -301,6 +317,7 @@ def verify_and_prepare_survival_data(
     df: pd.DataFrame,
     duration_col: str | None = None,
     event_col: str | None = None,
+    event_mapping: dict[Any, int] | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Sanitize right-censored duration and event columns for survival modeling."""
     if df.empty:
@@ -312,35 +329,70 @@ def verify_and_prepare_survival_data(
     if not duration_col:
         for c in out.columns:
             c_l = str(c).lower()
-            if pd.api.types.is_numeric_dtype(out[c]) and any(k in c_l for k in ("tenure", "duration", "time", "months_active", "days")):
+            if pd.api.types.is_numeric_dtype(out[c]) and any(k in c_l for k in ("tenure", "duration", "time", "months_active", "days", "follow_up")):
                 duration_col = str(c)
                 break
 
     if not event_col:
         for c in out.columns:
             c_l = str(c).lower()
-            if c != duration_col and any(k in c_l for k in ("churn", "status", "event", "died", "failed", "cancelled")):
+            if c != duration_col and any(k in c_l for k in ("churn", "status", "event", "died", "dead", "failed", "cancelled", "censored")):
                 event_col = str(c)
                 break
 
-    if duration_col and duration_col in out.columns:
-        dur_s = pd.to_numeric(out[duration_col], errors="coerce")
-        invalid_dur = int((dur_s <= 0).sum())
-        if invalid_dur > 0:
-            out[duration_col] = dur_s.clip(lower=0.01)
-            notes.append(f"Adjusted {invalid_dur} non-positive '{duration_col}' values to 0.01 for survival model validity.")
+    if not duration_col or not event_col or duration_col not in out.columns or event_col not in out.columns:
+        return out, notes
 
-    if event_col and event_col in out.columns:
-        ev_s = out[event_col]
-        if pd.api.types.is_bool_dtype(ev_s):
-            out[event_col] = ev_s.astype(int)
-        elif pd.api.types.is_object_dtype(ev_s) or pd.api.types.is_string_dtype(ev_s):
-            lower_ev = ev_s.astype(str).str.strip().str.lower()
-            pos_mask = lower_ev.isin({"1", "true", "yes", "churn", "churned", "died", "dead", "failed", "cancelled"})
-            out[event_col] = pos_mask.astype(int)
-        ev_num = pd.to_numeric(out[event_col], errors="coerce").fillna(0)
-        censored_share = 1.0 - float(ev_num.mean()) if len(ev_num) > 0 else 0.0
-        notes.append(f"Survival event '{event_col}' formatted as binary (censoring rate: {censored_share:.1%}).")
+    # 1. Duration validation: durations must be non-negative (>= 0).
+    # Valid time-zero events (duration == 0) are preserved; negative durations (< 0) are excluded.
+    dur_s = pd.to_numeric(out[duration_col], errors="coerce")
+    valid_dur = (dur_s >= 0) & np.isfinite(dur_s)
+
+    # 2. Event validation: map to 1 (event) / 0 (censored), leaving unknown / missing as NaN.
+    ev_s = out[event_col]
+    ev_clean: pd.Series
+    if event_mapping is not None:
+        ev_clean = ev_s.map(event_mapping).astype(float)
+    elif pd.api.types.is_bool_dtype(ev_s):
+        ev_clean = ev_s.astype(float)
+    elif pd.api.types.is_numeric_dtype(ev_s):
+        vals = set(pd.to_numeric(ev_s, errors="coerce").dropna().unique())
+        if vals <= {0.0, 1.0}:
+            ev_clean = pd.to_numeric(ev_s, errors="coerce").astype(float)
+        else:
+            # Non-binary numeric codes (e.g. {1, 2}) require explicit mapping
+            ev_clean = pd.Series(np.nan, index=out.index, dtype=float)
+            notes.append(
+                f"Numeric event column '{event_col}' contains non-binary codes {sorted(vals)}; "
+                "requires explicit event_mapping (e.g. {{1: 0, 2: 1}})."
+            )
+    else:
+        text_s = ev_s.astype(str).str.strip().str.lower()
+        ev_clean = text_s.map(_SURVIVAL_WORD_MAP).astype(float)
+        # If the column name explicitly records censoring rather than event, invert
+        c_name = str(event_col).lower()
+        if "censor" in c_name:
+            ev_clean = 1.0 - ev_clean
+
+    valid_mask = valid_dur & ev_clean.notna()
+    n_examined = len(df)
+    n_risk = int(valid_mask.sum())
+    n_excluded = n_examined - n_risk
+
+    if n_excluded > 0:
+        notes.append(
+            f"Survival data prepared: {n_risk} valid records in risk set "
+            f"({n_excluded} excluded due to negative duration or unknown/missing event status)."
+        )
+    else:
+        notes.append(f"Survival data prepared: all {n_risk} records valid in risk set.")
+
+    out = out[valid_mask].copy()
+    out[duration_col] = dur_s[valid_mask]
+    out[event_col] = ev_clean[valid_mask].astype(int)
+
+    censored_share = 1.0 - float(out[event_col].mean()) if n_risk > 0 else 0.0
+    notes.append(f"Survival event '{event_col}' formatted as binary (censoring rate: {censored_share:.1%}, risk set n={n_risk}).")
 
     return out, notes
 
@@ -348,6 +400,8 @@ def verify_and_prepare_survival_data(
 def assess_survey_reliability_and_polarity(
     df: pd.DataFrame,
     scale_cols: list[str] | None = None,
+    declared_endpoints: tuple[float, float] | None = None,
+    scoring_key: dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Align ordinal scale polarity and evaluate Cronbach's alpha internal consistency."""
     if df.empty:
@@ -372,24 +426,61 @@ def assess_survey_reliability_and_polarity(
     if len(sub) < 5:
         return out, notes
 
-    # Reverse-code negatively worded questions
-    neg_phrases = ("difficult", "slow", "dissatisfied", "bad", "confusing", "poor", "complaint", "problem")
-    for c in scale_cols:
-        if any(p in str(c).lower() for p in neg_phrases):
-            col_min = float(out[c].min())
-            col_max = float(out[c].max())
-            rev_col = f"{c}_rev"
-            out[rev_col] = (col_max + col_min) - out[c]
-            notes.append(f"Reverse-coded negative question '{c}' -> '{rev_col}' ({col_min:.0f}..{col_max:.0f} range).")
+    # Determine scale endpoints (low_end, high_end)
+    low_end: float
+    high_end: float
+    if declared_endpoints is not None:
+        low_end, high_end = float(declared_endpoints[0]), float(declared_endpoints[1])
+    else:
+        all_min = float(sub.min().min())
+        all_max = float(sub.max().max())
+        if all_min >= 1.0 and all_max <= 5.0:
+            low_end, high_end = 1.0, 5.0
+        elif all_min >= 1.0 and all_max <= 7.0:
+            low_end, high_end = 1.0, 7.0
+        elif all_min >= 0.0 and all_max <= 10.0:
+            low_end, high_end = 0.0, 10.0
+        else:
+            low_end, high_end = all_min, all_max
 
-    # Calculate Cronbach's alpha
-    k = len(scale_cols)
-    item_vars = float(sub.var(axis=0, ddof=1).sum())
-    total_var = float(sub.sum(axis=1).var(ddof=1))
-    if total_var > 0:
-        alpha = (k / (k - 1)) * (1.0 - (item_vars / total_var))
-        alpha = round(float(alpha), 3)
-        notes.append(f"Computed Cronbach's alpha reliability across {k} survey items: alpha = {alpha:.2f}.")
+    # Reverse-code negatively worded questions
+    neg_phrases = (
+        "difficult", "slow", "dissatisfied", "bad", "confusing", "poor",
+        "complaint", "problem", "frustrat", "dislike", "hard", "negative",
+    )
+    aligned_cols: list[str] = []
+    for c in scale_cols:
+        is_negative = False
+        if scoring_key is not None and c in scoring_key:
+            is_negative = bool(scoring_key[c] < 0)
+        else:
+            is_negative = any(p in str(c).lower() for p in neg_phrases)
+
+        if is_negative:
+            rev_col = f"{c}_rev"
+            out[rev_col] = (high_end + low_end) - out[c]
+            notes.append(
+                f"Reverse-coded negative question '{c}' -> '{rev_col}' "
+                f"({low_end:.0f}..{high_end:.0f} scale)."
+            )
+            aligned_cols.append(rev_col)
+        else:
+            aligned_cols.append(c)
+
+    # Calculate Cronbach's alpha on aligned items
+    aligned_sub = out[aligned_cols].dropna()
+    n_complete = len(aligned_sub)
+    k = len(aligned_cols)
+    if n_complete >= 5 and k >= 2:
+        item_vars = float(aligned_sub.var(axis=0, ddof=1).sum())
+        total_var = float(aligned_sub.sum(axis=1).var(ddof=1))
+        if total_var > 0:
+            alpha = (k / (k - 1)) * (1.0 - (item_vars / total_var))
+            alpha = round(float(alpha), 3)
+            notes.append(
+                f"Computed Cronbach's alpha reliability across {k} aligned survey items "
+                f"(n={n_complete} complete responses): alpha = {alpha:.2f}."
+            )
 
     return out, notes
 
@@ -450,7 +541,7 @@ def compute_geospatial_features(
     lat_col: str | None = None,
     lon_col: str | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Compute distance from geographic centroid (km) and spatial bounds."""
+    """Compute distance from geographic centroid (km) with spherical dateline wrapping."""
     if df.empty:
         return df.copy(), []
     out = df.copy()
@@ -469,16 +560,41 @@ def compute_geospatial_features(
 
     sub_lat = pd.to_numeric(out[lat_col], errors="coerce")
     sub_lon = pd.to_numeric(out[lon_col], errors="coerce")
-    mean_lat = float(sub_lat.mean())
-    mean_lon = float(sub_lon.mean())
 
-    # Haversine distance from centroid in km
-    dlat = np.radians(sub_lat - mean_lat)
-    dlon = np.radians(sub_lon - mean_lon)
-    a = np.sin(dlat / 2.0) ** 2 + np.cos(np.radians(mean_lat)) * np.cos(np.radians(sub_lat)) * np.sin(dlon / 2.0) ** 2
-    c_dist = 2.0 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
-    out["dist_from_centroid_km"] = (6371.0 * c_dist).round(3)
-    notes.append(f"Computed spatial distance from centroid ({mean_lat:.3f}, {mean_lon:.3f}) as 'dist_from_centroid_km'.")
+    # Validate coordinate bounds
+    valid_coords = (
+        (sub_lat.abs() <= 90.0)
+        & (sub_lon.abs() <= 180.0)
+        & sub_lat.notna()
+        & sub_lon.notna()
+    )
+    n_invalid = int((~valid_coords).sum())
+    if n_invalid > 0:
+        notes.append(f"Identified {n_invalid} invalid coordinate rows outside bounds [-90, 90] lat, [-180, 180] lon.")
+
+    if not valid_coords.any():
+        out["dist_from_centroid_km"] = np.nan
+        notes.append("No valid coordinates found for geospatial distance calculation.")
+        return out, notes
+
+    center = spherical_center(
+        sub_lat[valid_coords].to_numpy(dtype=float),
+        sub_lon[valid_coords].to_numpy(dtype=float),
+    )
+    if center is None:
+        out["dist_from_centroid_km"] = np.nan
+        notes.append("Geographic centroid is undefined (antipodal coordinates or cancelling resultant); distance omitted.")
+        return out, notes
+
+    c_lat, c_lon = center
+    dists = haversine_distance(
+        sub_lat.to_numpy(dtype=float),
+        sub_lon.to_numpy(dtype=float),
+        c_lat,
+        c_lon,
+    )
+    out["dist_from_centroid_km"] = np.round(dists, 3)
+    notes.append(f"Computed spherical distance from centroid ({c_lat:.3f}, {c_lon:.3f}) as 'dist_from_centroid_km'.")
 
     return out, notes
 
@@ -591,6 +707,35 @@ def discretize_continuous_quantiles(
     return out, notes
 
 
+def aggregate_point_in_time_event_features(
+    df: pd.DataFrame,
+    cust_col: str,
+    date_col: str,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Compute point-in-time cumulative event counts per entity to prevent lookahead leakage."""
+    if df.empty or cust_col not in df.columns or date_col not in df.columns:
+        return df.copy(), []
+    out = df.copy()
+    notes: list[str] = []
+
+    timestamps = pd.to_datetime(out[date_col], errors="coerce", format="mixed", utc=True)
+    # The first rank of a tied timestamp counts only strictly earlier events.
+    # Missing times and unknown customers have no observable event history.
+    known_customers = out[cust_col].where(timestamps.notna())
+    ranks = timestamps.groupby(known_customers, sort=False).rank(method="min")
+    out["cust_prior_event_count"] = (ranks - 1).astype("Int64")
+
+    # Retain retrospective lifetime frequency for descriptive summary tables
+    lifetime_freq = out[cust_col].map(out[cust_col].value_counts())
+    out["cust_lifetime_frequency"] = lifetime_freq
+    out["cust_event_frequency"] = lifetime_freq  # backward-compatible alias
+    notes.append(
+        f"Computed point-in-time prior count 'cust_prior_event_count' via '{cust_col}' "
+        f"preventing lookahead leakage (lifetime frequency preserved as 'cust_lifetime_frequency')."
+    )
+    return out, notes
+
+
 def auto_reshape_for_archetype(
     df: pd.DataFrame,
     archetype: str | DatasetArchetype,
@@ -625,14 +770,17 @@ def auto_reshape_for_archetype(
         cust_col = next((c for c in cleaned_df.columns if re.search(r"(?:customer|client|user|account)", str(c), re.I)), None)
         date_col = next((c for c in cleaned_df.columns if pd.api.types.is_datetime64_any_dtype(cleaned_df[c]) or re.search(r"(?:date|time|timestamp)", str(c), re.I)), None)
         amt_col = next((c for c in cleaned_df.columns if pd.api.types.is_numeric_dtype(cleaned_df[c]) and re.search(r"(?:amount|price|revenue|sales|spend|total)", str(c), re.I)), None)
-        if cust_col and date_col and amt_col:
-            if aggregate_granularity:
-                cleaned_df, rfm_notes = aggregate_customer_rfm(cleaned_df, cust_col, date_col, amt_col)
-                notes.extend(rfm_notes)
-            else:
-                cust_freq = cleaned_df[cust_col].map(cleaned_df[cust_col].value_counts())
-                cleaned_df["cust_event_frequency"] = cust_freq
-                notes.append(f"Enriched event stream with customer frequency via '{cust_col}'.")
+        if cust_col and date_col and amt_col and aggregate_granularity:
+            cleaned_df, rfm_notes = aggregate_customer_rfm(cleaned_df, cust_col, date_col, amt_col)
+            notes.extend(rfm_notes)
+        elif cust_col and date_col:
+            cleaned_df, pit_notes = aggregate_point_in_time_event_features(cleaned_df, cust_col, date_col)
+            notes.extend(pit_notes)
+        elif cust_col:
+            cust_freq = cleaned_df[cust_col].map(cleaned_df[cust_col].value_counts())
+            cleaned_df["cust_lifetime_frequency"] = cust_freq
+            cleaned_df["cust_event_frequency"] = cust_freq
+            notes.append(f"Enriched event stream with retrospective customer frequency via '{cust_col}'.")
 
     elif arch_str in ("basket",):
         bsk_col = next((c for c in cleaned_df.columns if re.search(r"(?:basket|order|invoice|receipt|cart)", str(c), re.I)), None)

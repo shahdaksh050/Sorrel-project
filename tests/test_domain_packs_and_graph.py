@@ -273,3 +273,53 @@ def test_graph_analysis_ignores_ordinary_business_columns() -> None:
     tool = GraphAnalysisTool()
     assert tool.applies_to(profile, None) < 0.2
     assert tool.default_params(profile, None) == {}
+
+
+def test_graph_analysis_weighted_leaders_differ_and_mass_conserved(tmp_path: Path) -> None:
+    # Construct a weighted directed graph where leaders differ and sinks exist:
+    # - Node A has the highest unweighted degree (4 outgoing connections)
+    # - Node B has the highest weighted strength (massive weights 100 + 100 = 200)
+    # - Node C has the highest PageRank (accumulates heavy incoming transitions, out-degree 0 / sink)
+    edges = [
+        {"from_node": "A", "to_node": "B", "volume": 1.0},
+        {"from_node": "A", "to_node": "C", "volume": 1.0},
+        {"from_node": "A", "to_node": "D", "volume": 1.0},
+        {"from_node": "A", "to_node": "E", "volume": 1.0},
+        {"from_node": "B", "to_node": "C", "volume": 100.0},
+        {"from_node": "B", "to_node": "D", "volume": 100.0},
+    ]
+    df = pd.DataFrame(edges)
+    path = str(tmp_path / "weighted_graph.csv")
+    df.to_csv(path, index=False)
+
+    tool = GraphAnalysisTool()
+    res = tool.execute(
+        file_path=path,
+        source_column="from_node",
+        target_column="to_node",
+        weight_column="volume",
+    )
+
+    results = res["results"]
+    assert results["top_hub"]["node"] == "A"
+    assert results["top_hub"]["degree"] == 4
+
+    assert results["top_strength"]["node"] == "B"
+    assert results["top_strength"]["strength"] > 200.0
+
+    assert results["top_pagerank"]["node"] == "C"
+
+    # Leaders are distinct
+    assert results["top_hub"]["node"] != results["top_strength"]["node"]
+    assert results["top_strength"]["node"] != results["top_pagerank"]["node"]
+
+    # PageRank mass conservation: sum of PageRank scores across all nodes must equal 1.0
+    assert results["pagerank_mass_sum"] == pytest.approx(1.0, abs=1e-5)
+
+    # Check evidence reporting
+    hub_finding = next(f for f in res["findings"] if f["finding_id"] == "graph_top_hub")
+    ev = hub_finding["evidence"]
+    assert ev["top_hub"] == "A"
+    assert ev["top_strength_node"] == "B"
+    assert ev["top_pagerank_node"] == "C"
+    assert ev["pagerank_mass_sum"] == pytest.approx(1.0, abs=1e-5)

@@ -1,6 +1,7 @@
 """Unit tests for automated pre-modeling reshaping pipeline (All_ArchetypePlan §4.2)."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
@@ -9,6 +10,7 @@ import pandas as pd
 from src.core.profiler import DatasetArchetype
 from src.core.reshaping import (
     aggregate_customer_rfm,
+    aggregate_point_in_time_event_features,
     assess_survey_reliability_and_polarity,
     auto_reshape_for_archetype,
     compute_geospatial_features,
@@ -166,23 +168,127 @@ def test_verify_and_prepare_survival_data() -> None:
         "churn": ["yes", "no", "yes", "no", "no"],
     })
     out, notes = verify_and_prepare_survival_data(df)
-    assert (out["tenure"] > 0).all()
-    assert out["churn"].tolist() == [1, 0, 1, 0, 0]
-    assert any("Adjusted" in n for n in notes)
+    # Row 0 with -5.0 is excluded, row 1 with 0.0 is preserved as a valid time-zero event
+    assert (out["tenure"] >= 0).all()
+    assert 0.0 in out["tenure"].values
+    assert -5.0 not in out["tenure"].values
+    assert len(out) == 4
+    assert out["churn"].tolist() == [0, 1, 0, 0]
+    assert any("excluded due to negative duration" in n for n in notes)
     assert any("censoring rate" in n for n in notes)
 
 
-def test_assess_survey_reliability_and_polarity() -> None:
+def test_survival_cleaning_unknown_labels_missing_and_mapping() -> None:
     df = pd.DataFrame({
-        "q1_satisfaction": [4, 5, 3, 4, 5, 4, 5, 3, 4, 5],
-        "q2_support": [5, 4, 4, 5, 5, 4, 5, 4, 5, 5],
-        "q3_difficult_navigation": [2, 1, 3, 2, 1, 2, 1, 3, 2, 1],  # negative question
-        "q4_recommend": [5, 5, 4, 4, 5, 5, 4, 4, 5, 5],
+        "time": [-10.0, 0.0, 5.0, 15.0, 25.0, 30.0],
+        "status": ["yes", "dead", "unknown", None, "alive", "lost"],
     })
-    out, notes = assess_survey_reliability_and_polarity(df)
+    out, notes = verify_and_prepare_survival_data(df, duration_col="time", event_col="status")
+    # -10 is excluded (negative)
+    # "unknown", None, "lost" are unmapped/unknown status -> excluded
+    # Only rows with valid non-negative time and recognized event ("dead"->1, "alive"->0) remain:
+    # row 1: time=0.0, status="dead" -> 1
+    # row 4: time=25.0, status="alive" -> 0
+    assert len(out) == 2
+    assert out["time"].tolist() == [0.0, 25.0]
+    assert out["status"].tolist() == [1, 0]
+    assert any("4 excluded" in n for n in notes)
+
+    # Test numeric 1/2 codes without and with event_mapping
+    df_med = pd.DataFrame({
+        "months": [10.0, 20.0, 30.0, 40.0],
+        "status_code": [1, 2, 1, 2],
+    })
+    # Without mapping -> codes {1, 2} require explicit mapping; rows excluded
+    out_unmapped, notes_unmapped = verify_and_prepare_survival_data(df_med, duration_col="months", event_col="status_code")
+    assert len(out_unmapped) == 0
+    assert any("requires explicit event_mapping" in n for n in notes_unmapped)
+
+    # With mapping -> {1: 0, 2: 1} maps cleanly
+    out_mapped, notes_mapped = verify_and_prepare_survival_data(
+        df_med, duration_col="months", event_col="status_code", event_mapping={1: 0, 2: 1}
+    )
+    assert len(out_mapped) == 4
+    assert out_mapped["status_code"].tolist() == [0, 1, 0, 1]
+    assert any("4 records valid in risk set" in n for n in notes_mapped)
+
+
+def test_assess_survey_reliability_and_polarity() -> None:
+    # 1-5 instrument with responses restricted to 2-4 and one reverse-coded item
+    df = pd.DataFrame({
+        "q1_satisfaction": [4, 4, 3, 4, 3, 4, 4, 3, 4, 4],
+        "q2_support": [4, 3, 3, 4, 4, 3, 4, 3, 4, 4],
+        "q3_difficult_navigation": [2, 3, 3, 2, 2, 3, 2, 3, 2, 2],  # negative question (aligned: 6-x)
+        "q4_recommend": [4, 4, 3, 3, 4, 4, 4, 3, 4, 4],
+    })
+    out, notes = assess_survey_reliability_and_polarity(
+        df,
+        declared_endpoints=(1.0, 5.0),
+        scoring_key={"q3_difficult_navigation": -1},
+    )
     assert "q3_difficult_navigation_rev" in out.columns
-    assert any("Reverse-coded" in n for n in notes)
-    assert any("Cronbach's alpha" in n for n in notes)
+    # 6 - x with endpoints (1.0, 5.0)
+    assert out["q3_difficult_navigation_rev"].tolist() == [4, 3, 3, 4, 4, 3, 4, 3, 4, 4]
+    assert any("Reverse-coded negative question" in n for n in notes)
+    # Cronbach's alpha must be positive and report complete responses count
+    alpha_note = next(n for n in notes if "Cronbach's alpha" in n)
+    assert "alpha = " in alpha_note
+    assert "n=10 complete responses" in alpha_note
+    # Parse alpha
+    match = re.search(r"alpha = ([0-9]+(?:\.[0-9]+)?)", alpha_note)
+    assert match is not None
+    assert float(match.group(1)) > 0.70
+
+
+def test_aggregate_point_in_time_event_features_no_lookahead() -> None:
+    # A customer transacting 3 times over 3 dates
+    df = pd.DataFrame({
+        "customer_id": ["C1", "C1", "C1", "C2", "C2"],
+        "trans_date": ["2024-01-01", "2024-02-01", "2024-03-01", "2024-01-15", "2024-02-15"],
+        "spend": [100.0, 150.0, 200.0, 50.0, 80.0],
+    })
+    out, notes = aggregate_point_in_time_event_features(df, "customer_id", "trans_date")
+    assert "cust_prior_event_count" in out.columns
+    assert "cust_lifetime_frequency" in out.columns
+    # First transaction of C1 has 0 prior events
+    c1_rows = out[out["customer_id"] == "C1"].sort_values("trans_date")
+    assert c1_rows["cust_prior_event_count"].tolist() == [0, 1, 2]
+    # Retrospective lifetime frequency reflects total events (3 for C1, 2 for C2)
+    assert c1_rows["cust_lifetime_frequency"].tolist() == [3, 3, 3]
+    assert any("preventing lookahead leakage" in n for n in notes)
+
+
+def test_compute_geospatial_features_dateline_and_antipodal() -> None:
+    # Date line cluster: points around 180 antimeridian (+179 and -179)
+    df_dateline = pd.DataFrame({
+        "latitude": [0.0, 0.0, 0.0, 0.0],
+        "longitude": [179.0, 179.0, -179.0, -179.0],
+    })
+    out, notes = compute_geospatial_features(df_dateline)
+    assert len(notes) > 0
+    assert "dist_from_centroid_km" in out.columns
+    # 1 degree from equator is ~111.19 km, NOT 19,900 km!
+    dists = out["dist_from_centroid_km"].tolist()
+    for d in dists:
+        assert 110.0 < d < 112.5
+
+    # Invalid coordinates (e.g. lat > 90)
+    df_invalid = pd.DataFrame({
+        "latitude": [105.0, 0.0],
+        "longitude": [0.0, 0.0],
+    })
+    out_inv, notes_inv = compute_geospatial_features(df_invalid)
+    assert np.isnan(out_inv["dist_from_centroid_km"].iloc[0])
+    assert any("invalid coordinate rows" in n for n in notes_inv)
+
+    # Antipodal points: resultant cancels out, center is undefined
+    df_antipodal = pd.DataFrame({
+        "latitude": [0.0, 0.0],
+        "longitude": [0.0, 180.0],
+    })
+    out_anti, notes_anti = compute_geospatial_features(df_antipodal)
+    assert out_anti["dist_from_centroid_km"].isna().all()
+    assert any("Geographic centroid is undefined" in n for n in notes_anti)
 
 
 def test_compute_panel_deltas_and_lags() -> None:

@@ -242,3 +242,78 @@ class TestPValuesAreNeverPrintedAsZero:
         text = result.output["summary"] + " " + result.output["interpretation"]
         assert "p=0.0000" not in text and "p=0.000 " not in text
         assert "p<0.001" in text
+
+
+class TestStatisticalDistinctionsAndEquivalence:
+    """Verify distinction between absent check, inconclusive comparison,
+    detected difference, and demonstrated equivalence."""
+
+    def test_noisy_small_sample_is_inconclusive(self, tmp_path: Path) -> None:
+        rng = np.random.default_rng(42)
+        n = 16  # 8 per group, small noisy sample
+        df = pd.DataFrame({
+            "val": rng.normal(10, 5, n),
+            "grp": ["a"] * 8 + ["b"] * 8,
+        })
+        p = tmp_path / "small_noisy.csv"
+        df.to_csv(p, index=False)
+        tool = SelectStatisticalTestTool()
+        result = tool.run(file_path=str(p), feature_column="val", group_column="grp")
+        assert result.status == "success"
+        assert result.output["statistical_state"] == "inconclusive"
+        findings = tool.findings(result.output, None, None)
+        assert len(findings) == 1
+        assert findings[0].statistical_state == "inconclusive"
+        assert "inconclusive" in findings[0].headline.lower()
+
+    def test_precisely_estimated_negligible_difference_is_demonstrated_equivalence(self, tmp_path: Path) -> None:
+        rng = np.random.default_rng(101)
+        n = 50000  # large sample, negligible effect d ~ 0.038
+        g1 = rng.normal(100.0, 15.0, n // 2)
+        g2 = rng.normal(100.5, 15.0, n // 2)  # true diff = 0.5, d = 0.5 / 15 = 0.033
+        df = pd.DataFrame({
+            "val": np.concatenate([g1, g2]),
+            "grp": ["ctrl"] * (n // 2) + ["treat"] * (n // 2),
+        })
+        p = tmp_path / "large_equiv.csv"
+        df.to_csv(p, index=False)
+        tool = SelectStatisticalTestTool()
+        result = tool.run(file_path=str(p), feature_column="val", group_column="grp")
+        assert result.status == "success"
+        assert result.output["statistical_state"] == "demonstrated_equivalence"
+        assert result.output["effect_ci"] is not None
+        # 95% CI is strictly within [-0.20, 0.20]
+        assert result.output["effect_ci"][0] >= -0.20
+        assert result.output["effect_ci"][1] <= 0.20
+        findings = tool.findings(result.output, None, None)
+        assert len(findings) == 1
+        assert findings[0].kind == "invariance"
+        assert findings[0].statistical_state == "demonstrated_equivalence"
+        assert "practical equivalence" in findings[0].headline.lower()
+
+    def test_material_difference_is_detected_difference(self, tmp_path: Path) -> None:
+        rng = np.random.default_rng(202)
+        n = 500  # substantial difference d ~ 0.65
+        g1 = rng.normal(100.0, 10.0, n // 2)
+        g2 = rng.normal(106.5, 10.0, n // 2)
+        df = pd.DataFrame({
+            "val": np.concatenate([g1, g2]),
+            "grp": ["a"] * (n // 2) + ["b"] * (n // 2),
+        })
+        p = tmp_path / "material_diff.csv"
+        df.to_csv(p, index=False)
+        tool = SelectStatisticalTestTool()
+        result = tool.run(file_path=str(p), feature_column="val", group_column="grp")
+        assert result.status == "success"
+        assert result.output["significant"] is True
+        assert result.output["statistical_state"] == "detected_difference"
+        findings = tool.findings(result.output, None, None)
+        assert len(findings) == 1
+        assert findings[0].kind == "test"
+        assert findings[0].statistical_state == "detected_difference"
+        assert "differs meaningfully" in findings[0].headline.lower()
+
+    def test_absent_check_has_no_findings(self) -> None:
+        tool = SelectStatisticalTestTool()
+        assert tool.findings({}, None, None) == []
+        assert tool.findings({"statistical_state": "unperformed"}, None, None) == []

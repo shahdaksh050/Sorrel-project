@@ -77,7 +77,7 @@ class TestValidateUpload:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("MAX_UPLOAD_MB", "not-a-number")
-        assert max_upload_bytes() == 200 * 1024 * 1024
+        assert max_upload_bytes() == 250 * 1024 * 1024
 
     def test_rejects_png_disguised_as_csv(self) -> None:
         png = b"\x89PNG\r\n\x1a\n" + b"fake image data"

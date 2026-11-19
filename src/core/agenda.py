@@ -723,6 +723,8 @@ def coverage_report(
     """
     from src.core.findings import CAVEAT_FINDING_KINDS
 
+    findings = [f for f in findings if f.get("primary_eligible", True) and f.get("kind") not in CAVEAT_FINDING_KINDS]
+    failed_tools: set[str] = set()
     # Build structured index of successful tool executions
     executed_tools: list[dict[str, Any]] = []
     if tool_results:
@@ -745,6 +747,8 @@ def coverage_report(
                     "params": params if isinstance(params, dict) else {},
                     "output": output if isinstance(output, dict) else {},
                 })
+            elif status == "error":
+                failed_tools.add(str(name))
 
     answered: list[Question] = []
     unanswered: list[Question] = []
@@ -754,7 +758,11 @@ def coverage_report(
             unanswered.append(q)  # a declined question (e.g. modelling) is unanswered by definition
             continue
 
-        kind_hit = (q.kind, "segment_lift", "driver", "trend", "concentration", "change", *_KIND_ALIASES.get(q.kind, ()))
+        kind_hit = (q.kind, *_KIND_ALIASES.get(q.kind, ()))
+        if q.kind == "segment":
+            kind_hit += ("segment_lift",)
+        if q.kind == "trend":
+            kind_hit += ("change",)
 
         llm_hit = any(
             f.get("kind") in _LLM_KINDS and _mentioned(f, q.columns) >= min(2, len(q.columns))
@@ -762,18 +770,7 @@ def coverage_report(
         ) if q.columns else False
 
         hit = False
-        if q.kind in {spec[0] for spec in _SPECIALIST_TOOLS.values()}:
-            hit = any(
-                f.get("source_tool") == q.suggested_tool and f.get("kind") not in CAVEAT_FINDING_KINDS
-                for f in findings
-            ) or any(ex["tool"] == q.suggested_tool for ex in executed_tools)
-        elif q.kind == "distribution":
-            hit = (
-                llm_hit
-                or any(f.get("source_tool") == q.suggested_tool for f in findings)
-                or any(ex["tool"] in (q.suggested_tool, "detect_outliers") for ex in executed_tools)
-            )
-        elif q.kind == "quality":
+        if q.kind == "quality":
             hit = (
                 any(f.get("source_tool") in (q.suggested_tool, "clean_data", "ingest_dataset", "integrity_audit") for f in findings)
                 or any(ex["tool"] in (q.suggested_tool, "clean_data", "ingest_dataset", "integrity_audit") for ex in executed_tools)
@@ -793,23 +790,21 @@ def coverage_report(
                             tool_cols.add(v.lower())
                         elif isinstance(v, (list, tuple)):
                             tool_cols.update(str(item).lower() for item in v)
-                    for k in ("target_column", "segment_column", "value_column", "feature_column", "group_column", "time_column", "price_column", "quantity_column"):
+                    for k in ("target_column", "segment_column", "value_column", "feature_column", "group_column",
+                              "time_column", "date_column", "measure_column", "dimension_column", "price_column",
+                              "quantity_column", "duration_column", "event_column", "order_column", "item_column",
+                              "x_column", "y_column", "outcome_column", "lat_column", "lon_column"):
                         v = ex["output"].get(k)
                         if isinstance(v, str):
                             tool_cols.add(v.lower())
                     analyzed = ex["output"].get("features_analyzed") or ex["output"].get("columns_analyzed") or []
                     if isinstance(analyzed, (list, tuple)):
                         tool_cols.update(str(c).lower() for c in analyzed)
-                    outliers_cols = ex["output"].get("outliers_by_column")
+                    outliers_cols = ex["output"].get("per_column_detail") or ex["output"].get("outliers_by_column")
                     if isinstance(outliers_cols, dict):
                         tool_cols.update(str(c).lower() for c in outliers_cols.keys())
 
                     q_lower = {c.lower().strip() for c in q.columns}
-                    if q.suggested_tool in ("time_series_analysis", "change_analysis"):
-                        measure_col = q.columns[0].lower().strip()
-                        if measure_col in tool_cols:
-                            hit = True
-                            break
                     if len(q_lower) >= 2:
                         if q_lower.issubset(tool_cols):
                             hit = True
@@ -829,5 +824,12 @@ def coverage_report(
     return {
         "total": len(agenda),
         "answered": len(answered),
-        "unanswered": [q.to_dict() for q in unanswered],
+        "answered_questions": [q.to_dict() for q in answered],
+        "unanswered": [
+            {**q.to_dict(), "reason": (
+                "No suitable method was identified." if q.suggested_tool is None
+                else "The suggested analysis failed." if q.suggested_tool in failed_tools
+                else "No eligible result addressed the requested measures and comparison."
+            )} for q in unanswered
+        ],
     }

@@ -47,15 +47,14 @@ def test_a_running_page_shows_the_stepper_beside_the_plate(rendered: dict[str, A
     assert running["stepper"]
 
 
-def test_a_finished_run_shows_the_header_band_the_stepper_and_all_four_tabs(rendered: dict[str, Any]) -> None:
+def test_a_finished_run_shows_the_header_band_the_stepper_and_result_tabs(rendered: dict[str, Any]) -> None:
     done = rendered["finished"]
     assert done["finished"], "the sample run did not reach its results page"
     assert done["exceptions"] == []
-    assert done["steps"] in (6, 7)
-    # A step the run did not need (here "Solving the Tricky Parts") is skipped, not done, so the count can be 6.
-    assert done["stepper_label"] in ("Analysis steps, 6 of 6 done", "Analysis steps, 6 of 7 done", "Analysis steps, 7 of 7 done")
+    assert done["steps"] == 5
+    assert done["stepper_label"] == "Analysis steps, 5 of 5 done"
     assert not done["waiting_in_stepper"]
-    assert done["tabs"] == ["Answers", "Charts", "Details", "Downloads"]
+    assert done["tabs"] == ["Answers", "Charts", "Actions", "Details", "Downloads"]
     assert done["eyebrow"]
     assert done["buttons"] == ["btn_new_analysis", "btn_toggle_hero_cinema"]
 

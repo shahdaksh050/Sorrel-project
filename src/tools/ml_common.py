@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from src.core.profiler import profile_dataframe
+from src.tools.base import ToolExecutionError
 from src.tools.data_processing import (
     _read_df as _read_df,  # re-exported: src.tools.clustering imports it from here
 )
@@ -104,7 +105,7 @@ def _build_cv_policy(
 
 
 def _prepare_features(
-    df: pd.DataFrame, target_column: str
+    df: pd.DataFrame, target_column: str, *, supervised: bool = False
 ) -> tuple[pd.DataFrame, pd.Series[Any], list[str]]:
     """
     Shared train/evaluate/visualise feature preparation.
@@ -133,8 +134,20 @@ def _prepare_features(
     df = df.dropna(subset=[target_column])
     y = df[target_column]
     features = df.drop(columns=[target_column]).copy()
+    # Retrospective counts and full-dataset quartiles are descriptive only.
+    # Older cleaned CSVs contain the legacy cust_event_frequency alias.
+    retrospective_counts = {"cust_event_frequency", "cust_lifetime_frequency"}
+    descriptive_columns = [
+        col for col in features if str(col).removesuffix("_quartile") in retrospective_counts
+        or (str(col).endswith("_quartile") and str(col).removesuffix("_quartile") in df.columns)
+    ]
+    if descriptive_columns:
+        features = features.drop(columns=descriptive_columns)
+        treatments.append(f"Excluded full-dataset descriptive features from model inputs: {descriptive_columns}.")
     n_rows = max(len(features), 1)
     profile = profile_dataframe(df, target_column=target_column)
+    if supervised and (reason := profile.censoring_rationale(target_column)):
+        raise ToolExecutionError(reason)
     column_profiles = {column.name: column for column in profile.columns}
 
     # is_numeric_dtype, not `dtype == object`: pandas 3 strings are `str` dtype

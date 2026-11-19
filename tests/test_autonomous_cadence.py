@@ -65,4 +65,6 @@ def test_autonomous_cadence_cycle1_and_cycle2(tmp_path: pytest.TempPathFactory) 
     # objective-fit question; the explicit regression step remains intact.
     assert "cluster_data" not in tool_names_c2
     assert "scenario_simulation" not in tool_names_c2
-    assert tool_names_c2 == ["regression_analysis"]
+    # The next eligible cross-sectional blueprint method checks associations.
+    assert tool_names_c2 == ["regression_analysis", "correlation_analysis"]
+    assert anchored_c2[0].parameters == {"target_column": "revenue"}

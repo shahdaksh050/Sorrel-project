@@ -726,6 +726,18 @@ class DatasetProfile:
     def measures(self) -> list[ColumnProfile]:
         return self.columns_of_role(SEMANTIC_MEASURE)
 
+    def censoring_rationale(self, target: str | None) -> str | None:
+        if not target:
+            return None
+        duration, event = survival_columns(self.columns, target)
+        if duration is None or event is None:
+            return None
+        return (
+            f"'{target}' records an event during varying follow-up ('{duration.name}'). "
+            "Treating censored observations as negatives risks survivorship bias. "
+            "Use survival_analysis, or define an eligible fixed-horizon outcome first."
+        )
+
     def dimensions(self) -> list[ColumnProfile]:
         return self.columns_of_role(SEMANTIC_DIMENSION, SEMANTIC_FLAG)
 
@@ -1381,6 +1393,40 @@ def find_experiment_arm(columns: list[ColumnProfile], row_count: int) -> ColumnP
     return None
 
 
+def survival_columns(
+    columns: list[ColumnProfile], target: str | None = None,
+) -> tuple[ColumnProfile | None, ColumnProfile | None]:
+    """Identify observed follow-up and a binary event indicator, optionally for a specific target."""
+    dur_keywords = (
+        "tenure", "duration", "time_to_event", "survival_time", "days_active",
+        "months_active", "followup_time", "time_to_churn", "tenure_months",
+    )
+    dur_col = next(
+        (
+            c for c in columns
+            if c.kind == "numeric"
+            and (any(k in c.name.lower() for k in dur_keywords) or (c.semantic_role == SEMANTIC_MEASURE and "time" in c.name.lower()))
+            and c.stats.get("min", 0) >= 0
+        ),
+        None,
+    )
+    event_keywords = (
+        "churn", "churned", "died", "death", "failed", "failure", "cancelled",
+        "censored", "event_observed", "canceled", "attrition", "relapse", "event", "is_churn", "is_cancelled", "is_failed",
+    )
+    event_col = next(
+        (
+            c for c in columns
+            if (c.kind in ("boolean", "numeric", "categorical") and c.nunique == 2)
+            and any(k in c.name.lower() for k in event_keywords)
+            and (target is None or c.name == target)
+            and (dur_col is None or c.name != dur_col.name)
+        ),
+        None,
+    )
+    return dur_col, event_col
+
+
 def _infer_archetype(
     columns: list[ColumnProfile],
     row_count: int,
@@ -1437,32 +1483,7 @@ def _infer_archetype(
         ]
 
     # 3. Survival / Censored Duration Check
-    dur_keywords = (
-        "tenure", "duration", "time_to_event", "survival_time", "days_active",
-        "months_active", "followup_time", "time_to_churn", "tenure_months",
-    )
-    dur_col = next(
-        (
-            c for c in columns
-            if c.kind == "numeric"
-            and (any(k in c.name.lower() for k in dur_keywords) or (c.semantic_role == SEMANTIC_MEASURE and "time" in c.name.lower()))
-            and c.stats.get("min", 0) >= 0
-        ),
-        None,
-    )
-    event_keywords = (
-        "churn", "churned", "died", "death", "failed", "failure", "cancelled",
-        "canceled", "attrition", "relapse", "event", "is_churn", "is_cancelled", "is_failed",
-    )
-    event_col = next(
-        (
-            c for c in columns
-            if (c.kind in ("boolean", "numeric", "categorical") and c.nunique == 2)
-            and (any(k in c.name.lower() for k in event_keywords) or c.semantic_role == SEMANTIC_FLAG)
-            and (dur_col is None or c.name != dur_col.name)
-        ),
-        None,
-    )
+    dur_col, event_col = survival_columns(columns)
     if dur_col is not None and event_col is not None:
         return ARCHETYPE_SURVIVAL, [
             f"duration/tenure column '{dur_col.name}' with binary event flag '{event_col.name}'",

@@ -65,6 +65,9 @@ class TestClusterDataTool:
         assert 0 < len(points) <= PCA_POINT_CAP
         assert "cluster_labels" in out
         assert "cluster_short_labels" in out
+        assert "pca_top_features" in out
+        assert len(out["pca_top_features"]) == 2
+        assert all(isinstance(f, str) and f in out["features_used"] for f in out["pca_top_features"])
         assert all({"x", "y", "cluster", "cluster_label", "cluster_short_label"} <= set(p.keys()) for p in points)
         assert all("Cluster " in p["cluster_label"] for p in points)
 

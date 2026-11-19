@@ -80,6 +80,15 @@ def _build_executive_summary(
     """Build the executive summary from `reasoning` (with internal-plumbing jargon
     and process boilerplate stripped sentence-by-sentence). If substantive sentences
     remain, keep them; otherwise ground the summary on the top actionable findings."""
+    if "executive_summary" in llm_insights:
+        exec_sum = str(llm_insights["executive_summary"] or "").strip()
+        coverage = llm_insights.get("coverage")
+        if isinstance(coverage, dict):
+            tot = coverage.get("total", 0)
+            ans = coverage.get("answered", 0)
+            if tot > 0 and f"{ans} of {tot}" not in exec_sum and ans < tot:
+                exec_sum = f"{exec_sum} Analysis addressed {ans} of {tot} business questions; {tot - ans} questions remain open.".strip()
+        return exec_sum
     clean_reasoning = _strip_jargon_sentences(str(llm_insights.get("reasoning", "") or ""))
     grounded = _findings_grounded_summary(findings)
     if clean_reasoning:
@@ -244,13 +253,17 @@ def _format_run_status(llm_insights: dict[str, Any]) -> list[str]:
     if status:
         lines.append(f"- **Status**: `{status}`")
     if isinstance(coverage, dict):
-        lines.append(
-            f"- **Questions answered**: {coverage.get('answered', 0)} of {coverage.get('total', 0)}"
-        )
+        answered = coverage.get("answered", 0)
+        total = coverage.get("total", 0)
+        lines.append(f"- **Questions answered**: {answered} of {total}")
         unanswered = coverage.get("unanswered") or []
-        for question in unanswered[:3]:
-            text = question.get("text") if isinstance(question, dict) else str(question)
-            lines.append(f"  - Unanswered: {plainify(str(text))}")
+        for question in unanswered:
+            if isinstance(question, dict):
+                text = question.get("text") or ""
+                reason = question.get("blocked_reason") or question.get("reason") or "Unaddressed in planned analysis steps"
+                lines.append(f"  - Unanswered: {plainify(str(text))} — reason: {plainify(str(reason))}")
+            else:
+                lines.append(f"  - Unanswered: {plainify(str(question))}")
     for issue in issues[:5]:
         if isinstance(issue, dict):
             lines.append(

@@ -418,6 +418,10 @@ class SegmentComparisonTool(BaseTool):
             return [(measure_column, dimension_column)]
         measures = [measure_column] if measure_column else [c.name for c in _pick_measure_columns(profile)]
         dims = [dimension_column] if dimension_column else [c.name for c in _pick_dimension_columns(profile)]
+        if not dimension_column and profile.archetype == "panel" and profile.entity_col in dims:
+            # Keep the panel's defining comparison within the bounded family,
+            # even when cleaning introduces several low-cardinality calendar fields.
+            dims.sort(key=lambda name: name != profile.entity_col)
         if not measures or not dims:
             return []
         # A column can legitimately appear in both pools now that flags

@@ -58,7 +58,7 @@ def test_planted_pair_is_top_rule(tmp_path: Path) -> None:
 
     f = BasketAnalysisTool().findings(out, None, None)[0]
     assert f.kind == "association" and "item_A" in f.headline and "item_B" in f.headline
-    assert "more often than the average customer" in f.headline
+    assert "times its share across all orders" in f.headline
 
 
 def test_support_threshold_respected(tmp_path: Path) -> None:
@@ -67,6 +67,17 @@ def test_support_threshold_respected(tmp_path: Path) -> None:
     assert all(r["orders"] >= 250 for r in out["rules"])
     high = _run(tmp_path, _lines(), min_support=0.5).output
     assert high["rules"] == [] and "No pair" in high["summary"]
+
+
+def test_support_denominator_only_counts_orders_with_observed_items(tmp_path: Path) -> None:
+    df = _lines(500)
+    expected = _run(tmp_path, df).output
+    incomplete = pd.DataFrame({"order_id": [600, None], "item": [None, "orphan"]})
+    actual = _run(tmp_path, pd.concat([df, incomplete], ignore_index=True)).output
+    assert actual["n_orders"] == 500
+    assert actual["n_excluded_lines"] == 2
+    assert actual["n_items"] == expected["n_items"]
+    assert actual["rules"] == expected["rules"]
 
 
 def test_applies_to_negative_and_positive() -> None:

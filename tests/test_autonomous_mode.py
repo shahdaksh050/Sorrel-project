@@ -25,6 +25,7 @@ def test_synthesize_autonomous_objective_picks_currency_north_star() -> None:
     assert "arr_revenue" in obj
     assert "tier" in obj
     assert "Does arr_revenue differ significantly across tier?" in obj
+    assert "governing 'logins'" in _synthesize_autonomous_objective(prof, agenda, "logins")
 
 
 def test_prompt_manager_injects_autonomous_objective() -> None:

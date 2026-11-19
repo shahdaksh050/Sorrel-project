@@ -69,6 +69,16 @@ class TestHumanizeLabel:
     def test_non_string_handled_safely(self) -> None:
         assert humanize_label(123) == "123"  # type: ignore[arg-type]
 
+    def test_pc_and_model_and_sensor_names_humanized(self) -> None:
+        assert humanize_label("PC1") == "Principal Component 1"
+        assert humanize_label("PC 2") == "Principal Component 2"
+        assert humanize_label("random_forest") == "Random Forest"
+        assert humanize_label("xgboost") == "XGBoost"
+        assert humanize_label("logistic_regression") == "Logistic Regression"
+        assert humanize_label("pm2.5") == "Particulate Matter (PM2.5)"
+        assert humanize_label("pm10") == "Particulate Matter (PM10)"
+        assert humanize_label("PT08.S1(CO)") == "CO Sensor (PT08.S1)"
+
 
 class TestVegaConfigUnaffected:
     """8.4 must not touch the existing theme tokens (colors) — regression

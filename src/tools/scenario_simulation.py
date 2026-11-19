@@ -7,6 +7,7 @@ producing projected baseline shifts, total population impact, and 95% confidence
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -75,6 +76,19 @@ def _resolve_target_goal(target_column: str, requested_goal: str | None) -> tupl
     )
 
 
+_INTENSIVE_TOKENS = frozenset({
+    "avg", "average", "mean", "median", "rate", "ratio", "pct", "percent", "percentage",
+    "share", "score", "index", "price", "margin", "std", "stdev", "var", "min", "max",
+    "per", "density", "age", "rank", "rating", "temp", "temperature", "celsius",
+    "fahrenheit", "satisfaction", "humidity", "pressure", "voltage", "speed", "frequency",
+})
+
+
+def _is_additive_target(column: str) -> bool:
+    tokens = set(re.split(r"[^a-z0-9]+", column.lower()))
+    return not bool(tokens & _INTENSIVE_TOKENS)
+
+
 class ScenarioSimulationTool(BaseTool):
     """Simulate parametric 'What-If' interventions on drivers and segments."""
 
@@ -125,6 +139,7 @@ class ScenarioSimulationTool(BaseTool):
         joint_optimization: bool = True,
         target_goal: str | None = None,
         max_shift_pct: float = 20.0,
+        projection_population: int | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         df = _read_df(file_path)
@@ -153,10 +168,12 @@ class ScenarioSimulationTool(BaseTool):
         if len(target_s) < 20:
             raise ToolExecutionError(f"Target column '{target_column}' has fewer than 20 numeric observations.")
 
-        n_pop = len(target_s)
+        n_proj = int(projection_population) if projection_population is not None else len(target_s)
+        n_est = len(target_s)
         base_mean = float(target_s.mean())
         base_total = float(target_s.sum())
-        is_binary_target = target_s.nunique(dropna=True) <= 2
+        is_binary_target = bool(target_s.isin([0, 1]).all())
+        is_additive = is_binary_target or _is_additive_target(target_column)
 
         # Select driver column if omitted
         raw_candidate_drivers = [c for c in numeric_cols if c != target_column]
@@ -198,9 +215,12 @@ class ScenarioSimulationTool(BaseTool):
         if driver_column and driver_column in df.columns and pd.api.types.is_numeric_dtype(df[driver_column]):
             sub = df[[driver_column, target_column]].dropna()
             if len(sub) >= 20:
+                n_est = len(sub)
                 x = sub[driver_column].to_numpy(dtype=float)
                 y = sub[target_column].to_numpy(dtype=float)
                 x_mean = float(x.mean())
+                x_min = float(x.min())
+                x_max = float(x.max())
                 x_var = float(np.var(x, ddof=1))
                 if x_var > 1e-9:
                     slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
@@ -212,13 +232,17 @@ class ScenarioSimulationTool(BaseTool):
                         "p_value": float(p_value),
                         "std_err": float(std_err),
                         "x_mean": x_mean,
+                        "x_min": x_min,
+                        "x_max": x_max,
                     }
 
                     sim_shifts = shifts or [5.0, 10.0, 25.0, -10.0]
                     for shift_pct in sim_shifts:
                         delta_x = x_mean * (shift_pct / 100.0)
+                        simulated_x = x_mean + delta_x
+                        is_extrap = bool(simulated_x < x_min or simulated_x > x_max)
                         delta_y = float(slope * delta_x)
-                        ci_margin = float(1.96 * std_err * abs(delta_x))
+                        ci_margin = float(1.96 * std_err * abs(delta_x)) if delta_x else 0.0
                         new_mean = base_mean + delta_y
                         if is_binary_target:
                             new_mean = float(np.clip(new_mean, 0.0, 1.0))
@@ -234,20 +258,24 @@ class ScenarioSimulationTool(BaseTool):
                             ci_lower = delta_y - ci_margin
                             ci_upper = delta_y + ci_margin
                         rel_change_pct = (delta_y / base_mean * 100.0) if abs(base_mean) > 1e-9 else 0.0
-                        tot_impact = delta_y * n_pop
+                        tot_impact = round(delta_y * n_proj, 2) if is_additive else None
 
                         scenarios.append({
                             "type": "driver_shift",
                             "driver": driver_column,
                             "shift_pct": shift_pct,
                             "delta_driver": round(delta_x, 4),
+                            "simulated_driver_value": round(simulated_x, 4),
+                            "driver_min": round(x_min, 4),
+                            "driver_max": round(x_max, 4),
+                            "is_extrapolation": is_extrap,
                             "delta_target": round(delta_y, 4),
                             "relative_change_pct": round(rel_change_pct, 2),
                             "ci_lower": round(ci_lower, 4),
                             "ci_upper": round(ci_upper, 4),
                             "projected_mean": round(new_mean, 4),
-                            "projected_total_impact": round(tot_impact, 2),
-                            "sensitivity_total": round(tot_impact, 2),
+                            "projected_total_impact": tot_impact,
+                            "sensitivity_total": tot_impact,
                         })
 
         # Multi-variable joint optimization across top continuous drivers
@@ -290,6 +318,7 @@ class ScenarioSimulationTool(BaseTool):
                             })
 
                         rel_opt_change = (total_mv_delta_y / base_mean * 100.0) if abs(base_mean) > 1e-9 else 0.0
+                        joint_tot_impact = round(total_mv_delta_y * n_proj, 2) if is_additive else None
                         joint_package = {
                             "target_goal": resolved_goal,
                             "goal_source": goal_source,
@@ -299,8 +328,8 @@ class ScenarioSimulationTool(BaseTool):
                             "predicted_delta_target": round(total_mv_delta_y, 4),
                             "relative_change_pct": round(rel_opt_change, 2),
                             "projected_mean": round(base_mean + total_mv_delta_y, 4),
-                            "projected_total_impact": round(total_mv_delta_y * n_pop, 2),
-                            "sensitivity_total": round(total_mv_delta_y * n_pop, 2),
+                            "projected_total_impact": joint_tot_impact,
+                            "sensitivity_total": joint_tot_impact,
                         }
                 except Exception:
                     joint_package = None
@@ -319,34 +348,33 @@ class ScenarioSimulationTool(BaseTool):
             and not _is_protected_col(c)
         ]
         seg_col = segment_column or (cat_candidates[0] if cat_candidates else None)
-        if seg_col and seg_col in df.columns and not _is_protected_col(seg_col):
+        if resolved_goal in {"minimize", "maximize"} and seg_col and seg_col in df.columns and not _is_protected_col(seg_col):
             seg_work = df[[seg_col, target_column]].dropna()
             group_stats = seg_work.groupby(seg_col)[target_column].agg(["count", "mean"])
             if len(group_stats) >= 2:
                 eligible = group_stats[group_stats["count"] >= 15]
                 if not eligible.empty:
-                    lowest_seg = eligible["mean"].idxmin()
-                    lowest_mean = float(eligible.loc[lowest_seg, "mean"])
-                    lowest_n = int(eligible.loc[lowest_seg, "count"])
-                    rest_mean = float(seg_work[seg_work[seg_col] != lowest_seg][target_column].mean())
-                    gap = rest_mean - lowest_mean
-                    if gap > 0:
-                        recoverable_total = gap * lowest_n
+                    segment = eligible["mean"].idxmax() if resolved_goal == "minimize" else eligible["mean"].idxmin()
+                    segment_mean = float(eligible.loc[segment, "mean"])
+                    segment_n = int(eligible.loc[segment, "count"])
+                    rest_mean = float(seg_work.loc[seg_work[seg_col] != segment, target_column].mean())
+                    gap = rest_mean - segment_mean
+                    if (resolved_goal == "minimize" and gap < 0) or (resolved_goal == "maximize" and gap > 0):
                         segment_opportunity = {
                             "dimension": seg_col,
-                            "segment": str(lowest_seg),
-                            "segment_n": lowest_n,
-                            "segment_mean": round(lowest_mean, 4),
+                            "segment": str(segment),
+                            "segment_n": segment_n,
+                            "segment_mean": round(segment_mean, 4),
                             "rest_mean": round(rest_mean, 4),
                             "gap_per_unit": round(gap, 4),
-                            "gap_pct": round((gap / rest_mean) * 100.0, 2) if rest_mean > 0 else 0.0,
-                            "recoverable_total": round(recoverable_total, 2),
-                            "cohort_gap_total": round(recoverable_total, 2),
+                            "gap_pct": round((gap / abs(rest_mean)) * 100.0, 2) if rest_mean else None,
+                            "recoverable_total": None,
+                            "cohort_gap_total": round(gap * segment_n, 2) if is_additive else None,
                         }
 
         # Build Markdown decision table
         lines = [
-            f"| Sensitivity Benchmark / Lever | Reference Cohort | Statistical Shift (Unadjusted) | 95% Confidence Interval | Linear Extrapolation ({n_pop:,} units) |",
+            f"| Sensitivity Benchmark / Lever | Reference Cohort | Statistical Shift (Unadjusted) | 95% Confidence Interval | Linear Extrapolation ({n_proj:,} units) |",
             "| :--- | :--- | :--- | :--- | :--- |",
         ]
         if joint_optimization and not prescriptive_optimization_allowed:
@@ -356,21 +384,26 @@ class ScenarioSimulationTool(BaseTool):
                 lines.append(f"| Joint Optimization | Not generated | target_goal={resolved_goal}; descriptive sensitivity only | N/A | N/A |")
         if joint_package:
             interv_summary = ", ".join(f"{it['driver']} {it['recommended_shift_pct']:+0.0f}%" for it in joint_package["interventions"])
+            joint_tot_str = f"{joint_package['projected_total_impact']:+,.2f}" if joint_package["projected_total_impact"] is not None else "N/A (Intensive Measure)"
             lines.append(
                 f"| Multi-Driver Sensitivity Simulation ({interv_summary}) | All Population | "
                 f"{joint_package['predicted_delta_target']:+0.2f} ({joint_package['relative_change_pct']:+0.1f}%) | "
-                f"[Joint multivariate model] | {joint_package['projected_total_impact']:+,.2f} |"
+                f"[Joint multivariate model] | {joint_tot_str} |"
             )
         for s in scenarios:
+            s_tot_str = f"{s['projected_total_impact']:+,.2f}" if s["projected_total_impact"] is not None else "N/A (Intensive Measure)"
+            extrap_badge = " [Extrapolation]" if s.get("is_extrapolation") else ""
             lines.append(
                 f"| Shift {s['driver']} {s['shift_pct']:+0.0f}% | All Population | {s['delta_target']:+0.2f} ({s['relative_change_pct']:+0.1f}%) | "
-                f"[{s['ci_lower']:+0.2f}, {s['ci_upper']:+0.2f}] | {s['projected_total_impact']:+,.2f} |"
+                f"[{s['ci_lower']:+0.2f}, {s['ci_upper']:+0.2f}] | {s_tot_str}{extrap_badge} |"
             )
         if segment_opportunity:
+            observed_total = segment_opportunity["cohort_gap_total"]
+            seg_tot_str = f"{observed_total:+,.2f} across the cohort" if observed_total is not None else "N/A (Intensive Measure)"
             lines.append(
-                f"| Benchmark '{segment_opportunity['segment']}' to average | {segment_opportunity['segment']} (n={segment_opportunity['segment_n']:,}) | "
-                f"+{segment_opportunity['gap_per_unit']:0.2f} (+{segment_opportunity['gap_pct']:0.1f}%) | [Audited baseline gap] | "
-                f"+{segment_opportunity['recoverable_total']:,.2f} (Cohort difference) |"
+                f"| Difference to other records | {segment_opportunity['segment']} (n={segment_opportunity['segment_n']:,}) | "
+                f"{segment_opportunity['gap_per_unit']:+0.2f} per record (others minus cohort) | Observed comparison | "
+                f"{seg_tot_str} |"
             )
         decision_table = "\n".join(lines)
 
@@ -382,27 +415,39 @@ class ScenarioSimulationTool(BaseTool):
                 summary_parts.append("Joint optimization was not generated because the target is binary.")
             else:
                 summary_parts.append("Joint optimization was not generated because this scenario is non-prescriptive.")
+        if not is_additive:
+            summary_parts.append(f"Total impact omitted: '{target_column}' is an intensive/non-additive measure.")
         if joint_package:
+            if joint_package["projected_total_impact"] is not None:
+                joint_tot_phrase = f"; total impact: {joint_package['projected_total_impact']:+,.2f}"
+            else:
+                joint_tot_phrase = " (intensive measure; total omitted)"
             summary_parts.append(
                 f"Multi-driver joint sensitivity simulation ({', '.join(joint_package['drivers_optimized'])}) projects a "
                 f"{joint_package['relative_change_pct']:+0.1f}% cumulative shift in '{target_column}' "
-                f"({joint_package['predicted_delta_target']:+0.2f} per unit; total impact: {joint_package['projected_total_impact']:+,.2f})."
+                f"({joint_package['predicted_delta_target']:+0.2f} per unit{joint_tot_phrase})."
             )
         if scenarios:
             top_s = next((s for s in scenarios if s["shift_pct"] == 10.0), scenarios[0])
+            if top_s["projected_total_impact"] is not None:
+                tot_phrase = f"extrapolating to {top_s['projected_total_impact']:+,.2f} across {n_proj:,} records"
+            else:
+                tot_phrase = f"total impact omitted (intensive measure; projection n={n_proj:,}, estimation n={n_est:,})"
+            extrap_note = " [Extrapolation beyond observed driver support]" if top_s.get("is_extrapolation") else ""
             summary_parts.append(
                 f"A {top_s['shift_pct']:+0.0f}% shift in '{top_s['driver']}' corresponds to an unadjusted linear change in "
                 f"'{target_column}' of {top_s['relative_change_pct']:+0.1f}% ({top_s['delta_target']:+0.2f} per unit, "
-                f"95% CI: [{top_s['ci_lower']:+0.2f}, {top_s['ci_upper']:+0.2f}]), extrapolating to "
-                f"{top_s['projected_total_impact']:+,.2f} across {n_pop:,} records [descriptive sensitivity benchmark; unadjusted for confounding]."
+                f"95% CI: [{top_s['ci_lower']:+0.2f}, {top_s['ci_upper']:+0.2f}]), {tot_phrase}{extrap_note} "
+                "[observational sensitivity benchmark under stated counterfactual assumption; unadjusted for confounding]."
             )
         if segment_opportunity:
             summary_parts.append(
-                f"The observed performance gap for cohort '{segment_opportunity['segment']}' in '{segment_opportunity['dimension']}' "
-                f"represents an unadjusted cohort difference of +{segment_opportunity['recoverable_total']:,.2f}."
+                f"Mean '{target_column}' was {segment_opportunity['segment_mean']:,.2f} for "
+                f"{segment_opportunity['dimension']}='{segment_opportunity['segment']}' and "
+                f"{segment_opportunity['rest_mean']:,.2f} for other records. This is an unadjusted cohort comparison."
             )
 
-        summary = " ".join(summary_parts) if summary_parts else f"Baseline scenario analysis complete for '{target_column}' across {n_pop:,} records."
+        summary = " ".join(summary_parts) if summary_parts else f"Baseline scenario analysis complete for '{target_column}' across {n_proj:,} records."
 
         return {
             "summary": summary,
@@ -412,13 +457,16 @@ class ScenarioSimulationTool(BaseTool):
             "goal_rationale": goal_rationale,
             "is_binary_target": is_binary_target,
             "bounded_target": is_binary_target,
+            "is_additive_target": is_additive,
             "model_family": (
                 "bounded_probability_sensitivity" if is_binary_target
                 else "linear_sensitivity"
             ),
             "actionable_levers": candidate_drivers,
             "excluded_levers": excluded_levers,
-            "population_size": n_pop,
+            "estimation_population": n_est,
+            "projection_population": n_proj,
+            "population_size": n_proj,
             "baseline_mean": round(base_mean, 4),
             "baseline_total": round(base_total, 2),
             "driver_model": driver_model,
@@ -437,24 +485,38 @@ class ScenarioSimulationTool(BaseTool):
         results: list[Finding] = []
         target = output.get("target_column") or "target"
         scenarios = output.get("scenarios") or []
+        n_proj = int(output.get("projection_population", output.get("population_size", 0)))
+        n_est = int(output.get("estimation_population", output.get("population_size", 0)))
         for i, s in enumerate(scenarios):
-            if s.get("shift_pct") in (10.0, -10.0, 25.0):
-                if abs(s.get("relative_change_pct", 0.0)) / 100.0 < 0.02:
+            if s.get("shift_pct") in (10.0, -10.0, 25.0) or len(scenarios) <= 3 or s.get("is_extrapolation"):
+                if abs(s.get("relative_change_pct", 0.0)) / 100.0 < 0.02 and not s.get("is_extrapolation"):
                     continue
+                extrap_flag = " [Extrapolation]" if s.get("is_extrapolation") else ""
                 headline = (
                     f"Sensitivity Projection: {s['shift_pct']:+0.0f}% shift in '{s['driver']}' associates with a "
                     f"{s['relative_change_pct']:+0.1f}% change in '{target}' ({s['delta_target']:+0.2f} per unit, "
-                    f"95% CI: [{s['ci_lower']:+0.2f}, {s['ci_upper']:+0.2f}])."
+                    f"95% CI: [{s['ci_lower']:+0.2f}, {s['ci_upper']:+0.2f}]){extrap_flag}."
                 )
+                if s.get("projected_total_impact") is not None:
+                    tot_desc = f"Linear extrapolation across population: {s['projected_total_impact']:+,.2f}"
+                else:
+                    tot_desc = f"Total impact omitted: '{target}' is an intensive/non-additive measure"
+
                 results.append(Finding(
                     finding_id=f"decision_scenario_{i}_{_slug(target)}_{_slug(s['driver'])}_{int(s['shift_pct'])}",
                     kind="decision_scenario",
                     headline=headline,
                     detail=(
-                        f"Linear extrapolation across population: {s['projected_total_impact']:+,.2f}; "
-                        f"baseline mean: {output.get('baseline_mean')}; population n={output.get('population_size')}."
+                        f"{tot_desc}; baseline mean: {output.get('baseline_mean')}; "
+                        f"projection n={n_proj:,}; estimation n={n_est:,}. "
+                        "Observational linear sensitivity benchmark under stated counterfactual assumption (unadjusted for confounding)."
                     ),
-                    evidence=s,
+                    evidence={
+                        **s,
+                        "estimation_population": n_est,
+                        "projection_population": n_proj,
+                        "is_additive": output.get("is_additive_target", True),
+                    },
                     source_tool=self.name,
                     measure=target,
                     dimension=s["driver"],
@@ -462,15 +524,18 @@ class ScenarioSimulationTool(BaseTool):
                     effect_kind="lift",
                     confidence=0.75,
                     surprise=0.3,
-                    caveats=["Observational linear extrapolation unadjusted for unmeasured confounding; descriptive sensitivity only, not guaranteed causal impact."],
+                    caveats=[
+                        "Observational linear extrapolation unadjusted for unmeasured confounding; "
+                        "descriptive sensitivity only, not guaranteed causal impact."
+                    ],
                 ))
 
         seg_opp = output.get("segment_opportunity")
         if seg_opp:
+            observed_difference = seg_opp["segment_mean"] - seg_opp["rest_mean"]
             headline = (
-                f"Cohort Benchmark: Segment '{seg_opp['segment']}' in '{seg_opp['dimension']}' trails baseline by "
-                f"{seg_opp['gap_per_unit']:0.2f} per unit ({seg_opp['gap_pct']:0.1f}%), an aggregate gap of "
-                f"+{seg_opp['recoverable_total']:,.2f}."
+                f"Mean '{target}' for {seg_opp['dimension']}='{seg_opp['segment']}' was "
+                f"{abs(observed_difference):,.2f} {'higher' if observed_difference > 0 else 'lower'} than for other records."
             )
             results.append(Finding(
                 finding_id=f"recoverable_gap_{_slug(target)}_{_slug(seg_opp['dimension'])}_{_slug(seg_opp['segment'])}",
@@ -482,8 +547,8 @@ class ScenarioSimulationTool(BaseTool):
                 measure=target,
                 dimension=seg_opp["dimension"],
                 level=seg_opp["segment"],
-                effect=seg_opp["gap_pct"] / 100.0,
-                effect_kind="lift",
+                effect=observed_difference / abs(seg_opp["rest_mean"]) if seg_opp["rest_mean"] else observed_difference,
+                effect_kind="lift" if seg_opp["rest_mean"] else "difference",
                 confidence=0.70,
                 surprise=0.4,
                 caveats=["Observational cohort difference; descriptive benchmark unadjusted for confounding or selection effects, not guaranteed causal recovery."],
@@ -492,10 +557,14 @@ class ScenarioSimulationTool(BaseTool):
         joint_pkg = output.get("joint_package")
         if joint_pkg and abs(joint_pkg.get("relative_change_pct", 0.0)) >= 1.0:
             drvs_str = ", ".join(joint_pkg["drivers_optimized"])
+            if joint_pkg.get("projected_total_impact") is not None:
+                joint_tot_str = f", total impact {joint_pkg['projected_total_impact']:+,.2f}"
+            else:
+                joint_tot_str = " (intensive measure; total omitted)"
             headline = (
                 f"Multi-Driver Joint Sensitivity Simulation: Coordinated shift across {len(joint_pkg['drivers_optimized'])} levers ({drvs_str}) "
                 f"projects a {joint_pkg['relative_change_pct']:+0.1f}% cumulative shift in '{target}' "
-                f"({joint_pkg['predicted_delta_target']:+0.2f} per unit, total impact {joint_pkg['projected_total_impact']:+,.2f})."
+                f"({joint_pkg['predicted_delta_target']:+0.2f} per unit{joint_tot_str})."
             )
             results.append(Finding(
                 finding_id=f"joint_opt_{_slug(target)}",
@@ -503,7 +572,7 @@ class ScenarioSimulationTool(BaseTool):
                 headline=headline,
                 detail=(
                     f"Multivariate sensitivity simulation identified coordinated shifts across {drvs_str}. "
-                    f"Projected mean moves to {joint_pkg['projected_mean']} across {output.get('population_size')} units."
+                    f"Projected mean moves to {joint_pkg['projected_mean']} across {output.get('projection_population', output.get('population_size'))} units."
                 ),
                 evidence=joint_pkg,
                 source_tool=self.name,
@@ -558,6 +627,11 @@ class ScenarioSimulationTool(BaseTool):
             "joint_optimization": {
                 "type": "boolean",
                 "description": "Generate prescriptive multi-driver shifts only for non-binary minimize/maximize goals.",
+                "required": False,
+            },
+            "projection_population": {
+                "type": "integer",
+                "description": "Eligible population count to project totals across (defaults to dataset rows).",
                 "required": False,
             },
         }

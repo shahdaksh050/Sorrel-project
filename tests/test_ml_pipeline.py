@@ -26,6 +26,17 @@ def _memory_with_dataset(path: str = "x.csv") -> MemorySystem:
     return memory
 
 
+def test_evaluate_resolves_saved_path_with_relative_output_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    model = Path("output/run/models/trained.pkl")
+    model.parent.mkdir(parents=True)
+    model.touch()
+    memory = _memory_with_dataset()
+    memory.set_context("best_model_path", str(model))
+    params = EvaluateModelTool().prepare_params({"file_path": "x.csv"}, memory, "output/run")
+    assert params["model_path"] == str(model.resolve())
+
+
 @pytest.fixture
 def classification_csv(tmp_path: pytest.TempPathFactory) -> str:
     import numpy as np
@@ -325,11 +336,18 @@ def test_train_model_clustering_branch(tmp_path: Path) -> None:
         output_dir=str(tmp_path / "models"),
     )
     assert out["task_type"] == "clustering"
-    assert out["best_model"] == "kmeans"
+    assert out["best_model"] is None
     assert sorted(out["models_trained"]) == ["dbscan", "kmeans"]
     assert out["baseline_cv_mean"] is None and out["split_strategy"] == "n/a"
-    assert out["train_samples"] == out["test_samples"] == 60
+    assert out["train_samples"] == 60 and out["test_samples"] == 0
+    assert out["test_size"] is None and out["n_cv_folds"] is None
     assert (tmp_path / "models" / "kmeans.pkl.sig").exists()
+    assert "clustering_diagnostics" in out
+    diag = out["clustering_diagnostics"]
+    assert diag["fit_population"] == 60
+    assert "kmeans" in out["models_trained"]
+    assert out["models_trained"]["kmeans"]["fit_population"] == 60
+    assert out["models_trained"]["kmeans"]["cluster_sizes"] is not None
 
 
 def test_target_leakage_dropped_and_retrained_on_clean_features(tmp_path: Path) -> None:

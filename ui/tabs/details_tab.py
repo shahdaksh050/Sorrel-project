@@ -146,46 +146,83 @@ def render_details_tab(
             c1, c2, c3 = st.columns(3)
             c1.metric("Test used", stat_out.get("test_name", "—"))
             c2.metric("p-value", format_p(stat_out.get("p_value")))
-            c3.metric("Likely real, not chance", "Yes" if stat_out.get("significant") else "No")
+            significance = stat_out.get("significant")
+            c3.metric("Below test threshold", {True: "Yes", False: "No"}.get(significance, "Unavailable"))
             st.info(stat_out.get("interpretation", "No interpretation recorded."))
 
-    if train_out:
+    cluster_tool = find_tool(tool_results, "cluster_data")
+    is_clustering = (train_out and train_out.get("task_type") == "clustering") or bool(cluster_tool)
+    if is_clustering:
+        with st.container(border=True, key="audit_clustering"):
+            st.markdown(
+                audit_head_html("Clustering diagnostics", "Unsupervised fit on analysis frame (no supervised holdout)."),
+                unsafe_allow_html=True,
+            )
+            diag = (train_out.get("clustering_diagnostics") if train_out else None) or (cluster_tool or {})
+            fit_pop = (
+                diag.get("fit_population")
+                or (train_out.get("train_samples") if train_out else None)
+                or diag.get("n_samples")
+                or "Unavailable"
+            )
+            sil = diag.get("silhouette_score")
+            sil_str = f"{sil:.3f}" if isinstance(sil, (int, float)) else "Unavailable"
+            inertia = diag.get("inertia")
+            inertia_str = f"{inertia:,.1f}" if isinstance(inertia, (int, float)) else "Unavailable"
+            best_mod = (train_out.get("best_model") if train_out else None) or diag.get("best_model") or "Clustering"
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Fit population", f"{fit_pop:,}" if isinstance(fit_pop, int) else str(fit_pop))
+            c2.metric("Best model", str(best_mod))
+            c3.metric("Silhouette score", sil_str)
+            c4.metric("Inertia", inertia_str)
+
+            c_sizes = diag.get("cluster_sizes") or {}
+            c_shares = diag.get("cluster_shares") or {}
+            if c_sizes:
+                st.markdown("##### Cluster size distribution")
+                dist_rows = []
+                for cid, sz in c_sizes.items():
+                    share = c_shares.get(cid)
+                    share_str = f"{share:.1%}" if isinstance(share, (int, float)) else "Unavailable"
+                    dist_rows.append({"Cluster": str(cid), "Size (n)": sz, "Share": share_str})
+                st.dataframe(safe_df(pd.DataFrame(dist_rows)), width="stretch")
+    elif train_out:
         with st.container(border=True, key="audit_models"):
             st.markdown(audit_head_html("Models"), unsafe_allow_html=True)
-            mt2 = train_out.get("models_trained", {})
-            best2 = train_out.get("best_model", "")
-            task2 = train_out.get("task_type", "classification")
-            pk2 = "accuracy" if task2 == "classification" else "r2"
-            sk2 = "f1_score" if task2 == "classification" else "rmse"
+            task = train_out.get("task_type")
+            metric = "f1_score" if task == "classification" else "r2"
+            label = "weighted F1" if task == "classification" else "R²"
+            val_scheme = train_out.get("cv_scheme") or "Unavailable"
+            baseline_val = train_out.get("baseline_cv_mean")
+            baseline_str = f"{baseline_val:.3f}" if isinstance(baseline_val, (int, float)) else "Unavailable"
+            lift_val = train_out.get("lift_over_baseline")
+            lift_str = f"{lift_val:+.3f}" if isinstance(lift_val, (int, float)) else "Unavailable"
 
-            st.markdown(
-                f"**Type of problem:** `{task2}` &nbsp;|&nbsp; **Best model:** `{best2}` "
-                f"&nbsp;|&nbsp; **Times each model was tested:** `{train_out.get('n_cv_folds', 5)}` "
-                f"&nbsp;|&nbsp; **Held back for testing:** `{int(train_out.get('test_size', 0.2)*100)}%`"
-            )
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Validation design", str(val_scheme))
+            c2.metric("Baseline score", baseline_str)
+            c3.metric("Model lift vs baseline", lift_str)
+
             rows = []
-            for nm, m in mt2.items():
-                tr2 = m.get("train_metrics", {})
-                te2 = m.get("test_metrics", {})
-                g = m.get("train_test_gap")
+            for name, model in train_out.get("models_trained", {}).items():
+                train_m = (model.get("train_metrics") or {}).get(metric)
+                test_m = (model.get("test_metrics") or {}).get(metric)
+                cv_m = model.get("cv_mean")
+                cv_s = model.get("cv_std")
+                gap_m = model.get("train_test_gap")
                 rows.append({
-                    "Model": f"{nm} (best)" if nm == best2 else nm,
-                    f"Train {pk2}": f"{tr2.get(pk2,0)*100:.1f}%",
-                    f"Test {pk2}": f"{te2.get(pk2,0)*100:.1f}%",
-                    "CV mean": f"{m.get('cv_mean',0)*100:.1f}%",
-                    "CV std": f"±{m.get('cv_std',0)*100:.1f}%",
-                    "Gap": (
-                        f"{g*100:.1f}%" + (" [RISK]" if g and g >= 0.10 else "")
-                        if g is not None
-                        else "—"
-                    ),
-                    sk2.replace("_", " "): (
-                        f"{te2.get(sk2,0)*100:.1f}%"
-                        if sk2 != "rmse"
-                        else f"{te2.get(sk2,0):.4f}"
-                    ),
+                    "Model": name,
+                    "Selected": name == train_out.get("best_model"),
+                    f"Train {label}": f"{train_m:.3f}" if isinstance(train_m, (int, float)) else "Unavailable",
+                    f"Test {label}": f"{test_m:.3f}" if isinstance(test_m, (int, float)) else "Unavailable",
+                    f"CV mean {label}": f"{cv_m:.3f}" if isinstance(cv_m, (int, float)) else "Unavailable",
+                    "CV std": f"{cv_s:.3f}" if isinstance(cv_s, (int, float)) else "Unavailable",
+                    "Train–test gap": f"{gap_m:.3f}" if isinstance(gap_m, (int, float)) else "Unavailable",
                 })
-            st.dataframe(safe_df(pd.DataFrame(rows)), width="stretch")
+            if rows:
+                st.dataframe(safe_df(pd.DataFrame(rows)), width="stretch")
+
 
             if eval_out:
                 st.markdown("#### Accuracy by Category")
@@ -203,6 +240,31 @@ def render_details_tab(
                         if isinstance(v, dict)
                     ]
                     st.dataframe(safe_df(pd.DataFrame(cr_rows)), width="stretch")
+
+    coverage = report.get("coverage") or (run_view.coverage if run_view else {})
+    if isinstance(coverage, dict) and coverage.get("total"):
+        with st.container(border=True, key="audit_questions"):
+            st.markdown(
+                audit_head_html(
+                    "Question Coverage & Open Questions",
+                    "Audit of questions addressed by executed analysis steps vs. remaining open.",
+                ),
+                unsafe_allow_html=True,
+            )
+            ans = coverage.get("answered", 0)
+            tot = coverage.get("total", 0)
+            st.write(f"**Business questions answered:** {ans} of {tot}")
+            unanswered = coverage.get("unanswered") or []
+            if unanswered:
+                st.markdown(f"##### Open business questions ({len(unanswered)})")
+                q_rows = []
+                for u in unanswered:
+                    q_rows.append({
+                        "Question": u.get("text", ""),
+                        "Status": "Blocked" if u.get("blocked") else "Open",
+                        "Reason": u.get("reason") or u.get("blocked_reason") or "Not answered by executed steps",
+                    })
+                st.dataframe(safe_df(pd.DataFrame(q_rows)), width="stretch")
 
     gov = report.get("governance")
     if gov:

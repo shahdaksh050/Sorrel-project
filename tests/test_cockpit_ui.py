@@ -683,6 +683,170 @@ def test_action_matrix_excludes_cluster_synthetic_features() -> None:
     assert len(matrix["incremental"]) == 0
 
 
+def test_swarm_dashboard_pvalue_formatting_avoids_zero() -> None:
+    from ui.components.swarm_dashboard import build_swarm_payload
+
+    # When p-value is extremely small (< 0.001), target should be '< 0.001' not '0'
+    payload = build_swarm_payload(
+        findings=[
+            {
+                "finding_id": "f_sig",
+                "kind": "segment_lift",
+                "headline": "Significant segment lift observed",
+                "p_adjusted": 0.000002,
+                "effect": 0.45,
+            }
+        ]
+    )
+    p_kpi = next(k for k in payload["kpis"] if "p-value" in k["label"].lower())
+    assert p_kpi["target"] == "< 0.001"
+    assert p_kpi["badge"] == "p < 0.001"
+    assert "FDR" in p_kpi["subtext"]
+
+
+@patch("streamlit.markdown")
+@patch("streamlit.columns")
+@patch("streamlit.container")
+@patch("streamlit.caption")
+def test_render_charts_tab_unified_view(
+    mock_caption: MagicMock,
+    mock_container: MagicMock,
+    mock_columns: MagicMock,
+    mock_markdown: MagicMock,
+) -> None:
+    from ui.tabs.charts_tab import render_charts_tab
+
+    mock_columns.return_value = [MagicMock() for _ in range(5)]
+    mock_container.return_value.__enter__.return_value = MagicMock()
+
+    mock_dashboard = [
+        {"chart_id": "c_lead", "title": "Lead Wide Chart", "size": "wide", "spec": {"mark": "line"}},
+        {"chart_id": "c_half1", "title": "Paired Chart 1", "size": "half", "spec": {"mark": "bar"}},
+        {"chart_id": "c_half2", "title": "Paired Chart 2", "size": "half", "spec": {"mark": "bar"}},
+    ]
+    mock_report = {
+        "title": "Autonomous Executive Briefing",
+        "lead_narrative": "Air quality measures show significant cluster variance.",
+        "row_count": 50000,
+        "column_count": 12,
+        "quality_score": "95.0 / 100",
+    }
+    mock_findings = [
+        {
+            "finding_id": "f1",
+            "headline": "Lead finding holds",
+            "effect": 0.35,
+            "p_adjusted": 0.0005,
+            "evidence": {"checks": {"robust": True, "paradox_free": True}},
+        }
+    ]
+
+    render_charts_tab(
+        dashboard=mock_dashboard,
+        report=mock_report,
+        vega_cfg={"view": {"stroke": "transparent"}},
+        findings=mock_findings,
+    )
+
+    assert mock_caption.called
+    assert mock_markdown.called
+
+
+@patch("streamlit.info")
+def test_render_charts_tab_empty_dashboard(mock_info: MagicMock) -> None:
+    from ui.tabs.charts_tab import render_charts_tab
+
+    render_charts_tab(
+        dashboard=[],
+        report={"coverage": {"total": 5, "answered": 0}},
+        vega_cfg={},
+    )
+    assert mock_info.called
+
+
+def test_get_archetype_action_config_all_archetypes() -> None:
+    from ui.tabs.actions_tab import get_archetype_action_config
+
+    cfg_panel = get_archetype_action_config("panel")
+    assert cfg_panel["archetype_cluster"] == "longitudinal_panel"
+    assert "Cohort" in cfg_panel["quadrants"][0][0][2]
+    assert "COHORT GUARDRAILS" == cfg_panel["guardrails"]["badge"]
+
+    cfg_sensor = get_archetype_action_config("continuous_series")
+    assert cfg_sensor["archetype_cluster"] == "sensor_iot"
+    assert "Control" in cfg_sensor["quadrants"][0][0][1]
+    assert "SYSTEM GUARDRAILS" == cfg_sensor["guardrails"]["badge"]
+
+    cfg_survey = get_archetype_action_config("survey")
+    assert cfg_survey["archetype_cluster"] == "scientific_clinical"
+    assert "Confirmatory" in cfg_survey["quadrants"][1][0][1]
+
+    cfg_comm = get_archetype_action_config("transactional")
+    assert cfg_comm["archetype_cluster"] == "commercial"
+    assert "Quick Wins" in cfg_comm["quadrants"][0][0][1]
+
+    cfg_gen = get_archetype_action_config("unknown")
+    assert cfg_gen["archetype_cluster"] == "general"
+
+
+def test_format_archetype_lever_and_rationale() -> None:
+    from ui.tabs.actions_tab import format_archetype_lever_and_rationale
+
+    # In panel / environmental data:
+    lever_p, rat_p = format_archetype_lever_and_rationale(
+        "Target AQI_Bucket='Very Poor'",
+        "Investigate the observed difference before changing policy.",
+        "longitudinal_panel",
+    )
+    assert "Priority Cohort: AQI_Bucket='Very Poor'" in lever_p
+    assert "before changing policy" not in rat_p
+    assert "before enacting broad cohort interventions" in rat_p
+
+    # In sensor data:
+    lever_s, rat_s = format_archetype_lever_and_rationale(
+        "Target Sub_metering_1='High'",
+        "Investigate before changing policy.",
+        "sensor_iot",
+    )
+    assert "Control Regime: Sub_metering_1='High'" in lever_s
+    assert "before adjusting operational thresholds" in rat_s
+
+
+@patch("streamlit.markdown")
+@patch("streamlit.columns")
+@patch("streamlit.container")
+def test_render_actions_tab_panel_archetype_awareness(
+    mock_container: MagicMock,
+    mock_columns: MagicMock,
+    mock_markdown: MagicMock,
+) -> None:
+    from ui.tabs.actions_tab import render_actions_tab
+
+    mock_columns.return_value = [MagicMock(), MagicMock()]
+    mock_container.return_value.__enter__.return_value = MagicMock()
+
+    mock_finding = {
+        "finding_id": "f_aqi",
+        "kind": "segment_lift",
+        "headline": "Very Poor AQI leads PM2.5 with +154% higher performance",
+        "dimension": "AQI_Bucket",
+        "level": "Very Poor",
+        "measure": "PM2.5",
+        "effect": 1.54,
+        "confidence": 0.85,
+        "caveats": ["Counts are per 'City' (repeated rows aggregated), not per row."],
+        "evidence": {"n": 22, "n_rest": 26, "checks": {"robust": True, "paradox_free": True}},
+    }
+    mock_report = {
+        "understanding": {"archetype": "panel"},
+        "findings": [mock_finding],
+    }
+
+    render_actions_tab(report=mock_report, tool_results=[], run_view=None)
+    assert mock_markdown.called
+
+
+
 
 
 

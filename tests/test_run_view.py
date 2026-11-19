@@ -247,7 +247,10 @@ def test_caps_apply_but_totals_stay_true() -> None:
 
 def test_headline_findings_capped_at_five() -> None:
     findings = tuple(_finding(str(i)) for i in range(MAX_HEADLINE_FINDINGS + 3))
-    assert len(select_headline_findings(findings)) == MAX_HEADLINE_FINDINGS
+    # Uncapped returns all eligible findings
+    assert len(select_headline_findings(findings)) == MAX_HEADLINE_FINDINGS + 3
+    # Explicit cap limits the output
+    assert len(select_headline_findings(findings, cap=MAX_HEADLINE_FINDINGS)) == MAX_HEADLINE_FINDINGS
 
 
 # ── selection and verdict parity with the Answers tab ────────────────────────
@@ -261,7 +264,7 @@ def _legacy_answers_tab_verdict(report: dict[str, Any]) -> tuple[int, int] | Non
         for f in all_findings
         if f.get("layer") in ("exec", "analyst")
         and f.get("kind") not in ("method_fit", "coverage_gap")
-    ][:5]
+    ]
     audited = [
         (f, marks)
         for f in card_findings

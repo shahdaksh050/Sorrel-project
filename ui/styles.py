@@ -96,6 +96,12 @@ def inject_theme_css() -> None:
     --text-3xl: 2.5rem;
     --text-4xl: 3.5rem;
     --ease-in-out: cubic-bezier(.4, 0, .2, 1);
+
+    /* Semantic fallback tokens */
+    --ink-text:    var(--ink);
+    --ink-muted:   var(--graphite);
+    --ink-faint:   var(--ink-4);
+    --paper-card:  var(--sheet-alt);
 }}
 
 @media (prefers-reduced-motion: reduce) {{
@@ -1247,6 +1253,8 @@ div[data-testid="stFileChip"],
     color: var(--graphite); background: var(--sheet); vertical-align: 1px; }}
 .how-tag.supported {{ color: var(--positive); background: color-mix(in srgb, var(--positive) 8%, var(--sheet)); }}
 .how-tag.refuted {{ color: var(--danger-text); background: color-mix(in srgb, var(--risk) 8%, var(--sheet)); }}
+.how-tag.inconclusive {{ color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--sheet)); }}
+.findings-scroll-container {{ max-height: 580px; overflow-y: auto; padding-right: 6px; }}
 .how-ideas {{ list-style: none; padding-left: 0; }}
 .how-ideas li {{ margin-bottom: .55rem; }}
 /* ── "Found so far, may change" (live run): hairline block, tokens only ── */
@@ -1306,18 +1314,64 @@ div[data-testid="stButtonGroup"] [aria-checked="true"] * {{
     background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--radius);
 }}
 /* The finding list is clickable, so it may answer the pointer; the selected one is marked by a bar. */
-.st-key-selected_finding [role="radiogroup"] > label:hover {{ border-color: var(--graphite); }}
-.st-key-selected_finding [role="radiogroup"] > label:has(input:checked) {{
-    border-color: var(--accent-text); box-shadow: inset 3px 0 0 var(--accent-text);
+.st-key-selected_finding [role="radiogroup"] {{ gap: 0.25rem !important; }}
+.st-key-selected_finding [role="radiogroup"] > label {{
+    padding: 0.42rem 0.65rem !important;
+    border-radius: var(--radius) !important;
+    border: 1px solid var(--rule) !important;
+    background: var(--sheet) !important;
+    margin-bottom: 0 !important;
+    transition: all var(--dur-fast) ease !important;
+    cursor: pointer !important;
 }}
-.st-key-selected_finding [role="radiogroup"] p {{ font-size: var(--text-sm); line-height: 1.45; }}
+.st-key-selected_finding [role="radiogroup"] > label:hover {{
+    border-color: var(--pen) !important;
+    background: var(--sheet-alt) !important;
+}}
+.st-key-selected_finding [role="radiogroup"] > label:has(input:checked) {{
+    border-color: var(--pen) !important;
+    background: color-mix(in srgb, var(--pen) 6%, var(--sheet)) !important;
+    box-shadow: inset 3px 0 0 var(--pen) !important;
+}}
+.st-key-selected_finding [role="radiogroup"] p {{
+    font-size: 0.85rem !important;
+    line-height: 1.35 !important;
+    font-weight: 500 !important;
+    margin: 0 !important;
+}}
+.st-key-selected_finding [role="radiogroup"] > label:has(input:checked) p {{
+    font-weight: 600 !important;
+    color: var(--ink) !important;
+}}
+
 [class*="st-key-evidence_panel"] {{ background: var(--sheet); border-radius: var(--radius); }}
-.evidence-head {{ display: flex; flex-direction: column; align-items: flex-start; gap: .5rem; margin-bottom: .4rem; }}
-.evidence-title {{ font-family: var(--serif); font-style: italic; font-size: var(--text-xl) !important; font-weight: 500 !important; line-height: 1.3; margin: 0; padding: 0; }}
-.evidence-detail {{ color: var(--ink-2); font-size: var(--text-sm); line-height: 1.6; max-width: 68ch; margin: .4rem 0 .6rem; }}
-.evidence-none, .evidence-source {{ color: var(--graphite); font-size: var(--text-xs); margin: .4rem 0; }}
-.evidence-caveats {{ font-size: var(--text-sm); color: var(--ink); margin: .6rem 0; }}
-.evidence-caveats ul {{ margin: .25rem 0 0; padding-left: 1.2rem; color: var(--ink-2); line-height: 1.5; }}
+.evidence-head {{
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    margin-bottom: 0.35rem;
+    flex-wrap: wrap;
+}}
+.evidence-title {{
+    font-family: var(--sans) !important;
+    font-style: normal !important;
+    font-size: 1.12rem !important;
+    font-weight: 600 !important;
+    line-height: 1.35 !important;
+    color: var(--ink) !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}}
+.evidence-detail {{
+    color: var(--ink) !important;
+    font-size: 0.88rem !important;
+    line-height: 1.48 !important;
+    max-width: 68ch;
+    margin: 0.25rem 0 0.5rem;
+}}
+.evidence-none, .evidence-source {{ color: var(--graphite); font-size: var(--text-xs); margin: .3rem 0; }}
+.evidence-caveats {{ font-size: 0.82rem; color: var(--ink); margin: .4rem 0; }}
+.evidence-caveats ul {{ margin: .2rem 0 0; padding-left: 1.1rem; color: var(--graphite); line-height: 1.45; }}
 .verdict-mark {{
     display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; font-weight: 600;
     letter-spacing: .06em; text-transform: uppercase;
@@ -1326,6 +1380,90 @@ div[data-testid="stButtonGroup"] [aria-checked="true"] * {{
 .verdict-mark.held {{ color: var(--positive); }}
 .verdict-mark.needs_more {{ color: var(--risk-text); }}
 .verdict-mark.unchecked {{ color: var(--graphite); border-style: dashed; }}
+
+/* ── Unified Debloated Briefing Box ── */
+.briefing-box {{
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--pen);
+    border-radius: var(--radius);
+    padding: 0.85rem 1.15rem;
+    margin-bottom: 1rem;
+}}
+.briefing-header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.4rem;
+}}
+.briefing-title {{
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}}
+.briefing-tag {{
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--pen);
+    background: color-mix(in srgb, var(--pen) 8%, var(--sheet));
+    padding: 1px 6px;
+    border-radius: var(--radius-pill);
+    border: 1px solid color-mix(in srgb, var(--pen) 25%, transparent);
+}}
+.briefing-q {{
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--ink);
+}}
+.briefing-verdict {{
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    border: 1px solid currentColor;
+}}
+.briefing-verdict.ok {{
+    color: var(--positive);
+    background: color-mix(in srgb, var(--positive) 8%, var(--sheet));
+}}
+.briefing-verdict.caution {{
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, var(--sheet));
+}}
+.briefing-verdict.unchecked {{
+    color: var(--graphite);
+    background: color-mix(in srgb, var(--graphite) 8%, var(--sheet));
+}}
+.briefing-body {{
+    font-size: 0.92rem;
+    line-height: 1.5;
+    color: var(--ink);
+    margin: 0;
+}}
+.briefing-chips {{
+    display: flex;
+    gap: 0.35rem 0.6rem;
+    flex-wrap: wrap;
+    margin-top: 0.45rem;
+    padding-top: 0.4rem;
+    border-top: 1px dashed var(--rule);
+}}
+.briefing-chip {{
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--graphite);
+}}
 
 /* ── Vega-Lite container containment ── */
 div[data-testid="stVegaLiteChart"] {{

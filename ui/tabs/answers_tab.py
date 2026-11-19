@@ -9,10 +9,12 @@ come from the `RunView`; `tool_results` is read only for model detail.
 from __future__ import annotations
 
 import html
+import re
 from typing import Any
 
 import streamlit as st
 
+from src.core.audited_entry import GLYPH
 from src.core.plain_language import business_headline, plainify
 from src.core.run_view import RunView, build_run_view
 from ui.components.cards import (
@@ -29,8 +31,21 @@ from ui.components.cards import (
     render_run_compare,
     round_for_reading,
     search_findings,
-    state_label,
 )
+
+
+def _debloated_finding_label(finding: dict[str, Any]) -> str:
+    """Format a crisp, 1-line label for the left-hand navigation list."""
+    st_val = finding_state(finding)
+    st_mark = {"held": "✓", "needs_more": "⚠", "unchecked": "○"}.get(st_val, "○")
+
+    head = round_for_reading(business_headline(finding))
+    # Remove long trailing statistical parentheticals (e.g. " (difference +2.15, d=1.42, n=68 vs 121)")
+    head = re.sub(r"\s*\([^)]*(?:difference|p=|d=|n=|r=|z=|vs|CI)[^)]*\)", "", head).strip(". ")
+
+    if len(head) > 52:
+        head = head[:49].rsplit(" ", 1)[0] + "…"
+    return f"{st_mark}  {head}"
 
 
 @st.fragment
@@ -40,23 +55,69 @@ def _evidence_inspector(
     vega_cfg: dict[str, Any],
 ) -> None:
     """Ranked findings beside the selected one's evidence. A fragment, so choosing a finding does not rerun the page."""
-    ids = [str(f.get("finding_id") or f"finding-{i}") for i, f in enumerate(findings)]
-    if st.session_state.get("selected_finding") not in ids:
-        st.session_state["selected_finding"] = ids[0]
-    labels = {
-        fid: f"{round_for_reading(business_headline(f))} ({state_label(finding_state(f))})"
-        for fid, f in zip(ids, findings, strict=True)
-    }
+    if not findings:
+        return
+
+    n_held = sum(1 for f in findings if finding_state(f) == "held")
+    n_needs = sum(1 for f in findings if finding_state(f) == "needs_more")
+    n_obs = sum(1 for f in findings if finding_state(f) == "unchecked")
+
+    filter_choices = [f"All ({len(findings)})"]
+    if n_held:
+        filter_choices.append(f"✓ Held up ({n_held})")
+    if n_needs:
+        filter_choices.append(f"⚠ Needs data ({n_needs})")
+    if n_obs:
+        filter_choices.append(f"○ Observations ({n_obs})")
+
     left, right = st.columns([0.40, 0.60], gap="medium")
     with left:
-        chosen = st.radio(
-            "Findings, most important first",
-            ids,
-            format_func=lambda fid: labels[fid],
-            key="selected_finding",
-        )
+        active_filter = filter_choices[0]
+        if len(filter_choices) > 2:
+            sel_filter = st.segmented_control(
+                "Filter findings",
+                filter_choices,
+                default=filter_choices[0],
+                key="findings_status_filter",
+                label_visibility="collapsed",
+            )
+            if sel_filter:
+                active_filter = sel_filter
+
+        if "Held up" in active_filter:
+            subset = [f for f in findings if finding_state(f) == "held"]
+        elif "Needs data" in active_filter:
+            subset = [f for f in findings if finding_state(f) == "needs_more"]
+        elif "Observations" in active_filter:
+            subset = [f for f in findings if finding_state(f) == "unchecked"]
+        else:
+            subset = findings
+
+        if not subset:
+            subset = findings
+
+        ids = [str(f.get("finding_id") or f"finding-{i}") for i, f in enumerate(subset)]
+        if st.session_state.get("selected_finding") not in ids:
+            st.session_state["selected_finding"] = ids[0]
+
+        labels = {
+            fid: _debloated_finding_label(f)
+            for fid, f in zip(ids, subset, strict=True)
+        }
+
+        # Bounded scrollable container when finding count is large (> 4), else compact container
+        container_kwargs = {"height": 520, "border": True} if len(findings) > 4 else {"border": True}
+        with st.container(**container_kwargs):
+            chosen = st.radio(
+                "Ranked findings",
+                ids,
+                format_func=lambda fid: labels[fid],
+                key="selected_finding",
+                label_visibility="collapsed",
+            )
+
     position = ids.index(chosen)
-    finding = findings[position]
+    finding = subset[position]
     # Each choice is its own card (the key carries the position), so choosing mounts a fresh one and it
     # can settle in from the side the choice came from. The first draw, and a redraw of the same finding,
     # carry no marker and do not animate.
@@ -67,17 +128,10 @@ def _evidence_inspector(
     with right:
         with st.container(border=True, key=f"evidence_panel_{position}"):
             st.markdown(marker + render_evidence_html(finding, with_figures=False, business_first=True), unsafe_allow_html=True)
-            ev = finding.get("evidence") if isinstance(finding, dict) else {}
-            if isinstance(ev, dict):
-                n_obs = ev.get("n") or ev.get("sample_size") or ev.get("n_total")
-                if isinstance(n_obs, (int, float)):
-                    st.caption(f"Audited sample: {int(n_obs):,} usable observations for this finding.")
             chart = chart_by_finding.get(str(finding.get("finding_id") or ""))
             if chart:
                 # Unframed (the pane is the frame) and at the common chart height.
-                render_dashboard_chart(chart, vega_cfg, framed=False, height=260, suppress_caption=True)
-            else:
-                st.caption("This finding has no chart. The statistical methodology below provides the evidence.")
+                render_dashboard_chart(chart, vega_cfg, framed=False, height=240, suppress_caption=True)
             st.markdown(render_methodology_drawer(finding), unsafe_allow_html=True)
 
 
@@ -127,28 +181,17 @@ def render_answers_tab(
     quality_label = f"{q}/100" if isinstance(q, (int, float)) else "Unavailable"
     row_count = meta.row_count if meta is not None else prof.get("row_count")
 
-    # 1. The question as the heading, the answer under it.
+    # 1. Executive Briefing Header & Verdict
     answer = html.escape(plainify(view.reasoning)) if view.reasoning else ""
-    if view.objective or answer:
-        st.markdown('<span class="eyebrow">Sorrel · Answers</span>', unsafe_allow_html=True)
-    if view.objective:
-        st.markdown(
-            '<div class="exec-directive">'
-            f'<h2>You asked: <span class="serif-it">{html.escape(view.objective)}</span></h2>'
-            + (f'<p class="dir-content">{answer}</p>' if answer else "")
-            + "</div>",
-            unsafe_allow_html=True,
-        )
-    elif answer:
-        st.markdown(
-            f'<div class="exec-directive"><h2>Summary</h2>'
-            f'<p class="dir-content">{answer}</p></div>',
-            unsafe_allow_html=True,
-        )
+    headline_raw = list(view.headline_findings)
 
-    # 2. Verdict, counted from the findings listed below so the number and the list always agree.
-    # Only when a check actually ran: a "0 of 0" would claim a check that did not happen.
-    headline = list(view.headline_findings)
+    def _finding_sort_key(f: dict[str, Any]) -> tuple[int, float]:
+        st_val = finding_state(f)
+        state_order = {"held": 0, "needs_more": 1, "unchecked": 2}
+        score = float(f.get("importance") or f.get("score") or f.get("confidence") or 0.0)
+        return (state_order.get(st_val, 3), -score)
+
+    headline = sorted(headline_raw, key=_finding_sort_key)
     total = len(headline)
     states = [finding_state(f) for f in headline]
     checked = sum(1 for x in states if x != "unchecked")
@@ -156,36 +199,54 @@ def render_answers_tab(
     needs_more = sum(1 for x in states if x == "needs_more")
     not_checked = len(states) - checked
 
-    eligible_count = sum(1 for f in headline if f.get("primary_eligible", True)) or total
     k_tests = len(report.get("statistical_test_pvalues") or report.get("statistical_test_pvalues_bh_corrected") or [])
 
-    if checked:
-        sub_lines = []
-        if needs_more:
-            sub_lines.append(f"{needs_more} need{'s' if needs_more == 1 else ''} more data.")
-        if gap_val is not None and gap_is_risky(gap_val):
-            sub_lines.append("Training performance exceeded held-out performance.")
-        lift = train_out.get("lift_over_baseline") if train_out else None
-        if train_out and isinstance(lift, (float, int)) and not train_out.get("model_training_gated"):
-            sub_lines.append(f"Cross-validation score minus baseline: {lift:+.3f}.")
-        adj_str = f" (evaluated with Benjamini-Hochberg FDR at α=0.05 across {k_tests} tests)" if k_tests > 0 else ""
-        if not_checked == 0:
-            lead_verdict = f"{held} of {checked} audited finding{'s' if checked != 1 else ''} held up (out of {eligible_count} eligible findings){adj_str}."
-        else:
-            plural_obs = "s" if not_checked != 1 else ""
-            lead_verdict = (
-                f"{held} of {checked} audited finding{'s' if checked != 1 else ''} held up "
-                f"(out of {eligible_count} eligible findings; {not_checked} exploratory observation{plural_obs} without statistical checks){adj_str}."
-            )
-        st.markdown(
-            f'<div class="run-banner{" ok" if needs_more == 0 else " caution"}">'
-            f"{lead_verdict}"
-            + "".join(f'<span class="sub">{html.escape(s)}</span>' for s in sub_lines)
-            + "</div>",
-            unsafe_allow_html=True,
-        )
+    sub_chips: list[str] = []
+    if k_tests > 0:
+        sub_chips.append(f"Benjamini-Hochberg FDR (k={k_tests}, α=0.05)")
+    if gap_val is not None and gap_is_risky(gap_val):
+        sub_chips.append("⚠ Train-test gap exceeded threshold")
+    lift = train_out.get("lift_over_baseline") if train_out else None
+    if train_out and isinstance(lift, (float, int)) and not train_out.get("model_training_gated"):
+        sub_chips.append(f"CV Lift: {lift:+.3f}")
+    if not_checked > 0:
+        plural_obs = "s" if not_checked != 1 else ""
+        sub_chips.append(f"{not_checked} exploratory observation{plural_obs}")
 
-    # 3. Evidence: a ranked list on the left, the selected finding with its chart and checks beside it.
+    chips_html = ""
+    if sub_chips:
+        chips_html = '<div class="briefing-chips">' + "".join(
+            f'<span class="briefing-chip">· {html.escape(c)}</span>' for c in sub_chips
+        ) + '</div>'
+
+    verdict_badge = ""
+    if checked:
+        v_cls = "ok" if needs_more == 0 else "caution"
+        v_icon = GLYPH["pass"] if needs_more == 0 else GLYPH["fail"]
+        verdict_badge = f'<span class="briefing-verdict {v_cls}">{v_icon} {held}/{checked} Audited Findings Verified</span>'
+    elif total:
+        verdict_badge = f'<span class="briefing-verdict unchecked">○ {total} Exploratory Findings</span>'
+
+    if view.objective:
+        header_title = f'<span class="briefing-tag">QUESTION</span> <span class="briefing-q">"{html.escape(view.objective)}"</span>'
+    else:
+        header_title = '<span class="briefing-tag">EXECUTIVE SUMMARY</span> <span class="briefing-q">Autonomous Dataset Exploration</span>'
+
+    briefing_body = f'<p class="briefing-body">{answer}</p>' if answer else ""
+
+    st.markdown(
+        f"""<div class="briefing-box">
+<div class="briefing-header">
+    <div class="briefing-title">{header_title}</div>
+    {verdict_badge}
+</div>
+{briefing_body}
+{chips_html}
+</div>""",
+        unsafe_allow_html=True,
+    )
+
+    # 2. Evidence: a ranked list on the left, the selected finding with its chart and checks beside it.
     st.markdown("## What we found")
     if headline:
         dash_by_finding = {str(c["finding_id"]): c for c in (dash or []) if c.get("finding_id")}
@@ -242,25 +303,26 @@ def render_answers_tab(
                 f"({len(unanswered)} remain open)."
             )
         if unanswered:
-            st.caption(f"⚠ {len(unanswered)} question(s) considered, not answered.")
-            with st.expander(f"What wasn't answered, and why ({len(unanswered)} open)", expanded=True):
+            with st.expander(f"What wasn't answered, and why ({len(unanswered)} open)", expanded=False):
                 for u in unanswered:
                     reason = u.get("reason") or u.get("blocked_reason") or "Not answered by executed steps"
                     st.markdown(f"- **{md_text(u.get('text', ''))}** — *reason: {reason}*")
         if small_notes:
             st.caption("Small groups combined. " + " ".join(small_notes[:3]))
         if du_html:
-            st.markdown("### How we read your data")
-            st.markdown(du_html, unsafe_allow_html=True)
+            with st.expander("Data Schema & Ingestion Profiling", expanded=False):
+                st.markdown(du_html, unsafe_allow_html=True)
 
-    # 5. Next action.
+    # 4. Next action.
     st.markdown("## What to do")
     if view.recommendations:
-        for rec in view.recommendations:
+        for idx, rec in enumerate(view.recommendations, start=1):
             rec_plain = plainify(rec)
-            badge = "Next step"
+            badge = f"Step {idx}"
             st.markdown(
-                f'<div class="rc"><span class="mk">{badge}</span>{html.escape(rec_plain)}</div>',
+                f'<div class="rc" style="margin-bottom:0.35rem;padding:9px 13px;">'
+                f'<span class="mk">{badge}</span>{html.escape(rec_plain)}'
+                f'</div>',
                 unsafe_allow_html=True,
             )
     else:

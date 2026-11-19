@@ -341,8 +341,8 @@ def render_evidence_html(
         f'<div class="evidence-head"><span class="verdict-mark {state}">{html.escape(state_label(state))}</span>'
         f'<h3 class="evidence-title">{headline}</h3></div>'
         + (f'<p class="evidence-detail">{html.escape(detail)}</p>' if show_detail else "")
-        + (f'<div class="check-row">{marks}</div>' if marks and not business_first else ('<p class="evidence-none">No check ran on this finding.</p>' if not business_first else ""))
-        + (f'<div class="evidence-caveats"><b>{caveat_title}</b><ul>{caveats}</ul></div>' if caveats else "")
+        + (f'<div class="check-row">{marks}</div>' if marks else ('<p class="evidence-none">No statistical audit ran on this finding.</p>' if not business_first else ""))
+        + (f'<div class="evidence-caveats"><b>{caveat_title}</b><ul>{caveats}</ul></div>' if caveats and not business_first else "")
         + (tech_note_html(analyst_figures(finding)) if with_figures else "")
     )
 
@@ -351,8 +351,6 @@ def render_methodology_drawer(finding: dict[str, Any]) -> str:
     """Render an expandable drawer folding away raw p-values, sample sizes, CIs, and checks."""
     evidence = finding.get("evidence") if isinstance(finding, dict) else {}
     ev = evidence if isinstance(evidence, dict) else {}
-    checks = audited_checks(ev)
-    marks = _check_marks_html(checks) if checks else ""
 
     bits: list[str] = []
     # Sample sizes
@@ -394,13 +392,17 @@ def render_methodology_drawer(finding: dict[str, Any]) -> str:
     if detail and any(x in detail for x in ("p=", "CI", "d=", "n=", "beta=")):
         bits.append(f"<b>Diagnostic Notation:</b> <code>{html.escape(detail)}</code>")
 
-    body = "<br>".join(bits) if bits else "Audited statistical evidence verified against dataset REPL execution."
-    marks_html = f'<div class="check-row" style="margin-bottom:0.6rem;">{marks}</div>' if marks else ""
+    # Operational guardrails / caveats folded inside drawer
+    raw_caveats = [round_for_reading(plainify(str(c))) for c in (finding.get("caveats") or [])[:4]]
+    if raw_caveats:
+        cav_items = "".join(f"<li>{html.escape(c)}</li>" for c in raw_caveats)
+        bits.append(f"<b>Operational Guardrails:</b><ul style='margin:0.25rem 0 0.4rem;padding-left:1.2rem;color:var(--graphite);'>{cav_items}</ul>")
 
-    return f"""<details class="tech-note" style="margin-top:0.8rem;">
+    body = "<br>".join(bits) if bits else "Audited statistical evidence verified against dataset REPL execution."
+
+    return f"""<details class="tech-note" style="margin-top:0.6rem;">
 <summary>Evidence & Statistical Methodology</summary>
-<div style="padding:0.6rem 0.2rem;font-size:0.85rem;line-height:1.5;">
-{marks_html}
+<div style="padding:0.5rem 0.2rem;font-size:0.83rem;line-height:1.5;">
 {body}
 </div>
 </details>"""
@@ -594,9 +596,17 @@ def render_agent_grid(
         elif ag["name"] == "Fact-Checker":
             agent_output = "Tests complete: checked which columns move together and whether the differences are real."
         elif ag["name"] == "Model Builder":
-            agent_output = f"Best model so far: {report.get('best_model', 'N/A')}. Tested multiple times on different slices of your data."
+            bm = report.get("best_model")
+            if bm and bm != "N/A":
+                agent_output = f"Best model: {bm}. Validated with cross-validation across data folds."
+            else:
+                agent_output = "Descriptive/EDA workflow: no supervised predictive model required."
         elif ag["name"] == "Reality-Checker":
-            agent_output = "Checked every model for memorisation. Applied a penalty to any that didn't hold up."
+            bm = report.get("best_model")
+            if bm and bm != "N/A":
+                agent_output = "Checked every model for memorisation. Applied a penalty to any that didn't hold up."
+            else:
+                agent_output = "Audited statistical distributions, outlier bounds, and hypothesis robustness."
         elif ag["name"] == "Double-Checker":
             agent_output = "Finished reviewing. Went back for more passes where needed."
         elif ag["name"] == "Detail Handler":

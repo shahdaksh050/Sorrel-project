@@ -608,6 +608,165 @@ _inputs_box = (
     else st.container(border=True, key="task_card")
 )
 
+with _inputs_box:
+    # ── Upload ────────────────────────────────────────────────────────────────
+    st.markdown('<div class="step-head"><span class="step-n">1</span> Add your file</div>', unsafe_allow_html=True)
+    _upload_col, _sample_col = st.columns([0.72, 0.28], gap="medium")
+    with _upload_col:
+        uploaded = st.file_uploader(
+            "CSV, TSV or Excel",
+            type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
+            label_visibility="collapsed",
+        )
+    with _sample_col:
+        st.markdown(
+            '<div class="sample-choice"><div class="sample-title">No file handy?</div>'
+            '<p>Run a real analysis of a bundled customer-churn file. It is not your data.</p></div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Use sample data", key="btn_sample_data"):
+            _sample = ROOT / "data" / "sample_customer_churn.csv"
+            if _sample.exists():
+                _sample_bytes = _sample.read_bytes()
+                _sample_df, _sample_report = read_any_bytes(_sample_bytes, _sample.name)
+                st.session_state["preview_df"] = _sample_df
+                st.session_state["preview_read_report"] = _sample_report
+                st.session_state["preview_bytes"] = _sample_bytes
+                st.session_state["preview_name"] = _sample.name
+                st.session_state["orig_name"] = _sample.name
+                st.session_state["from_uploader"] = False
+                st.session_state["_sample_run"] = True
+                st.rerun()
+            st.error("The bundled sample file is missing from this install.")
+
+    # Persist to session_state immediately on upload / clear on removal.
+    # Every upload passes through src.core.security before touching disk:
+    # extension allowlist, size ceiling, magic-byte sniffing, safe filename.
+    if uploaded is not None:
+        if uploaded.name != st.session_state.get("orig_name", ""):
+            _reset_pipeline()
+            raw_bytes = uploaded.read()
+            st.session_state["orig_name"] = uploaded.name
+            from src.core.security import UploadValidationError, validate_upload
+            try:
+                safe_name = validate_upload(uploaded.name, raw_bytes)
+            except UploadValidationError as _ve:
+                st.session_state["preview_df"]    = None
+                st.session_state["preview_bytes"] = None
+                st.session_state["preview_name"]  = ""
+                st.error(f"Upload rejected. {_ve}")
+            else:
+                st.session_state["preview_bytes"] = raw_bytes
+                st.session_state["preview_name"]  = safe_name
+                _fname = safe_name.lower()
+                try:
+                    # One reader for every format/encoding/delimiter — a bare
+                    # pd.read_csv here previewed a semicolon- or cp1252-encoded
+                    # export as a single mangled column while the analysis
+                    # behind it was correct.
+                    _pdf, _prep = read_any_bytes(raw_bytes, safe_name)
+                    st.session_state["preview_df"] = _pdf
+                    st.session_state["preview_read_report"] = _prep
+                    st.session_state["preview_notes"] = list(_prep.notes)
+                except Exception as _e:
+                    st.session_state["preview_df"] = None
+                    st.session_state["preview_notes"] = []
+                    st.error(f"Could not read file: {_e}")
+                st.session_state["from_uploader"] = True
+    else:
+        if st.session_state.get("orig_name") and st.session_state.get("from_uploader"):
+
+            _stale_run = _active_run()
+            if _stale_run is not None:
+                _stale_run.discard_and_stop()  # its results belong to the removed file
+            _theme = st.session_state.get("theme", "day")
+            for _k2, _v2 in _DEFAULTS.items():
+                st.session_state[_k2] = _v2
+            st.session_state["theme"] = _theme
+            st.session_state["from_uploader"] = False
+
+    _loaded = st.session_state.get("preview_df")
+    if isinstance(_loaded, pd.DataFrame):
+        st.markdown(
+            f'<div class="file-identity"><b>{html.escape(str(st.session_state.get("preview_name") or ""))}</b>'
+            f" is loaded: {len(_loaded):,} rows, {len(_loaded.columns)} columns.</div>",
+            unsafe_allow_html=True,
+        )
+
+    _notes: list[str] = st.session_state.get("preview_notes") or []
+    if _notes:
+        _items = "".join(f"<li>{html.escape(str(n))}</li>" for n in _notes)
+        st.markdown(
+            f'<details class="file-notices"><summary>{len(_notes)} file notice'
+            f'{"s" if len(_notes) > 1 else ""} (auto-repaired)</summary><ul>{_items}</ul></details>',
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("More formats and related tables"):
+        st.caption(
+            "Other formats are read too (Parquet, JSON, Stata, SPSS and more). Related tables "
+            "such as customers or products are joined automatically on shared IDs."
+        )
+        related_uploads = st.file_uploader(
+            "Related tables",
+            type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+        )
+        valid_related: list[Any] = []
+        if related_uploads:
+            for _ru in related_uploads:
+                try:
+                    validate_upload(_ru.name, _ru.getvalue())
+                    valid_related.append(_ru)
+                except UploadValidationError as _err:
+                    st.error(f"Cannot upload '{_ru.name}': {_err}")
+            related_uploads = valid_related
+    join_choices: dict[int, dict[str, Any]] = (
+        _join_review(related_uploads) if related_uploads and st.session_state.get("preview_bytes") else {}
+    )
+
+    st.markdown('<div class="step-head"><span class="step-n">2</span> Ask your question</div>', unsafe_allow_html=True)
+    objective = st.text_area(
+        "What do you want to know? (optional, plain English)",
+        placeholder="e.g. What's driving this result? Which rows are the "
+                    "outliers, and why?",
+        height=90,
+        help="Your helpers will prioritise analyses that answer this question "
+             "and address it directly in the final report.",
+    )
+
+    _target_options = ["Let the assistant decide"]
+    _target_frame = st.session_state.get("preview_df")
+    if isinstance(_target_frame, pd.DataFrame):
+        _target_options.extend(str(column) for column in _target_frame.columns)
+    _target_choice = st.selectbox(
+        "Target column",
+        _target_options,
+        help="Choose the outcome to predict, or let the assistant identify a useful target.",
+    )
+    target_col = "" if _target_choice == _target_options[0] else _target_choice
+
+    # The one place the analysis mode is chosen (the sidebar only reports it), so there is a
+    # single widget and a single session key.
+    st.markdown('<div class="step-head"><span class="step-n">3</span> Choose how to answer</div>', unsafe_allow_html=True)
+    _analysis_mode = st.segmented_control(
+        "Analysis mode",
+        [_MODE_AI, _MODE_NO_AI],
+        default=_MODE_AI,
+        key="analysis_mode",
+        label_visibility="collapsed",
+        help="Without an AI summary the analysis is deterministic: no key, no network call, "
+             "and your data never reaches an AI provider.",
+    )
+    use_llm = _analysis_mode != _MODE_NO_AI
+    st.caption(
+        "An AI writes the plan and the summary from a controlled description of your data, "
+        "not the raw file."
+        if use_llm
+        else "Private and deterministic. No key or network call is needed."
+    )
+
 with st.sidebar:
     st.markdown(
         '<div class="side-brand">'
@@ -616,165 +775,6 @@ with st.sidebar:
         '<div class="side-sub">Everything here has a safe default. You can run without opening it.</div></div>',
         unsafe_allow_html=True,
     )
-
-    with _inputs_box:
-        # ── Upload ────────────────────────────────────────────────────────────────
-        st.markdown('<div class="step-head"><span class="step-n">1</span> Add your file</div>', unsafe_allow_html=True)
-        _upload_col, _sample_col = st.columns([0.72, 0.28], gap="medium")
-        with _upload_col:
-            uploaded = st.file_uploader(
-                "CSV, TSV or Excel",
-                type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
-                label_visibility="collapsed",
-            )
-        with _sample_col:
-            st.markdown(
-                '<div class="sample-choice"><div class="sample-title">No file handy?</div>'
-                '<p>Run a real analysis of a bundled customer-churn file. It is not your data.</p></div>',
-                unsafe_allow_html=True,
-            )
-            if st.button("Use sample data", key="btn_sample_data"):
-                _sample = ROOT / "data" / "sample_customer_churn.csv"
-                if _sample.exists():
-                    _sample_bytes = _sample.read_bytes()
-                    _sample_df, _sample_report = read_any_bytes(_sample_bytes, _sample.name)
-                    st.session_state["preview_df"] = _sample_df
-                    st.session_state["preview_read_report"] = _sample_report
-                    st.session_state["preview_bytes"] = _sample_bytes
-                    st.session_state["preview_name"] = _sample.name
-                    st.session_state["orig_name"] = _sample.name
-                    st.session_state["from_uploader"] = False
-                    st.session_state["_sample_run"] = True
-                    st.rerun()
-                st.error("The bundled sample file is missing from this install.")
-
-        # Persist to session_state immediately on upload / clear on removal.
-        # Every upload passes through src.core.security before touching disk:
-        # extension allowlist, size ceiling, magic-byte sniffing, safe filename.
-        if uploaded is not None:
-            if uploaded.name != st.session_state.get("orig_name", ""):
-                _reset_pipeline()
-                raw_bytes = uploaded.read()
-                st.session_state["orig_name"] = uploaded.name
-                from src.core.security import UploadValidationError, validate_upload
-                try:
-                    safe_name = validate_upload(uploaded.name, raw_bytes)
-                except UploadValidationError as _ve:
-                    st.session_state["preview_df"]    = None
-                    st.session_state["preview_bytes"] = None
-                    st.session_state["preview_name"]  = ""
-                    st.error(f"Upload rejected. {_ve}")
-                else:
-                    st.session_state["preview_bytes"] = raw_bytes
-                    st.session_state["preview_name"]  = safe_name
-                    _fname = safe_name.lower()
-                    try:
-                        # One reader for every format/encoding/delimiter — a bare
-                        # pd.read_csv here previewed a semicolon- or cp1252-encoded
-                        # export as a single mangled column while the analysis
-                        # behind it was correct.
-                        _pdf, _prep = read_any_bytes(raw_bytes, safe_name)
-                        st.session_state["preview_df"] = _pdf
-                        st.session_state["preview_read_report"] = _prep
-                        st.session_state["preview_notes"] = list(_prep.notes)
-                    except Exception as _e:
-                        st.session_state["preview_df"] = None
-                        st.session_state["preview_notes"] = []
-                        st.error(f"Could not read file: {_e}")
-                    st.session_state["from_uploader"] = True
-        else:
-            if st.session_state.get("orig_name") and st.session_state.get("from_uploader"):
-
-                _stale_run = _active_run()
-                if _stale_run is not None:
-                    _stale_run.discard_and_stop()  # its results belong to the removed file
-                _theme = st.session_state.get("theme", "day")
-                for _k2, _v2 in _DEFAULTS.items():
-                    st.session_state[_k2] = _v2
-                st.session_state["theme"] = _theme
-                st.session_state["from_uploader"] = False
-
-        _loaded = st.session_state.get("preview_df")
-        if isinstance(_loaded, pd.DataFrame):
-            st.markdown(
-                f'<div class="file-identity"><b>{html.escape(str(st.session_state.get("preview_name") or ""))}</b>'
-                f" is loaded: {len(_loaded):,} rows, {len(_loaded.columns)} columns.</div>",
-                unsafe_allow_html=True,
-            )
-
-        _notes: list[str] = st.session_state.get("preview_notes") or []
-        if _notes:
-            _items = "".join(f"<li>{html.escape(str(n))}</li>" for n in _notes)
-            st.markdown(
-                f'<details class="file-notices"><summary>{len(_notes)} file notice'
-                f'{"s" if len(_notes) > 1 else ""} (auto-repaired)</summary><ul>{_items}</ul></details>',
-                unsafe_allow_html=True,
-            )
-
-        with st.expander("More formats and related tables"):
-            st.caption(
-                "Other formats are read too (Parquet, JSON, Stata, SPSS and more). Related tables "
-                "such as customers or products are joined automatically on shared IDs."
-            )
-            related_uploads = st.file_uploader(
-                "Related tables",
-                type=sorted(ext.lstrip(".") for ext in ALLOWED_EXTENSIONS),
-                accept_multiple_files=True,
-                label_visibility="collapsed",
-            )
-            valid_related: list[Any] = []
-            if related_uploads:
-                for _ru in related_uploads:
-                    try:
-                        validate_upload(_ru.name, _ru.getvalue())
-                        valid_related.append(_ru)
-                    except UploadValidationError as _err:
-                        st.error(f"Cannot upload '{_ru.name}': {_err}")
-                related_uploads = valid_related
-        join_choices: dict[int, dict[str, Any]] = (
-            _join_review(related_uploads) if related_uploads and st.session_state.get("preview_bytes") else {}
-        )
-
-        st.markdown('<div class="step-head"><span class="step-n">2</span> Ask your question</div>', unsafe_allow_html=True)
-        objective = st.text_area(
-            "What do you want to know? (optional, plain English)",
-            placeholder="e.g. What's driving this result? Which rows are the "
-                        "outliers, and why?",
-            height=90,
-            help="Your helpers will prioritise analyses that answer this question "
-                 "and address it directly in the final report.",
-        )
-
-        _target_options = ["Let the assistant decide"]
-        _target_frame = st.session_state.get("preview_df")
-        if isinstance(_target_frame, pd.DataFrame):
-            _target_options.extend(str(column) for column in _target_frame.columns)
-        _target_choice = st.selectbox(
-            "Target column",
-            _target_options,
-            help="Choose the outcome to predict, or let the assistant identify a useful target.",
-        )
-        target_col = "" if _target_choice == _target_options[0] else _target_choice
-
-        # The one place the analysis mode is chosen (the sidebar only reports it), so there is a
-        # single widget and a single session key.
-        st.markdown('<div class="step-head"><span class="step-n">3</span> Choose how to answer</div>', unsafe_allow_html=True)
-        _analysis_mode = st.segmented_control(
-            "Analysis mode",
-            [_MODE_AI, _MODE_NO_AI],
-            default=_MODE_AI,
-            key="analysis_mode",
-            label_visibility="collapsed",
-            help="Without an AI summary the analysis is deterministic: no key, no network call, "
-                 "and your data never reaches an AI provider.",
-        )
-        use_llm = _analysis_mode != _MODE_NO_AI
-        st.caption(
-            "An AI writes the plan and the summary from a controlled description of your data, "
-            "not the raw file."
-            if use_llm
-            else "Private and deterministic. No key or network call is needed."
-        )
 
     # ── Connect an AI ─────────────────────────────────────────────────────────
     st.markdown(

@@ -532,12 +532,22 @@ class ReportMixin(ControllerState):
                 )
 
                 disposition = finding.recommendation_disposition()
+                arch_str = str(getattr(self.last_profile, "archetype", "") or "").lower()
                 if disposition == "act":
                     action = f"Apply the evaluated intervention for {level_name} and track its effect on '{measure}'."
                 elif disposition == "pilot":
                     action = f"Test whether changing {level_name} affects '{measure}' in a controlled pilot."
                 elif disposition == "investigate":
-                    action = f"Investigate {level_name} operational dynamics before changing policy."
+                    if any(a in arch_str for a in ("sensor", "continuous")):
+                        action = f"Investigate {level_name} regime dynamics and sensor baseline."
+                    elif any(a in arch_str for a in ("panel", "geospatial")):
+                        action = f"Investigate {level_name} cohort dynamics before broader intervention."
+                    elif any(a in arch_str for a in ("survey", "cross_sectional", "survival")):
+                        action = f"Investigate {level_name} subgroup factors in follow-up research."
+                    elif any(a in arch_str for a in ("transaction", "basket", "customer")):
+                        action = f"Investigate {level_name} operational dynamics before changing policy."
+                    else:
+                        action = f"Investigate {level_name} dynamics before taking intervention action."
                 else:
                     action = f"Monitor {level_name} trends as an operational context factor."
 

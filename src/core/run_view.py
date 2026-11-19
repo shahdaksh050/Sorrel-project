@@ -197,13 +197,17 @@ def is_headline_finding(layer: Any, kind: Any) -> bool:
 
 def select_headline_findings(
     findings: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+    cap: int | None = None,
 ) -> tuple[dict[str, Any], ...]:
-    """The findings that get a card: result-bearing layers, no method notes, first five.
+    """The findings that get a card: result-bearing layers, no method notes.
 
-    The single copy of the selection the Answers tab used to build inline.
+    When `cap` is None, returns all eligible findings so the user sees the complete set.
+    When `cap` is an integer, limits to at most `cap` findings.
     """
     picked = [f for f in findings if is_headline_finding(f.get("layer"), f.get("kind"))]
-    return tuple(picked[:MAX_HEADLINE_FINDINGS])
+    if cap is not None:
+        return tuple(picked[:cap])
+    return tuple(picked)
 
 
 def compute_verdict(headline: tuple[dict[str, Any], ...]) -> Verdict | None:

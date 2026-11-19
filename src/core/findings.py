@@ -342,7 +342,12 @@ class Finding:
             v for k in (*_SAMPLE_SIZE_KEYS, "n_rest", "segment_n", "population_size", "n_records")
             if isinstance(v := self.evidence.get(k), (int, float)) and not isinstance(v, bool)
         ]
-        has_adequate_sample = min(sample_sizes) >= 100 if sample_sizes else True
+        is_entity_aggregated = any(
+            "repeated rows aggregated" in str(c).lower() or "per '" in str(c).lower() or "per " in str(c).lower()
+            for c in self.caveats
+        ) or bool(self.evidence.get("entity_column")) or bool(self.evidence.get("unit_of_analysis"))
+        min_sample_threshold = 20 if is_entity_aggregated else 100
+        has_adequate_sample = min(sample_sizes) >= min_sample_threshold if sample_sizes else True
         if (
             self.controllability == "manipulable"
             and self.outcome is not None
@@ -963,8 +968,8 @@ def classify_action_matrix(
         # Check sensor telemetry:
         if controllability == "sensor_telemetry" or is_sensor_telemetry_feature(target_feature):
             entry["rationale"] = (
-                "Sensor telemetry / additive component of active power load — "
-                "passive instrumentation readout; do not treat as an intervention lever or manipulate meter readings."
+                f"Sensor telemetry / measurement readout ('{target_feature}') — "
+                "passive instrumentation signal to monitor as operational baseline or threshold boundary; not a direct input lever."
             )
             entry["quadrant"] = "watch_caveats"
             entry["impact_level"] = "Context"
@@ -1026,19 +1031,24 @@ def classify_action_matrix(
             and (has_observational_disclaimer or evidence_tier == "pilot")
         )
         if is_observational_segment_contrast and evidence_tier != "causal_action":
-            if disposition != "pilot":
-                entry.update(lever=headline, rationale="Investigate the observed difference before changing policy.",
-                             quadrant="watch_caveats", impact_level="Context", feasibility_level="Investigation")
+            if any("do not treat as a causal lever" in c.lower() for c in caveats) or disposition == "monitor":
+                entry.update(
+                    lever=headline,
+                    rationale="Observational evidence — monitor as contextual factor or covariate.",
+                    quadrant="watch_caveats",
+                    impact_level="Context",
+                    feasibility_level="Investigation",
+                )
                 matrix["watch_caveats"].append(entry)
                 continue
 
-            entry["lever"] = f"Pilot A/B test: {lever}" if not lever.startswith("Pilot") else lever
+            entry["lever"] = f"Pilot validation: {lever}" if not lever.startswith("Pilot") else lever
             entry["rationale"] = (
                 f"High-contrast observational segment ({int(conf * 100)}% confidence); "
-                f"validate via prospective A/B test or pilot before scaling."
+                f"validate via targeted pilot trial or localized rollout before scaling."
             )
             entry["quadrant"] = "pilot"
-            entry["impact_level"] = "High"
+            entry["impact_level"] = "High" if (norm_eff >= 0.15 or abs(effect or 0) >= 0.15) else "Moderate"
             entry["feasibility_level"] = "Pilot Validation"
             matrix["pilot"].append(entry)
             continue

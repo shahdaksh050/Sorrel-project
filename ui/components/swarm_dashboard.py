@@ -8,6 +8,7 @@ live Vega-Lite analytical visualization binding.
 from __future__ import annotations
 
 import html
+import itertools
 from pathlib import Path
 from typing import Any
 
@@ -161,9 +162,19 @@ def build_swarm_payload(
         quality_score = "Unavailable"
     if isinstance(quality_score, (int, float)):
         quality_score = f"{quality_score:.1f} / 100"
-    missingness = rep.get("missingness", "Unavailable")
-    if isinstance(missingness, (int, float)):
-        missingness = f"{missingness:.2%}"
+    missing_val = rep.get("missingness")
+    if missing_val is None or missing_val == "Unavailable":
+        if isinstance(prof_obj, dict):
+            missing_val = prof_obj.get("missing_pct") or prof_obj.get("missing_percentage")
+        elif hasattr(prof_obj, "missing_pct"):
+            missing_val = prof_obj.missing_pct
+    if isinstance(missing_val, (int, float)):
+        if missing_val > 1.0:
+            missingness = f"{missing_val:.2f}%"
+        else:
+            missingness = f"{missing_val:.2%}"
+    else:
+        missingness = "0.00%" if missing_val == 0 else str(missing_val or "0.00%")
 
     kpis: list[dict[str, Any]] = []
     evidence = headline_finding.get("evidence") or {}
@@ -191,11 +202,24 @@ def build_swarm_payload(
     adjusted = headline_finding.get("p_adjusted")
     pvalue = adjusted if adjusted is not None else headline_finding.get("p_value")
     if isinstance(pvalue, (int, float)):
+        if pvalue < 0.001:
+            target_str = "< 0.001"
+            badge_str = "p < 0.001"
+        else:
+            target_str = f"{pvalue:.3g}"
+            badge_str = f"p = {pvalue:.3g}"
+        sub_text = (
+            "Benjamini-Hochberg FDR control across all tested hypotheses."
+            if adjusted is not None
+            else "Observed statistical significance level."
+        )
         kpis.append({
             "label": "Adjusted p-value" if adjusted is not None else "Raw p-value",
-            "badge": "p < 0.001" if pvalue < 0.001 else f"p = {pvalue:.3g}",
-            "target": f"{pvalue:.3g}", "prefix": "", "suffix": "",
-            "subtext": headline_finding.get("headline") or "",
+            "badge": badge_str,
+            "target": target_str,
+            "prefix": "",
+            "suffix": "",
+            "subtext": sub_text,
         })
 
 
@@ -384,7 +408,7 @@ def render_native_swarm_cockpit(
 <h2>{html.escape(str(title))}</h2>
 <p class="dir-content">{html.escape(str(lead_narrative))}</p>
 <div style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;margin-top:0.75rem;">
-<span class="mono-badge" style="background:var(--paper-card);border:1px solid var(--pen);color:var(--pen);font-weight:700;">{html.escape(str(headline_badge))}</span>
+<span class="mono-badge" style="background:var(--sheet-alt);border:1px solid var(--pen);color:var(--pen);font-weight:700;">{html.escape(str(headline_badge))}</span>
 <span class="mono-badge">Run #{html.escape(str(run_id))}</span>
 <span class="mono-badge">{html.escape(str(source_name))}</span>
 </div>
@@ -413,11 +437,11 @@ def render_native_swarm_cockpit(
                     target_val = f"{kpi.get('prefix', '')}{kpi.get('target', '')}{kpi.get('suffix', '')}"
                     st.markdown(
                         f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">'
-                        f'<div style="font-size:0.76rem;font-weight:600;color:var(--ink-muted);text-transform:uppercase;letter-spacing:0.04em;">{html.escape(str(kpi.get("label", "")))}</div>'
+                        f'<div style="font-size:0.76rem;font-weight:600;color:var(--graphite);text-transform:uppercase;letter-spacing:0.04em;">{html.escape(str(kpi.get("label", "")))}</div>'
                         f'<span class="mono-badge" style="color:var(--pen);font-size:0.7rem;">{html.escape(str(kpi.get("badge", "")))}</span>'
                         f'</div>'
-                        f'<div style="font-size:1.75rem;font-weight:700;color:var(--ink-text);font-family:var(--sans);margin:0.2rem 0;">{html.escape(target_val)}</div>'
-                        f'<div style="font-size:0.78rem;color:var(--ink-muted);line-height:1.35;">{html.escape(str(kpi.get("subtext", "")))}</div>',
+                        f'<div style="font-size:1.75rem;font-weight:700;color:var(--ink);font-family:var(--sans);margin:0.2rem 0;">{html.escape(target_val)}</div>'
+                        f'<div style="font-size:0.78rem;color:var(--graphite);line-height:1.35;">{html.escape(str(kpi.get("subtext", "")))}</div>',
                         unsafe_allow_html=True,
                     )
 
@@ -435,26 +459,52 @@ def render_native_swarm_cockpit(
                 return "", None
             return f"Evidence for: {plainify(str(f.get('headline', '')))} ({state_label(finding_state(f))})", f
 
-        # Lead Chart
-        c0 = charts[0]
-        note0, f0_match = _get_note(c0)
-        render_dashboard_chart(c0, cfg, note0, f0_match, framed=True, height=340, card_key="swarm_chart_lead")
+        lone_cards = itertools.count()
 
-        # Subsequent charts
-        if len(charts) > 1:
-            for j in range(1, len(charts), 2):
-                pair = charts[j : j + 2]
-                if len(pair) == 1:
-                    note_j, f_j = _get_note(pair[0])
-                    render_dashboard_chart(pair[0], cfg, note_j, f_j, framed=True, height=280, card_key=f"swarm_chart_{j}")
-                else:
-                    c_left, c_right = st.columns(2, gap="medium")
-                    with c_left:
-                        n_l, f_l = _get_note(pair[0])
-                        render_dashboard_chart(pair[0], cfg, n_l, f_l, framed=True, height=280, card_key=f"swarm_chart_{j}")
-                    with c_right:
-                        n_r, f_r = _get_note(pair[1])
-                        render_dashboard_chart(pair[1], cfg, n_r, f_r, framed=True, height=280, card_key=f"swarm_chart_{j+1}")
+        def flush_cockpit(pending: list[dict[str, Any]]) -> None:
+            """Two panels per row, in bordered columns so the two cards are always the same height;
+            a lone last panel takes the full width."""
+            for j in range(0, len(pending), 2):
+                row = pending[j : j + 2]
+                if len(row) == 1:
+                    note_lone, f_lone = _get_note(row[0])
+                    render_dashboard_chart(
+                        row[0],
+                        cfg,
+                        note_lone,
+                        f_lone,
+                        height=260,
+                        card_key=f"swarm_chart_lone_{next(lone_cards)}",
+                    )
+                    continue
+                cols = st.columns(len(row), border=True)
+                for col, ch in zip(cols, row, strict=False):
+                    with col:
+                        note_col, f_col = _get_note(ch)
+                        render_dashboard_chart(
+                            ch, cfg, note_col, f_col, height=260, framed=False
+                        )
+
+        # Ranking order is kept. Only the lead chart and charts that need width (time series,
+        # survival curves, anything marked "wide") span the page; the rest sit two to a row.
+        pending: list[dict[str, Any]] = []
+        for index, ch in enumerate(charts):
+            spans_page = ch.get("size") == "wide" or (index == 0 and ch.get("size") != "half")
+            if spans_page:
+                flush_cockpit(pending)
+                pending = []
+                note_wide, f_wide = _get_note(ch)
+                render_dashboard_chart(
+                    ch,
+                    cfg,
+                    note_wide,
+                    f_wide,
+                    height=340,
+                    card_key=f"swarm_chart_wide_{index}",
+                )
+            else:
+                pending.append(ch)
+        flush_cockpit(pending)
     else:
         st.info("No dashboard charts generated for this run.")
 

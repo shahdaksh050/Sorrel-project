@@ -3,13 +3,12 @@ Charts Tab (Dynamic Vega-Lite Dashboard).
 """
 from __future__ import annotations
 
-import itertools
 from typing import Any
 
 import streamlit as st
 
-from src.core.plain_language import plainify
-from ui.components.cards import finding_state, render_dashboard_chart, state_label, tab_head
+from ui.components.cards import tab_head
+from ui.components.swarm_dashboard import render_native_swarm_cockpit
 
 #: One chart height per panel type, so the panels of a row line up: half-width panels share one, and
 #: the full-width panels (the lead chart, time series, anything marked "wide") share a taller one.
@@ -26,85 +25,9 @@ def render_charts_tab(
     meta: Any | None = None,
     prof: Any | None = None,
 ) -> None:
-    """Render Tier 3: Dynamic Visual Dashboard."""
-    by_id = {str(f["finding_id"]): f for f in (findings or []) if f.get("finding_id")}
-
-    def finding_of(ch: dict[str, Any]) -> dict[str, Any] | None:
-        """The finding a chart supports, so its checks and its source can sit beside it."""
-        return by_id.get(str(ch.get("finding_id") or ""))
-
-    def note(ch: dict[str, Any]) -> str:
-        """Which finding a chart supports, with its verdict, so a chart is never an unexplained picture."""
-        f = by_id.get(str(ch.get("finding_id") or ""))
-        if f is None:
-            return ""
-        return f"Evidence for: {plainify(str(f.get('headline', '')))} ({state_label(finding_state(f))})"
-
+    """Render Tier 3: Dynamic Visual Dashboard (Unified Cockpit & Synchronized Analytical Visualizations)."""
     tab_head("Charts", "The charts, most important", "first")
-    if dashboard:
-        c_left, c_right = st.columns([0.65, 0.35], vertical_alignment="center")
-        with c_left:
-            st.caption(
-                "Charts are chosen to fit your data, most important first. "
-                "A chart tied to a finding says which one and whether it held up."
-            )
-        with c_right:
-            view_style = st.radio(
-                "Cockpit View",
-                ["Standard Grid", "Autonomous Swarm Cockpit"],
-                horizontal=True,
-                label_visibility="collapsed",
-                key="dash_view_style",
-            )
-        if view_style == "Autonomous Swarm Cockpit":
-            from ui.components.swarm_dashboard import render_swarm_dashboard
-
-            render_swarm_dashboard(
-                dashboard=dashboard,
-                report=report,
-                findings=findings,
-                run_view=run_view,
-                vega_cfg=vega_cfg,
-                meta=meta,
-                prof=prof,
-            )
-            return
-
-        lone_cards = itertools.count()  # `flush` runs more than once: each card key must stay unique
-
-        def flush(pending: list[dict[str, Any]]) -> None:
-            """Two panels per row, in bordered columns so the two cards are always the same height; a
-            lone last panel takes the full width."""
-            for j in range(0, len(pending), 2):
-                row = pending[j : j + 2]
-                if len(row) == 1:
-                    render_dashboard_chart(
-                        row[0], vega_cfg, note(row[0]), finding_of(row[0]), height=HALF_HEIGHT,
-                        card_key=f"chart_card_lone_{next(lone_cards)}",
-                    )
-                    continue
-                for col, ch in zip(st.columns(2, border=True), row, strict=True):
-                    with col:
-                        render_dashboard_chart(
-                            ch, vega_cfg, note(ch), finding_of(ch), height=HALF_HEIGHT, framed=False
-                        )
-
-        # Ranking order is kept. Only the lead chart and charts that need width (time series,
-        # survival curves, anything marked "wide") span the page; the rest sit two to a row, so
-        # a three-bar chart is not stretched across a full-width canvas.
-        pending: list[dict[str, Any]] = []
-        for index, ch in enumerate(dashboard):
-            spans_page = ch.get("size") == "wide" or (index == 0 and ch.get("size") != "half")
-            if spans_page:
-                flush(pending)
-                pending = []
-                render_dashboard_chart(
-                    ch, vega_cfg, note(ch), finding_of(ch), height=WIDE_HEIGHT, card_key=f"chart_card_wide_{index}"
-                )
-            else:
-                pending.append(ch)
-        flush(pending)
-    else:
+    if not dashboard:
         dash_coverage = report.get("coverage") or {}
         if dash_coverage.get("total", 0) > 0 and dash_coverage.get("answered", 0) == 0:
             st.info(
@@ -117,3 +40,20 @@ def render_charts_tab(
                 "No dashboard was generated for this run. The run may still be "
                 "processing, or the analysis produced no chartable results."
             )
+        return
+
+    st.caption(
+        "Charts are chosen to fit your data, most important first. "
+        "A chart tied to a finding says which one and whether it held up."
+    )
+
+    render_native_swarm_cockpit(
+        dashboard=dashboard,
+        report=report,
+        findings=findings,
+        run_view=run_view,
+        vega_cfg=vega_cfg,
+        meta=meta,
+        prof=prof,
+    )
+

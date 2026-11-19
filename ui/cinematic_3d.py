@@ -178,11 +178,17 @@ def extract_cinematic_state(session_state: Any) -> dict[str, Any]:
     def _count_kind(kind: str) -> int:
         return sum(1 for c in cols_summary if isinstance(c, dict) and c.get("kind") == kind)
 
-    # The `or N` fallbacks keep the showcase populated before any profile exists.
-    num_numeric = _count_kind("numeric") or 8
-    num_categorical = _count_kind("categorical") or 4
-    num_datetime = _count_kind("datetime") or 1
-    num_text = _count_kind("text") or 1
+    # Only fall back to demonstration defaults when no columns exist at all
+    if cols_summary:
+        num_numeric = _count_kind("numeric")
+        num_categorical = _count_kind("categorical")
+        num_datetime = _count_kind("datetime")
+        num_text = _count_kind("text")
+    else:
+        num_numeric = 8
+        num_categorical = 4
+        num_datetime = 1
+        num_text = 1
     quality_score = profile.get("quality_score", 94) if isinstance(profile, dict) else 94
 
     # 4. Statistical & Tool Outputs
@@ -255,7 +261,7 @@ def extract_cinematic_state(session_state: Any) -> dict[str, Any]:
     analysis_done = bool(session_state.get("analysis_done") or session_state.get("final_report"))
     if not has_models:
         if not analysis_done:
-            # Pre-analysis demonstration models
+            # Pre-analysis demonstration models for initial showcase
             has_models = True
             best_model_name = "GradientBoosting"
             best_cv_score = 0.924
@@ -273,14 +279,15 @@ def extract_cinematic_state(session_state: Any) -> dict[str, Any]:
     report_raw = session_state.get("final_report")
     report = report_raw if isinstance(report_raw, dict) else {}
     run_view = session_state.get("run_view")
+    effective_obj = str(session_state.get("run_objective") or session_state.get("user_objective") or "")
     if run_view is None and report:
         from src.core.run_view import build_run_view
         try:
-            run_view = build_run_view(report, {}, objective=str(session_state.get("user_objective") or ""), is_sample=False)
+            run_view = build_run_view(report, {}, objective=effective_obj, is_sample=False)
         except Exception:
             run_view = None
 
-    user_objective = session_state.get("user_objective") or (
+    user_objective = effective_obj or (
         run_view.objective if run_view and run_view.objective else "Comprehensive Autonomous Statistical Exploration."
     )
 

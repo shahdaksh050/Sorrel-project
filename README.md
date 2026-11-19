@@ -57,9 +57,10 @@ from raw rows.
 3. **Plans.** An LLM (or a deterministic profile-driven plan when you choose
    no LLM) proposes a short sequence of tool calls. Each step is validated
    against the real column names and tool schemas before it runs.
-4. **Executes.** 34 registered tools run deterministically: statistics, models
-   with cross-validation, time series, forecasting, survival, text, geography,
-   graphs, and sandboxed custom code when allowed.
+4. **Executes.** 41 registered tools run deterministically: statistics, models
+   with cross-validation, causal inference (IPW, DiD), counterfactual scenario
+   simulations, time series, forecasting, survival, text, geography, graphs,
+   and sandboxed custom code when allowed.
 5. **Checks its own claims.** Findings carry effect sizes, confidence
    intervals, run-level multiple-testing control, and audit check marks. Numbers
    in the LLM's summary that do not match executed results are flagged.
@@ -137,7 +138,7 @@ flowchart TB
         ctrl["AgentController<br/>plan, orchestrate, audit, report"]
         prompts["PromptManager"]
         mem["MemorySystem<br/>metadata, results, findings"]
-        reg["ToolRegistry<br/>34 tools"]
+        reg["ToolRegistry<br/>41 tools"]
     end
 
     subgraph rlm["Inference layer: src/rlm"]
@@ -253,7 +254,7 @@ flowchart TB
     end
 
     artefacts --> view["RunView<br/>read-only projection"]
-    view --> tabs["Answers, Charts, Details, Downloads"]
+    view --> tabs["Answers, Charts, Actions, Details, Downloads"]
 ```
 
 What reaches an LLM prompt is metadata, the data profile, tool summaries and
@@ -347,7 +348,7 @@ sequenceDiagram
     deactivate Run
     App->>Run: snapshot() shows finished
     App->>App: fold outcome into session state, rerun
-    App-->>User: Answers, Charts, Details, Downloads
+    App-->>User: Answers, Charts, Actions, Details, Downloads
 ```
 
 **One reasoning iteration with tool execution.**
@@ -423,7 +424,7 @@ sequenceDiagram
 ### Class diagrams
 
 The engine core, trimmed to the types that carry the design. The tools shown are
-four of the 34.
+four of the 41.
 
 ```mermaid
 classDiagram
@@ -712,10 +713,11 @@ than a list of tools.
 | Sidebar | File upload, the bundled sample, provider and model, analysis switches (LLM, ML, iterations) and the safety settings, which a shared-server operator controls. |
 | Header band | The run's state and file, the seven steps with what each reported, and the workflow plate. Only one step reads "Working" at a time. |
 | Run | Analysis on a worker thread with live step notes, "found so far" findings, a cooperative Stop, and a partial report when stopped. |
-| Answers | The question as the heading, a verdict ("N of M checked findings held up"), ranked findings with their audit check marks, caveats, recommendations, and a search over findings. |
-| Charts | Vega-Lite charts chosen to fit the data, each tied to the finding it supports, with the numbers behind it as a table. |
-| Details | How the file was read and repaired, analyses specific to the data, the audit trail, models, governance and the step-by-step record. |
-| Downloads | The report (HTML and Markdown), JSON results, models, the 3D presentation and the raw result. |
+| Answers | Uncapped, debloated finding inventory with three-tier ranking (Held Up, Needs Data, Observations), category filter pills, verified claim check marks, and collapsible methodology drawers. |
+| Charts | Master Analytical Cockpit combining Autonomous Swarm Executive Briefing, population telemetry trust strip, top analytical KPIs (< 0.001 FDR precision), and responsive adaptive grid with finding evidence linkages. |
+| Actions | Prescriptive Action Engine & 2x2 Prioritization Matrix dynamically tailored across 10 universal data archetypes (Quick Wins, Strategic Bets, Pilot/A/B Tests, Incremental Tuning), with operational risk guardrails, interactive What-If scenario simulations, and actionable directives. |
+| Details | How the file was read and repaired, domain integrity diagnostics, execution trace, models, governance and the step-by-step audit record. |
+| Downloads | Self-contained standalone HTML report with embedded assets, Markdown and JSON results, HMAC-signed models, and the raw execution record. |
 
 The look is the **Sorrel** design system: warm paper, near-black ink, a forest
 green primary, an amber accent, Geist for the interface and an italic serif for
@@ -743,8 +745,22 @@ analyst would ask of this data.
 compare, associate, predict, explain, forecast, detect, segment, monitor, audit)
 so the plan favours the right tools.
 
+**Universal Dataset Archetypes.** The engine automatically classifies datasets into 10 mutually exclusive, collectively exhaustive (MECE) archetypes via deterministic decision ladders in `profiler.py`:
+- `transactional`: Orders, invoices, customer interaction logs (auto-reshaping: RFM features, repeat purchase).
+- `continuous_series`: High-frequency IoT, sensor telemetry, audio/signal time series (auto-reshaping: calendar encodings, lag features).
+- `panel`: Entities tracked repeatedly across time (auto-reshaping: entity aggregation, within-entity deltas, mixed models).
+- `cross_sectional`: Tabular survey, clinical, or customer snapshots without repeated measures.
+- `survival`: Right-censored time-to-event records (tenure until churn, component life).
+- `survey`: Likert-scale or questionnaire responses (Cronbach's alpha reliability, sentiment extraction).
+- `basket`: Line-item market baskets (auto-incidence encoding, association mining).
+- `network`: Edge lists and bipartite relationship graphs (degree distributions, PageRank).
+- `geospatial`: Point coordinates and geographic locations (bounding boxes, spatial clustering).
+- `hybrid_text`: Tables paired with long-form text (TF-IDF keyword extraction, sentiment polarity).
+
+Pre-modeling transformations (in `reshaping.py` and `CleanDataTool`) run automatically without distorting base measures, and the **Archetype-Native Action Engine** adapts quadrant labels, operational risk guardrails, and validation directives to the detected archetype.
+
 <details>
-<summary><strong>The 34 registered tools</strong></summary>
+<summary><strong>The 41 registered tools</strong></summary>
 
 Applicability depends on the profile and the question. A tool being registered
 does not mean it runs on every upload, and a tool may decline when its
@@ -755,6 +771,7 @@ assumptions are not met. Flags: **ML** fits models (disabled by `--no-ml`),
 | --- | --- | --- |
 | `ingest_dataset` | | Loads a file and reports schema, types, missingness, class balance and basic statistics. |
 | `clean_data` | | Repairs types and reports missing values, duplicates and constant columns. |
+| `extract_structured_features` | | Parses composite or unit-bearing columns into additive numeric and category features. |
 | `detect_outliers` | | IQR, z-score or isolation-forest outliers, flagged rather than dropped. |
 | `correlation_analysis` | | Correlation matrix, top pairs, correlation with the target. |
 | `select_statistical_test` | | Picks and runs a test from normality, group count and data types. |
@@ -764,7 +781,12 @@ assumptions are not met. Flags: **ML** fits models (disabled by `--no-ml`),
 | `dimensionality_analysis` | ML | PCA variance per component and highly correlated feature pairs. |
 | `regression_analysis` | ML | OLS or logistic drivers on a lean predictor set. |
 | `mixed_model_analysis` | ML | Random-intercept models for repeated or nested data. |
+| `causal_analysis` | ML | Inverse Propensity Weighting (IPW) causal diagnostic with positivity/overlap checking. |
+| `difference_in_differences` | | Panel Difference-in-Differences (DiD) estimator with pre-trend parallel testing. |
+| `scenario_simulation` | ML | Counterfactual 'What-If' simulations and multi-driver joint optimization for target shifts. |
+| `threshold_analysis` | | Non-linear tipping points, structural breaks, and piecewise regression thresholds. |
 | `time_series_analysis` | | Trend, stationarity, autocorrelation and seasonality. |
+| `multi_seasonal_analysis` | | Multi-periodicity cycle decomposition via Fast Fourier Transform (FFT) and harmonics. |
 | `forecast_analysis` | | Backtested forecasts over a regular series. |
 | `change_analysis` | | Latest period against the prior period and the trailing average. |
 | `anomaly_analysis` | | Spikes, dips, level shifts and unusual segments. |
@@ -772,6 +794,7 @@ assumptions are not met. Flags: **ML** fits models (disabled by `--no-ml`),
 | `curve_fit_analysis` | | Linear, exponential, logistic and dose-response curve fits. |
 | `segment_comparison` | | Lift of a measure across segments against the baseline, with intervals. |
 | `concentration_analysis` | | How concentrated a measure is across entities. |
+| `ranking_dynamics` | | Bradley-Terry latent rating estimation, win probabilities, and home-field advantage modeling. |
 | `experiment_analysis` | | A/B-style tests with the test chosen automatically. |
 | `cohort_analysis` | | RFM segments and repeat purchase from transaction data. |
 | `basket_analysis` | | Items bought together. |
@@ -953,7 +976,7 @@ mypy src/
 pytest tests/ -v
 ```
 
-About 1,500 tests cover the tools, the controller, the sandbox, the memory and
+Over 2,000 unit and integration tests across 116 source files cover the tools, the controller, the sandbox, the memory and
 finding model, the stylesheet and design tokens, and the application itself
 (`tests/test_app_render.py` runs the real app in Streamlit's test harness).
 `tests/test_architecture.py` checks the layer rules in this README.
@@ -996,10 +1019,10 @@ source files.
 │   │   ├── run_config.py, run_view.py, design_tokens.py
 │   │   └── ...                 domains, integrity, hypothesis, joins, statistics helpers
 │   ├── rlm/engine.py           Inference tracing and token/cost accounting
-│   └── tools/                  34 BaseTool subclasses and shared helpers
+│   └── tools/                  41 BaseTool subclasses and shared helpers
 ├── ui/
 │   ├── run.py                  ActiveRun, RunSpec, RunOutcome (worker thread)
-│   ├── tabs/                   Answers, Charts, Details, Downloads
+│   ├── tabs/                   Answers, Charts, Actions, Details, Downloads
 │   ├── components/             Cards, steps, provisional findings
 │   ├── landing.py, landing_component/   The landing page
 │   ├── pipeline_3d.py, cinematic_3d.py, assets/   The workflow plate and 3D export
@@ -1030,18 +1053,21 @@ What follows comes from the planning documents in `docs/`. Items under
   module with a test that keeps them in sync.
 - The controller split into planning, step and report mixins, and a browser smoke
   test in CI.
+- 41 registered deterministic tools covering causal inference (IPW, DiD), counterfactual scenario simulation, multi-seasonal FFT, threshold break detection, and latent rankings.
+- 10 Universal MECE Dataset Archetypes (`transactional`, `continuous_series`, `panel`, `cross_sectional`, `survival`, `survey`, `basket`, `network`, `geospatial`, `hybrid_text`) with automated pre-modeling transformations.
+- Archetype-Native Prescriptive Action Matrix (2x2) and operational risk guardrails dynamically adapted to data archetypes.
+- Unified Master Charts Cockpit combining Autonomous Swarm Executive Briefing, population telemetry trust strip, top analytical KPIs (< 0.001 FDR precision), and responsive adaptive grid.
+- Full-population mathematical computing with zero mock data and PyArrow high-throughput I/O.
 
 **Open**
 
 - A property-driven expansion of analysis methods (messy-table layouts, parallel
-  series, irregular events, spatial dependence, survey and experimental design,
-  dataset comparison). See [docs/FutureScope.md](docs/FutureScope.md).
+  series, irregular events, dataset comparison). See [docs/FutureScope.md](docs/FutureScope.md).
 - One shared Three.js runtime across the landing page, the plate and the
   cinematic export, and a full device and accessibility matrix.
 - Incremental analysis streaming beyond provisional findings, and chart
   cross-filtering.
-- Dedicated unit tests for a few of the newer specialised tools, coverage
-  measurement and structured runtime logging. See
+- Dedicated unit tests for newer specialized tools, coverage measurement and structured runtime logging. See
   [docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md).
 - A licence file. The repository does not yet declare one.
 

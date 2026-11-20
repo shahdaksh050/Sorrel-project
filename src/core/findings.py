@@ -14,11 +14,12 @@ orphaned from none of them, and none of them independently.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from dataclasses import dataclass, field, fields, replace
+from typing import Any, Literal
 
-from src.core.privacy import redact_level_in_text
+from src.core.privacy import redact_level_in_text, redact_small_level
 from src.core.stats_utils import get_base_column_name, is_derived_pair
+from src.core.vocab import has_role
 
 #: A finding whose |effect| falls below this is suppressed outright unless
 #: it is the only finding available — the T5 "triviality suppression" rule.
@@ -245,7 +246,7 @@ class Finding:
                 reasons.append("causal language was not supported")
         if self.kind in CAVEAT_FINDING_KINDS:
             reasons.append("method or coverage caveat")
-        if self.statistical_state == "inconclusive":
+        if (self.statistical_state or self.evidence.get("statistical_state")) in ("inconclusive", "unperformed"):
             reasons.append("comparison did not establish difference or equivalence")
         self.eligibility_reasons = list(dict.fromkeys(reasons))
         self.primary_eligible = not self.eligibility_reasons
@@ -256,9 +257,6 @@ class Finding:
         Resolves each finding's disposition once and stores outcome, unit, desired_direction,
         evidence_design, controllability, and source on self.
         """
-        if self.disposition is not None:
-            return self.disposition
-
         self.refresh_eligibility()
 
         # Determine source
@@ -299,6 +297,10 @@ class Finding:
         # 1. Eligibility gate
         if not self.primary_eligible:
             self.disposition = "investigate"
+            return self.disposition
+
+        if (self.statistical_state or self.evidence.get("statistical_state")) == "demonstrated_equivalence":
+            self.disposition = "monitor"
             return self.disposition
 
         # 2. Sensor telemetry / passive meters:
@@ -343,11 +345,11 @@ class Finding:
             if isinstance(v := self.evidence.get(k), (int, float)) and not isinstance(v, bool)
         ]
         is_entity_aggregated = any(
-            "repeated rows aggregated" in str(c).lower() or "per '" in str(c).lower() or "per " in str(c).lower()
+            "repeated rows aggregated" in str(c).lower() or "per '" in str(c).lower()
             for c in self.caveats
-        ) or bool(self.evidence.get("entity_column")) or bool(self.evidence.get("unit_of_analysis"))
+        ) or bool(self.evidence.get("entity_column")) or self.evidence.get("unit_of_analysis") not in (None, "", "row")
         min_sample_threshold = 20 if is_entity_aggregated else 100
-        has_adequate_sample = min(sample_sizes) >= min_sample_threshold if sample_sizes else True
+        has_adequate_sample = bool(sample_sizes) and min(sample_sizes) >= min_sample_threshold
         if (
             self.controllability == "manipulable"
             and self.outcome is not None
@@ -552,7 +554,7 @@ def is_trivial(finding: Finding) -> bool:
     than a discovery, should not compete for headline space."""
     if _is_self_derived_finding(finding):
         return True
-    if finding.statistical_state in ("demonstrated_equivalence", "inconclusive"):
+    if finding.statistical_state in ("demonstrated_equivalence", "inconclusive", "unperformed"):
         return False
     if finding.kind in ("uniformity", "invariance"):
         return False
@@ -795,7 +797,10 @@ def _is_actionable_feature(col: str | None) -> bool:
     clean_stems = tuple(s.replace("_", "") for s in _OUTCOME_FEATURE_STEMS)
     if any(norm == s or norm.startswith(s) or norm.endswith(s) for s in clean_stems):
         return False
-    if norm in ("amount", "totalamount", "spend", "totalspend", "customerspend"):
+    if has_role(col, "age") or has_role(col, "protected_attribute"):
+        return False
+    if norm in ("seniorcitizen", "partner", "dependents",
+                "amount", "totalamount", "spend", "totalspend", "customerspend"):
         return False
     if norm.startswith(("sales",)) and not norm.startswith(("salesrep", "saleschannel", "salesperson")):
         return False
@@ -822,384 +827,150 @@ def _is_actionable_feature(col: str | None) -> bool:
 def classify_action_matrix(
     findings: list[Finding] | list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Classify findings into an actionable 2x2 Impact vs Feasibility matrix.
-
-    Returns:
-        {
-            "quick_wins": [...],          # High Impact, High Feasibility (immediate execution)
-            "strategic_bets": [...],       # High Impact, Lower Feasibility / Structural
-            "incremental": [...],          # Moderate/Low Impact, High Feasibility (routine optimizations)
-            "watch_caveats": [...],        # Needs Guardrails / Paradoxes / Fragility / High Uncertainty
-        }
-    """
+    """Project audit decisions into actions; serialized runs follow the same rules."""
     matrix: dict[str, list[dict[str, Any]]] = {
-        "quick_wins": [],
-        "strategic_bets": [],
-        "incremental": [],
-        "pilot": [],
-        "watch_caveats": [],
+        key: [] for key in ("quick_wins", "strategic_bets", "pilot", "incremental", "watch_caveats")
     }
     matrix["a_b_test"] = matrix["pilot"]
-
+    names = {f.name for f in fields(Finding)}
     for item in findings:
-        evidence: dict[str, Any] = {}
         if isinstance(item, Finding):
-            item.refresh_eligibility()
-            finding_id = item.finding_id
-            kind = item.kind
-            headline = item.headline
-            detail = item.detail
-            dimension = item.dimension
-            level = item.level
-            effect = item.effect
-            conf = item.effective_confidence()
-            norm_eff = item.normalized_effect()
-            imp = item.importance or item.compute_importance()
-            caveats = list(item.caveats)
-            evidence_tier: EvidenceTier = item.evidence_tier
-            primary_eligible = item.primary_eligible
-            eligibility_reasons = list(item.eligibility_reasons)
-            if isinstance(item.evidence, dict):
-                evidence = item.evidence
-        elif isinstance(item, dict):
-            finding_id = str(item.get("finding_id", ""))
-            kind = str(item.get("kind", ""))
-            headline = str(item.get("headline", ""))
-            detail = str(item.get("detail", ""))
-            measure = item.get("measure")
-            dimension = item.get("dimension")
-            level = item.get("level")
-            effect = item.get("effect")
-            effect_kind = item.get("effect_kind")
-            source_tool = str(item.get("source_tool", ""))
-            conf = float(item.get("confidence", 0.5))
-            norm_eff = abs(float(effect)) if isinstance(effect, (int, float)) else 0.0
-            imp = float(item.get("importance", 0.5))
-            caveats = list(item.get("caveats") or [])
-            raw_tier = str(item.get("evidence_tier", "observation"))
-            evidence_tier = cast(
-                EvidenceTier,
-                raw_tier
-                if raw_tier in {"observation", "hypothesis", "pilot", "causal_action"}
-                else "observation",
-            )
-            primary_eligible = bool(item.get("primary_eligible", True))
-            eligibility_reasons = [str(v) for v in item.get("eligibility_reasons", [])]
-            raw_ev = item.get("evidence")
-            if isinstance(raw_ev, dict):
-                evidence = raw_ev
+            finding = replace(item)
         else:
-            continue
-
-        checks = evidence.get("checks", {}) if isinstance(evidence, dict) else {}
-        has_paradox = checks.get("paradox_free") is False
-        is_fragile = checks.get("robust") is False
-        is_caveat_kind = kind in CAVEAT_FINDING_KINDS
-
-        # Data hygiene belongs in the dedicated integrity section, never in
-        # a strategic or operational action quadrant.
-        if is_data_hygiene_finding(item):
-            continue
-
-        # Self-derived mathematical tautologies are dropped completely
-        if _is_self_derived_finding(item):
-            continue
-
-        layer = getattr(item, "layer", None) or (item.get("layer") if isinstance(item, dict) else "")
-        is_appendix = str(layer).lower() == "appendix"
-
-        target_feature = dimension or getattr(item, "measure", None) or (item.get("measure") if isinstance(item, dict) else None)
-        is_controllable = _is_actionable_feature(target_feature)
-
-        if isinstance(item, Finding):
-            disposition = item.recommendation_disposition()
-            controllability = item.controllability or classify_feature_controllability(target_feature, kind, headline)
-        else:
-            raw_disp = item.get("disposition")
-            controllability = item.get("controllability") or classify_feature_controllability(target_feature, kind, headline)
-            if raw_disp in ("monitor", "investigate", "pilot", "act"):
-                disposition = raw_disp
-            else:
-                temp_f = Finding(
-                    finding_id=finding_id, kind=kind, headline=headline, detail=detail,
-                    evidence=evidence, source_tool=source_tool, measure=measure,
-                    dimension=dimension, level=level, effect=effect, effect_kind=effect_kind,
-                    confidence=conf, evidence_tier=evidence_tier, caveats=caveats,
-                    primary_eligible=primary_eligible, eligibility_reasons=eligibility_reasons,
-                )
-                disposition = temp_f.recommendation_disposition()
-                controllability = temp_f.controllability or classify_feature_controllability(target_feature, kind, headline)
-
-        level_label = evidence.get("level_label") if isinstance(evidence, dict) else None
-        lever = headline
-        if kind == "driver" and dimension and level:
-            lever = f"Target {dimension}='{level}'"
-        elif kind == "decision_scenario" and dimension:
-            lever = f"Simulate {dimension} intervention"
-        elif kind == "interaction_synergy" and dimension and level:
-            lever = f"Target synergy: {dimension}='{level}'"
-        elif kind in ("correlation", "association"):
-            meas = getattr(item, "measure", None) or (item.get("measure") if isinstance(item, dict) else None)
-            lever = f"Context: {meas} & {dimension} (Correlation)" if (meas and dimension) else f"Context: {meas or dimension}"
-        elif dimension and level:
-            if level_label and str(level_label) != str(level):
-                lever = f"Target '{level_label}' ({dimension}='{level}')"
-            else:
-                lever = f"Target {dimension}='{level}'"
-        elif dimension:
-            lever = f"Target {dimension} segment" if kind == "segment_lift" else f"Target {dimension}"
-        elif target_feature:
-            lever = f"Target {target_feature}" if is_controllable else f"Outcome metric: {target_feature}"
-
-        entry = {
-            "finding_id": finding_id,
-            "headline": headline,
-            "lever": lever,
-            "kind": kind,
-            "effect": effect,
-            "confidence": round(conf, 2),
-            "importance": round(imp, 3),
-            "caveats": caveats,
-            "evidence_tier": evidence_tier,
-            "disposition": disposition,
-            "controllability": controllability,
-        }
-
-        # Check sensor telemetry:
-        if controllability == "sensor_telemetry" or is_sensor_telemetry_feature(target_feature):
-            entry["rationale"] = (
-                f"Sensor telemetry / measurement readout ('{target_feature}') — "
-                "passive instrumentation signal to monitor as operational baseline or threshold boundary; not a direct input lever."
-            )
-            entry["quadrant"] = "watch_caveats"
-            entry["impact_level"] = "Context"
-            entry["feasibility_level"] = "Monitoring"
-            matrix["watch_caveats"].append(entry)
-            continue
-
-        # Preserve actionable descriptive advice (e.g. duplicate billing cluster)
-        if any(phrase in (headline + " " + detail).lower() for phrase in ("duplicate", "billing", "anomaly", "mismatch", "defect", "cluster", "leakage", "hygiene")):
-            entry["lever"] = f"Investigate data integrity: {lever}" if not lever.startswith("Investigate") else lever
-            entry["rationale"] = "Descriptive operational finding: investigate duplicate records and data hygiene before changing downstream policy."
-            entry["quadrant"] = "watch_caveats"
-            entry["impact_level"] = "High"
-            entry["feasibility_level"] = "Audit / Investigation"
-            matrix["watch_caveats"].append(entry)
-            continue
-
-        # Observational confidence is not intervention validity.
-        # Check sample size adequacy: entity-aggregated data (e.g. states, cities, stores)
-        # has a lower natural n cutoff (n >= 20) than raw row-level records (n >= 100).
-        sample_sizes = [
-            v for k in (*_SAMPLE_SIZE_KEYS, "segment_n", "population_size", "n_records")
-            if isinstance(v := evidence.get(k), (int, float)) and not isinstance(v, bool)
-        ]
-        is_entity_aggregated = any("repeated rows aggregated" in str(c).lower() or "per '" in str(c).lower() for c in caveats) or bool(evidence.get("entity_column"))
-        min_sample_threshold = 20 if is_entity_aggregated else 100
-        has_adequate_sample = (
-            min(sample_sizes) >= min_sample_threshold
-            if sample_sizes
-            else (checks.get("records") is not False)
-        )
-        sample_size_val = min(sample_sizes) if sample_sizes else None
-        entry["sample_size"] = sample_size_val
-
-        # Detect data defect caveats (imputed data, flatlines, extreme skew)
-        has_data_defect = any(
-            any(phrase in c.lower() for phrase in ("imputed", "missing data", "zero variance", "flatline", "extreme skew"))
-            for c in caveats
-        )
-
-        # Observational disclaimers that suggest prospective pilot validation
-        has_observational_disclaimer = bool(caveats) and any(
-            any(phrase in c.lower() for phrase in (
-                "proof of cause", "adjusted association", "observational", "observation", "unadjusted",
-                "selection effect", "confounding", "additive driver",
-            ))
-            for c in caveats
-        )
-        is_observational_segment_contrast = (
-            primary_eligible
-            and is_controllable
-            and not is_appendix
-            and not is_caveat_kind
-            and not has_paradox
-            and not is_fragile
-            and has_adequate_sample
-            and conf >= 0.50
-            and (kind in ("segment_lift", "decision_scenario") or evidence_tier == "pilot")
-            and (has_observational_disclaimer or evidence_tier == "pilot")
-        )
-        if is_observational_segment_contrast and evidence_tier != "causal_action":
-            if any("do not treat as a causal lever" in c.lower() for c in caveats) or disposition == "monitor":
-                entry.update(
-                    lever=headline,
-                    rationale="Observational evidence — monitor as contextual factor or covariate.",
-                    quadrant="watch_caveats",
-                    impact_level="Context",
-                    feasibility_level="Investigation",
-                )
-                matrix["watch_caveats"].append(entry)
+            if not all(item.get(key) for key in ("finding_id", "kind", "headline")):
                 continue
-
-            entry["lever"] = f"Pilot validation: {lever}" if not lever.startswith("Pilot") else lever
-            entry["rationale"] = (
-                f"High-contrast observational segment ({int(conf * 100)}% confidence); "
-                f"validate via targeted pilot trial or localized rollout before scaling."
-            )
-            entry["quadrant"] = "pilot"
-            entry["impact_level"] = "High" if (norm_eff >= 0.15 or abs(effect or 0) >= 0.15) else "Moderate"
-            entry["feasibility_level"] = "Pilot Validation"
-            matrix["pilot"].append(entry)
-            continue
-
-        is_correlation = kind in ("correlation", "association")
-        raw_source = getattr(item, "source_tool", None) or (item.get("source_tool") if isinstance(item, dict) else "")
-        if raw_source in ("correlation_analysis",):
-            is_correlation = True
-
-        # Non-actionable or fatal risk items route to watch_caveats:
-        # Reversals, fragility, data defects, non-controllable factors, correlations, or sub-threshold confidence.
-        has_fatal_caveat = any(
-            any(p in c.lower() for p in (
-                "direction reverses", "possible confounding", "does not hold within",
-                "sensitive to outlier trimming", "fragile", "extreme skew",
-                "zero variance", "flatline", "imputed", "missing data",
-                "overfit", "memorised", "leakage", "parallel trends violated", "positivity violated",
-            ))
-            for c in caveats
-        )
-
+            finding = Finding(**{key: val for key, val in item.items() if key in names})
+        if not isinstance(finding.evidence, dict):
+            finding.evidence = {}
+        # Older reports may have cached an action before post-hoc checks or role updates.
+        if finding.controllability == "manipulable" and not _is_actionable_feature(finding.dimension or finding.measure):
+            finding.controllability = None
+        state = finding.statistical_state or finding.evidence.get("statistical_state")
         if (
-            not primary_eligible
-            or is_caveat_kind
-            or has_paradox
-            or is_fragile
-            or has_data_defect
-            or has_fatal_caveat
-            or conf < 0.45
-            or is_correlation
-            or (not is_controllable and not is_appendix)
-            or (sample_sizes and not has_adequate_sample)
+            state in ("demonstrated_equivalence", "inconclusive", "unperformed")
+            or finding.kind in (*CAVEAT_FINDING_KINDS, "invariance", "uniformity")
+            or is_data_hygiene_finding(finding) or _is_self_derived_finding(finding)
         ):
-            reason = []
-            reason.extend(eligibility_reasons)
-            if is_correlation:
-                reason.append("Observational correlation — monitor as context or covariate, not an intervention lever")
-            if not is_controllable:
-                reason.append(f"External non-controllable factor ('{target_feature}') — monitor as risk/context, not direct lever")
-            if has_paradox:
-                reason.append("Subgroup reversal detected (Simpson's paradox)")
-            if is_fragile:
-                reason.append("Sensitive to outlier trimming")
-            if has_data_defect:
-                reason.append("Data hygiene/imputation caveat — review data quality before action")
-            if sample_sizes and not has_adequate_sample:
-                reason.append(f"Small sample size (n < {min_sample_threshold}) for observational contrast")
-            if caveats:
-                clean_cavs = [
-                    c for c in caveats
-                    if c not in reason
-                    and not any(p in c.lower() for p in ("not proof of cause", "observation evidence", "do not treat as a causal lever"))
-                ]
-                reason.extend(clean_cavs[:2])
-            if not reason:
-                reason.append("Low statistical confidence or caveat kind")
-            entry["rationale"] = "; ".join(reason)
-            entry["quadrant"] = "watch_caveats"
-            entry["impact_level"] = "Context"
-            entry["feasibility_level"] = "Monitoring"
-            matrix["watch_caveats"].append(entry)
             continue
-
-        if is_appendix or not is_controllable or is_correlation:
+        previously_blocked = not finding.primary_eligible
+        disposition = finding.recommendation_disposition()
+        dim, outcome = finding.dimension, finding.measure
+        evidence = finding.evidence
+        level = redact_small_level(finding.level, evidence.get("n")) if finding.level else None
+        subject = f"{dim}='{level}'" if dim and level else dim
+        reasons = list(dict.fromkeys([*finding.eligibility_reasons, *finding.caveats]))
+        checks = evidence.get("checks") or {}
+        if isinstance(checks, dict) and checks.get("paradox_free") is False:
+            reasons.append("Simpson's paradox: the subgroup comparison reverses.")
+        if isinstance(checks, dict) and checks.get("not_luck") is False:
+            reasons.append("The difference did not pass statistical correction.")
+            previously_blocked = True
+        sensor = next((col for col in (outcome, dim) if is_sensor_telemetry_feature(col)), None)
+        guarded = previously_blocked or not finding.primary_eligible or any(
+            phrase in reason.lower() for reason in reasons
+            for phrase in ("imputed", "fragile", "possible confounding", "do not treat as a causal lever",
+                           "overfit", "leakage", "flatline", "missing data", "parallel trends violated")
+        )
+        group = "watch_caveats"
+        feasibility = "Investigation"
+        if guarded:
+            disposition = "investigate"
+            if not outcome or not subject:
+                continue
+            action = f"Recheck '{outcome}' across {subject} using the stated limitations."
+        elif sensor:
+            disposition = "monitor"
+            if dim == "hour_of_day" and all(isinstance(evidence.get(k), int) for k in ("peak_hour", "trough_hour")):
+                action = (
+                    f"Compare new '{sensor}' readings at {evidence['peak_hour']:02d}:00 and "
+                    f"{evidence['trough_hour']:02d}:00 to check whether the daily pattern persists."
+                )
+            elif dim and dim != sensor:
+                action = f"Monitor '{sensor}' by '{dim}' to check whether the observed pattern persists."
+            elif level:
+                action = f"Review '{sensor}' readings around {level} against the observed baseline."
+            else:
+                action = f"Track '{sensor}' against its observed baseline."
+            reasons.append("Sensor telemetry measures the observed pattern.")
+            if any("meter" in col.lower() for col in (dim, outcome) if col):
+                reasons.append("Monitor the signal; do not manipulate meter readings.")
+        elif finding.layer == "appendix":
             continue
-
-        # 2. Impact evaluation
-        # High impact requires substantial normalized effect, raw lift >= 15%, high importance >= 0.40,
-        # or targeted structural synergies/scenarios with measurable magnitude.
-        is_high_impact = (
-            norm_eff >= 0.15
-            or (isinstance(effect, (int, float)) and abs(effect) >= 0.15)
-            or imp >= 0.40
-            or (kind in ("decision_scenario", "interaction_synergy") and (effect is None or abs(effect or 0) >= 0.08))
-            or (kind == "driver" and (norm_eff >= 0.10 or abs(effect or 0) >= 0.10 or imp >= 0.35))
-        )
-
-        # 3. Feasibility evaluation
-        # High feasibility means high confidence and direct operational controllability without
-        # cross-functional structural alignment.
-        is_high_feasibility = (
-            conf >= 0.55
-            and kind in ("segment_lift", "driver", "concentration", "decision_scenario")
-            and kind != "interaction_synergy"  # synergies are structural bets
-        )
-
-        if is_high_impact and is_high_feasibility:
-            if disposition == "act":
-                entry["rationale"] = f"High lift with robust statistical confidence ({int(conf * 100)}%). Direct operational execution candidate."
-                entry["quadrant"] = "quick_wins"
-                entry["impact_level"] = "High"
-                entry["feasibility_level"] = "Immediate Execution"
-                matrix["quick_wins"].append(entry)
-            elif disposition == "pilot":
-                entry["lever"] = f"Pilot A/B test: {lever}" if not lever.startswith("Pilot") else lever
-                entry["rationale"] = f"Candidate for controlled pilot ({int(conf * 100)}% confidence); validate via prospective test before scaling."
-                entry["quadrant"] = "pilot"
-                entry["impact_level"] = "High"
-                entry["feasibility_level"] = "Pilot Validation"
-                matrix["pilot"].append(entry)
+        elif disposition in ("act", "pilot") and subject and outcome:
+            if disposition == "pilot":
+                group = "pilot"
+                feasibility = "Pilot Validation"
+                action = f"Pilot a change to {subject} and measure '{outcome}' against a comparison group."
+                reasons.append("Validate the observed contrast in a prospective A/B test or pilot.")
             else:
-                entry["rationale"] = f"Observational association ({int(conf * 100)}% confidence); investigate underlying drivers before policy changes."
-                entry["quadrant"] = "watch_caveats"
-                entry["impact_level"] = "High"
-                entry["feasibility_level"] = "Investigation"
-                matrix["watch_caveats"].append(entry)
-        elif is_high_impact:
-            if disposition == "act":
-                entry["rationale"] = "High potential upside; requires structural or cross-dimensional alignment."
-                entry["quadrant"] = "strategic_bets"
-                entry["impact_level"] = "High"
-                entry["feasibility_level"] = "Structural Initiative"
-                matrix["strategic_bets"].append(entry)
-            elif disposition == "pilot":
-                entry["lever"] = f"Pilot A/B test: {lever}" if not lever.startswith("Pilot") else lever
-                entry["rationale"] = "High potential upside; validate via controlled pilot before structural alignment."
-                entry["quadrant"] = "pilot"
-                entry["impact_level"] = "High"
-                entry["feasibility_level"] = "Pilot Validation"
-                matrix["pilot"].append(entry)
-            else:
-                entry["rationale"] = "Observational signal with high potential upside; investigate before committing resources."
-                entry["quadrant"] = "watch_caveats"
-                entry["impact_level"] = "High"
-                entry["feasibility_level"] = "Investigation"
-                matrix["watch_caveats"].append(entry)
-        elif is_high_feasibility:
-            if disposition == "act":
-                entry["rationale"] = "Low-risk operational tuning with clear evidence."
-                entry["quadrant"] = "incremental"
-                entry["impact_level"] = "Moderate"
-                entry["feasibility_level"] = "Operational Optimization"
-                matrix["incremental"].append(entry)
-            elif disposition == "pilot":
-                entry["lever"] = f"Pilot A/B test: {lever}" if not lever.startswith("Pilot") else lever
-                entry["rationale"] = "Low-risk operational candidate; validate with small pilot."
-                entry["quadrant"] = "pilot"
-                entry["impact_level"] = "Moderate"
-                entry["feasibility_level"] = "Pilot Validation"
-                matrix["pilot"].append(entry)
-            else:
-                entry["rationale"] = "Observational contrast with moderate impact; monitor or investigate as routine context."
-                entry["quadrant"] = "incremental"
-                entry["impact_level"] = "Moderate"
-                entry["feasibility_level"] = "Operational Optimization"
-                matrix["incremental"].append(entry)
+                large = finding.normalized_effect() >= 0.3 if finding.effect_kind else abs(finding.effect or 0.0) >= 0.15
+                group = "incremental"
+                if large:
+                    group = "strategic_bets" if finding.kind == "interaction_synergy" else "quick_wins"
+                feasibility = "Immediate Execution"
+                action = f"Apply the evaluated change to {subject} and track '{outcome}'."
+        elif subject and outcome and finding.kind in ("segment_lift", "driver", "test", "correlation", "association"):
+            action = f"Compare '{outcome}' across {subject} in a follow-up sample."
+            disposition = "investigate"
+            if evidence.get("unit_of_analysis") in (None, "row") and isinstance(evidence.get("n"), int) and evidence["n"] < 100:
+                reasons.append("Small sample size limits the evidence for intervention.")
+        elif finding.controllability == "descriptive" and "duplicate" in finding.headline.lower():
+            action = f"Investigate duplicate records in '{outcome or dim}'."
+            reasons.append("Reconcile the duplicate records against their source.")
+            disposition = "investigate"
+        elif outcome and not _is_actionable_feature(outcome) and not dim and get_base_column_name(outcome) == outcome:
+            action = f"Track '{outcome}' as a key outcome metric in the next reporting period."
+            disposition = "monitor"
         else:
-            entry["rationale"] = "Moderate effect with standard feasibility."
-            entry["quadrant"] = "incremental"
-            entry["impact_level"] = "Moderate"
-            entry["feasibility_level"] = "Operational Optimization"
-            matrix["incremental"].append(entry)
-
+            continue
+        matrix[group].append({
+            "finding_id": finding.finding_id, "headline": finding.headline, "lever": action,
+            "rationale": " ".join([finding.headline.rstrip(".") + ".", *reasons]), "effect": finding.effect,
+            "effect_kind": finding.effect_kind, "evidence_tier": finding.evidence_tier,
+            "disposition": disposition, "quadrant": group, "feasibility_level": feasibility,
+            "caveats": reasons, "sample_size": evidence.get("n"), "kind": finding.kind,
+        })
     return matrix
+
+
+def report_action_matrix(
+    report: dict[str, Any], findings: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Read even an empty stored decision; reconstruct only for historical reports."""
+    matrix = report.get("action_matrix")
+    if isinstance(matrix, dict):
+        if all(isinstance(rows, list) and all(isinstance(row, dict) for row in rows) for rows in matrix.values()):
+            return matrix
+        # The original cockpit stored lists of strings under its four display labels.
+        legacy: dict[str, list[dict[str, Any]]] = {}
+        aliases = {"strategic_pilots": "pilot", "low_priority": "incremental"}
+        for label, values in matrix.items():
+            if not isinstance(label, str) or not isinstance(values, list):
+                continue
+            key = aliases[label] if label in aliases else label
+            rows = legacy.setdefault(key, [])
+            rows.extend({"lever": value, "rationale": "Recorded in the saved report."}
+                        for value in values if isinstance(value, str))
+        return legacy
+    return classify_action_matrix([f for f in findings if f.get("primary_eligible") is not False])
+
+
+def matrix_recommendations(matrix: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Pick distinct, linked actions for the executive summary in priority order."""
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for quadrant in ("quick_wins", "strategic_bets", "pilot", "incremental", "watch_caveats"):
+        for entry in matrix.get(quadrant, []):
+            action = entry["lever"]
+            if action in seen:
+                continue
+            seen.add(action)
+            records.append({
+                "recommendation_id": f"rec_{entry['finding_id']}",
+                "finding_ids": [entry["finding_id"]], "disposition": entry["disposition"],
+                "action": action, "rationale": entry["rationale"], "claims": [],
+                "limitations": entry["caveats"],
+            })
+            if len(records) == 4:
+                return records
+    return records

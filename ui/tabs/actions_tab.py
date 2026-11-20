@@ -12,7 +12,7 @@ from typing import Any
 
 import streamlit as st
 
-from src.core.findings import classify_action_matrix
+from src.core.findings import matrix_recommendations, report_action_matrix
 from src.core.plain_language import plainify
 from ui.components.cards import find_tool, round_for_reading, tab_head
 
@@ -240,13 +240,12 @@ def render_actions_tab(
                 resolved_arch = "continuous_series"
 
     cfg = get_archetype_action_config(resolved_arch)
-    cluster = cfg["archetype_cluster"]
 
     tab_head(cfg["tab_title"][0], cfg["tab_title"][1], cfg["tab_title"][2])
 
     # 1. 2x2 Action Prioritization Matrix
     findings = list(run_view.findings) if run_view and hasattr(run_view, "findings") else (report.get("findings") or [])
-    matrix = classify_action_matrix(findings)
+    matrix = report_action_matrix(report, findings)
 
     qw_items = matrix.get("quick_wins", [])
     sb_items = matrix.get("strategic_bets", [])
@@ -257,7 +256,6 @@ def render_actions_tab(
     total_actionable = len(qw_items) + len(sb_items) + len(pilot_items) + len(inc_items)
     raw_top_lever = qw_items[0].get("lever") if qw_items else (pilot_items[0].get("lever") if pilot_items else (sb_items[0].get("lever") if sb_items else "Review audit"))
     top_lever = round_for_reading(plainify(str(raw_top_lever)))
-    top_lever, _ = format_archetype_lever_and_rationale(top_lever, "", cluster)
 
     # Top Executive Action Ribbon
     rib = cfg["ribbon"]
@@ -293,17 +291,14 @@ def render_actions_tab(
                     )
                     if items:
                         for it in items[:3]:
-                            raw_lev = round_for_reading(plainify(str(it.get("lever", it.get("headline", "")))))
-                            raw_rat = round_for_reading(plainify(str(it.get("rationale", ""))))
-                            lever, rationale = format_archetype_lever_and_rationale(raw_lev, raw_rat, cluster)
-                            eff = it.get("effect")
-                            eff_badge = f' <span style="font-size:0.8rem;color:var(--pen);font-weight:700;">({eff:+0.1%})</span>' if isinstance(eff, (int, float)) and abs(eff) < 10 else ""
+                            lever = round_for_reading(plainify(str(it.get("lever", it.get("headline", "")))))
+                            rationale = round_for_reading(plainify(str(it.get("rationale", ""))))
                             samp = it.get("sample_size")
                             samp_str = f' <span style="font-size:0.75rem;color:var(--rule-strong);">(n={samp:,})</span>' if isinstance(samp, (int, float)) else ""
 
                             st.markdown(
                                 f'<div style="margin-bottom:0.65rem;border-left:3px solid {accent_color};padding-left:0.6rem;">'
-                                f'<div style="font-weight:600;font-size:0.88rem;line-height:1.35;">{html.escape(lever)}{eff_badge}{samp_str}</div>'
+                                f'<div style="font-weight:600;font-size:0.88rem;line-height:1.35;">{html.escape(lever)}{samp_str}</div>'
                                 f'<div style="font-size:0.8rem;color:var(--graphite);margin-top:0.2rem;line-height:1.4;">{html.escape(rationale)}</div>'
                                 f'</div>',
                                 unsafe_allow_html=True,
@@ -335,9 +330,8 @@ def render_actions_tab(
             for w_idx, it in enumerate(watch_items[:4]):
                 target_col = w_cols[w_idx % len(w_cols)]
                 with target_col:
-                    raw_w_lev = round_for_reading(plainify(str(it.get("lever", it.get("headline", "")))))
-                    raw_w_rat = round_for_reading(plainify(str(it.get("rationale", ""))))
-                    lever, rationale = format_archetype_lever_and_rationale(raw_w_lev, raw_w_rat, cluster)
+                    lever = round_for_reading(plainify(str(it.get("lever", it.get("headline", "")))))
+                    rationale = round_for_reading(plainify(str(it.get("rationale", ""))))
                     st.markdown(
                         f'<div style="margin-bottom:0.5rem;border-left:2px solid var(--risk);padding-left:0.5rem;">'
                         f'<div style="font-weight:600;font-size:0.85rem;">{html.escape(lever)}</div>'
@@ -349,21 +343,44 @@ def render_actions_tab(
     # 3. What-If Counterfactual Scenario Simulations
     scenario_out = find_tool(tool_results, "scenario_simulation")
     if scenario_out and isinstance(scenario_out, dict):
-        st.divider()
-        st.markdown("### What-If Counterfactual Interventions")
         target_name = scenario_out.get("target_column") or "Target"
         scenarios = scenario_out.get("scenarios") or []
-        if scenarios:
+        base_fallback = scenario_out.get("baseline_mean")
+
+        # Resolve valid numeric scenarios only (suppress broken None entries)
+        valid_scenarios: list[dict[str, Any]] = []
+        for sc in scenarios:
+            base_val = sc.get("base_value") if sc.get("base_value") is not None else (
+                sc.get("base_mean") if sc.get("base_mean") is not None else base_fallback
+            )
+            new_val = sc.get("counterfactual_value") if sc.get("counterfactual_value") is not None else sc.get("projected_mean")
+            pred_delta = sc.get("predicted_delta") if sc.get("predicted_delta") is not None else (
+                sc.get("delta_target") if sc.get("delta_target") is not None else sc.get("predicted_delta_target")
+            )
+            if pred_delta is None and base_val is not None and new_val is not None:
+                pred_delta = new_val - base_val
+
+            if isinstance(base_val, (int, float)) and isinstance(new_val, (int, float)) and isinstance(pred_delta, (int, float)):
+                shift = sc.get("shift_pct")
+                driver = sc.get("driver") or "Driver"
+                name = sc.get("scenario_name") or (f"Simulate {shift:+0.0f}% Shift in '{driver}'" if isinstance(shift, (int, float)) else f"Simulate Shift in '{driver}'")
+                valid_scenarios.append({
+                    "name": name,
+                    "base_val": float(base_val),
+                    "new_val": float(new_val),
+                    "pred_delta": float(pred_delta),
+                })
+
+        if valid_scenarios:
+            st.divider()
+            st.markdown("### What-If Counterfactual Interventions")
             st.caption(f"Predicted response of {html.escape(str(target_name))} under targeted driver modifications.")
-            for sc in scenarios[:3]:
+            for sc in valid_scenarios[:3]:
                 with st.container(border=True):
-                    sc_name = html.escape(str(sc.get("scenario_name") or sc.get("driver") or "Scenario"))
-                    pred_delta = sc.get("predicted_delta")
-                    base_val = sc.get("base_value")
-                    new_val = sc.get("counterfactual_value")
-                    delta_str = f"{pred_delta:+0.2f}" if isinstance(pred_delta, (int, float)) else str(pred_delta)
-                    base_str = f"{base_val:0.2f}" if isinstance(base_val, (int, float)) else str(base_val)
-                    new_str = f"{new_val:0.2f}" if isinstance(new_val, (int, float)) else str(new_val)
+                    sc_name = html.escape(sc["name"])
+                    base_str = f"{sc['base_val']:0.2f}"
+                    new_str = f"{sc['new_val']:0.2f}"
+                    delta_str = f"{sc['pred_delta']:+0.2f}"
 
                     c1, c2, c3 = st.columns([0.45, 0.25, 0.3])
                     c1.markdown(f"**{sc_name}**")
@@ -374,10 +391,11 @@ def render_actions_tab(
     st.divider()
     st.markdown(f"### {html.escape(cfg['directives_title'])}")
     recs = (run_view.recommendations if run_view and hasattr(run_view, "recommendations") else None) or report.get("recommendations") or []
+    if findings and "action_matrix" not in report:
+        recs = [entry["action"] for entry in matrix_recommendations(matrix)]
     if recs:
         for idx, rec in enumerate(recs, start=1):
             rec_plain = plainify(str(rec))
-            _, rec_plain = format_archetype_lever_and_rationale("", rec_plain, cluster)
             rec_lower = rec_plain.lower()
             if any(rec_lower.startswith(p) for p in ("remediate", "repair", "fix", "audit", "address")):
                 badge = "Repair"
@@ -385,7 +403,7 @@ def render_actions_tab(
                 badge = "Test"
             elif any(rec_lower.startswith(p) for p in ("monitor", "watch", "track")):
                 badge = "Watch"
-            elif any(rec_lower.startswith(p) for p in ("investigate", "explore", "research")):
+            elif any(rec_lower.startswith(p) for p in ("investigate", "explore", "research", "compare", "recheck")):
                 badge = "Explore"
             elif any(rec_lower.startswith(p) for p in ("optimize", "tune", "refine", "calibrate")):
                 badge = "Tune"

@@ -288,7 +288,7 @@ def _cap_worker_cpu_threads() -> None:
 
 
 def _configure_worker_streams() -> None:
-    """Make Rich/controller output safe on Windows non-UTF-8 consoles."""
+    """Make Rich/controller output safe on Windows non-UTF-8 consoles and silence benign noise."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if callable(reconfigure):
@@ -296,6 +296,17 @@ def _configure_worker_streams() -> None:
                 reconfigure(encoding="utf-8", errors="replace")
             except (OSError, ValueError):
                 pass
+    import logging
+    import warnings
+
+    class _NoiseFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return "missing ScriptRunContext" not in record.getMessage()
+
+    logging.getLogger("streamlit").addFilter(_NoiseFilter())
+    logging.getLogger().addFilter(_NoiseFilter())
+    warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered in divide")
+    warnings.filterwarnings("ignore", category=RuntimeWarning, message="divide by zero encountered")
 
 # Kept outside Streamlit session state so a replacement browser session can
 # adopt a still-running local worker by its validated durable run ID.

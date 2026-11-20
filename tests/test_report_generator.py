@@ -219,6 +219,7 @@ class TestGenerateReportTool:
                 "finding_id": "lift_1",
                 "kind": "segment_lift",
                 "headline": "Enterprise revenue is 45% above the remaining segments",
+                "measure": "revenue",
                 "source_tool": "segment_comparison",
                 "effect": 0.45,
                 "confidence": 0.85,

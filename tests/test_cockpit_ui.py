@@ -120,13 +120,12 @@ def test_business_headline_and_takeaway() -> None:
     }
 
     hl = business_headline(finding_delivery)
-    assert "Delivery Category Leads Satisfaction with +172% Higher Rating" in hl
+    assert "4.85 vs 1.78" in hl
     assert "difference +2.15" not in hl
     assert "n=68" not in hl
 
     takeaway = business_takeaway(finding_delivery)
-    assert "Operational Takeaway: Prioritize the 'Delivery' segment" in takeaway
-    assert "n=68 records" in takeaway
+    assert "68 in the segment and 121 in the comparison group" in takeaway
 
     # Case 2: Stripping trailing academic statistics notation
     raw_finding = {
@@ -315,7 +314,7 @@ def test_render_evidence_html_business_first_shows_takeaway_and_folds_stats() ->
     }
     html_out = render_evidence_html(finding, business_first=True)
     # The main visible detail must be the operational takeaway, NOT raw statistics
-    assert "Operational Takeaway: Prioritize the" in html_out
+    assert "68 in the segment and 121 in the comparison group" in html_out
     assert "Delivery" in html_out
     assert "n=68 in segment vs 121 elsewhere" not in html_out
     assert "p=0.0001" not in html_out
@@ -329,7 +328,7 @@ def test_business_headline_from_raw_unstructured_string() -> None:
         "headline": "Delivery orders average rating of 4.85 vs 1.78 for everyone else (difference +2.15, d=1.42, n=68 vs 121)."
     }
     hl = business_headline(raw_finding)
-    assert hl == "Delivery Category Leads Satisfaction with +172% Higher Rating"
+    assert "4.85 vs 1.78" in hl
 
 
 def test_classify_action_matrix_benign_caveats_not_fatal() -> None:
@@ -593,9 +592,9 @@ def test_correlation_takeaway_resolves_col_b_without_none() -> None:
     }
     takeaway = business_takeaway(finding)
     assert "'None'" not in takeaway
-    assert "Global Active Power" in takeaway
-    assert "Sub Metering 3" in takeaway
-    assert "Operational Takeaway: High co-movement observed between" in takeaway
+    assert "Global_active_power" in takeaway
+    assert "Sub_metering_3" in takeaway
+    assert "does not establish a causal effect" in takeaway
 
     hl = business_headline(finding)
     assert "Global Active Power and Sub Metering 3 Move in Positive Alignment" in hl
@@ -618,8 +617,8 @@ def test_anomaly_segment_plain_headline_formats_cleanly() -> None:
         },
     }
     hl = business_headline(finding)
-    assert "Sunday Shows with +1% Surge in Sub Metering 1 Over Baseline" in hl or "Sunday Shows" in hl
-    assert "day_of_week" not in hl
+    assert "Sunday" in hl and "+138%" in hl
+    assert "2.48" in hl and "1.04" in hl
 
 
 def test_correlation_heatmap_adaptive_step_sizing() -> None:

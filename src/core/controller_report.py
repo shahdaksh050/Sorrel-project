@@ -35,16 +35,16 @@ from src.core.dashboard import (
 from src.core.dependence import check_simpsons_paradox, intraclass_correlation
 from src.core.findings import (
     Finding,
-    _is_actionable_feature,
-    _is_self_derived_finding,
-    is_sensor_telemetry_feature,
+    classify_action_matrix,
+    matrix_recommendations,
 )
 from src.core.json_normalization import strict_json_dumps
 from src.core.profiler import DatasetProfile, profile_dataframe
 from src.core.prompt_manager import (
     CHART_DESIGN_PROMPT,
 )
-from src.core.stats_utils import get_base_column_name, repeated_entity
+from src.core.question_router import comparison_objective
+from src.core.stats_utils import repeated_entity
 
 logger = logging.getLogger(__name__)
 
@@ -424,7 +424,6 @@ class ReportMixin(ControllerState):
         quarantined = [f for f in ranked if not f.primary_eligible]
 
         final_result["findings"] = [f.to_dict() for f in ranked]
-        final_result["primary_findings"] = [f.to_dict() for f in primary]
         final_result["quarantined_findings"] = [
             {
                 "finding_id": f.finding_id,
@@ -439,170 +438,45 @@ class ReportMixin(ControllerState):
                 "No finding passed every required post-hoc evidence gate; review the audit and limitations."
             ]
 
-        records: list[dict[str, Any]] = []
-        actionable_records: list[dict[str, Any]] = []
-        outcome_records: list[dict[str, Any]] = []
-        seen_levers: set[str] = set()
-
-        for finding in primary:
-            # Never recommend tautological relationships between derived transforms
-            if _is_self_derived_finding(finding):
-                continue
-
-            lever = finding.dimension
-            measure = finding.measure
-
-            # Check for sensor telemetry first:
-            is_telemetry = (
-                finding.controllability == "sensor_telemetry"
-                or is_sensor_telemetry_feature(lever)
-                or is_sensor_telemetry_feature(measure)
-            )
-            if is_telemetry:
-                norm_telemetry = (lever or measure or "").lower().strip()
-                if norm_telemetry in seen_levers:
-                    continue
-                seen_levers.add(norm_telemetry)
-                # Household power fixture: must identify meters' relationship as sensor telemetry / additive components of active power,
-                # and MUST NEVER recommend raising consumption or changing meter readings.
-                tel_name = lever or measure or "sensor telemetry"
-                action = (
-                    f"Monitor '{tel_name}' telemetry readouts as an additive component of active power load to detect sub-system anomalies."
-                    if any(term in str(tel_name).lower() for term in ("meter", "power", "watt", "voltage", "intensity"))
-                    else f"Monitor '{tel_name}' sensor telemetry trends for anomaly detection."
-                )
-                outcome_records.append(
-                    {
-                        "recommendation_id": f"rec_{finding.finding_id}",
-                        "finding_ids": [finding.finding_id],
-                        "disposition": "monitor",
-                        "action": action,
-                        "rationale": finding.headline,
-                        "claims": [],
-                        "limitations": [*list(finding.caveats), "Sensor telemetry represents passive electrical/physical readouts; do not treat as an intervention lever or attempt to alter meter readings."],
-                    }
-                )
-                continue
-
-            # Descriptive finding with actionable business advice (e.g. duplicate billing)
-            if finding.controllability == "descriptive" and any(
-                k in (finding.headline + " " + finding.detail).lower()
-                for k in ("duplicate", "billing", "anomaly", "mismatch", "defect", "cluster", "leakage", "hygiene")
-            ):
-                norm_desc = (lever or measure or "descriptive").lower().strip()
-                if norm_desc in seen_levers:
-                    continue
-                seen_levers.add(norm_desc)
-                action = f"Investigate data integrity and potential duplicate billing clusters in '{lever or measure}' before making operational changes."
-                actionable_records.append(
-                    {
-                        "recommendation_id": f"rec_{finding.finding_id}",
-                        "finding_ids": [finding.finding_id],
-                        "disposition": "investigate",
-                        "action": action,
-                        "rationale": finding.headline,
-                        "claims": [],
-                        "limitations": list(finding.caveats),
-                    }
-                )
-                continue
-
-            # Determine candidate outcome metric if no actionable lever
-            target_metric: str | None = None
-            if not (lever and _is_actionable_feature(lever)):
-                if measure and not _is_actionable_feature(measure):
-                    target_metric = measure
-
-            # Case 1: Controllable operational lever (dimension is actionable)
-            if lever and _is_actionable_feature(lever):
-                if finding.kind == "cluster" or (finding.dimension and finding.dimension.lower().startswith(("cluster", "segment"))):
-                    continue
-                if finding.level and str(finding.level).lower().startswith(("cluster_", "segment_")):
-                    continue
-                norm_lever = f"{lever}_{finding.level}".lower().strip()
-                if norm_lever in seen_levers:
-                    continue
-                seen_levers.add(norm_lever)
-
-                level_label = finding.evidence.get("level_label") if isinstance(finding.evidence, dict) else None
-                level_name = (
-                    f"'{level_label}' ({finding.dimension}='{finding.level}')"
-                    if (level_label and str(level_label) != str(finding.level))
-                    else (f"{finding.dimension}='{finding.level}'" if finding.level else f"'{finding.dimension}'")
-                )
-
-                disposition = finding.recommendation_disposition()
-                arch_str = str(getattr(self.last_profile, "archetype", "") or "").lower()
-                if disposition == "act":
-                    action = f"Apply the evaluated intervention for {level_name} and track its effect on '{measure}'."
-                elif disposition == "pilot":
-                    action = f"Test whether changing {level_name} affects '{measure}' in a controlled pilot."
-                elif disposition == "investigate":
-                    if any(a in arch_str for a in ("sensor", "continuous")):
-                        action = f"Investigate {level_name} regime dynamics and sensor baseline."
-                    elif any(a in arch_str for a in ("panel", "geospatial")):
-                        action = f"Investigate {level_name} cohort dynamics before broader intervention."
-                    elif any(a in arch_str for a in ("survey", "cross_sectional", "survival")):
-                        action = f"Investigate {level_name} subgroup factors in follow-up research."
-                    elif any(a in arch_str for a in ("transaction", "basket", "customer")):
-                        action = f"Investigate {level_name} operational dynamics before changing policy."
-                    else:
-                        action = f"Investigate {level_name} dynamics before taking intervention action."
+        request = comparison_objective(getattr(self, "objective", ""), getattr(self, "last_profile", None))
+        if request is not None:
+            matches = [f for f in ranked if request.matches(f)]
+            # A fragile relative lift cannot support an intervention. The observed
+            # event counts remain descriptive, with the limitation in the same sentence.
+            usable = [f for f in matches if f.primary_eligible or (
+                f.eligibility_reasons == ["robustness check failed"]
+                and f.evidence.get("events") is not None
+            )]
+            if usable:
+                rates = [f for f in usable if isinstance(f.evidence.get("level_value"), (int, float))]
+                if rates and (request.ascending or request.descending):
+                    rates.sort(key=lambda f: f.evidence["level_value"], reverse=request.descending)
+                    lead = rates[0]
                 else:
-                    action = f"Monitor {level_name} trends as an operational context factor."
+                    lead = usable[0]
+                headline = lead.headline
+                if lead.primary_eligible:
+                    primary = [lead, *(f for f in primary if f.finding_id != lead.finding_id)]
+                if not lead.primary_eligible:
+                    headline = headline.rstrip(".") + ", although the relative lift is sensitive to trimming."
+                final_result["lead_finding"] = {**lead.to_dict(), "headline": headline, "objective_answer": True}
+                final_result["insights"] = [headline, *(f.headline for f in primary if f.finding_id != lead.finding_id)]
+            else:
+                if not request.measure or request.missing_dimension:
+                    reason = "the requested outcome or grouping could not be identified in the dataset"
+                elif matches:
+                    reason = ", ".join(dict.fromkeys(r for f in matches for r in f.eligibility_reasons))
+                else:
+                    reason = "no eligible result established the requested comparison"
+                final_result["objective_gap"] = f"The requested comparison remains unanswered because {reason}."
+                final_result["insights"].insert(0, final_result["objective_gap"])
 
-                actionable_records.append(
-                    {
-                        "recommendation_id": f"rec_{finding.finding_id}",
-                        "finding_ids": [finding.finding_id],
-                        "disposition": disposition,
-                        "action": action,
-                        "rationale": finding.headline,
-                        "claims": [],
-                        "limitations": list(finding.caveats),
-                    }
-                )
-
-            # Case 2: Outcome metric to track across cycles (target is outcome KPI)
-            elif target_metric:
-                norm_metric = target_metric.lower().strip()
-                if get_base_column_name(norm_metric) != norm_metric:
-                    continue
-                if norm_metric in seen_levers:
-                    continue
-                seen_levers.add(norm_metric)
-
-                selected_target = self.memory.get_context("target_column")
-                if selected_target and selected_target != target_metric:
-                    continue
-                action = f"Track '{target_metric}' as a key outcome metric across operational reporting cycles."
-                outcome_records.append(
-                    {
-                        "recommendation_id": f"rec_{finding.finding_id}",
-                        "finding_ids": [finding.finding_id],
-                        "disposition": "monitor",
-                        "action": action,
-                        "rationale": finding.headline,
-                        "claims": [],
-                        "limitations": list(finding.caveats),
-                    }
-                )
-
-        records = (actionable_records[:3] + outcome_records)[:4]
-        if not records:
-            records.append(
-                {
-                    "recommendation_id": "rec_no_eligible_action",
-                    "finding_ids": [],
-                    "disposition": "investigate",
-                    "action": "Do not take an intervention from this run; resolve the recorded evidence gaps first.",
-                    "rationale": "No finding met the primary evidence gate.",
-                    "claims": [],
-                    "limitations": ["See quarantined_findings and execution_issues."],
-                }
-            )
+        final_result["primary_findings"] = [f.to_dict() for f in primary]
+        matrix = classify_action_matrix(primary)
+        final_result["action_matrix"] = matrix
+        records = matrix_recommendations(matrix)
         final_result["recommendation_records"] = records
-        final_result["recommendations"] = [str(record["action"]) for record in records]
+        final_result["recommendations"] = [record["action"] for record in records]
 
     def _resolve_public_status(self, final_result: dict[str, Any]) -> None:
         """Set the external run status without changing planner reply semantics."""

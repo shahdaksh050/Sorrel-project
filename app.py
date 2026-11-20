@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import types
+import warnings
 from pathlib import Path
 from typing import Any, cast
 
@@ -45,13 +46,18 @@ from src.core.run_config import RunConfig
 from src.core.security import ALLOWED_EXTENSIONS, UploadValidationError, validate_upload
 
 
-class _SuppressStaleFragmentFilter(logging.Filter):
+class _SuppressNoiseFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        return "does not exist any more" not in record.getMessage()
+        msg = record.getMessage()
+        return "does not exist any more" not in msg and "missing ScriptRunContext" not in msg
 
 
-logging.getLogger("streamlit").addFilter(_SuppressStaleFragmentFilter())
-logging.getLogger("streamlit.runtime.fragment").addFilter(_SuppressStaleFragmentFilter())
+logging.getLogger("streamlit").addFilter(_SuppressNoiseFilter())
+logging.getLogger("streamlit.runtime.fragment").addFilter(_SuppressNoiseFilter())
+logging.getLogger().addFilter(_SuppressNoiseFilter())
+
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered in divide")
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="divide by zero encountered")
 
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(

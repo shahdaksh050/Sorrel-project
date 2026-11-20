@@ -18,12 +18,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from src.core.findings import classify_action_matrix, is_data_hygiene_finding
+from src.core.findings import is_data_hygiene_finding, report_action_matrix
 from src.core.html_report import data_understanding_rows, governance_rows
 from src.core.json_normalization import strict_json_dumps
 from src.core.multiple_testing import DEFAULT_ALPHA as _BH_ALPHA
 from src.core.multiple_testing import apply_benjamini_hochberg as _apply_benjamini_hochberg
 from src.core.plain_language import describe_uncertainty, format_p, plainify
+from src.core.run_view import with_report_lead
 from src.tools.base import BaseTool
 
 if TYPE_CHECKING:
@@ -464,11 +465,13 @@ def _format_data_integrity(findings: list[dict[str, Any]] | None) -> list[str]:
     return lines
 
 
-def _format_top_findings(findings: list[dict[str, Any]] | None) -> list[str]:
+def _format_top_findings(findings: list[dict[str, Any]] | None, report: dict[str, Any] | None = None) -> list[str]:
     """The headline layer: the top 3-5 findings' own words, in plain
     language. Purely additive — an old caller passing no findings simply
     gets no section here, and every other section renders as before."""
-    top = _headline_findings(findings or [])
+    report = report or {}
+    primary = report.get("primary_findings", findings) or []
+    top = with_report_lead(report, _headline_findings(primary))[:_MAX_HEADLINE_FINDINGS]
     if not top:
         return []
     lines = ["## Top Findings", ""]
@@ -694,16 +697,14 @@ def _format_additional_analyses(tool_results: list[dict[str, Any]]) -> list[str]
     return lines
 
 
-def _format_action_matrix(findings: list[dict[str, Any]] | None) -> list[str]:
+def _format_action_matrix(findings: list[dict[str, Any]] | None, report: dict[str, Any] | None = None) -> list[str]:
     """Render an Action Prioritization Matrix (2x2) in Markdown from audited findings."""
-    if not findings:
-        return []
-    matrix = classify_action_matrix(findings)
+    matrix = report_action_matrix(report or {}, findings or [])
     lines: list[str] = [
         "## Action Prioritization Matrix (2x2)",
         "",
-        "| Quadrant | Priority & Strategic Lever | Impact & Evidence | Feasibility & Rationale |",
-        "| :--- | :--- | :--- | :--- |",
+        "| Category | Next step | Supporting evidence and limitations |",
+        "| :--- | :--- | :--- |",
     ]
     has_items = False
     quadrant_meta = [
@@ -717,12 +718,8 @@ def _format_action_matrix(findings: list[dict[str, Any]] | None) -> list[str]:
         items = matrix.get(key, [])
         for item in items[:3]:
             has_items = True
-            headline = plainify(str(item.get("headline", "")))
-            effect_val = item.get("effect")
-            effect_str = f"Effect: {effect_val:+0.2f}" if isinstance(effect_val, (int, float)) else "Audited driver"
-            lines.append(
-                f"| **{title}** | {item.get('lever', headline)} | {effect_str} | {item.get('rationale', 'Audited')} |"
-            )
+            cells = (title, item["lever"], item["rationale"])
+            lines.append("| " + " | ".join(str(cell).replace("|", "\\|").replace("\n", " ") for cell in cells) + " |")
     if not has_items:
         return []
     lines.append("")
@@ -872,7 +869,7 @@ class GenerateReportTool(BaseTool):
         # the shared bus, in plain language with the numbers embedded. Falls
         # back to the old insights list below when no findings were passed
         # (an old caller, or a run that produced none), so nothing regresses.
-        md_lines += _format_top_findings(findings)
+        md_lines += _format_top_findings(findings, llm_insights)
 
         # Executive summary — 3a: prefer `insights` over the LLM's raw
         # `reasoning` scratch text (which has leaked plumbing like "iter 1"
@@ -898,7 +895,7 @@ class GenerateReportTool(BaseTool):
                 md_lines.append(f"- {plainify(str(rec))}")
             md_lines.append("")
 
-        matrix_lines = _format_action_matrix(findings)
+        matrix_lines = _format_action_matrix(findings, llm_insights)
         if matrix_lines:
             md_lines += matrix_lines
 

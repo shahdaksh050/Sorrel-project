@@ -339,13 +339,45 @@ def fallback_caption(finding: dict[str, Any]) -> str:
     return sentence + "." if sentence else ""
 
 
-def business_headline(finding: dict[str, Any] | Any) -> str:
-    """Format a finding's headline into an executive business-impact statement.
+def humanize_for_summary(headline: str) -> str:
+    """Strip academic parentheticals and rewrite a statistical headline as a
+    plain-English sentence suitable for an executive summary.
 
-    Replaces academic statistics notation (e.g. difference +2.15, d=1.42, n=68 vs 121)
-    with commercial outperformance headlines (e.g. Delivery Category Leads Satisfaction
-    with +172% Higher Rating).
+    Preserves core numbers (rates, averages, percentages) but removes:
+    - trailing ``(2.83x, 20 vs 26)`` style ratio/sample parentheticals
+    - ``(95% CI +32.7% to +76.2%)`` confidence intervals
+    - ``(difference +2.15, d=1.42, n=68 vs 121)`` full stat blocks
+    Then runs ``plainify`` to convert any remaining notation.
     """
+    if not headline:
+        return headline
+    text = headline.strip()
+    # 1. Strip heavy trailing stat blocks (difference, d=, n=, x-multiple, CI)
+    text = re.sub(
+        r"\s*\((?:"
+        r"difference|d\s*=|beta\s*=|n\s*=|z\s*=|p\s*=|r\s*="
+        r"|[\d\.]+[xX]"
+        r"|\+?-?\d+(?:\.\d+)?%\s*(?:beyond|lift|higher|lower)"
+        r"|\d+\s*vs\s*\d+"
+        r"|95%\s*CI"
+        r")[^)]*\)\.?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # 2. Strip inline CI blocks (95% CI +32.7% to +76.2%)
+    text = re.sub(r"\s*\(\s*95%\s*CI\s+[^)]+\)", "", text, flags=re.IGNORECASE)
+    # 3. Replace "entities average" with "cohorts average"
+    text = re.sub(r"\bentities average\b", "cohorts average", text, flags=re.IGNORECASE)
+    # 4. Clean up whitespace and ensure punctuation
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    if text and not text.endswith((".", "?", "!")):
+        text += "."
+    return plainify(text)
+
+
+def business_headline(finding: dict[str, Any] | Any) -> str:
+    """Present the measured comparison and preserve the qualified objective answer."""
     raw_hl = str(
         finding.get("headline", "")
         if isinstance(finding, dict)
@@ -359,86 +391,11 @@ def business_headline(finding: dict[str, Any] | Any) -> str:
     dimension = finding.get("dimension") if isinstance(finding, dict) else getattr(finding, "dimension", None)
     level = finding.get("level") if isinstance(finding, dict) else getattr(finding, "level", None)
     measure = finding.get("measure") if isinstance(finding, dict) else getattr(finding, "measure", None)
-    effect = finding.get("effect") if isinstance(finding, dict) else getattr(finding, "effect", None)
-    effect_kind = str(finding.get("effect_kind", "") if isinstance(finding, dict) else getattr(finding, "effect_kind", "") or "")
-    evidence = finding.get("evidence") if isinstance(finding, dict) else getattr(finding, "evidence", {})
-    ev = evidence if isinstance(evidence, dict) else {}
-
-    if kind == "segment_lift" and (level or dimension):
-        clean_dim = str(dimension).replace("_", " ").title() if dimension else "Category"
-        clean_level = str(level).strip("'\"") if level else clean_dim
-        clean_measure = str(measure).replace("_", " ").title() if measure else "Performance"
-
-        # Determine true percentage lift from evidence or values
-        lift_val: float | None = None
-        if isinstance(ev.get("lift"), (int, float)):
-            lift_val = float(ev["lift"])
-        elif isinstance(ev.get("ratio"), (int, float)):
-            lift_val = float(ev["ratio"]) - 1.0
-        elif (
-            isinstance(ev.get("level_value"), (int, float))
-            and isinstance(ev.get("baseline_value"), (int, float))
-            and abs(float(ev["baseline_value"])) > 1e-9
-        ):
-            lift_val = (float(ev["level_value"]) - float(ev["baseline_value"])) / float(ev["baseline_value"])
-        elif effect_kind != "cohens_d" and isinstance(effect, (int, float)):
-            lift_val = float(effect)
-
-        if lift_val is not None:
-            pct = abs(lift_val) * 100 if abs(lift_val) < 10 else abs(lift_val)
-            direction = "Higher" if lift_val >= 0 else "Lower"
-            lead_word = "Leads" if lift_val >= 0 else "Lags"
-            sign = "+" if lift_val >= 0 else "-"
-            if "rating" in clean_measure.lower() or "satisfaction" in clean_measure.lower():
-                return f"{clean_level} {clean_dim} {lead_word} Satisfaction with {sign}{pct:.0f}% {direction} Rating"
-            return f"{clean_level} {clean_dim} {lead_word} {clean_measure} with {sign}{pct:.0f}% {direction} Performance"
-        elif effect_kind == "cohens_d" and isinstance(effect, (int, float)):
-            sign = "+" if float(effect) >= 0 else "-"
-            return f"{clean_level} {clean_dim} Outperforms in {clean_measure} (Effect {sign}{abs(float(effect)):.2f} SD)"
-
-    # 2. Check if raw headline matches segment comparison output pattern:
-    # e.g. "Delivery orders average rating of 4.85 vs 1.78 for everyone else (difference +2.15, d=1.42, n=68 vs 121)."
-    seg_match = re.match(
-        r"^(?P<lvl>[^'\"]+?)\s+(?P<noun>\w+)\s+(?:average|show a)\s+(?P<meas>[^0-9]+?)\s+(?:rate\s+)?of\s+(?P<v1>-?[\$€£₹]?\d+(?:\.\d+)?)\s+vs\s+(?P<v2>-?[\$€£₹]?\d+(?:\.\d+)?)\s+for\s+everyone\s+else",
-        raw_hl.strip(),
-        re.IGNORECASE,
-    )
-    if seg_match:
-        lvl = seg_match.group("lvl").strip()
-        meas_raw = seg_match.group("meas").strip().replace("_", " ").title()
-        v1_str = re.sub(r"[^\d.-]", "", seg_match.group("v1"))
-        v2_str = re.sub(r"[^\d.-]", "", seg_match.group("v2"))
-        try:
-            v1_val, v2_val = float(v1_str), float(v2_str)
-            if abs(v2_val) > 1e-9:
-                lift_calc = (v1_val - v2_val) / v2_val
-                pct = abs(lift_calc) * 100
-                direction = "Higher" if lift_calc >= 0 else "Lower"
-                lead_word = "Leads" if lift_calc >= 0 else "Lags"
-                sign = "+" if lift_calc >= 0 else "-"
-                if "rating" in meas_raw.lower() or "satisfaction" in meas_raw.lower():
-                    return f"{lvl} Category {lead_word} Satisfaction with {sign}{pct:.0f}% {direction} Rating"
-                return f"{lvl} Category {lead_word} {meas_raw} with {sign}{pct:.0f}% {direction} Performance"
-        except (ValueError, ZeroDivisionError):
-            pass
-
-    if kind == "driver" and dimension and measure:
-        clean_dim = str(dimension).replace("_", " ").title()
-        clean_meas = str(measure).replace("_", " ").title()
-        if level:
-            clean_lvl = str(level).strip("'\"")
-            return f"Targeting {clean_lvl} ({clean_dim}) Drives Significant Shift in {clean_meas}"
-        return f"{clean_dim} Identified as Key Driver of {clean_meas}"
-
-    if kind == "interaction_synergy" and dimension and measure:
-        clean_dim = str(dimension).replace("_", " ").title()
-        clean_meas = str(measure).replace("_", " ").title()
-        return f"Compound Synergy in {clean_dim} Drives Amplified {clean_meas}"
-
-    if kind == "decision_scenario" and dimension and measure:
-        clean_dim = str(dimension).replace("_", " ").title()
-        clean_meas = str(measure).replace("_", " ").title()
-        return f"Targeted Shift in {clean_dim} Unlocks Measurable Lift in {clean_meas}"
+    if isinstance(finding, dict) and finding.get("objective_answer"):
+        return raw_hl
+    if kind in ("segment_lift", "driver", "interaction_synergy", "decision_scenario"):
+        # Keep the native-unit comparison and any uncertainty supplied by the tool.
+        return plainify(raw_hl.split(" (difference ", 1)[0].rstrip(".") + ".")
 
     if kind == "cluster":
         sep_match = re.search(r"splits into (\d+) segments", raw_hl, re.IGNORECASE)
@@ -456,24 +413,7 @@ def business_headline(finding: dict[str, Any] | Any) -> str:
             return f"{cluster_name} Shows Distinct Pattern in {clean_m}"
 
     if kind in ("outlier_scan", "anomaly") and (level or dimension or measure):
-        ev_obj = finding.get("evidence") if isinstance(finding, dict) else getattr(finding, "evidence", {})
-        ev_map: dict[str, Any] = ev_obj if isinstance(ev_obj, dict) else {}
-        clean_lvl = str(level or ev_map.get("level") or ev_map.get("period") or "").strip("'\"")
-        clean_dim = str(dimension or ev_map.get("dimension") or "").strip("'\"")
-        clean_meas = str(measure or ev_map.get("value_column") or "").strip("'\"")
-        eff = finding.get("effect") if isinstance(finding, dict) else getattr(finding, "effect", None)
-        dev_pct = ev_map.get("deviation_pct") or eff
-        target_name = clean_lvl or clean_dim
-        if target_name and clean_meas:
-            label_name = target_name.replace("_", " ").title()
-            meas_name = clean_meas.replace("_", " ").title()
-            direction = "Surge" if (isinstance(dev_pct, (int, float)) and dev_pct >= 0) or "above" in raw_hl.lower() or "spike" in raw_hl.lower() else "Drop"
-            pct_str = ""
-            if isinstance(dev_pct, (int, float)) and 0 < abs(dev_pct) < 10:
-                pct_str = f"with {dev_pct:+.0f}% "
-            elif isinstance(dev_pct, (int, float)) and abs(dev_pct) >= 10:
-                pct_str = f"with {dev_pct:+.0f}% "
-            return f"{label_name} Shows {pct_str}{direction} in {meas_name} Over Baseline"
+        return plainify(raw_hl)
 
     if kind in ("correlation", "association"):
         ev_corr = finding.get("evidence") if isinstance(finding, dict) else getattr(finding, "evidence", {})
@@ -508,83 +448,24 @@ def business_headline(finding: dict[str, Any] | Any) -> str:
 
 
 def business_takeaway(finding: dict[str, Any] | Any) -> str:
-    """Format an operational business takeaway explaining why this finding matters and how to act."""
-    kind = str(finding.get("kind", "") if isinstance(finding, dict) else getattr(finding, "kind", "") or "")
-    dimension = finding.get("dimension") if isinstance(finding, dict) else getattr(finding, "dimension", None)
-    level = finding.get("level") if isinstance(finding, dict) else getattr(finding, "level", None)
-    measure = finding.get("measure") if isinstance(finding, dict) else getattr(finding, "measure", None)
-    evidence = finding.get("evidence") if isinstance(finding, dict) else getattr(finding, "evidence", {})
-    ev = evidence if isinstance(evidence, dict) else {}
-    n = ev.get("n") or ev.get("n_level") or ev.get("segment_n")
-    n_str = f" (n={n:,} records in cohort)" if isinstance(n, (int, float)) else ""
-
-    if kind == "segment_lift" and (level or dimension):
-        target = f"'{level}'" if level else f"'{dimension}'"
-        meas = f"'{measure}'" if measure else "performance"
-        return (
-            f"Operational Takeaway: Prioritize the {target} segment{n_str}. "
-            f"This cohort represents an immediate optimization lever to elevate {meas}. "
-            f"Focus operational capacity and targeted initiatives here."
-        )
-    elif kind == "driver" and (dimension or measure):
-        target = f"'{dimension}'" if dimension else "this feature"
-        meas = f"'{measure}'" if measure else "the primary outcome"
-        return (
-            f"Operational Takeaway: Adjusting '{target}' directly influences {meas}. "
-            f"Incorporate this parameter into executive planning to systematically optimize performance."
-        )
-    elif kind == "interaction_synergy":
-        clean_dim = plainify(str(dimension)).replace("_", " ").title() if dimension else "Key Dimensions"
-        clean_meas = plainify(str(measure)).replace("_", " ").title() if measure else "the primary outcome"
-        eff = finding.get("effect") if isinstance(finding, dict) else getattr(finding, "effect", None)
-        eff_str = f" ({eff:+.1%} synergy lift)" if isinstance(eff, (int, float)) and abs(eff) < 10 else ""
-        return (
-            f"Operational Takeaway: Compound synergy between '{clean_dim}' detected{eff_str}. "
-            f"Coordinating joint interventions across both factors produces greater ROI on {clean_meas} than individual tuning."
-        )
-    elif kind == "decision_scenario":
-        meas = f"'{measure}'" if measure else "the primary outcome"
-        target = f"'{dimension}'" if dimension else "this factor"
-        return (
-            f"Operational Takeaway: Counterfactual simulation shows high elasticity in {meas} when adjusting {target}. "
-            "Conduct a phased pilot rollout to capture projected gains."
-        )
-    elif kind in ("correlation", "association"):
-        col_a = ev.get("col_a") or measure or "Variable A"
-        col_b = ev.get("col_b") or dimension or "Variable B"
-        raw_hl = str(finding.get("headline", "") if isinstance(finding, dict) else getattr(finding, "headline", "") or "")
-        pair_m = re.match(r"^([\w\s_]+?)\s+and\s+([\w\s_]+?)\s+move together", raw_hl, re.IGNORECASE)
-        if pair_m:
-            col_a = ev.get("col_a") or measure or pair_m.group(1).strip()
-            col_b = ev.get("col_b") or dimension or pair_m.group(2).strip()
-        clean_a = plainify(str(col_a)).replace("_", " ").title()
-        clean_b = plainify(str(col_b)).replace("_", " ").title()
-        return (
-            f"Operational Takeaway: High co-movement observed between '{clean_b}' and '{clean_a}'. "
-            "Align operational capacity and forecasting models to track both variables jointly."
-        )
-    elif kind in ("outlier_scan", "anomaly", "change"):
-        meas = f"'{measure}'" if measure else "the primary metric"
-        lvl = f" on {level}" if level else ""
-        return (
-            f"Operational Takeaway: Significant anomalous deviation detected in {meas}{lvl}. "
-            "Audit transactional logs, external events, or operational shifts around this period to identify the root cause."
-        )
-    elif kind == "cluster":
-        return (
-            "Operational Takeaway: Distinct customer or entity clustering identified. "
-            "Tailor operational service tiers and engagement strategies to each segment's specific profile and volume."
-        )
-
-    # Fallback to plainified detail if present, distinct from headline, and not raw formula notation
-    detail = str(finding.get("detail", "") if isinstance(finding, dict) else getattr(finding, "detail", "") or "").strip()
-    raw_hl = str(finding.get("headline", "") if isinstance(finding, dict) else getattr(finding, "headline", "") or "").strip()
-    if (
-        detail
-        and detail.lower() != raw_hl.lower()
-        and not any(k in detail.lower() for k in ("p=", "ci [", "d=", "n=", "beta=", "robust sd", "rolling_median", "z-score"))
+    """Show supporting context from the finding without inventing an action."""
+    data = finding if isinstance(finding, dict) else vars(finding)
+    caveats = data.get("caveats") or []
+    if caveats:
+        return plainify(str(caveats[0]))
+    evidence = data.get("evidence") or {}
+    if data.get("kind") == "segment_lift":
+        n, rest = evidence.get("n"), evidence.get("n_rest")
+        if isinstance(n, int) and isinstance(rest, int):
+            return f"The comparison includes {n:,} in the segment and {rest:,} in the comparison group."
+    if data.get("kind") in ("correlation", "association"):
+        first = evidence.get("col_a") or data.get("measure")
+        second = evidence.get("col_b") or data.get("dimension")
+        if first and second:
+            return f"The association between {first} and {second} does not establish a causal effect."
+    detail = str(data.get("detail") or "").strip()
+    if detail and detail != data.get("headline") and not re.search(
+        r"p=|ci \[|d=|n=|beta=|robust sd|rolling_median|z-score", detail, re.I
     ):
         return plainify(detail)
-
-    return "Operational Takeaway: Verified statistical finding from multi-agent analysis. Monitor trend across reporting cycles."
-
+    return ""

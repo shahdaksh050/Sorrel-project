@@ -191,7 +191,7 @@ def render_answers_tab(
         score = float(f.get("importance") or f.get("score") or f.get("confidence") or 0.0)
         return (state_order.get(st_val, 3), -score)
 
-    headline = sorted(headline_raw, key=_finding_sort_key)
+    headline = headline_raw if report.get("lead_finding") else sorted(headline_raw, key=_finding_sort_key)
     total = len(headline)
     states = [finding_state(f) for f in headline]
     checked = sum(1 for x in states if x != "unchecked")
@@ -202,6 +202,9 @@ def render_answers_tab(
     k_tests = len(report.get("statistical_test_pvalues") or report.get("statistical_test_pvalues_bh_corrected") or [])
 
     sub_chips: list[str] = []
+    cov = report.get("coverage")
+    if isinstance(cov, dict) and cov.get("total"):
+        sub_chips.append(f"{cov.get('answered', 0)}/{cov['total']} questions answered")
     if k_tests > 0:
         sub_chips.append(f"Benjamini-Hochberg FDR (k={k_tests}, α=0.05)")
     if gap_val is not None and gap_is_risky(gap_val):
@@ -209,7 +212,7 @@ def render_answers_tab(
     lift = train_out.get("lift_over_baseline") if train_out else None
     if train_out and isinstance(lift, (float, int)) and not train_out.get("model_training_gated"):
         sub_chips.append(f"CV Lift: {lift:+.3f}")
-    if not_checked > 0:
+    if not checked and not_checked > 0:
         plural_obs = "s" if not_checked != 1 else ""
         sub_chips.append(f"{not_checked} exploratory observation{plural_obs}")
 

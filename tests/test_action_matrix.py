@@ -185,7 +185,9 @@ def test_observational_disclaimer_disqualifies_action_quadrants() -> None:
     assert len(matrix["quick_wins"]) == 0
     item = matrix["watch_caveats"][0]
     assert item["finding_id"] == "f_driver"
-    assert item["lever"] == "Target contract='One year vs Month-to-month'"
+    assert item["disposition"] == "investigate"
+    assert "contract='One year vs Month-to-month'" in item["lever"]
+    assert not item["lever"].startswith("Target")
 
 
 def test_observational_segment_contrast_enters_pilot_quadrant() -> None:

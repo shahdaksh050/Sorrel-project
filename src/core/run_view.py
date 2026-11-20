@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.core.audited_entry import audited_checks
+from src.core.findings import matrix_recommendations, report_action_matrix
 
 #: Memory context keys the caller must snapshot (while the controller exists)
 #: and pass to `build_run_view` as a plain dict.
@@ -210,6 +211,16 @@ def select_headline_findings(
     return tuple(picked)
 
 
+def with_report_lead(
+    report: Mapping[str, Any], findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Preserve the qualified objective answer across all headline surfaces."""
+    lead = report.get("lead_finding")
+    if not isinstance(lead, dict) or not lead.get("finding_id"):
+        return findings
+    return [lead, *(f for f in findings if f.get("finding_id") != lead["finding_id"])]
+
+
 def compute_verdict(headline: tuple[dict[str, Any], ...]) -> Verdict | None:
     """`N of M held up`, counting only findings whose audits actually ran.
 
@@ -334,7 +345,12 @@ def build_run_view(
     ctx: Mapping[str, Any] = context if isinstance(context, Mapping) else {}
 
     findings = _dict_tuple(result.get("findings"))
-    headline = select_headline_findings(findings)
+    primary = _dict_tuple(result.get("primary_findings", findings))
+    headline = tuple(with_report_lead(result, list(select_headline_findings(primary))))
+    recommendations = _str_tuple(result.get("recommendations"))
+    if "action_matrix" not in result and any(f.get("finding_id") for f in findings):
+        records = matrix_recommendations(report_action_matrix(dict(result), list(findings)))
+        recommendations = tuple(r["action"] for r in records)
     coverage = result.get("coverage")
     obj = objective.strip()
     if not obj and ctx.get("autonomous_objective"):
@@ -349,9 +365,9 @@ def build_run_view(
         findings=findings,
         headline_findings=headline,
         coverage=dict(coverage) if isinstance(coverage, Mapping) else {},
-        recommendations=_str_tuple(result.get("recommendations")),
+        recommendations=recommendations,
         insights=_str_tuple(result.get("insights")),
-        reasoning=_as_str(result.get("reasoning")),
+        reasoning=_as_str(result.get("executive_summary") or result.get("reasoning")),
         # `deterministic_mode` is set by the controller only when the LLM was off;
         # missing usage alone proves nothing, so it never implies "no AI".
         how=_build_how(ctx, no_ai=result.get("deterministic_mode") is True),

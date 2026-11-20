@@ -16,6 +16,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from src.core.chart_theme import vega_config
+from src.core.findings import report_action_matrix
 from src.core.json_normalization import strict_json_dumps
 from src.core.plain_language import plainify
 from ui.components.cards import finding_state, render_dashboard_chart, state_label
@@ -36,7 +37,7 @@ def build_swarm_payload(
     """Extract metadata, telemetry, KPIs, Vega-Lite chart specs, model leaderboard,
     action matrix, and audit ledger text for the Swarm Dashboard animation."""
     rep = report or {}
-    finds = findings or []
+    finds = findings or rep.get("findings") or []
 
     # Resolve metadata & profile objects from arguments or Streamlit session state
     session = getattr(st, "session_state", {})
@@ -71,9 +72,11 @@ def build_swarm_payload(
         actual_run_id = actual_run_id_str
     title = getattr(run_view, "objective", None) or rep.get("objective") or "Autonomous Executive Briefing"
 
-    headline_finding = finds[0] if finds else {}
-    rep_lead = rep.get("lead_narrative") or rep.get("summary")
-    if rep_lead and not any(k in str(rep_lead).lower() for k in ("robust sd", "rolling_median", "z-score")):
+    headline_finding = rep.get("lead_finding") or (finds[0] if finds else {})
+    rep_lead = rep.get("executive_summary") or rep.get("lead_narrative") or rep.get("summary")
+    if rep.get("executive_summary"):
+        lead_narrative = str(rep["executive_summary"])
+    elif rep_lead and not any(k in str(rep_lead).lower() for k in ("robust sd", "rolling_median", "z-score")):
         lead_narrative = str(rep_lead)
     else:
         from src.core.plain_language import business_headline, business_takeaway
@@ -88,7 +91,7 @@ def build_swarm_payload(
                 or headline_finding.get("headline")
                 or ""
             )
-    if any(k in lead_narrative.lower() for k in ("robust sd", "rolling_median", "z-score")):
+    if not rep.get("executive_summary") and any(k in lead_narrative.lower() for k in ("robust sd", "rolling_median", "z-score")):
         from src.core.plain_language import business_takeaway
         lead_narrative = business_takeaway(headline_finding) if headline_finding else ""
 
@@ -163,18 +166,15 @@ def build_swarm_payload(
     if isinstance(quality_score, (int, float)):
         quality_score = f"{quality_score:.1f} / 100"
     missing_val = rep.get("missingness")
-    if missing_val is None or missing_val == "Unavailable":
-        if isinstance(prof_obj, dict):
-            missing_val = prof_obj.get("missing_pct") or prof_obj.get("missing_percentage")
-        elif hasattr(prof_obj, "missing_pct"):
-            missing_val = prof_obj.missing_pct
     if isinstance(missing_val, (int, float)):
-        if missing_val > 1.0:
-            missingness = f"{missing_val:.2f}%"
-        else:
-            missingness = f"{missing_val:.2%}"
+        missingness = f"{missing_val:.2%}" if missing_val <= 1 else f"{missing_val:.2f}%"
     else:
-        missingness = "0.00%" if missing_val == 0 else str(missing_val or "0.00%")
+        profile_pct = getattr(prof_obj, "missing_pct", None)
+        if isinstance(prof_obj, dict):
+            profile_pct = prof_obj.get("missing_pct")
+            if profile_pct is None:
+                profile_pct = prof_obj.get("missing_percentage")
+        missingness = f"{profile_pct:.2f}%" if isinstance(profile_pct, (int, float)) else str(missing_val or "Unavailable")
 
     kpis: list[dict[str, Any]] = []
     evidence = headline_finding.get("evidence") or {}
@@ -269,8 +269,8 @@ def build_swarm_payload(
                 })
 
     # 6. Action Matrix
-    action_raw = rep.get("action_matrix") or rep.get("action_prioritization") or {}
-    has_action_matrix = bool(action_raw)
+    action_raw = report_action_matrix(rep, finds) if "action_matrix" in rep or not rep.get("action_prioritization") else rep["action_prioritization"]
+    has_action_matrix = any(action_raw.values())
 
     # 7. Audit
     ledger = f"{held} of {checked} checked findings held up" if checked else "No finding checks recorded"

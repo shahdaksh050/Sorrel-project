@@ -1581,27 +1581,21 @@
     }
 
     // 6. Action Matrix
-    if (payload.action_matrix && payload.action_matrix.has_action_matrix && payload.action_matrix.data) {
-      const quads = document.querySelectorAll('#card-action-matrix .quadrant');
-      const d = payload.action_matrix.data;
-      if (quads.length >= 4) {
-        if (d.quick_wins && quads[0]) {
-          const act = quads[0].querySelector('.quad-action');
-          if (act) act.textContent = Array.isArray(d.quick_wins) ? d.quick_wins[0] : String(d.quick_wins);
-        }
-        if (d.strategic_pilots && quads[1]) {
-          const act = quads[1].querySelector('.quad-action');
-          if (act) act.textContent = Array.isArray(d.strategic_pilots) ? d.strategic_pilots[0] : String(d.strategic_pilots);
-        }
-        if (d.watch_caveats && quads[2]) {
-          const act = quads[2].querySelector('.quad-action');
-          if (act) act.textContent = Array.isArray(d.watch_caveats) ? d.watch_caveats[0] : String(d.watch_caveats);
-        }
-        if (d.low_priority && quads[3]) {
-          const act = quads[3].querySelector('.quad-action');
-          if (act) act.textContent = Array.isArray(d.low_priority) ? d.low_priority[0] : String(d.low_priority);
-        }
-      }
+    if (payload.action_matrix) {
+      const matrix = payload.action_matrix.data || {};
+      const quadrants = [
+        ['Immediate actions', matrix.quick_wins],
+        ['Pilots and strategic actions', [...(matrix.pilot || []), ...(matrix.strategic_bets || [])]],
+        ['Monitor or investigate', matrix.watch_caveats],
+        ['Incremental actions', matrix.incremental],
+      ];
+      document.querySelectorAll('#card-action-matrix .quadrant').forEach((element, index) => {
+        const [label, entries] = quadrants[index];
+        const entry = entries?.[0];
+        element.querySelector('.quad-tag').textContent = label;
+        element.querySelector('.quad-action').textContent = entry?.lever || 'No supported action';
+        element.querySelector('.quad-sub').textContent = entry?.rationale || '';
+      });
     }
 
     // 7. Audit Seal

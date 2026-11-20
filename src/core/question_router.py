@@ -22,6 +22,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from src.core.findings import Finding
+from src.core.profiler import DatasetProfile, ground_objective_column
+
 QuestionFamily = Literal[
     "describe",
     "compare",
@@ -158,4 +161,67 @@ def route_question(
         recommended_tools=recommended_tools,
         rationale=rationale,
         expected_decision_value=_DECISION_VALUE[primary],
+    )
+
+
+@dataclass(frozen=True)
+class ComparisonObjective:
+    """Column roles for an explicit comparison, shared by planning and reporting."""
+
+    measure: str | None
+    dimension: str | None
+    hourly: bool
+    ascending: bool
+    descending: bool
+    missing_dimension: bool
+
+    def tool_parameters(self) -> dict[str, str]:
+        if not self.measure or self.missing_dimension:
+            return {}
+        if self.hourly:
+            return {"value_column": self.measure}
+        params = {"measure_column": self.measure}
+        if self.dimension:
+            params["dimension_column"] = self.dimension
+        return params
+
+    def matches(self, finding: Finding) -> bool:
+        if self.missing_dimension or not self.measure or finding.measure != self.measure:
+            return False
+        if self.hourly:
+            return finding.dimension == "hour_of_day" and finding.source_tool == "time_series_analysis"
+        return (
+            finding.kind in ("segment_lift", "test", "invariance", "uniformity")
+            and bool(finding.dimension)
+            and (self.dimension is None or finding.dimension == self.dimension)
+        )
+
+
+def comparison_objective(objective: str, profile: DatasetProfile | None) -> ComparisonObjective | None:
+    """Resolve named measures independently of prediction targets and grouping columns."""
+    if not objective or profile is None:
+        return None
+    text = objective.lower()
+    hourly = bool(re.search(r"\b(time of day|hour of (?:the )?day|hourly pattern|by hour)\b", text))
+    grouped = bool(re.search(r"\b(groups?|cohorts?|segments?|categories|compare|differs?|across|by)\b", text))
+    if not (hourly or grouped) or re.search(r"\b(predict|forecast|cluster|segment customers)\b", text):
+        return None
+    parts = re.split(r"\b(?:by|across)\b", text, maxsplit=1)
+    candidates = [c.name for c in profile.columns if c.is_measure() or c.is_flag() or c.kind in ("numeric", "boolean")]
+    measure = ground_objective_column(candidates, parts[0])
+    dim_names = [
+        c.name for c in profile.columns
+        if c.name != measure and c.kind not in ("identifier", "constant")
+        and (c.is_dimension() or c.kind == "categorical")
+    ]
+    dim_text = parts[-1] if len(parts) == 2 else text
+    dimension = None if hourly else ground_objective_column(dim_names, dim_text)
+    missing_dim = not hourly and len(parts) == 2 and not dimension and not re.fullmatch(
+        r"\s*(?:customer |user )?(?:groups?|cohorts?|segments?)[?.! ]*", dim_text
+    )
+    return ComparisonObjective(
+        measure=measure, dimension=dimension, hourly=hourly,
+        ascending=bool(re.search(r"\b(lowest|smallest)\b", text)),
+        descending=bool(re.search(r"\b(highest|largest)\b", text)),
+        missing_dimension=missing_dim,
     )

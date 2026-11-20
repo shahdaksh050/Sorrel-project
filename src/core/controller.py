@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -142,6 +143,74 @@ def _synthesize_autonomous_objective(
 
 
 # ---------------------------------------------------------------------------
+# Executive Summary Composer — archetype-aware, human-readable synthesis
+# ---------------------------------------------------------------------------
+
+#: Archetype → (noun for the data rows, verb phrase for the top finding)
+_ARCHETYPE_FRAMING: dict[str, tuple[str, str]] = {
+    "transactional":      ("transactions",   "reveal that"),
+    "continuous_series":  ("readings",       "show that"),
+    "panel":              ("observations",   "indicate that"),
+    "cross_sectional":    ("records",        "show that"),
+    "survival":           ("cases",          "indicate that"),
+    "survey":             ("responses",      "show that"),
+    "basket":             ("baskets",        "reveal that"),
+    "network":            ("interactions",   "indicate that"),
+    "geospatial":         ("locations",      "show that"),
+    "hybrid_text":        ("entries",        "reveal that"),
+}
+
+
+def _compose_executive_summary(
+    final_result: dict[str, Any],
+    profile: Any | None,
+) -> str:
+    """Build a 2-3 sentence executive summary from post-audit findings.
+
+    Rules:
+    1. If the user asked a specific objective (lead_finding), keep the exact
+       quantitative answer intact as sentence 1.
+    2. In autonomous exploration (no question), humanize the top findings,
+       stripping raw (2.83x, 20 vs 26) sample sizes and CI syntax.
+    3. Include the top actionable recommendation so the briefing concludes
+       with an operational takeaway ("so what").
+    """
+    from src.core.plain_language import humanize_for_summary, plainify
+
+    insights = final_result.get("insights") or []
+    has_lead = bool(final_result.get("lead_finding") or final_result.get("objective_gap"))
+    recs = final_result.get("recommendations") or []
+
+    parts: list[str] = []
+
+    if has_lead:
+        # User asked a specific question — sentence 1 is the verbatim answered evidence
+        lead_text = str(insights[0]).strip() if insights else ""
+        if lead_text:
+            parts.append(lead_text if lead_text.endswith((".", "?", "!")) else lead_text + ".")
+    else:
+        # Autonomous exploration — humanize the top findings
+        limit = 2
+        for item in insights[:limit]:
+            text = humanize_for_summary(str(item).strip())
+            if text:
+                parts.append(text if text.endswith((".", "?", "!")) else text + ".")
+
+    if not parts:
+        parts.append("Analysis produced no headline finding that passed the evidence gate.")
+
+    # Conclude with an operational takeaway / directive
+    if recs and len(parts) < 3:
+        first_rec = plainify(str(recs[0]).strip())
+        if first_rec and len(first_rec) < 180:
+            rec_clean = first_rec if first_rec.endswith((".", "?", "!")) else first_rec + "."
+            if rec_clean not in parts:
+                parts.append(rec_clean)
+
+    return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Agent Controller — the top-level orchestrator
 # ---------------------------------------------------------------------------
 
@@ -171,6 +240,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
         # (no network, no narrative synthesis, plans come from the profile);
         # with use_ml off no model is fitted, which is the single largest
         # time saving available since training dominates every run.
+        warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*(invalid value encountered in divide|divide by zero).*")
         self.use_llm = (
             use_llm
             if use_llm is not None
@@ -1045,7 +1115,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                 # ---- Parse plan steps (tolerant of malformed entries) ----
                 steps = self._parse_steps(llm_response, cap=not llm_response.get("deterministic"))
                 steps = self._ensure_preprocessing_steps(steps)
-                steps = self._ensure_agenda_anchor_steps(steps)
+                steps = self._bind_objective_comparison(self._ensure_agenda_anchor_steps(steps))
                 steps = self._ensure_causal_analysis_step(steps)
                 if not steps:
                     console.print(
@@ -1226,7 +1296,7 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
             "LLM disabled for this run — plan selected from the "
             "dataset profile and domain inference."
         )
-        steps = self._parse_steps(llm_response, cap=False)
+        steps = self._bind_objective_comparison(self._parse_steps(llm_response, cap=False))
         if steps:
             self.memory.store_analysis_plan(steps)
             progress.update(task_id, description=f"Stage 3 — Executing {len(steps)} tool(s)…")
@@ -1667,14 +1737,28 @@ class AgentController(PlanMixin, StepMixin, ReportMixin):
                 f"[yellow]⚠ {len(unverified)} unverified metric claim(s) were "
                 "quarantined from the final synthesis.[/]"
             )
+            lead = final_result.get("lead_finding")
+            if lead and lead["headline"] not in final_result.get("insights", []):
+                del final_result["lead_finding"]
+                gap = "The requested comparison remains unresolved because its supporting figures could not be verified."
+                final_result["objective_gap"] = gap
+                final_result["insights"].insert(0, gap)
+            rejected_actions = {
+                entry["text"] for entry in final_result.get("rejected_claims", [])
+                if entry.get("field") == "recommendations"
+            }
+            if rejected_actions:
+                final_result["recommendation_records"] = [
+                    record for record in final_result["recommendation_records"] if record["action"] not in rejected_actions
+                ]
+                for key, items in final_result["action_matrix"].items():
+                    final_result["action_matrix"][key] = [item for item in items if item["lever"] not in rejected_actions]
         self._resolve_public_status(final_result)
         # All public surfaces, including older readers of "reasoning", consume
         # the same post-audit answer. Planner narration remains in the run trace.
-        coverage = final_result.get("coverage") or {}
-        summary_parts = [str(item) for item in (final_result.get("insights") or [])[:2]]
-        if coverage.get("total"):
-            summary_parts.insert(0, f"Answered {coverage['answered']} of {coverage['total']} analysis questions.")
-        final_result["executive_summary"] = " ".join(summary_parts)
+        final_result["executive_summary"] = _compose_executive_summary(
+            final_result, getattr(self, "last_profile", None),
+        )
         final_result["reasoning"] = final_result["executive_summary"]
 
         # ---- Stage 5: Dossier Generation ----

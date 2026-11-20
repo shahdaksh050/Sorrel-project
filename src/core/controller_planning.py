@@ -24,6 +24,7 @@ from src.core.governance import (
 from src.core.memory import AnalysisStep, ToolResult
 from src.core.profiler import DatasetProfile
 from src.core.prompt_manager import ARCHETYPE_CANONICAL_TOOLS
+from src.core.question_router import comparison_objective
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +316,34 @@ class PlanMixin(ControllerState):
                     iteration=self.memory.iteration_count,
                 )
             )
+        return steps
+
+    def _bind_objective_comparison(self, steps: list[AnalysisStep]) -> list[AnalysisStep]:
+        request = comparison_objective(self.objective, self.last_profile)
+        if request is None or not (params := request.tool_parameters()):
+            return steps
+        name = "time_series_analysis" if request.hourly else "segment_comparison"
+        if not self.tool_registry.has(name) or self._tool_hard_prerequisite_error(name):
+            return steps
+        for result in self.memory.tool_results:
+            if result.tool_name != name or result.status != "success":
+                continue
+            if request.hourly and result.output.get("value_column") == request.measure:
+                return steps
+            if any(m == request.measure and (not request.dimension or d == request.dimension)
+                   for m, d in result.output.get("pairs_tested", [])):
+                return steps
+        for step in steps:
+            if step.tool_name == name:
+                step.parameters.update(params)
+                if not request.hourly and not request.dimension:
+                    step.parameters.pop("dimension_column", None)
+                return steps
+        meta = self.memory.dataset_metadata
+        if meta and self.tool_registry.get(name).applies_to(self.last_profile, meta) > 0:
+            steps.append(AnalysisStep(step_number=len(steps) + 1, tool_name=name,
+                                      parameters={"file_path": meta.file_path, **params},
+                                      rationale="Compute the comparison requested in the objective."))
         return steps
 
     def _ensure_preprocessing_steps(self, steps: list[AnalysisStep]) -> list[AnalysisStep]:

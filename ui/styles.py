@@ -179,6 +179,9 @@ def inject_theme_css() -> None:
     .stepper .step-dot, .stepper .step::after, .step-state, .step-name {{
         transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, color var(--dur-fast) ease;
     }}
+    .st-key-selected_finding [role="radiogroup"] > label {{
+        transition: background-color var(--dur-fast) ease, border-color var(--dur-fast) ease;
+    }}
     .stepper .step::before {{ transition: transform var(--dur-base) var(--ease-out); }}
     .block-container {{ transition: max-width var(--dur-base) var(--ease-out), padding var(--dur-base) var(--ease-out); }}
 }}
@@ -1321,7 +1324,6 @@ div[data-testid="stButtonGroup"] [aria-checked="true"] * {{
     border: 1px solid var(--rule) !important;
     background: var(--sheet) !important;
     margin-bottom: 0 !important;
-    transition: all var(--dur-fast) ease !important;
     cursor: pointer !important;
 }}
 .st-key-selected_finding [role="radiogroup"] > label:hover {{

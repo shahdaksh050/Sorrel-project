@@ -19,6 +19,8 @@ maxUploadSize = 250
 # short network interruption to reattach to its durable run record.
 websocketPingInterval = 20
 disconnectedSessionTTL = 600
+# Prevent in-flight WebSocket message cancellation that causes "Cached ForwardMsg MISS"
+fastReruns = false
 
 [theme]
 font = "'Geist', 'Segoe UI', sans-serif"

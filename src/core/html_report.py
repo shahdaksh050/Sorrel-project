@@ -23,11 +23,12 @@ from typing import Any
 from src.core.audited_entry import GLYPH, audited_checks
 from src.core.chart_theme import vega_config
 from src.core.design_tokens import css_root_block
-from src.core.findings import classify_action_matrix, is_data_hygiene_finding
+from src.core.findings import is_data_hygiene_finding, report_action_matrix
 from src.core.json_normalization import strict_json_dumps
 from src.core.multiple_testing import apply_benjamini_hochberg
 from src.core.plain_language import describe_uncertainty, format_p, plainify
 from src.core.report_assets import report_assets
+from src.core.run_view import with_report_lead
 
 # ---------------------------------------------------------------------------
 # 3a — executive summary: prefer the LLM's own `insights` over its raw
@@ -78,7 +79,7 @@ def _build_executive_summary(
     clean_reasoning = _strip_jargon_sentences(str(llm_insights.get("reasoning", "") or ""))
     grounded = ""
     if findings:
-        matrix = classify_action_matrix(findings)
+        matrix = report_action_matrix(llm_insights, findings)
         actionable = matrix["strategic_bets"] + matrix["quick_wins"]
         if actionable:
             grounded = " ".join(
@@ -357,11 +358,8 @@ def _finding_evidence_html(finding: dict[str, Any]) -> str:
     return "".join(bits)
 
 
-def _action_matrix_html(findings: list[dict[str, Any]] | None) -> str:
-    if not findings:
-        return ""
-    from src.core.findings import classify_action_matrix
-    matrix = classify_action_matrix(findings)
+def _action_matrix_html(findings: list[dict[str, Any]] | None, report: dict[str, Any] | None = None) -> str:
+    matrix = report_action_matrix(report or {}, findings or [])
     quadrants = [
         ("quick_wins", "⚡ Quick Wins", "High Impact · High Feasibility", "rec"),
         ("strategic_bets", "🎯 Strategic Bets", "High Impact · Structural / Complex", "insight"),
@@ -380,9 +378,7 @@ def _action_matrix_html(findings: list[dict[str, Any]] | None) -> str:
         for it in items[:3]:
             lever = _esc(it.get("lever", it.get("headline", "")))
             rationale = _esc(it.get("rationale", ""))
-            eff = it.get("effect")
-            eff_badge = f' <span class="kind">({eff:+0.1%})</span>' if isinstance(eff, (int, float)) and abs(eff) < 10 else ""
-            body.append(f'<div style="margin-bottom:.4rem;"><strong>{lever}</strong>{eff_badge}<br/><span style="font-size:.82rem;color:var(--graphite);">{rationale}</span></div>')
+            body.append(f'<div style="margin-bottom:.4rem;"><strong>{lever}</strong><br/><span style="font-size:.82rem;color:var(--graphite);">{rationale}</span></div>')
         content = "".join(body)
         quad_cards.append(
             f'<div class="card {card_cls}" style="flex:1 1 45%;min-width:280px;padding:.8rem 1rem;">'
@@ -782,7 +778,8 @@ def build_html_report(
     # ui/tabs/answers_tab.py's `card_findings` (layer in exec/analyst, no
     # caveat kinds, capped at 5), so the report and the console verdict
     # agree on M, not just on the wording. ----
-    top_findings = _headline_findings(findings)
+    primary = llm_insights.get("primary_findings", findings) or []
+    top_findings = with_report_lead(llm_insights, _headline_findings(primary))[:_MAX_HEADLINE_FINDINGS]
 
     # ---- 3.5 run-level verdict — mirrors ui/tabs/answers_tab.py's "N of M
     # held up" banner so the report and the console tell the same story.
@@ -822,7 +819,7 @@ def build_html_report(
     recs = llm_insights.get("recommendations") or []
     if recs:
         sections.append("<h2>What to do next</h2>" + _cards([plainify(str(r)) for r in recs], "rec"))
-    matrix_html = _action_matrix_html(findings)
+    matrix_html = _action_matrix_html(findings, llm_insights)
     if matrix_html:
         sections.append(matrix_html)
 

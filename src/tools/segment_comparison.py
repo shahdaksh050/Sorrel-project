@@ -579,6 +579,7 @@ class SegmentComparisonTool(BaseTool):
                 "level": level_str,
                 "level_label": str(level_label) if level_label else None,
                 "is_rate": is_rate,
+                **({"events": succ_level, "baseline_events": succ_rest} if is_rate and entity is None else {}),
                 "unit_hint": unit_hint,
                 "level_value": round(level_mean, 6),
                 "baseline_value": round(baseline_mean, 6),
@@ -925,8 +926,16 @@ class SegmentComparisonTool(BaseTool):
         level_disp = redact_small_level(c['level'], c.get('n'))
         if c.get("level_label") and str(c["level_label"]).strip() and str(c["level_label"]).strip() != str(c["level"]).strip():
             level_disp = f"'{c['level_label']}' ({c['dimension']} {c['level']})"
+        group = f"{level_disp} {row_noun}"
+        if str(level_disp) in ("0", "1", "True", "False"):
+            group = f"{row_noun.capitalize()} with {c['dimension']}={level_disp}"
+        if c.get("events") is not None and c.get("baseline_events") is not None:
+            return (
+                f"{group} {middle} ({c['events']:,}/{c['n']:,}) vs {baseline_str} "
+                f"({c['baseline_events']:,}/{c['n_rest']:,}) for everyone else ({comparison})."
+            )
         return (
-            f"{level_disp} {row_noun} {middle} vs {baseline_str} "
+            f"{group} {middle} vs {baseline_str} "
             f"for everyone else ({comparison}, n={c['n']:,} vs {c['n_rest']:,})."
         )
 
